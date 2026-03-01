@@ -17,21 +17,89 @@ This launches Emacs in a 320x240 pixel window with no user configuration loaded 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.
 
 #+begin_example
-[ q w  ] [e r t y u i] [ o p  ]
-[ a s  ] [ d f g h   ] [j k l ]
-[z x c ] [ v b n     ] [  m   ]
-[     SPACE     ] [RET] [ DEL ]
-[CAPS]
+[qw ] [ert] [op ]
+[   ] [yui] [   ]
+[as ] [dfg] [jkl]
+[   ] [ h ] [   ]
+[zxc] [vbn] [ m ]
+[   ] [   ] [   ]
+[SPC] [RET] [DEL]
+[cap]
 #+end_example
 
 - *Multi-tap input*: tap a key to type its first letter, tap again quickly to cycle through the remaining letters on that key. After a 1-second pause, the current letter is committed.
 - The keyboard is non-editable and does not steal focus — typed characters are inserted into the editing buffer in the top window.
 - *CAPS* toggles uppercase input.
 
-* Development
+* Remote Development
 
-The project is structured as:
+EmacsOS can be controlled from another device over the network — useful for testing on a phone with no physical keyboard.
+
+** On the phone (target device)
+
+Start EmacsOS with the server enabled:
+
+#+begin_src sh
+make start-server
+#+end_src
+
+This launches EmacsOS and starts the Emacs server listening on all interfaces (TCP). An auth file is written to =~/.emacs.d/server/server= containing the port and authentication key.
+
+** Sending eval expressions (TCP, no SSH)
+
+Copy the auth file from the phone and fix the address:
+
+#+begin_src sh
+scp phone:~/.emacs.d/server/server ./server-file
+sed -i 's/0\.0\.0\.0/192.168.1.42/' ./server-file   # use the phone's actual IP
+#+end_src
+
+Then evaluate expressions directly from your dev machine:
+
+#+begin_src sh
+emacsclient -f ./server-file -e '(buffer-name)'
+#+end_src
+
+** Opening a full terminal frame (SSH)
+
+=emacsclient -t= requires the server to access the client's TTY device, which doesn't work across machines over TCP. Use SSH instead — =emacsclient= runs on the phone and the terminal renders over the SSH connection:
+
+#+begin_src sh
+ssh -t phone emacsclient -t
+#+end_src
+
+This gives you a full Emacs frame in your terminal, sharing all buffers and state with the phone's EmacsOS session.
+
+** Examples
+
+*** Typing via the virtual keyboard
+
+The =emacos--tap-key= function handles multi-tap and inserts into the correct buffer:
+
+#+begin_src sh
+emacsclient -f ./server-file -e '(emacos--tap-key "qw")'    # types "q"
+emacsclient -f ./server-file -e '(emacos--tap-key "qw")'    # cycles to "w"
+emacsclient -f ./server-file -e '(emacos--tap-space)'        # space
+emacsclient -f ./server-file -e '(emacos--tap-return)'       # newline
+emacsclient -f ./server-file -e '(emacos--tap-backspace)'    # delete backward
+#+end_src
+
+*** Direct buffer manipulation
+
+#+begin_src sh
+emacsclient -f ./server-file -e '(with-selected-window (emacos--target) (insert "Hello from remote!"))'
+emacsclient -f ./server-file -e '(with-selected-window (emacos--target) (erase-buffer))'
+#+end_src
+
+*** Running commands
+
+#+begin_src sh
+emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'
+emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
+#+end_src
+
+* Project Structure
 
 - =os.el= — main init file (keyboard, frame setup)
 - =references/= — research papers informing the keyboard design
-- =Makefile= — launch target
+- =Makefile= — launch targets

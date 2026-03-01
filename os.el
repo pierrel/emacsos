@@ -3,12 +3,10 @@
 ;; Disable chrome
 (setq inhibit-startup-screen t
       inhibit-startup-message t
-      initial-scratch-message nil
       window-min-height 1)
 
 (menu-bar-mode -1)
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
-(when (fboundp 'scroll-bar-mode) (scroll-bar-mode -1))
 
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;
@@ -145,6 +143,15 @@ Prefer the minibuffer when it is active."
   (let ((s (if emacos--caps (upcase kg) kg)))
     (mapconcat #'char-to-string s " ")))
 
+(defun emacos--key-lines (kg)
+  "Return (TOP . BOTTOM) cons of 3-char display strings for KG."
+  (let ((s (if emacos--caps (upcase kg) kg)))
+    (if (<= (length s) 3)
+        (cons (emacos--center s 3)
+              (emacos--center "" 3))
+      (cons (substring s 0 3)
+            (emacos--center (substring s 3) 3)))))
+
 (defun emacos--btn (label action &optional arg)
   "Insert a clickable button showing LABEL that calls ACTION (with ARG)."
   (insert-text-button
@@ -224,27 +231,30 @@ If the command opens the minibuffer, switch to the keyboard page."
 
 (defun emacos--render-keyboard-page ()
   "Render the Optimal-T9 keyboard into the current buffer."
-  ;; Letter rows
+  ;; Letter rows — each row is 2 lines tall, 3 chars per button
   (dolist (row emacos-t9-layout)
-    (let ((widths '(7 13 7))
-          (i 0))
-      (dolist (kg row)
+    (let ((cells (mapcar #'emacos--key-lines row))
+          (groups row))
+      ;; Top line
+      (dotimes (i (length groups))
         (when (> i 0) (insert " "))
-        (emacos--btn
-         (emacos--center (emacos--key-display kg) (nth i widths))
-         #'emacos--tap-key kg)
-        (setq i (1+ i))))
-    (insert "\n"))
+        (emacos--btn (car (nth i cells)) #'emacos--tap-key (nth i groups)))
+      (insert "\n")
+      ;; Bottom line
+      (dotimes (i (length groups))
+        (when (> i 0) (insert " "))
+        (emacos--btn (cdr (nth i cells)) #'emacos--tap-key (nth i groups)))
+      (insert "\n")))
   ;; Space, Return, Backspace
-  (emacos--btn (emacos--center "SPACE" 15) #'emacos--tap-space)
+  (emacos--btn "SPC" #'emacos--tap-space)
   (insert " ")
-  (emacos--btn (emacos--center "RET" 5) #'emacos--tap-return)
+  (emacos--btn "RET" #'emacos--tap-return)
   (insert " ")
-  (emacos--btn (emacos--center "DEL" 5) #'emacos--tap-backspace)
+  (emacos--btn "DEL" #'emacos--tap-backspace)
   (insert "\n")
   ;; Caps toggle
   (emacos--btn
-   (if emacos--caps " CAPS ON " "  CAPS   ")
+   (if emacos--caps "CAP" "cap")
    #'emacos--tap-caps))
 
 (defun emacos--render-global-page ()
