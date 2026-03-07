@@ -221,29 +221,35 @@ If the command opens the minibuffer, switch to the keyboard page."
 ;;; Page renderers
 
 (defun emacos--render-keyboard-page ()
-  "Render the Optimal-T9 keyboard into the current buffer."
-  ;; Letter rows
-  (dolist (row emacos-t9-layout)
-    (let ((widths '(6 6 6))
-          (i 0))
-      (dolist (kg row)
-        (when (> i 0) (insert " "))
-        (emacos--btn
-         (emacos--center (emacos--key-display kg) (nth i widths))
-         #'emacos--tap-key kg)
-        (setq i (1+ i))))
-    (insert "\n"))
-  ;; Space, Return, Backspace
-  (emacos--btn (emacos--center "SPC" 10) #'emacos--tap-space)
-  (insert " ")
-  (emacos--btn (emacos--center "RET" 4) #'emacos--tap-return)
-  (insert " ")
-  (emacos--btn (emacos--center "DEL" 4) #'emacos--tap-backspace)
-  (insert "\n")
-  ;; Caps toggle
-  (emacos--btn
-   (if emacos--caps (emacos--center "CAPS" 6) (emacos--center "caps" 6))
-   #'emacos--tap-caps))
+  "Render the Optimal-T9 keyboard, sized to fit the keyboard window."
+  (let* ((win (get-buffer-window (current-buffer)))
+         (win-w  (if win (window-body-width win) 20))
+         (win-px (if win (window-body-height win t)
+                   (* 6 (frame-char-height))))
+         ;; 3 equal buttons with 1-char gaps: btn-w = (win-w - 2) / 3
+         (btn-w (/ (- win-w 2) 3))
+         ;; 6 lines total (3 letter rows + SPC row + CAPS row + page bar)
+         (ls (max 0 (- (/ win-px 6) (frame-char-height)))))
+    ;; Letter rows
+    (dolist (row emacos-t9-layout)
+      (let ((i 0))
+        (dolist (kg row)
+          (when (> i 0) (insert " "))
+          (emacos--btn (emacos--center (emacos--key-display kg) btn-w)
+                       #'emacos--tap-key kg)
+          (setq i (1+ i))))
+      (insert "\n"))
+    ;; Space, Return, Backspace
+    (emacos--btn (emacos--center "SPC" btn-w) #'emacos--tap-space)
+    (insert " ")
+    (emacos--btn (emacos--center "RET" btn-w) #'emacos--tap-return)
+    (insert " ")
+    (emacos--btn (emacos--center "DEL" btn-w) #'emacos--tap-backspace)
+    (insert "\n")
+    ;; Caps toggle
+    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") btn-w)
+                 #'emacos--tap-caps)
+    (setq-local line-spacing ls)))
 
 (defun emacos--render-global-page ()
   "Render global command buttons into the current buffer."
@@ -304,7 +310,6 @@ If the command opens the minibuffer, switch to the keyboard page."
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
       (setq-local truncate-lines t)
-      (setq-local line-spacing 6)
       (goto-char (point-min)))))
 
 ;;; Initialization
@@ -315,17 +320,17 @@ If the command opens the minibuffer, switch to the keyboard page."
   ;; Main editing buffer
   (switch-to-buffer (get-buffer-create "*scratch*"))
   (setq-local mode-line-format " EmacsOS")
-  ;; Render keyboard page
-  (emacos--render-page)
   ;; Split: top = editor, bottom = keyboard
   (let* ((total (window-total-height))
          (kbd-height (min 7 (/ total 2)))
          (kw (split-window nil (- total kbd-height) 'below)))
-    (set-window-buffer kw (get-buffer "*keyboard*"))
+    (set-window-buffer kw (get-buffer-create "*keyboard*"))
     (set-window-dedicated-p kw t)
     (set-window-parameter kw 'no-other-window t)
     (set-window-parameter kw 'no-delete-other-windows t)
-    (setq emacos--target-window (selected-window))))
+    (setq emacos--target-window (selected-window)))
+  ;; Render after window is visible so dimensions are known
+  (emacos--render-page))
 
 ;; Defer init until the window system is ready
 (add-hook 'window-setup-hook #'emacos--init)
