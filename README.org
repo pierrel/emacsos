@@ -17,14 +17,11 @@ This launches Emacs in a 320x240 pixel window with no user configuration loaded 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.
 
 #+begin_example
-[qw ] [ert] [op ]
-[   ] [yui] [   ]
-[as ] [dfg] [jkl]
-[   ] [ h ] [   ]
-[zxc] [vbn] [ m ]
-[   ] [   ] [   ]
-[SPC] [RET] [DEL]
-[cap]
+[ qw ] [ertyui] [ op ]
+[ as ] [ dfgh ] [jkl ]
+[ zxc] [ vbn  ] [ m  ]
+[  SPC   ] [RET] [DEL]
+[ caps]
 #+end_example
 
 - *Multi-tap input*: tap a key to type its first letter, tap again quickly to cycle through the remaining letters on that key. After a 1-second pause, the current letter is committed.

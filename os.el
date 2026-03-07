@@ -139,18 +139,9 @@ Prefer the minibuffer when it is active."
     (concat (make-string l ?\s) text (make-string r ?\s))))
 
 (defun emacos--key-display (kg)
-  "Format key group KG for display, e.g. \"qw\" -> \"q w\"."
+  "Format key group KG for display."
   (let ((s (if emacos--caps (upcase kg) kg)))
-    (mapconcat #'char-to-string s " ")))
-
-(defun emacos--key-lines (kg)
-  "Return (TOP . BOTTOM) cons of 3-char display strings for KG."
-  (let ((s (if emacos--caps (upcase kg) kg)))
-    (if (<= (length s) 3)
-        (cons (emacos--center s 3)
-              (emacos--center "" 3))
-      (cons (substring s 0 3)
-            (emacos--center (substring s 3) 3)))))
+    s))
 
 (defun emacos--btn (label action &optional arg)
   "Insert a clickable button showing LABEL that calls ACTION (with ARG)."
@@ -231,30 +222,27 @@ If the command opens the minibuffer, switch to the keyboard page."
 
 (defun emacos--render-keyboard-page ()
   "Render the Optimal-T9 keyboard into the current buffer."
-  ;; Letter rows — each row is 2 lines tall, 3 chars per button
+  ;; Letter rows
   (dolist (row emacos-t9-layout)
-    (let ((cells (mapcar #'emacos--key-lines row))
-          (groups row))
-      ;; Top line
-      (dotimes (i (length groups))
+    (let ((widths '(6 6 6))
+          (i 0))
+      (dolist (kg row)
         (when (> i 0) (insert " "))
-        (emacos--btn (car (nth i cells)) #'emacos--tap-key (nth i groups)))
-      (insert "\n")
-      ;; Bottom line
-      (dotimes (i (length groups))
-        (when (> i 0) (insert " "))
-        (emacos--btn (cdr (nth i cells)) #'emacos--tap-key (nth i groups)))
-      (insert "\n")))
+        (emacos--btn
+         (emacos--center (emacos--key-display kg) (nth i widths))
+         #'emacos--tap-key kg)
+        (setq i (1+ i))))
+    (insert "\n"))
   ;; Space, Return, Backspace
-  (emacos--btn "SPC" #'emacos--tap-space)
+  (emacos--btn (emacos--center "SPC" 10) #'emacos--tap-space)
   (insert " ")
-  (emacos--btn "RET" #'emacos--tap-return)
+  (emacos--btn (emacos--center "RET" 4) #'emacos--tap-return)
   (insert " ")
-  (emacos--btn "DEL" #'emacos--tap-backspace)
+  (emacos--btn (emacos--center "DEL" 4) #'emacos--tap-backspace)
   (insert "\n")
   ;; Caps toggle
   (emacos--btn
-   (if emacos--caps "CAP" "cap")
+   (if emacos--caps (emacos--center "CAPS" 6) (emacos--center "caps" 6))
    #'emacos--tap-caps))
 
 (defun emacos--render-global-page ()
@@ -316,6 +304,7 @@ If the command opens the minibuffer, switch to the keyboard page."
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
       (setq-local truncate-lines t)
+      (setq-local line-spacing 6)
       (goto-char (point-min)))))
 
 ;;; Initialization
