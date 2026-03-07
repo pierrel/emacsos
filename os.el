@@ -310,6 +310,8 @@ If the command opens the minibuffer, switch to the keyboard page."
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
       (setq-local truncate-lines t)
+      (setq-local auto-hscroll-mode nil)
+      (set-window-hscroll (get-buffer-window buf) 0)
       (goto-char (point-min)))))
 
 ;;; Initialization
