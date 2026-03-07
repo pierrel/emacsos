@@ -228,7 +228,7 @@ If the command opens the minibuffer, switch to the keyboard page."
                    (* 6 (frame-char-height))))
          ;; 3 equal buttons with 1-char gaps: btn-w = (win-w - 2) / 3
          (btn-w (/ (- win-w 2) 3))
-         ;; 6 lines total (3 letter rows + SPC row + CAPS row + page bar)
+         ;; Distribute available height equally across all 6 lines
          (ls (max 0 (- (/ win-px 6) (frame-char-height)))))
     ;; Letter rows
     (dolist (row emacos-t9-layout)
@@ -324,7 +324,7 @@ If the command opens the minibuffer, switch to the keyboard page."
   (setq-local mode-line-format " EmacsOS")
   ;; Split: top = editor, bottom = keyboard
   (let* ((total (window-total-height))
-         (kbd-height (min 7 (/ total 2)))
+         (kbd-height (min 9 (/ total 2)))
          (kw (split-window nil (- total kbd-height) 'below)))
     (set-window-buffer kw (get-buffer-create "*keyboard*"))
     (set-window-dedicated-p kw t)
