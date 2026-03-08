@@ -143,16 +143,18 @@ Prefer the minibuffer when it is active."
   (let ((s (if emacos--caps (upcase kg) kg)))
     s))
 
-(defun emacos--btn (label action &optional arg)
-  "Insert a clickable button showing LABEL that calls ACTION (with ARG)."
+(defun emacos--btn (label action &optional arg height)
+  "Insert a clickable button showing LABEL that calls ACTION (with ARG).
+HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller)."
   (insert-text-button
    label
    'action (if arg
               (lambda (_) (funcall action arg))
             (lambda (_) (funcall action)))
    'follow-link t
-   'face '(:box (:line-width (1 . 1) :style released-button)
-           :background "gray25" :foreground "white")
+   'face `(:box (:line-width (1 . 1) :style released-button)
+           :background "gray25" :foreground "white"
+           ,@(when height `(:height ,height)))
    'mouse-face '(:box (:line-width (1 . 1) :style pressed-button)
                  :background "gray45" :foreground "white")))
 
@@ -222,34 +224,42 @@ If the command opens the minibuffer, switch to the keyboard page."
 
 (defun emacos--render-keyboard-page ()
   "Render the Optimal-T9 keyboard, sized to fit the keyboard window."
-  (let* ((win (get-buffer-window (current-buffer)))
-         (win-w  (if win (window-body-width win) 20))
-         (win-px (if win (window-body-height win t)
-                   (* 6 (frame-char-height))))
-         ;; 3 equal buttons with 1-char gaps: btn-w = (win-w - 2) / 3
-         (btn-w (/ (- win-w 2) 3))
-         ;; Distribute available height equally across all 6 lines
-         (ls (max 0 (- (/ win-px 6) (frame-char-height)))))
-    ;; Letter rows
+  (let* ((win      (get-buffer-window (current-buffer)))
+         (win-w    (if win (window-body-width win) 20))
+         (win-lines (if win (window-body-height win) 9))
+         ;; gap-w: visual width of the gap between buttons, in character widths.
+         ;; Can be fractional; btn-w shrinks to compensate.
+         (gap-w  1.5)
+         ;; Letter buttons are scale times taller (and wider) than default.
+         ;; btn-w shrinks so 3 scaled buttons + 2 gaps still fill the window.
+         (scale  1.75)
+         (btn-w  (floor (/ (- win-w (* 2 gap-w)) (* 3 scale))))
+         ;; Utility buttons use full-width columns at normal scale.
+         (util-w (floor (/ (- win-w 2) 3))))
+    ;; Letter rows — :height scale makes each row ~1.75x taller automatically
     (dolist (row emacos-t9-layout)
       (let ((i 0))
         (dolist (kg row)
-          (when (> i 0) (insert " "))
-          (emacos--btn (emacos--center (emacos--key-display kg) btn-w)
-                       #'emacos--tap-key kg)
+          (when (> i 0)
+            (insert " ")
+            (put-text-property (1- (point)) (point)
+                               'display `(space :width ,gap-w)))
+          (let* ((s (emacos--key-display kg))
+                 (s (substring s 0 (min (length s) btn-w))))
+            (emacos--btn (emacos--center s btn-w) #'emacos--tap-key kg scale))
           (setq i (1+ i))))
       (insert "\n"))
     ;; Space, Return, Backspace
-    (emacos--btn (emacos--center "SPC" btn-w) #'emacos--tap-space)
+    (emacos--btn (emacos--center "SPC" util-w) #'emacos--tap-space)
     (insert " ")
-    (emacos--btn (emacos--center "RET" btn-w) #'emacos--tap-return)
+    (emacos--btn (emacos--center "RET" util-w) #'emacos--tap-return)
     (insert " ")
-    (emacos--btn (emacos--center "DEL" btn-w) #'emacos--tap-backspace)
+    (emacos--btn (emacos--center "DEL" util-w) #'emacos--tap-backspace)
     (insert "\n")
     ;; Caps toggle
-    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") btn-w)
+    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
                  #'emacos--tap-caps)
-    (setq-local line-spacing ls)))
+    (setq-local line-spacing 0)))
 
 (defun emacos--render-global-page ()
   "Render global command buttons into the current buffer."
@@ -324,7 +334,7 @@ If the command opens the minibuffer, switch to the keyboard page."
   (setq-local mode-line-format " EmacsOS")
   ;; Split: top = editor, bottom = keyboard
   (let* ((total (window-total-height))
-         (kbd-height (min 9 (/ total 2)))
+         (kbd-height (/ (* total 3) 4))
          (kw (split-window nil (- total kbd-height) 'below)))
     (set-window-buffer kw (get-buffer-create "*keyboard*"))
     (set-window-dedicated-p kw t)
