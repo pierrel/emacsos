@@ -249,12 +249,14 @@ If the command opens the minibuffer, switch to the keyboard page."
             (emacos--btn (emacos--center s btn-w) #'emacos--tap-key kg scale))
           (setq i (1+ i))))
       (insert "\n"))
-    ;; Space, Return, Backspace
-    (emacos--btn (emacos--center "SPC" util-w) #'emacos--tap-space)
+    ;; Space, Return, Backspace — same scale as letter buttons
+    (emacos--btn (emacos--center "SPC" btn-w) #'emacos--tap-space nil scale)
     (insert " ")
-    (emacos--btn (emacos--center "RET" util-w) #'emacos--tap-return)
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
+    (emacos--btn (emacos--center "RET" btn-w) #'emacos--tap-return nil scale)
     (insert " ")
-    (emacos--btn (emacos--center "DEL" util-w) #'emacos--tap-backspace)
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
+    (emacos--btn (emacos--center "DEL" btn-w) #'emacos--tap-backspace nil scale)
     (insert "\n")
     ;; Caps toggle
     (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
