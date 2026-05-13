@@ -3,16 +3,20 @@
 
 Plan for a system that lets the user, sitting at the phone, ask an agent
 to customize emacsos in natural language ("set up gnus for my gmail"),
-have the agent iterate autonomously, and preview the working artifact
-before committing.  This is the design doc; implementation lands in
-later branches.
+have the agent iterate autonomously, and see the working artifact
+*applied to the live phone* — with one-tap roll-back to any previous
+version.  This is the design doc; implementation lands in later
+branches.
 
 * Goal
 
-The phone is the seat.  The user types into a chat surface on the phone,
-the agent (server-side) iterates, and the working result is rendered
-*on the phone* for review.  The user approves with a single tap and the
-change becomes the new baseline; rejecting leaves no trace.
+The phone is the seat.  The user types into a chat surface on the
+phone, the agent (server-side) iterates against safe stand-ins, and
+the result is *applied to the live phone* once the agent's own check
+passes.  The user can mark the current state as known-good (the boot
+target on next restart), roll back to any previous version, or — as
+the kill switch — hard-restart the phone, which always loads the
+last-marked known-good even if the live state is broken.
 
 Worked example:
 
@@ -23,16 +27,17 @@ foo@gmail.com, password XXX."
 Agent: [works in inner loop against stub IMAP] [...]
 Agent: "Done — opening it now.  Decisions: IMAP not POP (gmail
 supports both, IMAP keeps your mail on the server); threaded view;
-fetch on demand, no IDLE.  Press y to commit, n to discard."
+fetch on demand, no IDLE.  Press y to mark as known-good, n to roll
+back."
 
 User: "looks great, but show messages newest-first"
 
-Agent: [adjusts, re-evals]
-Agent: "Done.  Press y to commit, n to discard."
+Agent: [adjusts, re-applies]
+Agent: "Done.  Press y to mark as known-good, n to roll back."
 
 User: y
 
-Agent: "Committed.  Will be there after restart."
+Agent: "Marked as known-good.  Live now."
 #+end_quote
 
 * User interaction model
@@ -43,10 +48,12 @@ The phone's T9 multi-tap keyboard makes long free-text corrections
 expensive: "change the threading mode to interleaved" is ~40 taps.
 Socratic interrogation ("IMAP or POP? thread or flat?") amortizes the
 worst of T9 across many questions and is miserable.  Autonomous: the
-agent picks defaults, applies them, shows the working artifact, lets
-the user react to a concrete thing rather than abstract options.
-Corrections come as short selectable items where possible, free-typed
-only when necessary.  Commit/discard are single-tap actions.
+agent picks defaults, applies them live, loads the working artifact,
+lets the user react to a concrete thing rather than abstract options.
+Corrections come as short selectable items where possible (in scope
+for the initial chat page if simple; defer to a follow-up otherwise),
+free-typed only when necessary.  Mark-as-known-good and roll-back are
+single-tap actions.
 
 ** Decisions are surfaced in prose, not elisp
 
@@ -58,12 +65,35 @@ sessions never need to.  T9 makes scrolling code painful; prose
 explanations let the user reason about *intent* without parsing
 syntax.
 
-** Commit and discard
+** Apply, mark, roll back
 
-Until the user says "commit", nothing reaches the production config.
-Restart at any point gives the previous-known-good state.  "Commit"
-is an atomic swap of the staging changes into the user's dotfiles
-repo (git commit).  "Discard" throws the staging branch away.
+Every agent change is applied to the live phone and persisted as a
+new git commit in the dotfiles repo managed by =emacsos-server=.
+Nothing is staged for preview — the user sees the actual working
+artifact in the same session, not a sandbox proxy of it.
+
+Three user-facing operations:
+
+- *Mark as known-good* (single tap, e.g. =y= or "looks great").
+  Marks the current version as the boot target.  Next phone restart
+  will load this version.
+- *Roll back to last known-good* (single tap, e.g. =n= or
+  "nevermind").  Reverts the phone immediately and live to the
+  most recent known-good version.
+- *Roll back to a specific version*.  Available from a history view;
+  not the common path, but covers "actually, what we had three
+  iterations ago was better".
+
+Phone restart is the kill switch.  The bootloader always loads the
+last-marked known-good version, *not* the latest commit.  If the
+live state is broken (config error, emacs won't start, agent
+applied something terrible), a hard restart recovers — no rescue
+procedure required.  =emacsos-server= maintains the known-good
+marker.
+
+Initial state: the pre-session config is marked known-good before
+the agent applies its first change, so "roll back" always has
+somewhere to land.
 
 * Architecture
 
@@ -72,7 +102,7 @@ repo (git commit).  "Discard" throws the staging branch away.
 | Repo       | Responsibility                                                                                                              |
 |------------+-----------------------------------------------------------------------------------------------------------------------------|
 | =assist=   | Generic agent infrastructure: LLM queue, middleware, sandbox manager, skill loader, evals.  Emacs-agnostic.                 |
-| =emacsos=  | Emacs/phone-specific: chat surface in the phone UI, =emacsos-server= component that brokers phone ↔ assist, emacs/elisp skills, phone control channel, dotfiles staging discipline. |
+| =emacsos=  | Emacs/phone-specific: chat surface in the phone UI, =emacsos-server= component that brokers phone ↔ assist, emacs/elisp skills, phone control channel, dotfiles repo lifecycle. |
 
 Rationale: emacs-specific knowledge is genuinely tied to this OS — the
 skill prompts know about pages, the T9 keyboard, =emacos--target= and
@@ -89,50 +119,69 @@ pieces, revisit then.
 
 A new server process inside the =emacsos= repo that:
 
-- Accepts requests from the phone's chat surface (phone → server).
+- Accepts requests from the phone's chat surface (phone → server,
+  over HTTP).
 - Translates them into agent calls against =assist= (with appropriate
   skill context).
 - Drives the phone's emacs via the existing TCP =emacsclient= channel
-  (server → phone): write into the chat buffer, open preview pages,
-  apply staging configs, swap on commit.
-- Owns the dotfiles repo on the dev box: staging branch lifecycle,
-  scp + load-file to the phone, atomic commit on user approval,
-  rollback on discard.
+  (server → phone): write into the chat buffer, open buffers, apply
+  configs.
+- Owns the user's dotfiles repo end-to-end: creates it on first boot
+  for a new user, manages all commits, scp + =load-file= to the
+  phone, the known-good marker, and rollback to any historical
+  version.  The user never manages the repo directly.
 - Hosts the emacs/elisp skills, the info-page semantic index, and
   the credential-handling discipline.
 
-** Open question: skill discovery and execution path
+** Skill discovery: external path
 
-Today =assist='s middleware loads skills from =assist/middleware/skills/=.
-Putting emacs/elisp skills in =emacsos= means choosing one of:
+=assist='s middleware today loads skills from
+=assist/middleware/skills/=.  For this work, =assist= grows the
+ability to load skills from an additional path that =emacsos-server=
+provides on startup.  Skills live in the =emacsos= source tree;
+=assist= is the runtime.
 
-1. *External skill path.*  =assist= learns to load skills from a path
-   that =emacsos-server= provides on startup.  Skills live in
-   =emacsos= source tree; =assist= is the runtime.
-2. *Separate agent loop.*  =emacsos-server= runs its own agent loop
-   and uses =assist= as an LLM gateway only.  All emacs skills are
-   never seen by =assist='s middleware.
-3. *RPC skill registration.*  =emacsos-server= registers skills with
-   =assist= over a control channel at startup; =assist= proxies skill
-   invocations back to =emacsos-server=.
+Two constraints on the skills themselves:
 
-These have different implications for evals (does the eval suite run
-in =assist=, in =emacsos=, or both?), for review ownership of the
-skill prompt, and for the small-model's tool surface.  Decide before
-the first non-trivial skill ships.
+- *Agent-agnostic.*  Skill prompts and tool surfaces must not depend
+  on =assist='s internals.  Claude (or any other agent that
+  understands the standard skill format) should be able to pick the
+  same skill up and use it.  This is a hard requirement, not a
+  nice-to-have — it keeps =emacsos='s skills portable as the agent
+  landscape evolves.
+- *Generic vs. specific split.*  =assist= can host a generic elisp
+  skill that's useful to any agent doing elisp work.  Deeper emacs
+  dev interaction (gnus setup, org-mode flows, the phone-specific
+  page system) lives in =emacsos= where it has context.
+
+A previously considered third option (=emacsos-server= runs its own
+agent loop and uses =assist= only as an LLM gateway) was rejected:
+it duplicates the queue, middleware, and sandbox infrastructure
+that already exists, for no gain.
+
+** Evals
+
+Evals for this system live in =emacsos= and exercise the specific
+phone use-cases end-to-end (chat request → server → assist →
+applied to staging emacs → asserted outcome).  =assist= keeps its
+own eval suite for the generic elisp skill if/when that lands.
+Both follow the existing 3/5/10 cadence (baseline / post-impl /
+post-review / stability).
 
 * Config layout on the phone
 
 Three layers:
 
 - =os.el= — *user-agnostic platform.*  Pages, T9 keyboard, command
-  runner, control-channel infrastructure.  Ships with =emacsos=.  Agent
-  may edit it when adding platform primitives ("I need a new page
-  type to display gnus nicely"), but those are platform-contributor
-  changes, not user-customization changes.
+  runner, control-channel infrastructure.  Ships with =emacsos=.
+  Agent may edit it when adding platform primitives ("I need a new
+  page type to display gnus nicely"), but those are
+  platform-contributor changes, not user-customization changes.
 - =init.el= — *user-specific.*  Lists which feature modules to load,
   carries any user-level config that doesn't fit a module.  Agent's
-  primary edit surface.
+  primary edit surface.  =emacsos-server= creates an empty
+  scaffolded =init.el= (and the surrounding git repo) on first boot
+  for a new user; the user does not bootstrap it manually.
 - *Per-feature modules* — =gnus-setup.el=, =org-setup.el=,
   =magit-setup.el=, etc.  Each is a self-contained file loaded from
   =init.el=.
@@ -147,43 +196,59 @@ and force the agent to navigate ambiguous merge boundaries.
 
 ** Inner loop: dev-box, sandboxed, stub upstreams
 
-The agent iterates against a Docker sandbox on the dev box (same shape
-as =assist='s existing sandbox).  Emacs runs headless-ish there,
-loading the candidate =init.el= + modules.  External services (IMAP,
-SMTP, package archives that need real-net) are replaced with stubs:
-"happy server" — auth works, two folders, a handful of messages, IDLE
-supported.  Lets the agent verify *mechanics* (the elisp produces a
-working gnus state given a normal server) without burning real
-credentials or hitting real services on every revision.
+The agent iterates against a Docker sandbox on the dev box (same
+shape as =assist='s existing sandbox).  Emacs runs headless-ish
+there, loading the candidate =init.el= + modules.  External services
+(IMAP, SMTP, package archives that need real-net) are replaced with
+stubs: "happy server" — auth works, two folders, a handful of
+messages, IDLE supported.
+
+Why stubs rather than real services upfront: *safety while we
+learn*.  An agent that applies a broken gnus config and starts
+hammering your real IMAP account, or that hits an external service
+in a way that surprises you, is a worse first experience than
+slightly slower iteration.  Once we've seen the agent operate well
+across many sessions, this can graduate to "apply with real
+services from the start".  Treat the inner loop as a
+learning-period guardrail, not a forever feature.
 
 ** Checkpoint trigger: inner-loop stub pass
 
-When the inner loop's stub-IMAP check passes, the agent hands back to
-the user.  This is the only autonomous-to-user handoff signal — no
-"are you sure" prompts mid-iteration, no early checkpoints.
+When the inner loop's stub check passes, the agent applies to the
+live phone.  This is the only autonomous-to-user handoff signal —
+no mid-iteration "are you sure" prompts, no early checkpoints.
 
-** Outer loop: real artifact, phone preview
+** Apply to live phone
 
 On checkpoint:
 
-1. =emacsos-server= runs =local-deploy=-style scp + load-file to push
-   the staging =init.el= + modules onto the phone.
-2. Phone's emacs reloads with the new config and real credentials
+1. =emacsos-server= writes the new =init.el= + module files into
+   the user's dotfiles repo and creates a new git commit.
+2. The new state is pushed to the phone (scp + =load-file= via the
+   existing TCP =emacsclient= channel).
+3. Phone's emacs reloads with the new config and real credentials
    (from =authinfo.gpg=).
-3. Agent drives the phone via =emacsclient -e= to open the relevant
-   preview (the =*Group*= buffer for gnus, for example).
-4. Agent reports the outcome in the chat surface — *honestly*, see
+4. Agent drives the phone via =emacsclient -e= to surface the
+   relevant buffer (the =*Group*= buffer for gnus, for example).
+5. Agent reports the outcome in the chat surface — *honestly*, see
    below — with a short decision list.
+
+The user is now using the live artifact.  If they mark it
+known-good, the new commit becomes the boot target.  If they roll
+back, =emacsos-server= re-applies an earlier version to the phone
+(also via scp + =load-file=); the rolled-back-from commit stays in
+history so the user can roll forward to it again later.
 
 ** Deferred apply when the phone is unreachable
 
-Phone is usually on but cell connectivity drops.  When unreachable at
-checkpoint time:
+Phone is usually on but cell connectivity drops.  When unreachable
+at checkpoint time:
 
 - The inner loop can continue if the user wants to keep iterating
   (agent against sandbox + stub).
-- Outer-loop preview is queued.  When the phone reconnects, the agent
-  surfaces the queued checkpoint.
+- The apply step is queued.  When the phone reconnects,
+  =emacsos-server= applies the queued state and surfaces the
+  checkpoint message in the chat surface.
 - Do *not* silently retry forever.  Per the saved feedback rule
   ("threads should die on infrastructure failure rather than
   heal-and-retry"), if the phone is unreachable past a bound, the
@@ -196,8 +261,8 @@ checkpoint time:
 The worst failure is "agent claims success when the artifact is
 broken" — empty =*Group*= buffer because IMAP login silently failed,
 reported as "your inbox is ready."  Eval coverage must include the
-failure case: mock a failing IMAP, assert the agent's outer-loop
-report shows the failure rather than papering over it.
+failure case: mock a failing IMAP, assert the agent's report shows
+the failure rather than papering over it.
 
 Stronger than "no error" assertion: "≥ 1 group visible", "IMAP
 connect returned 2xx" — concrete positive signals, not absence of
@@ -210,8 +275,7 @@ surface.  That credential will pass through the agent's transcript /
 logs.  Handling rules:
 
 - Credentials are written directly into =authinfo.gpg= on the phone.
-  Never to a plaintext config file, never to the staging branch in
-  git.
+  Never to a plaintext config file, never to the dotfiles repo.
 - Never echoed back in summaries or decision lists.  The decision
   list says "configured gmail IMAP", not "configured gmail IMAP for
   foo@gmail.com with password XYZ".
@@ -227,24 +291,25 @@ in-conversation secret is the surface that needs deliberate care.
 
 - Dev box runs =emacsos-server= and =assist=.  Always available to
   itself.
-- Phone is reachable from the dev box at a stable address most of
+- Phone is reachable from the server at a stable address most of
   the time.  Existing =local-deploy= already assumes =ssh phone=
   resolves; the agent inherits that constraint.
-- Cell drops happen.  Inner loop is unaffected; outer loop defers
+- Cell drops happen.  Inner loop is unaffected; apply step defers
   per above.
 
 * MVP starting point
 
 End-to-end channel with one trivial skill, before any of the rich
-pieces (info index, elisp skill, gnus support, stub IMAP).  Sequence:
+pieces (info index, elisp skill, gnus support, stub IMAP, versioning
+and rollback).  Sequence:
 
-1. *Chat page in emacsos.*  New page accessible via =emacos--switch-page=,
-   with a request buffer (composed via T9) and a response buffer.
-   Single-tap action sends the request.
+1. *Chat page in emacsos.*  New page accessible via
+   =emacos--switch-page=, with a request buffer (composed via T9) and
+   a response buffer.  Single-tap action sends the request.
 2. *=emacsos-server= scaffolding.*  Long-running process on the dev
-   box.  Receives requests from the phone (HTTP, simplest viable
-   shape).  Calls =assist= as a black-box client.  Writes responses
-   back to the phone via the existing =emacsclient -f server -e= path.
+   box.  Receives HTTP requests from the phone.  Calls =assist= as a
+   black-box client.  Writes responses back to the phone via the
+   existing =emacsclient -f server -e= path.
 3. *One trivial skill.*  Something like =/echo= or "say hello and
    open the =*scratch*= buffer" — enough to prove the round trip
    without any emacs-specific reasoning.
@@ -252,27 +317,46 @@ pieces (info index, elisp skill, gnus support, stub IMAP).  Sequence:
    assist in test, send a request, assert the response lands in the
    chat buffer.
 
-Once that's green, layer on: info-page semantic search → elisp skill
-→ stub-IMAP inner loop → gnus skill as the first real feature →
-authinfo.gpg integration → real-loop preview.  Each layer is its own
-branch, its own design doc, its own evals.
+Once that's green, layer on: dotfiles repo bootstrap on first boot →
+known-good marker + roll-back affordances → info-page semantic
+search → elisp skill (in =emacsos=) → stub-IMAP inner loop → gnus
+skill as the first real feature → authinfo.gpg integration.  Each
+layer is its own branch, its own design doc, its own evals.
 
-* Open questions / next decisions
+* Decisions
 
-In rough priority order:
+Captured here so future readers don't have to re-derive them from
+the section bodies.
 
-1. *Skill-discovery path across the seam* (three options above).
-   Blocking for any non-trivial skill.
-2. *Phone → server transport.*  HTTP from the phone is the obvious
-   default but emacs-side HTTP is awkward; alternatives are a small
-   long-poll, or a websocket via an external helper.  Decision can
-   wait until the chat page lands.
-3. *Dotfiles repo location.*  Is it part of =emacsos=, a sibling repo,
-   or somewhere the user provides?  Probably a separate user-owned
-   repo at a known path; details deferred.
-4. *Info-corpus indexing pipeline.*  Where it's built, where it
-   lives, how it's updated on emacs-version bump.  Deferred until
-   the elisp skill is on the table.
+- *Skill discovery* = external path: =assist= loads skills from a
+  path that =emacsos-server= provides on startup.
+- *Phone → server transport* = HTTP.
+- *Dotfiles repo lifecycle* = owned by =emacsos-server=, created on
+  first boot for a new user.  User does not manage the repo.
+- *Info-corpus indexing* = managed by =emacsos-server=, pinned to
+  the phone's emacs version so everything stays in sync.  (Leaning;
+  specifics can defer until the elisp skill is on the table.)
+- *Boot model* = bootloader loads last-marked known-good version,
+  not the latest commit.  Restart is the kill switch.
+- *Skills must be agent-agnostic* — portable to Claude and other
+  agents, not coupled to =assist='s internals.
+- *Evals live in =emacsos=*, stress phone-specific use cases
+  end-to-end, use =assist= as the runtime.
+
+* Open questions
+
+(none currently blocking)
+
+Things worth flagging but not blocking:
+
+1. *T9-friendly correction UI.*  Short selectable items for common
+   corrections ("threaded view → flat", "newest first → oldest
+   first") rather than free-typed prose.  In scope for the chat
+   page if simple; defer to a follow-up otherwise.
+2. *Exact mechanism for the known-good marker.*  Git branch ref
+   (e.g., =known-good=), a marker file on the phone, or a separate
+   metadata store.  Probably a branch ref pointing at the chosen
+   commit, but worth confirming when =emacsos-server= is built.
 
 * Companion docs
 
