@@ -1,6 +1,9 @@
 #+title: EmacsOS
 
-A mobile-first operating system built entirely on Emacs, designed for small touchscreen devices.
+EmacsOS is a malleable, agent-customizable, local-first operating system built on Emacs, for small touchscreen devices. The phone is the user's most personal device, and they should be able to do anything they need to on it. The principles guiding this project include:
+- Malleable - Emacs is the substrate, so every keybinding, buffer behavior, and display rule is just elisp that can be changed at runtime. See [[https://malleable.systems/][malleable.systems]].
+- Agent-customizable - Editing elisp on a 320x240 screen with a T9 keyboard is miserable, so an agent does it instead, driven by natural language like "set up gnus for my gmail", with single-tap roll-back to any prior version. Design: [[file:docs/2026-05-12-agent-driven-customization.org][docs/2026-05-12-agent-driven-customization.org]].
+- Local-first - The user's data, configuration history, and decisions stay on machines they own. No mandatory cloud, no remote service the phone depends on to keep working.
 
 * Quick Start
 
@@ -98,5 +101,6 @@ emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
 * Project Structure
 
 - =os.el= — main init file (keyboard, frame setup)
+- =docs/= — design docs for in-progress and planned features
 - =references/= — research papers informing the keyboard design
 - =Makefile= — launch targets
