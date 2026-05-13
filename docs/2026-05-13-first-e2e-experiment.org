@@ -1,0 +1,175 @@
+#+title: First End-to-End Experiment
+#+date: 2026-05-13
+
+Concrete plan for the MVP step named in [[file:2026-05-12-agent-driven-customization.org][2026-05-12-agent-driven-customization.org]]: stand up the end-to-end channel with one trivial skill, prove the round trip, then stop.  No LLM, no skills loaded from the emacsos path, no rollback, no stub IMAP, no =assist= import.  Just the plumbing.
+
+* Goal
+
+Prove that the user, sitting at the phone in EmacsOS, can type a message into a *chat* surface, hit SEND, and see (a) a response from =emacsos-server= appear in the chat buffer and (b) a visible side effect on the phone driven by the server through =emacsclient=.  Once that round trip works, every later layer (LLM, skills, dotfiles repo, known-good marker, etc.) plugs into a verified pipe instead of being debugged simultaneously with the pipe.
+
+* Scope
+
+*In:*
+- New CHAT page on the phone's keyboard surface, with a =*chat*= top buffer and a SEND button.
+- New =emacsos-server= Python process on the dev box.
+- One trivial endpoint (=POST /chat=) that echoes the user's message and triggers a server-side =emacsclient= call back into the phone to demonstrate the back-channel.
+- One end-to-end test that drives the full path (real emacs, real HTTP, real =emacsclient=).
+
+*Out (called out so they don't sneak in):*
+- =assist= import.  Server is a standalone HTTP service for this experiment.  Plumbing first; LLM bolt-on follows in the next experiment.
+- Skill loading from an emacsos path.  The "external path" decision matters once =assist= is imported, not yet.
+- Phone control beyond a single demonstrative =message= call.  No buffer manipulation, no config swaps, no =load-file=.
+- Dotfiles repo, =authinfo.gpg=, gnus, stub IMAP, known-good marker, rollback, deferred apply.
+- Auth, TLS, internet-facing exposure.  Local network only.
+- T9-friendly correction UI.  Deferred per the master doc.
+
+* Decisions (please review)
+
+These are the choices that need a yes/no/redirect before code.  Rationale is one line per — push back where it's wrong.
+
+** Server lives at =emacsos/server/=
+
+A Python package in the existing repo, not a separate repo.  Sibling-to =os.el=.  Same git history, same PR review.  Reasons: cohesion with the rest of emacsos's surface, fewer cross-repo dependencies to wire up, easy revert if the experiment doesn't pan out.
+
+** Server runtime: Python 3.11+, FastAPI
+
+FastAPI because =assist= uses it (per its README's =manage.web= reference), so we'll already know the idioms when we start importing =assist=.  Async-friendly, type-annotated, no surprises.  Python 3.11+ for modern type syntax.
+
+** Port = =8765=
+
+Picked to avoid clashing with =assist='s default =5050= on a shared dev box.  Configurable via =EMACSOS_SERVER_PORT= env var.
+
+** API shape: =POST /chat=
+
+Request: =Content-Type: application/json=, body =\{"message": "...", "phone": \{"auth_file": "<contents of ~/.emacs.d/server/server>"\}\}=.
+
+Response: =\{"text": "...", "side_effect": "<short description or null>"\}=.
+
+For this experiment, the server's response is =text = "echo: <message>"= and the side effect is "messaged the phone" (server fires =emacsclient -f <tmp-auth-file> -e '(message "saw: <message>")'= so the user sees a real minibuffer flash on the phone).
+
+** Auth = none for MVP
+
+Local network only.  The server binds to =0.0.0.0:8765= and accepts unauthenticated requests.  Defer auth to whenever we expose this beyond a LAN.
+
+** Phone reach via inline auth in each =/chat= request
+
+Phone reads =~/.emacs.d/server/server= on every SEND and includes the contents in the request body under =phone.auth_file=.  Server has *no persistent phone state*: each request carries its own auth.  For the address (the file emacs writes contains =0.0.0.0=, not the phone's reachable IP), the server uses =request.client.host= from the incoming HTTP request and substitutes it into the auth-file contents before writing a temp file and invoking =emacsclient -f <tmp> -e '...'=.
+
+Why this shape instead of env vars + an out-of-band =scp=:
+
+- *True end-to-end with no manual setup step.*  Boot the phone, boot the server, chat works.
+- *Survives phone restart.*  emacs regenerates the auth secret on each =server-start=; the env-var/scp scheme would silently break after every reboot.
+- *Stateless server.*  No handshake state to lose on restart, no "have we registered the phone yet?" race.
+- *One endpoint to test.*  No separate =POST /handshake=.
+
+Fallback: if =phone.auth_file= is missing or unparseable, the server returns =text= echo and =side_effect = null=, logging a warning.  Server still works for HTTP-only round-trip testing without a live phone.
+
+Trade-off: the auth secret travels in every request.  Same trust model we'd already accepted (local network, no TLS, no auth on the chat endpoint itself).  The auth secret authenticates =emacsclient= to the emacs daemon; it's not a chat-conversation credential, so sending it inline is equivalent to the existing on-disk plaintext model.
+
+** Server lifecycle: =make server= (foreground)
+
+New Makefile target that runs the server in the foreground.  No systemd, no daemonization.  Keeps iteration cheap; long-running deploy concerns are for after the experiment works.
+
+** Server logging: stdout
+
+Plain text, one line per request.  No structured logging, no log files.  Replace later if/when it becomes painful.
+
+** Chat surface on the phone
+
+A new page named =chat= alongside =keyboard=, =global=, =mode= in the existing page bar.  Activating CHAT does two things:
+- Switches the top window to a buffer named =*chat*= (creating it if absent).  The buffer is a running transcript: user lines prefixed =you>=, server lines prefixed =bot>=, with a single editable input region at the bottom after =\\n> =.
+- Renders the chat-page contents into the bottom =*keyboard*= buffer: a single big SEND button plus a smaller CLEAR button.
+
+Switching back to KBD page leaves =*chat*= as the top buffer (so the user can keep composing via T9).  Switching to CMD or MODE doesn't auto-switch top buffer back; the user does that themselves if they want to.
+
+Alternative considered: a pure-bottom chat page with no top-buffer takeover, so the user manually switches to =*chat*= via a CMD button.  Rejected because it adds an extra step every time the user wants to chat, and the 320x240 screen punishes extra steps.
+
+** Send semantics
+
+Tapping SEND:
+1. Reads the text in =*chat*= between the last =\\n> = and =(point-max)=.  That text is the user's message.
+2. Reads =~/.emacs.d/server/server= into a string.  That's the =phone.auth_file= field.
+3. POSTs to =http://<server-host>:8765/chat= via =url-retrieve-synchronously= with body =\{message, phone: \{auth_file\}\}=.  Synchronous on purpose — async adds a callback and a "waiting…" indicator we don't need yet.
+4. Appends to =*chat*=: =\\nyou> <message>\\nbot> <response.text>\\n> =.  Leaves the point at end-of-buffer.
+
+Hard timeout in the client: 10 seconds.  Failure surfaces as =bot> [error: <reason>]=.
+
+The server host is configurable via a defcustom =emacos-chat-server-url= so the phone can point at either =localhost= (dev-on-phone) or a dev-box address (typical case).
+
+** emacs-side HTTP = =url-retrieve-synchronously=
+
+Built-in.  No new dependency.  Adequate for a 10-second-tops local network round trip.  Sync simplifies the chat-buffer update logic — no race between SEND tap and response arrival.  Re-evaluate when streaming responses matter (i.e., when =assist= is wired up and responses take many seconds).
+
+** Chat module lives at =emacsos/chat.el=
+
+Loaded from =os.el= via a =(require 'chat)= at the bottom.  Adds the CHAT page entry, the renderer, and =emacos--chat-send=.  Per the master doc's per-feature module convention, but applied to platform features rather than user features.
+
+** Test framework: pytest
+
+Same as =assist=.  Tests live under =emacsos/server/tests/=.  Two layers:
+- *Unit*: =POST /chat= against a TestClient with =emacsclient= mocked.  Asserts the response shape.
+- *Integration*: spawn the real server, spawn a headless emacs running =os.el= + =chat.el= with =server-start=, run a Python helper that simulates a SEND tap by calling =emacos--chat-send= via =emacsclient -f= (i.e., the dev-box-to-phone control channel in reverse), assert the chat buffer has =bot>= line and the phone got a =(message ...)= side effect (visible via =recent-keys= or =minibuffer-message= introspection).
+
+CI hook deferred (emacsos has no CI yet); the integration test is runnable locally via =make test-server=.
+
+* File layout
+
+=emacsos/= becomes:
+
+#+begin_example
+emacsos/
+├── Makefile              # new targets: server, test-server, test-server-int
+├── README.org
+├── docs/
+│   ├── 2026-05-12-agent-driven-customization.org   # master plan
+│   └── 2026-05-13-first-e2e-experiment.org         # this doc
+├── os.el                 # adds chat to page bar, requires 'chat
+├── chat.el               # NEW: chat page renderer + send action
+└── server/               # NEW: Python package
+    ├── pyproject.toml
+    ├── requirements.txt  # fastapi, uvicorn, httpx (tests)
+    ├── emacsos_server/
+    │   ├── __init__.py
+    │   ├── app.py        # FastAPI app, POST /chat
+    │   ├── phone.py      # emacsclient wrapper
+    │   └── config.py     # env-var loading
+    └── tests/
+        ├── test_chat_endpoint.py
+        └── test_end_to_end.py
+#+end_example
+
+* Implementation sequence
+
+Recommended order; each step is independently runnable so we catch breakage early.
+
+1. *Server skeleton.*  =emacsos/server/= with a FastAPI app exposing =POST /chat= that echoes (no =emacsclient= yet).  =make server= runs it.  Hit it with =curl= to confirm.
+2. *Phone driver.*  =phone.py= takes the incoming request's =auth_file= contents and =request.client.host=, substitutes the host into the auth-file string (replacing =0.0.0.0=), writes a temp file, and wraps =subprocess.run(["emacsclient", "-f", <tmp>, "-e", <expr>])=.  Unit test with =emacsclient= path-stubbed.  Wire into =POST /chat= so each request also sends =(message "saw: <msg>")= to the phone.
+3. *Chat page on the phone.*  =chat.el= with renderer + =emacos--chat-send= + integration into =os.el='s page bar.  Verify by switching to CHAT and seeing the page render, even before the server is reachable.
+4. *Send action wired to HTTP.*  =emacos--chat-send= POSTs to =http://localhost:8765/chat= via =url-retrieve-synchronously=, appends response to =*chat*=.  Verify with the server running.
+5. *End-to-end test.*  Drives the full path from a pytest fixture.  Asserts both directions (HTTP response shape AND phone side effect).
+6. *Makefile glue.*  =server=, =test-server=, =test-server-int=.  Document briefly in README under a new section.
+
+* Eval (the "works" bar)
+
+The experiment is done when, with the server running and a headless phone-emacs running with the auth file in place:
+
+- Manually sending "hello" from the chat surface produces =you> hello= and =bot> echo: hello= in =*chat*=, AND a minibuffer flash on the phone reading =saw: hello=.
+- =make test-server= passes (unit + integration), N=3 trials with no flakes.
+
+3/5/10 cadence from the master doc isn't applicable here — there's no LLM in the loop, so trials don't have run-to-run variance.  N=3 to catch race conditions; that's it.
+
+* Out of scope, next experiments
+
+Order is rough; each is its own design doc + branch.
+
+1. *=assist= import.*  Replace the echo with a real LLM call.  Streaming response handling.  First skill registered.
+2. *Skill discovery from emacsos path.*  Wire =assist='s loader to read skills from =emacsos/skills/=.  Verify one skill loads.
+3. *Honesty-contract validation.*  Server inspects the agent's report against a structured success signal before acknowledging "done".
+4. *Dotfiles repo bootstrap.*  =emacsos-server= creates the user's dotfiles repo on first run.
+5. *Known-good marker via git tags.*  Mark, roll back, kill-switch on restart.
+6. *Stub-IMAP inner loop.*  Docker sandbox emacs that loads candidate config against fake services.
+7. *First real feature: gnus setup.*  =authinfo.gpg= integration, real-creds outer loop.
+
+* Companion docs
+
+None yet.  When the experiment ships, this doc gets a brief "*Outcome*" section appended pointing at the merged PR and any deviations from the plan.
