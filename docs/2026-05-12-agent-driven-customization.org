@@ -61,7 +61,7 @@ Start with this split.  If the seam proves to be all overhead and =assist= would
 
 ** =emacsos-server= component
 
-A new server process inside the =emacsos= repo that:
+A new Python process inside the =emacsos= repo that imports =assist= as a library (see *Decisions* for why in-process and not via the assist CLI) and:
 
 - Accepts requests from the phone's chat surface (phone → server, over HTTP).
 - Translates them into agent calls against =assist= (with appropriate skill context).
@@ -165,6 +165,7 @@ Once that's green, layer on: dotfiles repo bootstrap on first boot → known-goo
 
 Captured here so future readers don't have to re-derive them from the section bodies.
 
+- *Agent integration* = =emacsos-server= depends on =assist= as an in-process Python library, not via its CLI.  In-process is required for the skill-discovery path (loaded at import time), for phone-control tools the agent calls back into =emacsos-server=, for structured honesty-contract validation, and for streaming events to the chat surface without stdout parsing.  =emacsos= pins an assist version in =requirements.txt= and bumps explicitly.
 - *Skill discovery* = external path: =assist= loads skills from a path that =emacsos-server= provides on startup.
 - *Phone → server transport* = HTTP.
 - *Dotfiles repo lifecycle* = owned by =emacsos-server=, created on first boot for a new user.  User does not manage the repo.
