@@ -29,7 +29,7 @@ Agent: "Marked as known-good.  Live now."
 
 ** Autonomous-with-checkpoints, not Socratic
 
-The phone's T9 multi-tap keyboard makes long free-text corrections expensive: "change the threading mode to interleaved" is ~40 taps.  Socratic interrogation ("IMAP or POP? thread or flat?") amortizes the worst of T9 across many questions and is miserable.  Autonomous: the agent picks defaults, applies them live, loads the working artifact, lets the user react to a concrete thing rather than abstract options.  Corrections come as short selectable items where possible (in scope for the initial chat page if simple; defer to a follow-up otherwise), free-typed only when necessary.  Mark-as-known-good and roll-back are single-tap actions.
+The phone's T9 multi-tap keyboard makes long free-text corrections expensive: "change the threading mode to interleaved" is ~40 taps.  Socratic interrogation ("IMAP or POP? thread or flat?") amortizes the worst of T9 across many questions and is miserable.  Autonomous: the agent picks defaults, applies them live, loads the working artifact, lets the user react to a concrete thing rather than abstract options.  Corrections come as free-typed prose for now; selectable-item shortcuts for common corrections are a deferred follow-up (see *Deferred* below).  Mark-as-known-good and roll-back are single-tap actions.
 
 ** Decisions are surfaced in prose, not elisp
 
@@ -52,11 +52,8 @@ Initial state: the pre-session config is marked known-good before the agent appl
 * Architecture
 
 ** Two repos, two responsibilities
-
-| Repo       | Responsibility                                                                                                              |
-|------------+-----------------------------------------------------------------------------------------------------------------------------|
-| =assist=   | Generic agent infrastructure: LLM queue, middleware, sandbox manager, skill loader, evals.  Emacs-agnostic.                 |
-| =emacsos=  | Emacs/phone-specific: chat surface in the phone UI, =emacsos-server= component that brokers phone ↔ assist, emacs/elisp skills, phone control channel, dotfiles repo lifecycle. |
+- =assist=: Generic agent infrastructure: LLM queue, middleware, sandbox manager, skill loader, evals.  Emacs-agnostic.
+- =emacsos=: Emacs/phone-specific: chat surface in the phone UI, =emacsos-server= component that brokers phone ↔ assist, emacs/elisp skills, phone control channel, dotfiles repo lifecycle.
 
 Rationale: emacs-specific knowledge is genuinely tied to this OS — the skill prompts know about pages, the T9 keyboard, =emacos--target= and friends, the =local-deploy= idiom.  Pushing that into =assist= would couple a generic project to a single consumer.  Keep emacs-specific glue in =emacsos= and lean on =assist= for the parts that are already generic.
 
@@ -173,17 +170,13 @@ Captured here so future readers don't have to re-derive them from the section bo
 - *Dotfiles repo lifecycle* = owned by =emacsos-server=, created on first boot for a new user.  User does not manage the repo.
 - *Info-corpus indexing* = managed by =emacsos-server=, pinned to the phone's emacs version so everything stays in sync.  (Leaning; specifics can defer until the elisp skill is on the table.)
 - *Boot model* = bootloader loads last-marked known-good version, not the latest commit.  Restart is the kill switch.
+- *Known-good marker* = git version tags (=v1=, =v2=, ...).  =emacsos-server= tags the current commit when the user marks it known-good; the bootloader picks the most recent tag.  Commits without a version tag are not known-good.
 - *Skills must be agent-agnostic* — portable to Claude and other agents, not coupled to =assist='s internals.
 - *Evals live in =emacsos=*, stress phone-specific use cases end-to-end, use =assist= as the runtime.
 
-* Open questions
+* Deferred
 
-(none currently blocking)
-
-Things worth flagging but not blocking:
-
-1. *T9-friendly correction UI.*  Short selectable items for common corrections ("threaded view → flat", "newest first → oldest first") rather than free-typed prose.  In scope for the chat page if simple; defer to a follow-up otherwise.
-2. *Exact mechanism for the known-good marker.*  Git branch ref (e.g., =known-good=), a marker file on the phone, or a separate metadata store.  Probably a branch ref pointing at the chosen commit, but worth confirming when =emacsos-server= is built.
+- *T9-friendly correction UI.*  Short selectable items for common corrections ("threaded view → flat", "newest first → oldest first") rather than free-typed prose.  Skipping it in the first version to keep things simple; will be a welcome addition once the chat-page UX makes it clear we need it.
 
 * Companion docs
 
