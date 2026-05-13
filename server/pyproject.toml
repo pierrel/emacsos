@@ -1,0 +1,24 @@
+[project]
+name = "emacsos-server"
+version = "0.0.1"
+description = "HTTP gateway between the phone and the assist agent."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.23",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.24",
+    "pytest>=7",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["emacsos_server*"]
