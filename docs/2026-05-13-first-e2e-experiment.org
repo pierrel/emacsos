@@ -41,19 +41,30 @@ Picked to avoid clashing with =assist='s default =5050= on a shared dev box.  Co
 
 ** API shape: =POST /chat=
 
-Request: =Content-Type: application/json=, body =\{"message": "..."\}=.
+Request: =Content-Type: application/json=, body =\{"message": "...", "phone": \{"auth_file": "<contents of ~/.emacs.d/server/server>"\}\}=.
 
 Response: =\{"text": "...", "side_effect": "<short description or null>"\}=.
 
-For this experiment, the server's response is =text = "echo: <message>"= and the side effect is "messaged the phone" (server fires =emacsclient -f <auth-file> -e '(message "saw: <message>")'= so the user sees a real minibuffer flash on the phone).
+For this experiment, the server's response is =text = "echo: <message>"= and the side effect is "messaged the phone" (server fires =emacsclient -f <tmp-auth-file> -e '(message "saw: <message>")'= so the user sees a real minibuffer flash on the phone).
 
 ** Auth = none for MVP
 
 Local network only.  The server binds to =0.0.0.0:8765= and accepts unauthenticated requests.  Defer auth to whenever we expose this beyond a LAN.
 
-** Phone reach via env vars
+** Phone reach via inline auth in each =/chat= request
 
-Server reads =EMACSOS_PHONE_SERVER_FILE= (path to the emacs auth file copied from the phone) at startup.  Falls back to the existing convention from the Makefile (=server= file in the repo root, copied via =scp phone:~/.emacs.d/server/server ./server=).  If neither resolves, server starts but =POST /chat= returns the echo without the side effect and logs a warning.
+Phone reads =~/.emacs.d/server/server= on every SEND and includes the contents in the request body under =phone.auth_file=.  Server has *no persistent phone state*: each request carries its own auth.  For the address (the file emacs writes contains =0.0.0.0=, not the phone's reachable IP), the server uses =request.client.host= from the incoming HTTP request and substitutes it into the auth-file contents before writing a temp file and invoking =emacsclient -f <tmp> -e '...'=.
+
+Why this shape instead of env vars + an out-of-band =scp=:
+
+- *True end-to-end with no manual setup step.*  Boot the phone, boot the server, chat works.
+- *Survives phone restart.*  emacs regenerates the auth secret on each =server-start=; the env-var/scp scheme would silently break after every reboot.
+- *Stateless server.*  No handshake state to lose on restart, no "have we registered the phone yet?" race.
+- *One endpoint to test.*  No separate =POST /handshake=.
+
+Fallback: if =phone.auth_file= is missing or unparseable, the server returns =text= echo and =side_effect = null=, logging a warning.  Server still works for HTTP-only round-trip testing without a live phone.
+
+Trade-off: the auth secret travels in every request.  Same trust model we'd already accepted (local network, no TLS, no auth on the chat endpoint itself).  The auth secret authenticates =emacsclient= to the emacs daemon; it's not a chat-conversation credential, so sending it inline is equivalent to the existing on-disk plaintext model.
 
 ** Server lifecycle: =make server= (foreground)
 
@@ -77,10 +88,13 @@ Alternative considered: a pure-bottom chat page with no top-buffer takeover, so 
 
 Tapping SEND:
 1. Reads the text in =*chat*= between the last =\\n> = and =(point-max)=.  That text is the user's message.
-2. POSTs it to =http://localhost:8765/chat= via =url-retrieve-synchronously=.  Synchronous on purpose — async adds a callback and a "waiting…" indicator we don't need yet.
-3. Appends to =*chat*=: =\\nyou> <message>\\nbot> <response.text>\\n> =.  Leaves the point at end-of-buffer.
+2. Reads =~/.emacs.d/server/server= into a string.  That's the =phone.auth_file= field.
+3. POSTs to =http://<server-host>:8765/chat= via =url-retrieve-synchronously= with body =\{message, phone: \{auth_file\}\}=.  Synchronous on purpose — async adds a callback and a "waiting…" indicator we don't need yet.
+4. Appends to =*chat*=: =\\nyou> <message>\\nbot> <response.text>\\n> =.  Leaves the point at end-of-buffer.
 
 Hard timeout in the client: 10 seconds.  Failure surfaces as =bot> [error: <reason>]=.
+
+The server host is configurable via a defcustom =emacos-chat-server-url= so the phone can point at either =localhost= (dev-on-phone) or a dev-box address (typical case).
 
 ** emacs-side HTTP = =url-retrieve-synchronously=
 
@@ -129,7 +143,7 @@ emacsos/
 Recommended order; each step is independently runnable so we catch breakage early.
 
 1. *Server skeleton.*  =emacsos/server/= with a FastAPI app exposing =POST /chat= that echoes (no =emacsclient= yet).  =make server= runs it.  Hit it with =curl= to confirm.
-2. *Phone driver.*  =phone.py= wrapping =subprocess.run(["emacsclient", "-f", <auth-file>, "-e", <expr>])=.  Unit test with =emacsclient= path-stubbed.  Wire into =POST /chat= so each request also sends =(message "saw: <msg>")= to the phone.
+2. *Phone driver.*  =phone.py= takes the incoming request's =auth_file= contents and =request.client.host=, substitutes the host into the auth-file string (replacing =0.0.0.0=), writes a temp file, and wraps =subprocess.run(["emacsclient", "-f", <tmp>, "-e", <expr>])=.  Unit test with =emacsclient= path-stubbed.  Wire into =POST /chat= so each request also sends =(message "saw: <msg>")= to the phone.
 3. *Chat page on the phone.*  =chat.el= with renderer + =emacos--chat-send= + integration into =os.el='s page bar.  Verify by switching to CHAT and seeing the page render, even before the server is reachable.
 4. *Send action wired to HTTP.*  =emacos--chat-send= POSTs to =http://localhost:8765/chat= via =url-retrieve-synchronously=, appends response to =*chat*=.  Verify with the server running.
 5. *End-to-end test.*  Drives the full path from a pytest fixture.  Asserts both directions (HTTP response shape AND phone side effect).
