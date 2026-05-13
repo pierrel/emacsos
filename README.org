@@ -1,46 +1,24 @@
 #+title: EmacsOS
 
-A malleable, agent-customizable, local-first operating system built
-on Emacs, for small touchscreen devices.
+A malleable, agent-customizable, local-first operating system built on Emacs, for small touchscreen devices.
 
 * Why
 
-The phone is the user's most personal device.  Whatever they need
-to do on it — read mail, capture a thought, reach a person, look
-something up — they should be able to.  Appliance OSes make the
-easy things easier and the unanticipated things impossible.
-EmacsOS goes the other way.
+The phone is the user's most personal device.  Whatever they need to do on it — read mail, capture a thought, reach a person, look something up — they should be able to.  Appliance OSes make the easy things easier and the unanticipated things impossible.  EmacsOS goes the other way.
 
 ** Malleable
 
-EmacsOS is built on Emacs because Emacs is [[https://malleable.systems/][malleable]]: the
-substrate the user works in is the same substrate they can change,
-all the way down.  Every keybinding, buffer behavior, and display
-rule is elisp — editable and reloadable at runtime.  On a phone
-this matters more, not less: the user's needs vary more, the
-screen is smaller, the affordances are weirder, and appliance
-defaults rarely fit.
+EmacsOS is built on Emacs because Emacs is [[https://malleable.systems/][malleable]]: the substrate the user works in is the same substrate they can change, all the way down.  Every keybinding, buffer behavior, and display rule is elisp — editable and reloadable at runtime.  On a phone this matters more, not less: the user's needs vary more, the screen is smaller, the affordances are weirder, and appliance defaults rarely fit.
 
 ** Agent-driven customization
 
-Editing elisp on a 320×240 screen with a T9 keyboard would be
-miserable, so the user doesn't.  An agent does — driven by natural
-language ("set up gnus for my gmail"), iterating against safe
-stand-ins, and applying the result to the live phone with
-single-tap roll-back to any prior version.  Phone restart is the
-kill switch: it always boots a previously-known-good version,
-even if the live state is broken.
+Editing elisp on a 320×240 screen with a T9 keyboard would be miserable, so the user doesn't.  An agent does — driven by natural language ("set up gnus for my gmail"), iterating against safe stand-ins, and applying the result to the live phone with single-tap roll-back to any prior version.  Phone restart is the kill switch: it always boots a previously-known-good version, even if the live state is broken.
 
 Design: [[file:docs/2026-05-12-agent-driven-customization.org][docs/2026-05-12-agent-driven-customization.org]].
 
 ** Local-first
 
-The user's data, configuration history, and decision authority
-stay under their control.  The agent's compute runs on a machine
-the user owns; the dotfiles repo lives where the user can reach
-it; credentials never leave the phone unencrypted.  No mandatory
-cloud account, no proprietary lock-in, no remote service the
-phone depends on to keep working.
+The user's data, configuration history, and decision authority stay under their control.  The agent's compute runs on a machine the user owns; the dotfiles repo lives where the user can reach it; credentials never leave the phone unencrypted.  No mandatory cloud account, no proprietary lock-in, no remote service the phone depends on to keep working.
 
 * Quick Start
 
