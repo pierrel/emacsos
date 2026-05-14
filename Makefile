@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy server test-server
+.PHONY: start start-server local-connect-server local-deploy server test-server test-simulation
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -25,3 +25,10 @@ server:
 
 test-server:
 	cd server && python -m pytest tests/ -v
+
+# End-to-end simulation: spins up a dockerized emacs daemon as the
+# "phone", starts emacsos-server, fires a /chat request, verifies the
+# (message ...) side effect actually landed in the daemon's *Messages*
+# buffer.  Requires docker, emacsclient on host.
+test-simulation:
+	cd server && bash simulation/run.sh
