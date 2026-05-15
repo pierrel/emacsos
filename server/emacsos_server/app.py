@@ -41,8 +41,11 @@ def _escape_elisp_string(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+# Sync (not async): the emacsclient call blocks for up to its
+# timeout.  A sync handler lets FastAPI run us in its threadpool so
+# we don't stall the event loop for unrelated requests.
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, request: Request) -> ChatResponse:
+def chat(req: ChatRequest, request: Request) -> ChatResponse:
     text = f"echo: {req.message}"
     side_effect: Optional[str] = None
 

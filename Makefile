@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy server setup-server test-server test-simulation
+.PHONY: start start-server local-connect-server local-deploy server setup-server test-server smoke
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -38,9 +38,14 @@ server: $(SERVER_STAMP)
 test-server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m pytest tests/ -v
 
-# End-to-end simulation: spins up a dockerized emacs daemon as the
-# "phone", starts emacsos-server, fires a /chat request, verifies the
-# (message ...) side effect actually landed in the daemon's *Messages*
-# buffer.  Requires docker and emacsclient on the host.
-test-simulation: $(SERVER_STAMP)
+# Smoke test for the full round trip: spins up a dockerized emacs
+# daemon as the "phone", starts emacsos-server, fires a /chat
+# request from inside the container, verifies the (message ...) side
+# effect actually landed in the daemon's *Messages* buffer.  Run this
+# after any change that touches the server, the phone driver, the
+# chat page on the phone, or the wire protocol -- and extend
+# server/simulation/run.sh as new capabilities (LLM, skills,
+# rollback, etc.) come online so the assertion grows with what the
+# server can do.  Requires docker and emacsclient on the host.
+smoke: $(SERVER_STAMP)
 	cd server && PATH="$(CURDIR)/$(SERVER_VENV)/bin:$$PATH" bash simulation/run.sh

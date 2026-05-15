@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end simulation of the chat round trip with a containerized
-# emacs daemon standing in for the phone.  Wired into `make
-# test-simulation`.
+# Full round-trip smoke test with a containerized emacs daemon
+# standing in for the phone.  Wired into `make smoke`.  Extend the
+# assertions here as new capabilities (LLM, skills, rollback, etc.)
+# land so the smoke grows with what the server can do.
 #
 # Flow:
 #   1. Build the phone-simulator image.
