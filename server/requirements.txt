@@ -1,0 +1,5 @@
+fastapi>=0.100
+uvicorn[standard]>=0.23
+pydantic>=2
+httpx>=0.24
+pytest>=7
