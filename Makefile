@@ -1,11 +1,54 @@
-.PHONY: start start-server local-connect-server local-deploy server setup-server test-server smoke
+.PHONY: start start-server local-connect-server local-deploy phone-install server setup-server test-server test-elisp smoke
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
 
+# === Phone deployment ===
+#
+# Two targets:
+#
+#   phone-install   First-time setup AND any time the chat URL or
+#                   init snippet changes.  Persists across reboots:
+#                   .el files + emacsos-init.el snippet land in
+#                   ~/.emacs.d/.  After the first run, add the
+#                   printed (load-file ...) line to the phone's own
+#                   init.el ONCE.
+#
+#   local-deploy    Hot-reload only.  scp's the .el files to the
+#                   persistent location and re-loads them into the
+#                   running emacs daemon.  Use during dev iteration
+#                   when you don't want to bounce the phone's emacs.
+#
+# Both targets write to ~/.emacs.d/emacsos/ so a hot-reload survives
+# the next reboot too (until you change emacsos-init.el — then
+# re-run phone-install).
+
+PHONE_EMACSOS_DIR ?= ~/.emacs.d/emacsos
+PHONE_INIT_SNIPPET ?= ~/.emacs.d/emacsos-init.el
+# Default to this dev box's first global-scope IPv4.  Override at
+# install time, e.g.:
+#   make phone-install DEV_BOX_URL=http://dev.lan:8765/chat
+DEV_BOX_URL ?= http://$(shell ip -4 -o addr show scope global 2>/dev/null | awk '{print $$4}' | cut -d/ -f1 | head -1):8765/chat
+
+phone-install:
+	@echo "→ Installing to phone:$(PHONE_EMACSOS_DIR)"
+	@echo "  chat URL: $(DEV_BOX_URL)"
+	ssh phone "mkdir -p $(PHONE_EMACSOS_DIR)"
+	scp os.el chat.el phone:$(PHONE_EMACSOS_DIR)/
+	sed "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" deploy/emacsos-init.el.in \
+	  | ssh phone "cat > $(PHONE_INIT_SNIPPET)"
+	@echo
+	@echo "✓ Installed.  If this is the first run, add ONE line to phone's init.el:"
+	@echo "    (load-file \"$(PHONE_INIT_SNIPPET)\")"
+	@echo "  then bounce the phone's emacs (or run \`make local-deploy\` to hot-reload now)."
+
 local-deploy:
-	scp os.el phone:/tmp/os.el
-	ssh phone emacsclient -f server -e '"(progn (load-file \"/tmp/os.el\") (emacos--render-page))"'
+	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
+	scp os.el chat.el phone:$(PHONE_EMACSOS_DIR)/
+	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (emacos--render-page))"'
+
+test-elisp:
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

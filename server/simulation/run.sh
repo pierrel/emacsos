@@ -28,6 +28,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="$(cd "$SERVER_DIR/.." && pwd)"
 
 IMAGE="emacsos-phone-sim"
 CONTAINER="emacsos-phone-sim-$$"
@@ -50,9 +51,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. Build phone image.
+# 1. Build phone image.  Build context = repo root so the Dockerfile
+# can COPY os.el + chat.el (baked into the daemon for the round-trip
+# step below).
 log "building $IMAGE"
-docker build -q -t "$IMAGE" "$SCRIPT_DIR" >/dev/null || fail "image build"
+docker build -q -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$REPO_DIR" >/dev/null \
+    || fail "image build"
 
 # 2. Start phone container (host network so 127.0.0.1:12345 is shared).
 log "starting phone container ($CONTAINER) with --network=host"
@@ -148,6 +152,58 @@ if printf '%s' "$MESSAGES" | grep -q "saw: $TEST_MSG"; then
 else
     log "messages buffer: $MESSAGES"
     fail "'*Messages*' did not contain 'saw: $TEST_MSG'"
+fi
+
+# 8. Round-trip via chat.el inside the daemon.  The curl path above
+#    proves the server in isolation; this path proves the full client
+#    surface (chat.el + url-retrieve-synchronously + the request shape
+#    the elisp actually produces) by driving (emacos--chat-send)
+#    against the daemon and reading back *chat*.
+CHAT_MSG="hello via chat.el"
+log "round-trip via chat.el in the daemon"
+
+# Load chat.el and point it at the server + the daemon's own auth file.
+emacsclient -f "$HOST_AUTH" -e "(progn
+  (load-file \"/opt/emacsos/chat.el\")
+  (setq emacos-chat-server-url \"http://127.0.0.1:$SERVER_PORT/chat\")
+  (setq emacos-chat-auth-file \"/home/phone/.emacs.d/server/server\"))" \
+  >/dev/null 2>&1 \
+  || fail "chat.el did not load in the daemon"
+
+# Simulate the user tapping into the input region and pressing SEND.
+emacsclient -f "$HOST_AUTH" -e "(progn
+  (with-current-buffer (emacos--chat-buffer)
+    (goto-char (point-max))
+    (insert \"$CHAT_MSG\"))
+  (emacos--chat-send))" >/dev/null 2>/tmp/emacsclient-chat.err \
+  || fail "emacos--chat-send signaled; stderr:\n$(cat /tmp/emacsclient-chat.err)"
+
+# Read back the transcript and assert both you> and bot> lines landed.
+CHAT_TRANSCRIPT=$(emacsclient -f "$HOST_AUTH" \
+  -e "(with-current-buffer \"*chat*\" (buffer-substring-no-properties (point-min) (point-max)))" \
+  2>/tmp/emacsclient-chat.err)
+[[ $? -eq 0 ]] \
+  || fail "emacsclient could not read *chat*; stderr:\n$(cat /tmp/emacsclient-chat.err)"
+
+if printf '%s' "$CHAT_TRANSCRIPT" | grep -q "you> $CHAT_MSG" \
+   && printf '%s' "$CHAT_TRANSCRIPT" | grep -q "bot> echo: $CHAT_MSG"; then
+    log "PASS: *chat* contains 'you> $CHAT_MSG' and 'bot> echo: $CHAT_MSG'"
+else
+    log "*chat* transcript: $CHAT_TRANSCRIPT"
+    fail "*chat* missing expected you>/bot> lines"
+fi
+
+# Independent side-effect check (same shape as step 7): the server
+# fires (message "saw: <text>") via emacsclient against the daemon.
+# Since we drove the request through chat.el this time, the message
+# the server processed is the bare chat input -- so we look for
+# 'saw: <CHAT_MSG>' in *Messages*.
+MESSAGES2=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err)
+if printf '%s' "$MESSAGES2" | grep -q "saw: $CHAT_MSG"; then
+    log "PASS: '*Messages*' contains 'saw: $CHAT_MSG' (chat.el path)"
+else
+    log "messages buffer: $MESSAGES2"
+    fail "'*Messages*' did not contain 'saw: $CHAT_MSG' after chat.el SEND"
 fi
 
 log "PASS"
