@@ -12,8 +12,11 @@ A successful run looks like: the user types a research-shaped question ("what's 
 * Scope
 
 *In:*
-- =server/requirements.txt= adds a pinned =assist= dependency.
-- =emacsos-server= constructs one process-wide =assist.Thread= at startup (lazily, on first /chat) and reuses it across requests.
+- =server/requirements.txt= + Makefile install =assist= editably
+  from the sibling =$(ASSIST_REPO_DIR)= checkout (see decision §2
+  for why editable, not wheel).
+- =emacsos-server= constructs one process-wide =assist.Thread=
+  lazily on first /chat and reuses it across requests.
 - =POST /chat= replaces the echo with =thread.message(req.message)= and returns the agent's final string.
 - =assist= runs with its defaults: built-in skills (=calculate=, etc.), built-in sub-agents (=research-agent=, =context-agent=, =critique-agent=, =fact-check-agent=), built-in tools (=search_internet=, =read_url=, =execute=, the filesystem ops).
 - A bounded timeout layer so a runaway agent or a stuck LLM cannot hang =/chat= forever — the chat surface degrades to =bot> [error: …]= the way it does today on transport failure.
@@ -37,17 +40,28 @@ Numbered.  Push back on any.
 
 PR #5 shipped a sync HTTP round trip with a 10s client timeout against an echo.  Three things change at once in this experiment — the body switches from echo to a real LLM, the response budget grows from milliseconds to potentially minutes, and a skill enters the loop.  Locking the wire shape (one request, one response, JSON in/JSON out, ={text, side_effect}=) and the surface shape (=*chat*= transcript) means every regression we hit belongs to *this* experiment's changes.  Streaming and skill discovery touch enough other surfaces to deserve their own branches.
 
-** 2. =assist= is pinned by SHA via =git+file://= in =requirements.txt=
+** 2. =assist= is installed editably from the sibling checkout
 
-=assist= is not on PyPI and its =pyproject.toml= has no published version stream.  Three options were on the table:
+*As shipped (revised mid-implementation).*  =assist='s
+=pyproject.toml= currently doesn't bundle =templates/= in the wheel,
+so a non-editable install crashes at import time.  The Makefile does
+=pip install -r $(ASSIST_REPO_DIR)/requirements.txt= followed by
+=pip install -e $(ASSIST_REPO_DIR)= where =ASSIST_REPO_DIR= defaults
+to =../assist=.  Both can be overridden at install time.
 
-- *(a) Editable install from a known path* (=pip install -e /home/pierre/src/assist=).  Fast iteration, but the pin is implicit (whatever's checked out is what runs).
-- *(b) Git URL with commit SHA* in =requirements.txt= (=assist @ git+file:///home/pierre/src/assist@<sha>=).  Honours the master-vision rule "pin and bump explicitly".  Reinstall on every bump.
-- *(c) Vendored copy*.  Rejected — turns every assist change into a two-repo dance.
-
-Pick (b).  Bumping is explicit (edit the SHA, =rm -rf server/.venv && make setup-server=), and the venv reflects exactly the assist commit being tested.  README's server section gets a one-line note.  When/if =assist= has a public remote, the URL swaps without touching anything else.
-
-Concession to iteration speed: a =make dev-server= target (separate from =make server=) that does =pip install -e /home/pierre/src/assist= *over* the pinned version, for when actively coediting both repos.  Not used by =make smoke= or by deploys.
+Original decision (kept here for context) was a SHA-pinned
+=git+file://= URL in =server/requirements.txt= for "pin and bump
+explicitly" semantics.  Dropped on the first =make setup-server=:
+the wheel path crashed at =from assist.thread import Thread= because
+the Jinja2 PackageLoader can't find =templates/= in the wheel-shaped
+install.  Editable install side-steps the issue (lives in the source
+tree) and matches the iteration-speed concession we'd planned for a
+=make dev-server= variant — so we collapsed the two into one
+install path.  The "pin and bump explicitly" property is recovered
+by the git SHA of the sibling checkout: bumping means =git pull= in
+=../assist= and re-running =make setup-server=.  Upstream =pyproject=
+fix is its own todo; once landed, swap back to the SHA-pinned URL
+for tighter reproducibility.
 
 ** 3. The =assist.Thread= is a module-level singleton in =emacsos_server.app=, lazily constructed at first /chat
 
@@ -141,14 +155,25 @@ Pick (b) for v1, with two carve-outs:
 
 Specific exception classes (=SandboxContainerLostError= etc.) get translated to specific messages once the path that raises them is in scope — sandbox arrives with gnus, etc.
 
-** 11. =EMACSOS_LLM_DISABLED= env knob: keep the echo-only fallback as a first-class server mode
+** 11. Echo fallback: descoped during PR review
 
-Two ways to keep =make smoke= green after this experiment:
+*Outcome.*  Originally shipped: an =EMACSOS_LLM_DISABLED= env knob
+preserved PR #5's echo behaviour as a first-class server mode, so
+=make smoke= could run without a model around.  The operator
+review (PR #6) overruled: "we're past it now."  Removed in the
+same PR.  The server now always runs assist; =ASSIST_MODEL_URL=
+is required at startup time (the smoke also requires it and
+fails fast otherwise).
 
-- *(a) Make the smoke require =ASSIST_MODEL_URL=.*  Honest, but breaks the "run smoke from any clean checkout" property the prior experiment shipped.
-- *(b) Server-side env switch =EMACSOS_LLM_DISABLED=1= that restores PR #5's echo behaviour verbatim, and have =server/simulation/run.sh= set it when =ASSIST_MODEL_URL= is unset.*  Existing assertions in run.sh keep passing; an additional LLM-section runs only when a model is reachable.
-
-Pick (b).  Treating "no LLM available" as a first-class server mode (rather than a startup failure) matches the local-first constraint: the phone's chat surface should keep working even when the dev-box LLM is down.  Today the user sees =bot> echo: …=; with this flag they keep seeing the same.  When =ASSIST_MODEL_URL= is set, the flag goes away and the real agent runs.
+Rationale for the removal: the local-first promise the original
+decision invoked was about the *phone*'s chat surface degrading
+gracefully when the dev-box LLM is down — which still holds: if
+the server can't reach the model, =/chat= returns =[error: assist
+model unavailable: …]= which the phone renders as a normal
+=bot> [error: …]= line.  The =bot> echo: …= shape never gave the
+user anything useful that the error line doesn't; carrying a
+second code path forever for that one debug convenience wasn't
+worth it.
 
 ** 12. Phone back-channel: rework the post-response =(message …)= flash text
 
@@ -171,34 +196,74 @@ already in flight as assist PR #104).
 
 * Implementation sequence
 
-Each step is independently runnable.
+*As shipped.*  The plan below is the actual landed shape — earlier
+revisions had a SHA-pinned wheel install and an echo-fallback gate;
+both got reworked mid-PR (see §2 and §11).
 
-1. *Pin assist in =server/requirements.txt=.*  Add =assist @ git+file:///home/pierre/src/assist@<current main sha>=.  =rm -rf server/.venv && make setup-server=.  Done when =server/.venv/bin/python -c 'import assist; print(assist)'= prints the install path.
+1. *Install assist editably from =$(ASSIST_REPO_DIR)= via the
+   Makefile.*  =rm -rf server/.venv && make setup-server= picks up
+   assist's =requirements.txt= and runs =pip install -e <repo>=.
+   Done when =server/.venv/bin/python -c 'from assist.thread import
+   Thread'= imports cleanly (which the wheel install does NOT —
+   see §2).
 
-2. *Module-level Thread singleton in =app.py=.*  =_THREAD: Optional[Thread] = None=, =_THREAD_LOCK=, =_get_thread()= that lazy-constructs with =select_chat_model(temperature=0.1)=, a fresh =tempfile.mkdtemp(prefix="emacsos-thread-")= as working_dir, =sandbox_backend=None=, no =extra_skill_sources= (builtin defaults only).  Done when an =import emacsos_server.app= followed by a probe call returns a Thread without exploding (with =ASSIST_MODEL_URL= set).
+2. *Module-level Thread singleton in =app.py=.*  =_THREAD: Optional=
+   guarded by =_THREAD_LOCK=, lazy =_get_thread()= constructs a
+   fresh =Thread(working_dir=tempfile.mkdtemp(...),
+   sandbox_backend=None, model=None)= — Thread itself calls
+   =select_chat_model= which reads =ASSIST_MODEL_URL=.
+   =_reset_thread()= clears the singleton on timeout so the next
+   request doesn't queue behind stale work or inherit a
+   ghost-turn.
 
-3. *Wire =/chat= to =thread.message=, behind the LLM-disabled flag.*  If =EMACSOS_LLM_DISABLED= or =ASSIST_MODEL_URL= unset → keep today's echo path verbatim.  Otherwise → =text = thread.message(req.message)=.  Wrapped in the §9 thread-pool +-timeout + the §10 catch-all.  Side-effect (§12) computes the flash text from the response.  Done when curl gets a real LLM reply for any plausible prompt against a running model endpoint.
+3. *Wire =/chat= to =thread.message= directly.*  No env gate — the
+   server always runs assist.  =_run_turn()= submits
+   =_get_thread()= + =.message()= to the executor as a single unit
+   so the timeout covers construction (not just the call).  Wrapped
+   in the §10 catch-all.
 
-4. *Bump =emacos-chat-timeout= from 10 to 300.*  One-line change in =chat.el= + the documenting comment.  Done when =make test-elisp= still passes.
+4. *Bump =emacos-chat-timeout= from 10 to 300.*  One-line in
+   =chat.el= + documenting comment.  Done when =make test-elisp=
+   still passes.
 
-5. *Smoke extension.*  =server/simulation/run.sh= grows a section, gated by =[[ -n "${ASSIST_MODEL_URL:-}" ]]=, that sends a short prompt ("hello"), asserts the response does NOT match the literal echo shape (=text != "echo: hello"=), and asserts the back-channel flash matches the §12 shape (=agent: <prefix>= rather than =saw: hello=).  The existing assertions (echo-text, "saw:" line) get moved under the LLM-disabled branch.  Done when =ASSIST_MODEL_URL= set → both branches run + pass; unset → existing echo-only branch passes alone.
+5. *Smoke.*  =server/simulation/run.sh= requires
+   =ASSIST_MODEL_URL=, asserts the response is non-echo and
+   non-=[error: …]=, and polls =*Messages*= for the =agent:= flash
+   (the back-channel runs as a BackgroundTask so it can lag the
+   response by ~1s).  =*Messages*= is cleared between the curl and
+   chat.el round trips so the second flash assertion is
+   unambiguous.
 
-6. *README update.*  Short subsection under the existing server section: "Bumping assist" + "Running with vs. without an LLM endpoint".
+6. *README update.*  "Running", "Bumping assist", "Smoke"
+   subsections under "Chat Server".
 
-7. *PR.*  Single emacsos PR — no assist patch dependency in this experiment.  (The =extra_skill_sources= parameter on =create_agent= is on a separate assist PR, #104, which will land alongside the skill-discovery experiment that needs it.)
+7. *PR.*  Single emacsos PR — no assist patch dependency.  (The
+   =extra_skill_sources= parameter on =create_agent= is on a
+   separate assist PR, #104, which lands with the skill-discovery
+   experiment.)
 
 * Eval (the "works" bar)
 
 The experiment is done when:
 
-- With =ASSIST_MODEL_URL= pointed at a live endpoint and the server running, manually sending a short prompt from the phone (e.g. "hello") produces:
+- With =ASSIST_MODEL_URL= pointed at a live endpoint and the
+  server running, manually sending a short prompt from the phone
+  (e.g. "hello") produces:
   - =you> hello= in =*chat*=
-  - =bot> <a real LLM answer>= in =*chat*= within the 300s budget — *not* the literal echo shape =echo: hello=.  This is the load-bearing assertion: it pins that the LLM path took the request, not the echo fallback.
-  - A minibuffer flash on the phone matching the §12 shape (=agent: <first 60 chars>=).
-- A research-shaped prompt (e.g. "what's a good ergonomic mouse?") completes within budget and the response is clearly research-derived (a report file path, a multi-paragraph answer, or links).  This is the manual demo check; smoke covers the structural assertion above.
-- Same short prompt with =ASSIST_MODEL_URL= unset and =EMACSOS_LLM_DISABLED=1=: =bot> echo: hello= (PR #5's behaviour preserved).
-- =make smoke= passes in both modes.
-- =make test-server= passes (unit + new tests that mock =thread.message= without hitting a model).
+  - =bot> <a real LLM answer>= in =*chat*= within the 300s budget.
+    Load-bearing assertion: response is non-empty and not
+    =[error: …]=, proving the agent path completed.
+  - A minibuffer flash on the phone matching the §12 shape
+    (=agent: <first 60 chars>=).
+- A research-shaped prompt (e.g. "what's a good ergonomic
+  mouse?") completes within budget and the response is clearly
+  research-derived (a report file path, a multi-paragraph answer,
+  or links).  Manual demo check; smoke covers only the structural
+  assertion.
+- =make smoke= passes (requires =ASSIST_MODEL_URL=; no echo-mode
+  variant after §11 was descoped).
+- =make test-server= passes (unit tests mock =thread.message= so
+  they don't hit a real model).
 
 Eval cadence per the assist =CLAUDE.md= rule (this is LLM-affected work): 3/5/10 — three trials of the live-LLM smoke after the first complete implementation, five after the reviewer pass, ten for the stability gate.  The non-LLM smoke (=EMACSOS_LLM_DISABLED=1=) follows 3 trials (no run-to-run variance).
 

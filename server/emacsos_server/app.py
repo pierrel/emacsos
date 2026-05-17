@@ -1,18 +1,20 @@
 """FastAPI app for the chat endpoint.
 
-POST /chat: either echoes (LLM-disabled mode) or invokes assist's
-agent (LLM-enabled mode), then fires a single ``(message ...)`` on
-the phone via emacsclient to confirm the back-channel.
+POST /chat: invokes assist's agent and returns the reply.  Phone
+back-channel `(message ...)` flash is scheduled as a BackgroundTask
+so it fires after the response is sent (the phone's chat.el blocks
+its main loop while waiting for our response; the back-channel
+can't be processed until then).
 
-See docs/2026-05-17-assist-import.org for the experiment plan and
-the decisions behind the LLM-disabled flag, the lazy Thread
-singleton, the timeout shape, and the post-response back-channel
-flash format.
+ASSIST_MODEL_URL must be set when the server is invoked OR by the
+time the first /chat lands; without it, agent construction fails and
+the chat surface renders a clean `[error: ...]`.
+
+See docs/2026-05-17-assist-import.org for the experiment plan.
 """
 from __future__ import annotations
 
 import logging
-import os
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -48,90 +50,108 @@ class ChatResponse(BaseModel):
 # --- assist Thread singleton (lazy, process-wide) ---
 
 # One Thread, one ongoing conversation, every /chat extends it.
-# Lazy construction: the server boots even when ASSIST_MODEL_URL isn't
-# yet pointed at a live endpoint; first /chat in LLM mode triggers
-# construction.  Lock-guarded so two concurrent first-requests don't
-# double-construct.  See design doc §3 + §4.
+# Lazy construction: the server boots even when ASSIST_MODEL_URL
+# isn't yet pointed at a live endpoint; first /chat triggers it.
+# Lock-guarded so two concurrent first-requests don't double-construct.
+# On agent timeout (see `_run_turn`), this singleton is cleared so
+# the next /chat builds a fresh Thread — the stale agent thread
+# keeps running in the background but its result lands in an
+# orphaned Thread that nobody reads.  Loses conversation continuity
+# across timeouts; acceptable for v1 in exchange for not poisoning
+# the next conversation with a ghost-turn or queue contention
+# behind the still-running stale agent.  Design doc §3-4 + §9-10.
 _THREAD = None
 _THREAD_LOCK = threading.Lock()
 
-# Server-internal timeout for the agent call.  30s under the
-# chat.el client timeout of 300s (design doc §9) so the server
-# returns a clean error message before the client gives up.
+# Server-internal timeout for the agent turn (construction + call).
+# 30s under the chat.el client timeout of 300s (design doc §9) so the
+# server returns a clean error message before the client gives up.
 AGENT_TIMEOUT_SECONDS = 270
 
 # One worker is enough: assist's per-thread queue already serialises
 # LLM calls on the same thread id, and we only have one thread.
 # Workers > 1 would create contention without parallelism.
 #
-# Known limitation: `future.result(timeout=…)` unblocks the caller on
-# timeout, but the underlying Python thread keeps running until the
-# agent returns (Python threads aren't externally cancellable).  A
-# runaway agent therefore leaks one thread per timeout until the
-# process exits.  Acceptable for v1 (one-thread singleton, manual
-# server restart on bad state); revisit if we ever expect concurrent
-# runaway calls.
+# Known limitation: `future.result(timeout=...)` unblocks the caller
+# on timeout, but the underlying Python thread keeps running until
+# the agent returns (Python threads aren't externally cancellable).
+# We reset `_THREAD = None` on timeout so the next request starts
+# on a fresh Thread; the stale agent thread keeps running and its
+# result lands in an orphaned Thread.  Process restart cleans up.
 _AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="emacsos-agent")
 
 
-def _llm_enabled() -> bool:
-    """LLM mode is on iff ASSIST_MODEL_URL is set AND
-    EMACSOS_LLM_DISABLED is not set to a truthy value.  Either gate
-    being closed falls back to the echo path (design doc §11)."""
-    if os.environ.get("EMACSOS_LLM_DISABLED", "").lower() in ("1", "true", "yes", "on"):
-        return False
-    return bool(os.environ.get("ASSIST_MODEL_URL"))
+def _build_thread():
+    """Construct a fresh `assist.Thread`.  Raises whatever assist
+    raises during construction (e.g. model probe failure)."""
+    # Import inside so module import doesn't trigger assist's
+    # transitive imports during server startup.
+    from assist.thread import Thread
+
+    working_dir = tempfile.mkdtemp(prefix="emacsos-thread-")
+    # sandbox_backend=None (design doc §5); model=None lets Thread
+    # call select_chat_model itself which reads ASSIST_MODEL_URL.
+    log.info("Constructing assist.Thread (working_dir=%s)", working_dir)
+    t = Thread(working_dir=working_dir, sandbox_backend=None)
+    log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
+    return t
 
 
 def _get_thread():
-    """Lazy-construct the singleton Thread.  Raises whatever assist
-    raises during construction (model probe failure, etc.); callers
-    must catch."""
+    """Return the singleton Thread, lazy-constructing under the lock.
+    Lock held only for the construction critical section; the actual
+    `.message()` call happens outside."""
     global _THREAD
     if _THREAD is not None:
         return _THREAD
     with _THREAD_LOCK:
         if _THREAD is not None:
             return _THREAD
-        # Import inside the lock so module import doesn't trigger
-        # assist's transitive imports during server startup.
-        from assist.thread import Thread
-
-        working_dir = tempfile.mkdtemp(prefix="emacsos-thread-")
-        # sandbox_backend=None (design doc §5); model=None lets Thread
-        # call select_chat_model itself which reads ASSIST_MODEL_URL.
-        log.info("Constructing assist.Thread (working_dir=%s)", working_dir)
-        _THREAD = Thread(working_dir=working_dir, sandbox_backend=None)
-        log.info("assist.Thread ready (thread_id=%s)", _THREAD.thread_id)
+        _THREAD = _build_thread()
         return _THREAD
 
 
-def _run_agent(message: str) -> str:
-    """Run one agent turn under the inner timeout.  Returns the bot
-    text, or raises an exception type the caller maps to an error
-    string."""
-    thread = _get_thread()
-    future = _AGENT_EXECUTOR.submit(thread.message, message)
+def _reset_thread():
+    """Drop the singleton reference.  Next `_get_thread()` constructs
+    fresh.  Used after timeouts so the next request doesn't queue
+    behind the stale agent or build on a ghost-turn."""
+    global _THREAD
+    with _THREAD_LOCK:
+        if _THREAD is not None:
+            log.warning("Resetting assist.Thread singleton (thread_id=%s)",
+                        _THREAD.thread_id)
+            _THREAD = None
+
+
+def _run_turn(message: str) -> str:
+    """Construct (if needed) + run one agent turn under the inner
+    timeout.  The whole turn — construction probe AND `.message()`
+    — runs in the worker thread so a slow model probe also obeys
+    the timeout (otherwise lazy construction on the calling thread
+    could block past the client timeout)."""
+    def _do_turn():
+        return _get_thread().message(message)
+    future = _AGENT_EXECUTOR.submit(_do_turn)
     return future.result(timeout=AGENT_TIMEOUT_SECONDS)
 
 
 def _agent_text(message: str) -> str:
-    """Catch-all wrapper around `_run_agent`.  Returns the bot text on
-    success; on any exception returns a chat-recognisable error
-    string.  Design doc §10 — two specific carve-outs for the most
-    common operator-facing errors, catch-all for everything else."""
+    """Wrap `_run_turn` in the error-mapping table.  Returns the bot
+    text on success; on any exception returns a chat-recognisable
+    error string.  Design doc §10."""
     try:
-        return _run_agent(message)
+        return _run_turn(message)
     except FutureTimeoutError:
         log.warning("Agent timed out after %ds", AGENT_TIMEOUT_SECONDS)
+        # The stale agent keeps running in the worker; reset the
+        # singleton so the next request doesn't queue behind it or
+        # inherit the half-complete conversation turn.
+        _reset_thread()
         return f"[error: agent timed out after {AGENT_TIMEOUT_SECONDS}s]"
     except RuntimeError as e:
         # select_chat_model raises RuntimeError for missing config
-        # AND for liveness/probe failures ("could not reach …",
-        # "returned no models", etc.).  Narrow the explicit-config
-        # case to messages that name the env var; everything else
-        # gets a model-unavailable wording so we don't mislabel a
-        # liveness failure as a misconfig.
+        # AND for liveness/probe failures.  Narrow the explicit-
+        # config case to messages naming the env var.
         msg = str(e)
         if "ASSIST_MODEL_URL" in msg:
             log.error("Agent config error: %s", e)
@@ -184,33 +204,24 @@ def _fire_back_channel(auth_contents: str, phone_host: str, flash: str) -> None:
 # sync handler lets FastAPI run us in its threadpool so we don't
 # stall the event loop for unrelated requests.
 #
-# The back-channel emacsclient call is scheduled as a BackgroundTask
-# so it fires AFTER the response has been sent.  Necessary because
-# the phone's chat.el uses url-retrieve-synchronously which blocks
-# the phone's emacs main loop until the response lands — if we
-# tried to fire the back-channel BEFORE returning, the phone
-# wouldn't be able to process the inbound emacsclient connection
-# (it's busy waiting for *our* response) and the call times out.
-# Discovered in real-LAN testing 2026-05-17; the localhost-loop
-# smoke didn't surface it because the back-channel call completed
-# fast enough to slip through.
+# Back-channel emacsclient call is a BackgroundTask so it fires
+# AFTER the response is sent — the phone's chat.el uses
+# url-retrieve-synchronously which blocks the phone's main loop
+# until our response lands; firing inline would deadlock.
+# Discovered in real-LAN testing 2026-05-17; the localhost smoke
+# slipped through because the timeout window was wider than the
+# fast-loop latency.
 @app.post("/chat", response_model=ChatResponse)
 def chat(
     req: ChatRequest,
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> ChatResponse:
-    if _llm_enabled():
-        log.info("POST /chat msg=%r mode=llm", req.message)
-        text = _agent_text(req.message)
-        flash = _flash_text(text)
-    else:
-        log.info("POST /chat msg=%r mode=echo", req.message)
-        text = f"echo: {req.message}"
-        flash = f"saw: {req.message}"
+    log.info("POST /chat msg=%r", req.message)
+    text = _agent_text(req.message)
+    flash = _flash_text(text)
 
     side_effect: Optional[str] = None
-
     if req.phone is not None and request.client is not None:
         phone_host = request.client.host
         background_tasks.add_task(

@@ -105,21 +105,22 @@ emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
 process (no CLI shellout) and returns the agent's reply for rendering
 in the phone's =*chat*= buffer.
 
-** Running with vs. without an LLM endpoint
+** Running
 
-The server has two modes:
+=ASSIST_MODEL_URL= must point at an OpenAI-compatible chat
+endpoint.  Start the server:
 
-- *LLM mode* (default when =ASSIST_MODEL_URL= is set): each /chat
-  goes through =assist.Thread.message()=, which uses the configured
-  model and any built-in skills / sub-agents.  Responses can take up
-  to ~5 minutes; the client timeout in =chat.el= matches.
-- *Echo mode* (default when =ASSIST_MODEL_URL= is unset, or
-  =EMACSOS_LLM_DISABLED=1=): the server skips assist and replies
-  =echo: <message>=.  Same shape, no model dependency; lets =make
-  smoke= run on any clean checkout.
+#+begin_src sh
+ASSIST_MODEL_URL=http://localhost:8000/v1 make server
+#+end_src
 
-Either mode fires the back-channel =(message …)= on the phone via
-=emacsclient= so the user sees the chat completed.
+Each =/chat= request goes through =assist.Thread.message()=, which
+uses the configured model plus assist's built-in skills and
+sub-agents (research, context, critique, fact-check).  Real
+responses can take up to ~5 minutes for research-shaped questions;
+the client timeout in =chat.el= matches.  The post-response
+back-channel fires =(message "agent: <reply prefix>")= on the
+phone via =emacsclient= so the user sees the round trip completed.
 
 ** Bumping assist
 
@@ -136,10 +137,15 @@ Or override the path: =make setup-server ASSIST_REPO_DIR=/abs/path/to/assist=.
 
 ** Smoke
 
-=make smoke= spins a dockerized phone simulation, starts the server,
-and exercises both the curl path (server in isolation) and the
-=chat.el= path (full client surface).  Set =ASSIST_MODEL_URL= to
-exercise LLM mode; leave unset for echo-only.
+=make smoke= spins a dockerized phone simulation, starts the
+server, and exercises both the curl path (server in isolation) and
+the =chat.el= path (full client surface) against a real LLM
+endpoint.  Requires =ASSIST_MODEL_URL= to be set in the calling
+shell:
+
+#+begin_src sh
+ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
+#+end_src
 
 * Project Structure
 
