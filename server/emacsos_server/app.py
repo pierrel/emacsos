@@ -1,16 +1,26 @@
 """FastAPI app for the chat endpoint.
 
-POST /chat: echoes the user's message, fires a single ``(message ...)``
-on the phone via emacsclient to demonstrate the back-channel.  No LLM
-in the loop yet; this is plumbing-only per the experiment plan in
-docs/2026-05-13-first-e2e-experiment.org.
+POST /chat: invokes assist's agent and returns the reply.  Phone
+back-channel `(message ...)` flash is scheduled as a BackgroundTask
+so it fires after the response is sent (the phone's chat.el blocks
+its main loop while waiting for our response; the back-channel
+can't be processed until then).
+
+ASSIST_MODEL_URL must be set when the server is invoked OR by the
+time the first /chat lands; without it, agent construction fails and
+the chat surface renders a clean `[error: ...]`.
+
+See docs/2026-05-17-assist-import.org for the experiment plan.
 """
 from __future__ import annotations
 
 import logging
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from pydantic import BaseModel
 
 from .config import Config
@@ -19,7 +29,7 @@ from .phone import call_emacs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("emacsos_server")
 
-app = FastAPI(title="emacsos-server", version="0.0.1")
+app = FastAPI(title="emacsos-server", version="0.1.0")
 config = Config.from_env()
 
 
@@ -37,34 +47,190 @@ class ChatResponse(BaseModel):
     side_effect: Optional[str] = None
 
 
+# --- assist Thread singleton (lazy, process-wide) ---
+
+# One Thread, one ongoing conversation, every /chat extends it.
+# Lazy construction: the server boots even when ASSIST_MODEL_URL
+# isn't yet pointed at a live endpoint; first /chat triggers it.
+# Lock-guarded so two concurrent first-requests don't double-construct.
+# On agent timeout (see `_run_turn`), this singleton is cleared so
+# the next /chat builds a fresh Thread — the stale agent thread
+# keeps running in the background but its result lands in an
+# orphaned Thread that nobody reads.  Loses conversation continuity
+# across timeouts; acceptable for v1 in exchange for not poisoning
+# the next conversation with a ghost-turn or queue contention
+# behind the still-running stale agent.  Design doc §3-4 + §9-10.
+_THREAD = None
+_THREAD_LOCK = threading.Lock()
+
+# Server-internal timeout for the agent turn (construction + call).
+# 30s under the chat.el client timeout of 300s (design doc §9) so the
+# server returns a clean error message before the client gives up.
+AGENT_TIMEOUT_SECONDS = 270
+
+# One worker is enough: assist's per-thread queue already serialises
+# LLM calls on the same thread id, and we only have one thread.
+# Workers > 1 would create contention without parallelism.
+#
+# Known limitation: `future.result(timeout=...)` unblocks the caller
+# on timeout, but the underlying Python thread keeps running until
+# the agent returns (Python threads aren't externally cancellable).
+# We reset `_THREAD = None` on timeout so the next request starts
+# on a fresh Thread; the stale agent thread keeps running and its
+# result lands in an orphaned Thread.  Process restart cleans up.
+_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="emacsos-agent")
+
+
+def _build_thread():
+    """Construct a fresh `assist.Thread`.  Raises whatever assist
+    raises during construction (e.g. model probe failure)."""
+    # Import inside so module import doesn't trigger assist's
+    # transitive imports during server startup.
+    from assist.thread import Thread
+
+    working_dir = tempfile.mkdtemp(prefix="emacsos-thread-")
+    # sandbox_backend=None (design doc §5); model=None lets Thread
+    # call select_chat_model itself which reads ASSIST_MODEL_URL.
+    log.info("Constructing assist.Thread (working_dir=%s)", working_dir)
+    t = Thread(working_dir=working_dir, sandbox_backend=None)
+    log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
+    return t
+
+
+def _get_thread():
+    """Return the singleton Thread, lazy-constructing under the lock.
+    Lock held only for the construction critical section; the actual
+    `.message()` call happens outside."""
+    global _THREAD
+    if _THREAD is not None:
+        return _THREAD
+    with _THREAD_LOCK:
+        if _THREAD is not None:
+            return _THREAD
+        _THREAD = _build_thread()
+        return _THREAD
+
+
+def _reset_thread():
+    """Drop the singleton reference.  Next `_get_thread()` constructs
+    fresh.  Used after timeouts so the next request doesn't queue
+    behind the stale agent or build on a ghost-turn."""
+    global _THREAD
+    with _THREAD_LOCK:
+        if _THREAD is not None:
+            log.warning("Resetting assist.Thread singleton (thread_id=%s)",
+                        _THREAD.thread_id)
+            _THREAD = None
+
+
+def _run_turn(message: str) -> str:
+    """Construct (if needed) + run one agent turn under the inner
+    timeout.  The whole turn — construction probe AND `.message()`
+    — runs in the worker thread so a slow model probe also obeys
+    the timeout (otherwise lazy construction on the calling thread
+    could block past the client timeout)."""
+    def _do_turn():
+        return _get_thread().message(message)
+    future = _AGENT_EXECUTOR.submit(_do_turn)
+    return future.result(timeout=AGENT_TIMEOUT_SECONDS)
+
+
+def _agent_text(message: str) -> str:
+    """Wrap `_run_turn` in the error-mapping table.  Returns the bot
+    text on success; on any exception returns a chat-recognisable
+    error string.  Design doc §10."""
+    try:
+        return _run_turn(message)
+    except FutureTimeoutError:
+        log.warning("Agent timed out after %ds", AGENT_TIMEOUT_SECONDS)
+        # The stale agent keeps running in the worker; reset the
+        # singleton so the next request doesn't queue behind it or
+        # inherit the half-complete conversation turn.
+        _reset_thread()
+        return f"[error: agent timed out after {AGENT_TIMEOUT_SECONDS}s]"
+    except RuntimeError as e:
+        # select_chat_model raises RuntimeError for missing config
+        # AND for liveness/probe failures.  Narrow the explicit-
+        # config case to messages naming the env var.
+        msg = str(e)
+        if "ASSIST_MODEL_URL" in msg:
+            log.error("Agent config error: %s", e)
+            return f"[error: assist model not configured: {msg}]"
+        if "model" in msg.lower():
+            log.error("Agent model unavailable: %s", e)
+            return f"[error: assist model unavailable: {msg}]"
+        log.exception("Agent RuntimeError")
+        return f"[error: {msg}]"
+    except Exception as e:  # noqa: BLE001 — catch-all is intentional
+        log.exception("Agent call failed")
+        return f"[error: {type(e).__name__}: {e}]"
+
+
 def _escape_elisp_string(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-# Sync (not async): the emacsclient call blocks for up to its
-# timeout.  A sync handler lets FastAPI run us in its threadpool so
-# we don't stall the event loop for unrelated requests.
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, request: Request) -> ChatResponse:
-    text = f"echo: {req.message}"
-    side_effect: Optional[str] = None
+def _flash_text(reply: str) -> str:
+    """Format `reply` for a one-line phone minibuffer flash.
 
+    Newlines collapse to spaces; the *reply portion* is capped at 60
+    chars (the `agent: ` prefix is always shown in full).  Total
+    flash is therefore up to ~67 chars — comfortable for the phone's
+    minibuffer.  Design doc §12."""
+    one_line = reply.replace("\n", " ").strip()
+    if len(one_line) > 60:
+        one_line = one_line[:57] + "..."
+    return f"agent: {one_line}"
+
+
+def _fire_back_channel(auth_contents: str, phone_host: str, flash: str) -> None:
+    """Background-task entry point: fire the post-response flash via
+    emacsclient.  Logged; never raises — failures here can't affect
+    the already-sent /chat response."""
+    expr = f"(message {_escape_elisp_string(flash)})"
+    ok, output = call_emacs(
+        auth_contents,
+        phone_host,
+        expr,
+        emacsclient=config.emacsclient,
+    )
+    if ok:
+        log.info("Back-channel flash delivered to %s", phone_host)
+    else:
+        log.warning("Back-channel emacsclient call failed: %s", output)
+
+
+# Sync (not async): the agent call blocks for tens of seconds.  A
+# sync handler lets FastAPI run us in its threadpool so we don't
+# stall the event loop for unrelated requests.
+#
+# Back-channel emacsclient call is a BackgroundTask so it fires
+# AFTER the response is sent — the phone's chat.el uses
+# url-retrieve-synchronously which blocks the phone's main loop
+# until our response lands; firing inline would deadlock.
+# Discovered in real-LAN testing 2026-05-17; the localhost smoke
+# slipped through because the timeout window was wider than the
+# fast-loop latency.
+@app.post("/chat", response_model=ChatResponse)
+def chat(
+    req: ChatRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> ChatResponse:
+    log.info("POST /chat msg=%r", req.message)
+    text = _agent_text(req.message)
+    flash = _flash_text(text)
+
+    side_effect: Optional[str] = None
     if req.phone is not None and request.client is not None:
         phone_host = request.client.host
-        expr = f"(message {_escape_elisp_string('saw: ' + req.message)})"
-        log.info("POST /chat msg=%r phone=%s", req.message, phone_host)
-        ok, output = call_emacs(
+        background_tasks.add_task(
+            _fire_back_channel,
             req.phone.auth_file,
             phone_host,
-            expr,
-            emacsclient=config.emacsclient,
+            flash,
         )
-        if ok:
-            side_effect = f"messaged the phone at {phone_host}"
-        else:
-            log.warning("emacsclient call failed: %s", output)
-    else:
-        log.info("POST /chat msg=%r (no phone auth; echo-only)", req.message)
+        side_effect = f"scheduled back-channel for {phone_host}"
 
     return ChatResponse(text=text, side_effect=side_effect)
 

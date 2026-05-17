@@ -28,8 +28,16 @@ server echoes without firing its back-channel."
   :type 'file
   :group 'emacsos)
 
-(defcustom emacos-chat-timeout 10
-  "Seconds to wait for /chat before reporting an error."
+(defcustom emacos-chat-timeout 300
+  "Seconds to wait for /chat before reporting an error.
+
+300s accommodates real assist agent runs (research, multi-step
+tools).  The server-side timeout is set 30s lower so a stalled
+agent surfaces as a clean `bot> [error: agent timed out …]'
+before the client gives up.  Bumped from 10s in the
+2026-05-17-assist-import experiment.  When streaming lands, drop
+this back down; the perceptual budget becomes \"time to first
+token\"."
   :type 'integer
   :group 'emacsos)
 

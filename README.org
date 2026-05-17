@@ -98,9 +98,61 @@ emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'
 emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
 #+end_src
 
+* Chat Server
+
+=emacsos-server= (in =server/=) is a small FastAPI process that handles
+=POST /chat= from the phone's CHAT page.  It runs assist's agent in
+process (no CLI shellout) and returns the agent's reply for rendering
+in the phone's =*chat*= buffer.
+
+** Running
+
+=ASSIST_MODEL_URL= must point at an OpenAI-compatible chat
+endpoint.  Start the server:
+
+#+begin_src sh
+ASSIST_MODEL_URL=http://localhost:8000/v1 make server
+#+end_src
+
+Each =/chat= request goes through =assist.Thread.message()=, which
+uses the configured model plus assist's built-in skills and
+sub-agents (research, context, critique, fact-check).  Real
+responses can take up to ~5 minutes for research-shaped questions;
+the client timeout in =chat.el= matches.  The post-response
+back-channel fires =(message "agent: <reply prefix>")= on the
+phone via =emacsclient= so the user sees the round trip completed.
+
+** Bumping assist
+
+emacsos-server depends on a sibling =assist= checkout.  The Makefile
+installs assist editably from =$(ASSIST_REPO_DIR)= (default =../assist=
+relative to the emacsos repo).  To take a newer assist:
+
+#+begin_src sh
+cd /path/to/assist && git pull
+cd /path/to/emacsos && rm -rf server/.venv && make setup-server
+#+end_src
+
+Or override the path: =make setup-server ASSIST_REPO_DIR=/abs/path/to/assist=.
+
+** Smoke
+
+=make smoke= spins a dockerized phone simulation, starts the
+server, and exercises both the curl path (server in isolation) and
+the =chat.el= path (full client surface) against a real LLM
+endpoint.  Requires =ASSIST_MODEL_URL= to be set in the calling
+shell:
+
+#+begin_src sh
+ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
+#+end_src
+
 * Project Structure
 
 - =os.el= — main init file (keyboard, frame setup)
+- =chat.el= — CHAT page, =*chat*= transcript, SEND wiring to =/chat=
+- =server/= — emacsos-server (FastAPI + phone driver)
 - =docs/= — design docs for in-progress and planned features
+- =deploy/= — install artifacts (init snippet template)
 - =references/= — research papers informing the keyboard design
-- =Makefile= — launch targets
+- =Makefile= — launch + deploy + test + smoke targets

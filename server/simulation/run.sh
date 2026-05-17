@@ -35,6 +35,17 @@ CONTAINER="emacsos-phone-sim-$$"
 PHONE_PORT=12345
 SERVER_PORT=8765
 TEST_MSG="hello from simulation"
+CHAT_MSG="hi from chat.el"
+
+# Smoke requires ASSIST_MODEL_URL — the server always runs assist
+# now (echo fallback removed per PR #6 review).  Fail fast with a
+# clear message rather than starting a server that errors on
+# every /chat.
+if [[ -z "${ASSIST_MODEL_URL:-}" ]]; then
+    echo "[sim] FAIL: ASSIST_MODEL_URL must be set" >&2
+    echo "[sim]       e.g. ASSIST_MODEL_URL=http://0.0.0.0:8000/v1 make smoke" >&2
+    exit 2
+fi
 
 # Track resources for cleanup.
 SERVER_PID=""
@@ -86,7 +97,7 @@ done
     || fail "daemon TCP port $PHONE_PORT not reachable"
 
 # 3. Start emacsos-server.
-log "starting emacsos-server on :$SERVER_PORT"
+log "starting emacsos-server on :$SERVER_PORT (model=$ASSIST_MODEL_URL)"
 (
     cd "$SERVER_DIR" \
     && EMACSOS_SERVER_PORT="$SERVER_PORT" \
@@ -128,30 +139,43 @@ JSON
 [[ -n "$RESPONSE" ]] || fail "no response from /chat"
 log "response: $RESPONSE"
 
-# 6. Assert response shape.
-echo "$RESPONSE" | python3 -c "
-import json, sys
+# 6. Assert response shape: real agent reply (not an error, not an
+#    echo-prefixed echo from some pre-removal fallback path).
+echo "$RESPONSE" | TEST_MSG="$TEST_MSG" python3 -c "
+import json, os, sys
 r = json.load(sys.stdin)
-assert r['text'] == 'echo: $TEST_MSG', f\"text mismatch: {r!r}\"
-assert r['side_effect'] is not None, f\"side_effect was null -- emacsclient call failed: {r!r}\"
+msg = os.environ['TEST_MSG']
+assert r['text'] != f'echo: {msg}', f'got echo response (echo path should be gone): {r!r}'
+assert r['text'], f'empty text: {r!r}'
+assert not r['text'].startswith('[error:'), f'agent errored: {r!r}'
+assert r['side_effect'] is not None, f'side_effect missing: {r!r}'
 print('[sim] response shape OK')
 " || fail "response shape"
 
-# 7. Independent verification: read *Messages* from the daemon and
-#    confirm the (message ...) the server fired actually landed.
+# 7. Independent verification: poll *Messages* on the daemon until
+#    the (message ...) the server fired lands.  The back-channel
+#    runs as a FastAPI BackgroundTask AFTER the response, so the
+#    flash may not be there the instant curl returns.  Poll for
+#    up to 5 seconds.  Flash always has the 'agent:' prefix since
+#    the echo fallback was removed.
 log "verifying via independent emacsclient call against the daemon"
 HOST_AUTH=$(mktemp /tmp/sim-auth-XXXXXX)
 printf '%s' "$AUTH_FILE_CONTENTS" | sed 's/0\.0\.0\.0/127.0.0.1/g' > "$HOST_AUTH"
-MESSAGES=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err)
-EMACSCLIENT_RC=$?
 
-[[ $EMACSCLIENT_RC -eq 0 ]] || fail "emacsclient exited $EMACSCLIENT_RC; stderr:\n$(cat /tmp/emacsclient.err)"
-
-if printf '%s' "$MESSAGES" | grep -q "saw: $TEST_MSG"; then
-    log "PASS: '*Messages*' contains 'saw: $TEST_MSG'"
+EXPECTED_PREFIX="agent:"
+MESSAGES=""
+for _ in $(seq 1 10); do
+    MESSAGES=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err) || true
+    if printf '%s' "$MESSAGES" | grep -q "$EXPECTED_PREFIX"; then
+        break
+    fi
+    sleep 0.5
+done
+if printf '%s' "$MESSAGES" | grep -q "$EXPECTED_PREFIX"; then
+    log "PASS: '*Messages*' contains '$EXPECTED_PREFIX'"
 else
     log "messages buffer: $MESSAGES"
-    fail "'*Messages*' did not contain 'saw: $TEST_MSG'"
+    fail "'*Messages*' did not contain '$EXPECTED_PREFIX' after 5s polling"
 fi
 
 # 8. Round-trip via chat.el inside the daemon.  The curl path above
@@ -159,8 +183,12 @@ fi
 #    surface (chat.el + url-retrieve-synchronously + the request shape
 #    the elisp actually produces) by driving (emacos--chat-send)
 #    against the daemon and reading back *chat*.
-CHAT_MSG="hello via chat.el"
 log "round-trip via chat.el in the daemon"
+
+# Clear *Messages* first so the back-channel side-effect check below
+# doesn't match the 'agent:' flash from step 7.
+emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (let ((inhibit-read-only t)) (erase-buffer)))' \
+  >/dev/null 2>&1 || fail "could not clear *Messages*"
 
 # Load chat.el and point it at the server + the daemon's own auth file.
 emacsclient -f "$HOST_AUTH" -e "(progn
@@ -179,31 +207,61 @@ emacsclient -f "$HOST_AUTH" -e "(progn
   || fail "emacos--chat-send signaled; stderr:\n$(cat /tmp/emacsclient-chat.err)"
 
 # Read back the transcript and assert both you> and bot> lines landed.
+# emacsclient prints elisp strings in prin1 form (literal \n chars,
+# not actual newlines), so parse with Python which decodes properly.
 CHAT_TRANSCRIPT=$(emacsclient -f "$HOST_AUTH" \
   -e "(with-current-buffer \"*chat*\" (buffer-substring-no-properties (point-min) (point-max)))" \
   2>/tmp/emacsclient-chat.err)
 [[ $? -eq 0 ]] \
   || fail "emacsclient could not read *chat*; stderr:\n$(cat /tmp/emacsclient-chat.err)"
 
-if printf '%s' "$CHAT_TRANSCRIPT" | grep -q "you> $CHAT_MSG" \
-   && printf '%s' "$CHAT_TRANSCRIPT" | grep -q "bot> echo: $CHAT_MSG"; then
-    log "PASS: *chat* contains 'you> $CHAT_MSG' and 'bot> echo: $CHAT_MSG'"
-else
-    log "*chat* transcript: $CHAT_TRANSCRIPT"
-    fail "*chat* missing expected you>/bot> lines"
-fi
+printf '%s' "$CHAT_TRANSCRIPT" \
+  | CHAT_MSG="$CHAT_MSG" python3 -c '
+import ast, os, sys
+raw = sys.stdin.read().strip()
+# emacsclient outputs a prin1-escaped string literal;
+# ast.literal_eval turns "\"a\\nb\"" into "a\nb".
+try:
+    transcript = ast.literal_eval(raw)
+except (SyntaxError, ValueError) as e:
+    print(f"could not decode transcript: {e!r}", file=sys.stderr)
+    print(f"raw: {raw!r}", file=sys.stderr)
+    sys.exit(1)
+chat_msg = os.environ["CHAT_MSG"]
 
-# Independent side-effect check (same shape as step 7): the server
-# fires (message "saw: <text>") via emacsclient against the daemon.
-# Since we drove the request through chat.el this time, the message
-# the server processed is the bare chat input -- so we look for
-# 'saw: <CHAT_MSG>' in *Messages*.
-MESSAGES2=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err)
-if printf '%s' "$MESSAGES2" | grep -q "saw: $CHAT_MSG"; then
-    log "PASS: '*Messages*' contains 'saw: $CHAT_MSG' (chat.el path)"
+if f"you> {chat_msg}" not in transcript:
+    print(f"*chat* transcript missing you> line:\n{transcript}", file=sys.stderr)
+    sys.exit(2)
+
+bot_lines = [ln for ln in transcript.split("\n") if ln.startswith("bot> ")]
+if not bot_lines:
+    print(f"*chat* transcript has no bot> line:\n{transcript}", file=sys.stderr)
+    sys.exit(3)
+bot = bot_lines[-1]
+if bot.startswith("bot> [error:"):
+    print(f"got error in chat.el round trip: {bot}", file=sys.stderr)
+    sys.exit(4)
+print(f"[sim] PASS: *chat* has you> {chat_msg} and bot reply: {bot[:80]}")
+' || fail "*chat* transcript assertion (see stderr above)"
+
+# Independent side-effect check: poll *Messages* for the 'agent:'
+# flash.  We cleared *Messages* before sending, so any 'agent:'
+# match is unambiguously from THIS round trip (addresses the
+# step-7-residue race that the pre-clear-less version had).
+CHAT_EXPECTED="agent:"
+MESSAGES2=""
+for _ in $(seq 1 10); do
+    MESSAGES2=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err) || true
+    if printf '%s' "$MESSAGES2" | grep -q "$CHAT_EXPECTED"; then
+        break
+    fi
+    sleep 0.5
+done
+if printf '%s' "$MESSAGES2" | grep -q "$CHAT_EXPECTED"; then
+    log "PASS: '*Messages*' contains '$CHAT_EXPECTED' (chat.el path)"
 else
     log "messages buffer: $MESSAGES2"
-    fail "'*Messages*' did not contain 'saw: $CHAT_MSG' after chat.el SEND"
+    fail "'*Messages*' did not contain '$CHAT_EXPECTED' after chat.el SEND (5s polling)"
 fi
 
 log "PASS"

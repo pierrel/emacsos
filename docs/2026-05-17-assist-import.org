@@ -1,0 +1,287 @@
+#+title: Assist Import: Real LLM Behind /chat
+#+date: 2026-05-17
+
+Concrete plan for the experiment named first in the "out of scope, next experiments" list of [[file:2026-05-13-first-e2e-experiment.org][2026-05-13-first-e2e-experiment.org]]: replace =emacsos-server='s echo with a real =assist= agent call.  Per the master vision in [[file:2026-05-12-agent-driven-customization.org][2026-05-12-agent-driven-customization.org]], =assist= is an in-process Python library — no CLI shellout, no separate process.  The pipe is already proven end-to-end (PR #5); this experiment swaps the dummy body of the pipe for a real LLM with =assist='s defaults — built-in skills, research / context / critique / fact-check sub-agents, all unchanged.  No emacsos-supplied skills, no skill discovery from the emacsos path, no honesty validation, no rollback, no dotfiles repo, no streaming-to-chat.el — all explicitly deferred.
+
+* Goal
+
+Prove that a real =assist= agent runs inside =emacsos-server=, answers a chat message from the phone, and is reachable from the phone surface in the same shape PR #5 already ships.  Once that loop is green, every later layer (skill discovery from the emacsos path, honesty-contract validation, dotfiles repo, rollback) plugs into a verified agent runtime instead of being debugged alongside the integration.
+
+A successful run looks like: the user types a research-shaped question ("what's the best ergonomic mouse for someone with small hands?") on the phone's CHAT page, taps SEND, waits while the agent invokes its built-in =research-agent= sub-agent, sees =bot> <a real answer or a path to the report file>= in =*chat*=, and sees a back-channel minibuffer flash that confirms the post-response phone-control call still works.  The "research-shaped" framing matters: it exercises the meatier of =assist='s built-in capabilities, not the trivial echo or arithmetic.
+
+* Scope
+
+*In:*
+- =server/requirements.txt= + Makefile install =assist= editably
+  from the sibling =$(ASSIST_REPO_DIR)= checkout (see decision §2
+  for why editable, not wheel).
+- =emacsos-server= constructs one process-wide =assist.Thread=
+  lazily on first /chat and reuses it across requests.
+- =POST /chat= replaces the echo with =thread.message(req.message)= and returns the agent's final string.
+- =assist= runs with its defaults: built-in skills (=calculate=, etc.), built-in sub-agents (=research-agent=, =context-agent=, =critique-agent=, =fact-check-agent=), built-in tools (=search_internet=, =read_url=, =execute=, the filesystem ops).
+- A bounded timeout layer so a runaway agent or a stuck LLM cannot hang =/chat= forever — the chat surface degrades to =bot> [error: …]= the way it does today on transport failure.
+- Smoke (=make smoke=) extended to exercise the LLM path against a real model endpoint, *gated by env*: if =ASSIST_MODEL_URL= is unset the smoke skips the LLM step and runs the existing echo-equivalent assertion (kept by a "no-LLM fallback" toggle on the server itself — see decision §11).
+
+*Out (called out so they don't sneak in):*
+- Emacsos-supplied skills.  Originally in scope as a =report-time= demo; dropped — built-in skills already exercise the agent's tool surface, and the architecturally-cleaner skill-discovery surface (assist patch + emacsos skills dir) belongs in its own experiment.
+- Skill *discovery* from an emacsos path.  Full discovery (=assist= loads any skill it finds under =emacsos/skills/=) is a later experiment.
+- Honesty-contract validation.  The server returns whatever the agent's last message says; structured success signals come later.
+- Streaming to the chat buffer.  =Chat.message()= is sync, =url-retrieve-synchronously= is sync, and =chat.el='s timeout will grow but the wire shape stays one-shot.
+- Dotfiles repo, =authinfo.gpg=, gnus, known-good marker, rollback.
+- Agent-callable phone-control tools.  Any visible phone side effect goes through the post-response server-side =emacsclient= call (§12), not through a tool the agent invokes.  Agent-tool surfaces for phone control are a follow-up.
+- Sandbox.  The agent runs without =sandbox_backend= for this experiment — see decision §5.
+- Auth and TLS — same as PR #5.
+
+* Decisions
+
+Numbered.  Push back on any.
+
+** 1. Scope is "one round trip, one skill, sync, no streaming"
+
+PR #5 shipped a sync HTTP round trip with a 10s client timeout against an echo.  Three things change at once in this experiment — the body switches from echo to a real LLM, the response budget grows from milliseconds to potentially minutes, and a skill enters the loop.  Locking the wire shape (one request, one response, JSON in/JSON out, ={text, side_effect}=) and the surface shape (=*chat*= transcript) means every regression we hit belongs to *this* experiment's changes.  Streaming and skill discovery touch enough other surfaces to deserve their own branches.
+
+** 2. =assist= is installed editably from the sibling checkout
+
+*As shipped (revised mid-implementation).*  =assist='s
+=pyproject.toml= currently doesn't bundle =templates/= in the wheel,
+so a non-editable install crashes at import time.  The Makefile does
+=pip install -r $(ASSIST_REPO_DIR)/requirements.txt= followed by
+=pip install -e $(ASSIST_REPO_DIR)= where =ASSIST_REPO_DIR= defaults
+to =../assist=.  Both can be overridden at install time.
+
+Original decision (kept here for context) was a SHA-pinned
+=git+file://= URL in =server/requirements.txt= for "pin and bump
+explicitly" semantics.  Dropped on the first =make setup-server=:
+the wheel path crashed at =from assist.thread import Thread= because
+the Jinja2 PackageLoader can't find =templates/= in the wheel-shaped
+install.  Editable install side-steps the issue (lives in the source
+tree) and matches the iteration-speed concession we'd planned for a
+=make dev-server= variant — so we collapsed the two into one
+install path.  The "pin and bump explicitly" property is recovered
+by the git SHA of the sibling checkout: bumping means =git pull= in
+=../assist= and re-running =make setup-server=.  Upstream =pyproject=
+fix is its own todo; once landed, swap back to the SHA-pinned URL
+for tighter reproducibility.
+
+** 3. The =assist.Thread= is a module-level singleton in =emacsos_server.app=, lazily constructed at first /chat
+
+Three placements were on the table:
+
+- *Per-request.*  Construct a fresh =Thread= for every /chat call.  Wastes the model probe, defeats checkpointing, throws away conversation continuity.  Rejected.
+- *Per-conversation (e.g. keyed on a phone-supplied thread id).*  Right answer eventually, but it forces a "what is a conversation?" decision in this experiment.  Defer.
+- *Module-level singleton.*  One thread, one ongoing conversation, every /chat extends it.  Matches the master vision's "the user has *a* conversation with the agent that customizes their phone."  Simple, persists across requests as long as the server is up.
+
+Pick singleton.  Lazy construction (first /chat, not at uvicorn startup) so the server boots even when =ASSIST_MODEL_URL= isn't yet pointed at a live endpoint — same "web server and vLLM start independently" property the assist codebase already has.  A =threading.Lock= guards the lazy init so two concurrent first-requests don't double-construct.
+
+The singleton lives in the process; on server restart it's gone (no checkpointer persistence to disk in v1 — see §4).  Acceptable because there is no user-visible "previous conversation" UI in =chat.el= today; the transcript reset on phone reboot already breaks continuity from the user's perspective.
+
+** 4. Thread persistence = in-memory only for v1, with a checkpointer-shaped seam
+
+=assist.Thread='s constructor accepts a =checkpointer=; =assist.ThreadManager= uses a =SqliteSaver= on a =threads.db= file.  Two options:
+
+- *(a) None / =InMemorySaver=.*  Conversation lives in the process.  Restart = lose state.  Matches today's behaviour from the user's perspective.
+- *(b) =SqliteSaver= against =server/state/threads.db=.*  Conversation survives server restarts.  Adds a disk artifact + a "where does state live, what wipes it" question this experiment shouldn't have to answer.
+
+Pick (a).  Leave a TODO comment + a one-line config knob name (=EMACSOS_SERVER_STATE_DIR=) reserved so a later experiment can switch to (b) without rewiring the construction site.  Rollback, history-view, "roll back to a specific version" all need persisted state; explicitly out of scope here.
+
+** 5. No sandbox in v1
+
+=assist='s sandbox is a Docker container; constructing one adds startup latency, a docker-daemon dependency, and a non-trivial failure mode (=SandboxContainerLostError=) for an experiment whose point is to prove the LLM call works.  The first skill (§7) runs =date(1)= via =execute=; without a sandbox that runs in the server's working directory.
+
+This is *intentional and temporary*.  Two reasons it's safe enough for v1:
+
+- The =emacsos-server= venv on the dev box is the user's own machine — same blast radius as any Python the user might run themselves.
+- =report-time= is read-only.
+
+Once we get to a skill that mutates the dotfiles repo (the gnus experiment), the sandbox becomes load-bearing and must be wired in.  Leave =sandbox_backend=None= explicit in the construction call with a comment pointing at this decision and the gnus experiment as the trigger.
+
+** 6. Model selection: =ASSIST_MODEL_URL= straight through to =select_chat_model=
+
+=assist.model_manager.select_chat_model()= already reads =ASSIST_MODEL_URL= (and =ASSIST_API_KEY=) from env, lazy-probes for the model name, and returns a configured =ChatOpenAI=.  =emacsos-server= calls it directly inside the singleton-construction path.  No duplicate URL config in =Config=.
+
+If =ASSIST_MODEL_URL= is unset, =select_chat_model= raises =RuntimeError= on first /chat.  We catch it (§10) and return =text= = ="[error: ASSIST_MODEL_URL is not configured on the server]"=, =side_effect= = null.  The chat surface stays alive and shows a recognisable error; the server keeps serving subsequent requests in case env was just slow to land.
+
+** 7. No emacsos-supplied skill for v1 — rely on assist's defaults
+
+Originally in scope as a =report-time= demo that would prove the
+"emacsos can register a skill that assist loads" mechanism.  Dropped on
+scope shrink: the proper mechanism is the architecturally-cleaner
+=extra_skill_sources= parameter on =create_agent= ([[file:~/src/assist/docs/2026-05-17-skills-sources-argument.org][~/src/assist/docs/2026-05-17-skills-sources-argument.org]]),
+which is its own experiment.  For *this* experiment, "real LLM behind
+/chat" is the only contract, and assist's built-in skills (=calculate=
+etc.) plus its built-in sub-agents (=research-agent= especially) are
+already enough to make the round-trip do something the user can see.
+
+If, after shipping, the demo feels too thin without phone-specific
+skills — pull forward the skill-discovery experiment as the immediate
+next branch.
+
+** 8. Concurrency: serialize /chat behind the singleton; one in-flight agent call at a time
+
+=assist= already has a per-thread =THREAD_QUEUE= that serializes LLM calls on the same thread id.  Our singleton means *every* /chat is on the same thread id, so the queue already prevents concurrent LLM hits.  What it does not do is reject overlapping /chat *requests*: the second one sits in the queue waiting.
+
+For v1: don't add a server-side reject.  =chat.el='s =emacos--chat-in-flight= already prevents the user from firing a second SEND while the first is outstanding.  If a curl client on the dev box races a chat-page SEND, the second one waits — annoying but not wrong.
+
+If/when we expose this beyond the LAN, revisit (return 429 with =Retry-After= rather than serialize).
+
+** 9. Bump =emacos-chat-timeout= from 10 to 300; leave the wire shape unchanged
+
+This is the contested call.  =assist= responses for non-trivial prompts take tens of seconds; with a skill in the loop and =execute= calls, minutes are realistic.  Options:
+
+- *(a) Streaming (SSE / chunked).*  Requires a chat.el rewrite — incremental rendering, abort key, in-flight UX.  Forces a second client/server change in this experiment.  Defer.
+- *(b) Long-poll.*  Server returns 202 + an id, chat.el polls.  Avoids streaming UX but adds server-side request state, an additional endpoint, and a polling cadence decision.  Defer.
+- *(c) Hybrid — one final answer, just bump the sync timeout.*  Chat.el stays exactly the shape PR #5 ships.  Server response is still a single ={text, side_effect}= JSON.  Only the timeout numbers move.
+
+Pick (c).  The phone's UI thread blocks for the duration — that *is* a problem; the user can't compose the next message while a slow request runs.  Two reasons to accept it for v1:
+
+- The status quo (PR #5) blocks for 10s already; bumping to 300 doesn't *introduce* the blocking, it just extends the worst case.  Streaming will fix it.
+- =emacos--chat-in-flight= already serialises sends, so an actual concurrent-compose UX doesn't exist on the phone today.  Removing the block buys nothing the user can use until streaming arrives.
+
+Concrete changes:
+- =chat.el= =emacos-chat-timeout= default: 10 → 300.  Comment near the defcustom names this experiment.
+- =server/emacsos_server/app.py= wraps =thread.message()= in a =concurrent.futures.ThreadPoolExecutor= submit + =future.result(timeout=270)= so the server returns a clean =text= = ="[error: agent timed out after 270s]"= a few seconds before the client gives up.  The 30-second margin keeps the client error informative ("server is alive but the agent stalled") rather than ambiguous (client timeout without a server signal).
+- =call_emacs= in =phone.py= keeps its 5s timeout — the back-channel side-effect call is unaffected by agent length.
+
+** 10. Error handling: catch-all wrapper that returns the chat-recognisable error shape
+
+=assist= can raise =openai.BadRequestError=, =openai.APITimeoutError=, =assist.sandbox.SandboxContainerLostError=, =RuntimeError= from =select_chat_model=, langgraph's recursion-limit exception, library-internal asserts, and the §9 timeout.  Two approaches:
+
+- *(a) Catch each specific case.*  Tedious for a v1 where most cases never fire (no sandbox, single-shot conversations) and the chat surface has exactly one error shape (=bot> [error: <reason>]=).
+- *(b) Single =try/except Exception=.*  Map the exception to a short human-readable string and return it as =text=, =side_effect=null.  Log the full traceback server-side.
+
+Pick (b) for v1, with two carve-outs:
+- =RuntimeError= from =select_chat_model= gets a specific message naming =ASSIST_MODEL_URL= (most common misconfig).
+- =concurrent.futures.TimeoutError= (the §9 wrapper) gets a specific "agent timed out after Xs" so the user knows the difference between "model unreachable" and "agent ran out of budget".
+
+Specific exception classes (=SandboxContainerLostError= etc.) get translated to specific messages once the path that raises them is in scope — sandbox arrives with gnus, etc.
+
+** 11. Echo fallback: descoped during PR review
+
+*Outcome.*  Originally shipped: an =EMACSOS_LLM_DISABLED= env knob
+preserved PR #5's echo behaviour as a first-class server mode, so
+=make smoke= could run without a model around.  The operator
+review (PR #6) overruled: "we're past it now."  Removed in the
+same PR.  The server now always runs assist; =ASSIST_MODEL_URL=
+is required at startup time (the smoke also requires it and
+fails fast otherwise).
+
+Rationale for the removal: the local-first promise the original
+decision invoked was about the *phone*'s chat surface degrading
+gracefully when the dev-box LLM is down — which still holds: if
+the server can't reach the model, =/chat= returns =[error: assist
+model unavailable: …]= which the phone renders as a normal
+=bot> [error: …]= line.  The =bot> echo: …= shape never gave the
+user anything useful that the error line doesn't; carrying a
+second code path forever for that one debug convenience wasn't
+worth it.
+
+** 12. Phone back-channel: rework the post-response =(message …)= flash text
+
+Today's =app.py= fires =(message "saw: <msg>")= via emacsclient on every /chat that carries phone auth.  That was useful as proof-of-concept; with a real agent in the loop it becomes noise — the user sees an unrelated "saw: …" flash after their real answer renders.
+
+For v1: keep the call, but switch the message to something derived from the agent's response — =(message "agent: %s" <reply, capped at 60 chars>)=.  The =agent:= prefix is always shown in full; only the reply portion is capped (so the total flash is ~67 chars, comfortable for the minibuffer).  Same back-channel exercise (proves =emacsclient= still works), but the flash now reinforces "your message was processed" instead of echoing the input.  If the agent timed out or errored, the back-channel fires with the error string.
+
+*Async fire, after the response (discovered in real-LAN testing).*  The back-channel emacsclient call is scheduled as a FastAPI =BackgroundTask= rather than fired inline before the response.  Necessary because the phone's =chat.el= uses =url-retrieve-synchronously= which blocks the phone's emacs main loop until the response lands — firing the back-channel *before* returning would try to call into a phone that's still synchronously waiting for us, and the inbound emacsclient connection times out.  The smoke (dockerized phone on =--network=host=, near-zero latency) didn't surface this; the real phone over wifi does.  Net change: =side_effect= in the response now describes the SCHEDULED back-channel (=scheduled back-channel for <host>=) rather than the call outcome — the call completes after the response is sent, so we can't synchronously report success/failure.  Failures inside the background task get logged; the user-visible outcome is whether the flash lands on the phone, not the =side_effect= field.
+
+The smoke's existing assertion (=*Messages*= contains ="saw: <msg>"=) needs updating to match the new shape; trivial.
+
+Agent-callable back-channel tools (the agent decides to fire =(message …)= as part of its loop, not as a server postscript) is the next experiment after skill discovery — too rich for v1.
+
+** 13. Skill registration mechanism: deferred to the skill-discovery experiment
+
+With §7 dropped, no skill registration happens in this experiment.  When
+the next experiment lands it uses the =extra_skill_sources= parameter
+on =create_agent= ([[file:~/src/assist/docs/2026-05-17-skills-sources-argument.org][~/src/assist/docs/2026-05-17-skills-sources-argument.org]],
+already in flight as assist PR #104).
+
+* Implementation sequence
+
+*As shipped.*  The plan below is the actual landed shape — earlier
+revisions had a SHA-pinned wheel install and an echo-fallback gate;
+both got reworked mid-PR (see §2 and §11).
+
+1. *Install assist editably from =$(ASSIST_REPO_DIR)= via the
+   Makefile.*  =rm -rf server/.venv && make setup-server= picks up
+   assist's =requirements.txt= and runs =pip install -e <repo>=.
+   Done when =server/.venv/bin/python -c 'from assist.thread import
+   Thread'= imports cleanly (which the wheel install does NOT —
+   see §2).
+
+2. *Module-level Thread singleton in =app.py=.*  =_THREAD: Optional=
+   guarded by =_THREAD_LOCK=, lazy =_get_thread()= constructs a
+   fresh =Thread(working_dir=tempfile.mkdtemp(...),
+   sandbox_backend=None, model=None)= — Thread itself calls
+   =select_chat_model= which reads =ASSIST_MODEL_URL=.
+   =_reset_thread()= clears the singleton on timeout so the next
+   request doesn't queue behind stale work or inherit a
+   ghost-turn.
+
+3. *Wire =/chat= to =thread.message= directly.*  No env gate — the
+   server always runs assist.  =_run_turn()= submits
+   =_get_thread()= + =.message()= to the executor as a single unit
+   so the timeout covers construction (not just the call).  Wrapped
+   in the §10 catch-all.
+
+4. *Bump =emacos-chat-timeout= from 10 to 300.*  One-line in
+   =chat.el= + documenting comment.  Done when =make test-elisp=
+   still passes.
+
+5. *Smoke.*  =server/simulation/run.sh= requires
+   =ASSIST_MODEL_URL=, asserts the response is non-echo and
+   non-=[error: …]=, and polls =*Messages*= for the =agent:= flash
+   (the back-channel runs as a BackgroundTask so it can lag the
+   response by ~1s).  =*Messages*= is cleared between the curl and
+   chat.el round trips so the second flash assertion is
+   unambiguous.
+
+6. *README update.*  "Running", "Bumping assist", "Smoke"
+   subsections under "Chat Server".
+
+7. *PR.*  Single emacsos PR — no assist patch dependency.  (The
+   =extra_skill_sources= parameter on =create_agent= is on a
+   separate assist PR, #104, which lands with the skill-discovery
+   experiment.)
+
+* Eval (the "works" bar)
+
+The experiment is done when:
+
+- With =ASSIST_MODEL_URL= pointed at a live endpoint and the
+  server running, manually sending a short prompt from the phone
+  (e.g. "hello") produces:
+  - =you> hello= in =*chat*=
+  - =bot> <a real LLM answer>= in =*chat*= within the 300s budget.
+    Load-bearing assertion: response is non-empty and not
+    =[error: …]=, proving the agent path completed.
+  - A minibuffer flash on the phone matching the §12 shape
+    (=agent: <first 60 chars>=).
+- A research-shaped prompt (e.g. "what's a good ergonomic
+  mouse?") completes within budget and the response is clearly
+  research-derived (a report file path, a multi-paragraph answer,
+  or links).  Manual demo check; smoke covers only the structural
+  assertion.
+- =make smoke= passes (requires =ASSIST_MODEL_URL=; no echo-mode
+  variant after §11 was descoped).
+- =make test-server= passes (unit tests mock =thread.message= so
+  they don't hit a real model).
+
+Eval cadence per the assist =CLAUDE.md= rule (this is LLM-affected work): 3/5/10 — three trials of the live-LLM smoke after the first complete implementation, five after the reviewer pass, ten for the stability gate.  The non-LLM smoke (=EMACSOS_LLM_DISABLED=1=) follows 3 trials (no run-to-run variance).
+
+* Out of scope, next experiments
+
+Order is rough; each is its own design doc + branch.
+
+1. *Emacsos-supplied skills (incl. discovery from the emacsos path).*  Uses the =extra_skill_sources= parameter on =assist.create_agent= (assist PR #104).  First skill is the =report-time= that was descoped from this experiment; second skill or two land alongside to verify multi-source discovery, not just the single-source path.
+2. *Honesty-contract validation.*  Server inspects the agent's report against a structured success signal before acknowledging "done".
+3. *Agent-callable phone-control tools.*  Tools registered with =create_agent= that hit =phone.py= so the agent can drive the phone mid-run.  =set-message= becomes a natural first skill at this layer.
+4. *Streaming response.*  Switch =/chat= to SSE; rewrite =chat.el='s SEND to render tokens incrementally, with an ABORT button.  Drop =emacos-chat-timeout= back down; the perceptual budget becomes "time to first token".
+5. *Persisted thread state.*  =SqliteSaver= on =server/state/threads.db=, conversation survives server restarts.
+6. *Sandbox for skill execution.*  Wire =DockerSandboxBackend= in.  Required before any skill that mutates the dotfiles repo.
+7. *Dotfiles repo bootstrap.*  =emacsos-server= creates the user's dotfiles repo on first run.
+8. *Known-good marker via git tags.*  Mark, roll back, kill-switch on restart.
+
+* Companion docs
+
+- [[file:~/src/assist/docs/2026-05-17-skills-sources-argument.org][~/src/assist/docs/2026-05-17-skills-sources-argument.org]] — the =extra_skill_sources= parameter on =create_agent= (assist PR #104).  Pairs with the *next* experiment, not this one; kept open against assist main pending the skill-discovery branch.
+
+When this experiment ships, append a brief *Outcome* section here pointing at the merged emacsos PR and any deviations from the plan.

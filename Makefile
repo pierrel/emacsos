@@ -45,7 +45,12 @@ phone-install:
 local-deploy:
 	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
 	scp os.el chat.el phone:$(PHONE_EMACSOS_DIR)/
-	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (emacos--render-page))"'
+	# Also (load-file) the init snippet if phone-install has been
+	# run -- the snippet re-applies (setq emacos-chat-server-url ...)
+	# which would otherwise be reset back to the defcustom default
+	# when chat.el is reloaded.  Conditional so a fresh phone (no
+	# phone-install yet) still gets a working code reload.
+	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 test-elisp:
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -f ert-run-tests-batch-and-exit
@@ -66,9 +71,23 @@ start-server:
 SERVER_VENV := server/.venv
 SERVER_STAMP := $(SERVER_VENV)/.installed
 
-$(SERVER_STAMP): server/requirements.txt
+# Assist's pyproject.toml only declares its build-time deps; its
+# Python runtime deps (langchain, langgraph, deepagents, openai,
+# docker, ...) live in `assist/requirements.txt` and aren't pulled
+# transitively by `pip install assist`.  Until assist's pyproject is
+# fixed (TODO upstream), install assist's requirements.txt alongside
+# emacsos's.  Override the location with `ASSIST_REPO_DIR=/path/to/assist`
+# if your checkout isn't at the default sibling path.
+ASSIST_REPO_DIR ?= $(CURDIR)/../assist
+
+# Stamp depends on assist's pyproject.toml too so a build-deps bump
+# upstream triggers a re-install (without it, `pip install -e` would
+# silently reuse a stale wheel cache against the new pyproject).
+$(SERVER_STAMP): server/requirements.txt $(ASSIST_REPO_DIR)/requirements.txt $(ASSIST_REPO_DIR)/pyproject.toml
 	python3 -m venv $(SERVER_VENV)
 	$(SERVER_VENV)/bin/python -m pip install --upgrade pip
+	$(SERVER_VENV)/bin/python -m pip install -r $(ASSIST_REPO_DIR)/requirements.txt
+	$(SERVER_VENV)/bin/python -m pip install -e $(ASSIST_REPO_DIR)
 	$(SERVER_VENV)/bin/python -m pip install -r server/requirements.txt
 	touch $@
 
