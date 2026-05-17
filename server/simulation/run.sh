@@ -35,6 +35,18 @@ CONTAINER="emacsos-phone-sim-$$"
 PHONE_PORT=12345
 SERVER_PORT=8765
 TEST_MSG="hello from simulation"
+CHAT_MSG="hi from chat.el"
+
+# LLM mode is on iff ASSIST_MODEL_URL is set in the caller's env.
+# When on, the smoke skips the echo-text assertions and runs the
+# LLM-specific ones (response != echo:, flash uses agent: prefix).
+# When off, the existing echo assertions run.  Either way the
+# back-channel side-effect is verified.  Design doc §11.
+if [[ -n "${ASSIST_MODEL_URL:-}" ]]; then
+    LLM_MODE=1
+else
+    LLM_MODE=0
+fi
 
 # Track resources for cleanup.
 SERVER_PID=""
@@ -86,7 +98,11 @@ done
     || fail "daemon TCP port $PHONE_PORT not reachable"
 
 # 3. Start emacsos-server.
-log "starting emacsos-server on :$SERVER_PORT"
+if [[ $LLM_MODE -eq 1 ]]; then
+    log "starting emacsos-server on :$SERVER_PORT (LLM mode, model=$ASSIST_MODEL_URL)"
+else
+    log "starting emacsos-server on :$SERVER_PORT (echo mode)"
+fi
 (
     cd "$SERVER_DIR" \
     && EMACSOS_SERVER_PORT="$SERVER_PORT" \
@@ -128,17 +144,29 @@ JSON
 [[ -n "$RESPONSE" ]] || fail "no response from /chat"
 log "response: $RESPONSE"
 
-# 6. Assert response shape.
-echo "$RESPONSE" | python3 -c "
-import json, sys
+# 6. Assert response shape.  Different assertions per mode.
+echo "$RESPONSE" | LLM_MODE="$LLM_MODE" TEST_MSG="$TEST_MSG" python3 -c "
+import json, os, sys
 r = json.load(sys.stdin)
-assert r['text'] == 'echo: $TEST_MSG', f\"text mismatch: {r!r}\"
+llm = os.environ['LLM_MODE'] == '1'
+msg = os.environ['TEST_MSG']
+if llm:
+    # LLM mode: must NOT be the echo shape, must be non-empty, must
+    # not be an [error: ...] (the LLM call should succeed against a
+    # real model endpoint).
+    assert r['text'] != f'echo: {msg}', f'got echo response in LLM mode: {r!r}'
+    assert r['text'], f'empty text in LLM mode: {r!r}'
+    assert not r['text'].startswith('[error:'), f'agent errored: {r!r}'
+else:
+    assert r['text'] == f'echo: {msg}', f'text mismatch: {r!r}'
 assert r['side_effect'] is not None, f\"side_effect was null -- emacsclient call failed: {r!r}\"
 print('[sim] response shape OK')
 " || fail "response shape"
 
 # 7. Independent verification: read *Messages* from the daemon and
 #    confirm the (message ...) the server fired actually landed.
+#    Flash prefix is 'saw:' in echo mode, 'agent:' in LLM mode
+#    (design doc §12).
 log "verifying via independent emacsclient call against the daemon"
 HOST_AUTH=$(mktemp /tmp/sim-auth-XXXXXX)
 printf '%s' "$AUTH_FILE_CONTENTS" | sed 's/0\.0\.0\.0/127.0.0.1/g' > "$HOST_AUTH"
@@ -147,11 +175,16 @@ EMACSCLIENT_RC=$?
 
 [[ $EMACSCLIENT_RC -eq 0 ]] || fail "emacsclient exited $EMACSCLIENT_RC; stderr:\n$(cat /tmp/emacsclient.err)"
 
-if printf '%s' "$MESSAGES" | grep -q "saw: $TEST_MSG"; then
-    log "PASS: '*Messages*' contains 'saw: $TEST_MSG'"
+if [[ $LLM_MODE -eq 1 ]]; then
+    EXPECTED_PREFIX="agent:"
+else
+    EXPECTED_PREFIX="saw: $TEST_MSG"
+fi
+if printf '%s' "$MESSAGES" | grep -q "$EXPECTED_PREFIX"; then
+    log "PASS: '*Messages*' contains '$EXPECTED_PREFIX'"
 else
     log "messages buffer: $MESSAGES"
-    fail "'*Messages*' did not contain 'saw: $TEST_MSG'"
+    fail "'*Messages*' did not contain '$EXPECTED_PREFIX'"
 fi
 
 # 8. Round-trip via chat.el inside the daemon.  The curl path above
@@ -159,7 +192,6 @@ fi
 #    surface (chat.el + url-retrieve-synchronously + the request shape
 #    the elisp actually produces) by driving (emacos--chat-send)
 #    against the daemon and reading back *chat*.
-CHAT_MSG="hello via chat.el"
 log "round-trip via chat.el in the daemon"
 
 # Load chat.el and point it at the server + the daemon's own auth file.
@@ -179,31 +211,71 @@ emacsclient -f "$HOST_AUTH" -e "(progn
   || fail "emacos--chat-send signaled; stderr:\n$(cat /tmp/emacsclient-chat.err)"
 
 # Read back the transcript and assert both you> and bot> lines landed.
+# emacsclient prints elisp strings in prin1 form (literal \n chars, not
+# actual newlines), so parse with Python which decodes properly.
 CHAT_TRANSCRIPT=$(emacsclient -f "$HOST_AUTH" \
   -e "(with-current-buffer \"*chat*\" (buffer-substring-no-properties (point-min) (point-max)))" \
   2>/tmp/emacsclient-chat.err)
 [[ $? -eq 0 ]] \
   || fail "emacsclient could not read *chat*; stderr:\n$(cat /tmp/emacsclient-chat.err)"
 
-if printf '%s' "$CHAT_TRANSCRIPT" | grep -q "you> $CHAT_MSG" \
-   && printf '%s' "$CHAT_TRANSCRIPT" | grep -q "bot> echo: $CHAT_MSG"; then
-    log "PASS: *chat* contains 'you> $CHAT_MSG' and 'bot> echo: $CHAT_MSG'"
-else
-    log "*chat* transcript: $CHAT_TRANSCRIPT"
-    fail "*chat* missing expected you>/bot> lines"
-fi
+# In echo mode: expect `bot> echo: <CHAT_MSG>`.  In LLM mode: any
+# `bot> ...` line that isn't an error and isn't the literal echo
+# shape — same logic as step 6.
+printf '%s' "$CHAT_TRANSCRIPT" \
+  | CHAT_MSG="$CHAT_MSG" LLM_MODE="$LLM_MODE" python3 -c '
+import ast, os, sys
+raw = sys.stdin.read().strip()
+# emacsclient outputs a prin1-escaped string literal; ast.literal_eval
+# turns "\"a\\nb\"" into "a\nb".
+try:
+    transcript = ast.literal_eval(raw)
+except (SyntaxError, ValueError) as e:
+    print(f"could not decode transcript: {e!r}", file=sys.stderr)
+    print(f"raw: {raw!r}", file=sys.stderr)
+    sys.exit(1)
+chat_msg = os.environ["CHAT_MSG"]
+llm = os.environ["LLM_MODE"] == "1"
+
+if f"you> {chat_msg}" not in transcript:
+    print(f"*chat* transcript missing you> line:\n{transcript}", file=sys.stderr)
+    sys.exit(2)
+
+bot_lines = [ln for ln in transcript.split("\n") if ln.startswith("bot> ")]
+if not bot_lines:
+    print(f"*chat* transcript has no bot> line:\n{transcript}", file=sys.stderr)
+    sys.exit(3)
+bot = bot_lines[-1]
+
+if llm:
+    if bot == f"bot> echo: {chat_msg}":
+        print(f"got literal echo in LLM mode -- LLM path not taken:\n{transcript}", file=sys.stderr)
+        sys.exit(4)
+    if bot.startswith("bot> [error:"):
+        print(f"got error in LLM mode: {bot}", file=sys.stderr)
+        sys.exit(5)
+    print(f"[sim] PASS: *chat* has you> {chat_msg} and non-echo bot reply: {bot[:80]}")
+else:
+    if bot != f"bot> echo: {chat_msg}":
+        print(f"*chat* bot line mismatch in echo mode: {bot}", file=sys.stderr)
+        sys.exit(6)
+    print(f"[sim] PASS: *chat* has you> {chat_msg} and bot> echo: {chat_msg}")
+' || fail "*chat* transcript assertion (see stderr above)"
 
 # Independent side-effect check (same shape as step 7): the server
-# fires (message "saw: <text>") via emacsclient against the daemon.
-# Since we drove the request through chat.el this time, the message
-# the server processed is the bare chat input -- so we look for
-# 'saw: <CHAT_MSG>' in *Messages*.
+# fires (message "<flash>") via emacsclient.  Flash prefix is
+# 'agent:' in LLM mode, 'saw: <CHAT_MSG>' in echo mode.
 MESSAGES2=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err)
-if printf '%s' "$MESSAGES2" | grep -q "saw: $CHAT_MSG"; then
-    log "PASS: '*Messages*' contains 'saw: $CHAT_MSG' (chat.el path)"
+if [[ $LLM_MODE -eq 1 ]]; then
+    CHAT_EXPECTED="agent:"
+else
+    CHAT_EXPECTED="saw: $CHAT_MSG"
+fi
+if printf '%s' "$MESSAGES2" | grep -q "$CHAT_EXPECTED"; then
+    log "PASS: '*Messages*' contains '$CHAT_EXPECTED' (chat.el path)"
 else
     log "messages buffer: $MESSAGES2"
-    fail "'*Messages*' did not contain 'saw: $CHAT_MSG' after chat.el SEND"
+    fail "'*Messages*' did not contain '$CHAT_EXPECTED' after chat.el SEND"
 fi
 
 log "PASS"

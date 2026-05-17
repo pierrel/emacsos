@@ -98,9 +98,55 @@ emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'
 emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
 #+end_src
 
+* Chat Server
+
+=emacsos-server= (in =server/=) is a small FastAPI process that handles
+=POST /chat= from the phone's CHAT page.  It runs assist's agent in
+process (no CLI shellout) and returns the agent's reply for rendering
+in the phone's =*chat*= buffer.
+
+** Running with vs. without an LLM endpoint
+
+The server has two modes:
+
+- *LLM mode* (default when =ASSIST_MODEL_URL= is set): each /chat
+  goes through =assist.Thread.message()=, which uses the configured
+  model and any built-in skills / sub-agents.  Responses can take up
+  to ~5 minutes; the client timeout in =chat.el= matches.
+- *Echo mode* (default when =ASSIST_MODEL_URL= is unset, or
+  =EMACSOS_LLM_DISABLED=1=): the server skips assist and replies
+  =echo: <message>=.  Same shape, no model dependency; lets =make
+  smoke= run on any clean checkout.
+
+Either mode fires the back-channel =(message …)= on the phone via
+=emacsclient= so the user sees the chat completed.
+
+** Bumping assist
+
+emacsos-server depends on a sibling =assist= checkout.  The Makefile
+installs assist editably from =$(ASSIST_REPO_DIR)= (default =../assist=
+relative to the emacsos repo).  To take a newer assist:
+
+#+begin_src sh
+cd /path/to/assist && git pull
+cd /path/to/emacsos && rm -rf server/.venv && make setup-server
+#+end_src
+
+Or override the path: =make setup-server ASSIST_REPO_DIR=/abs/path/to/assist=.
+
+** Smoke
+
+=make smoke= spins a dockerized phone simulation, starts the server,
+and exercises both the curl path (server in isolation) and the
+=chat.el= path (full client surface).  Set =ASSIST_MODEL_URL= to
+exercise LLM mode; leave unset for echo-only.
+
 * Project Structure
 
 - =os.el= — main init file (keyboard, frame setup)
+- =chat.el= — CHAT page, =*chat*= transcript, SEND wiring to =/chat=
+- =server/= — emacsos-server (FastAPI + phone driver)
 - =docs/= — design docs for in-progress and planned features
+- =deploy/= — install artifacts (init snippet template)
 - =references/= — research papers informing the keyboard design
-- =Makefile= — launch targets
+- =Makefile= — launch + deploy + test + smoke targets

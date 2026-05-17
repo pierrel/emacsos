@@ -3,3 +3,9 @@ uvicorn[standard]>=0.23
 pydantic>=2
 httpx>=0.24
 pytest>=7
+
+# assist is installed editably from $(ASSIST_REPO_DIR) by the
+# Makefile (see setup-server).  Editable required: assist's pyproject
+# doesn't bundle templates/ in the wheel, so a non-editable install
+# crashes at import time.  TODO upstream: fix assist's pyproject so a
+# plain wheel install works.
