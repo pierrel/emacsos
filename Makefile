@@ -1,11 +1,14 @@
-.PHONY: start start-server local-connect-server local-deploy server setup-server test-server smoke
+.PHONY: start start-server local-connect-server local-deploy server setup-server test-server test-elisp smoke
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
 
 local-deploy:
-	scp os.el phone:/tmp/os.el
-	ssh phone emacsclient -f server -e '"(progn (load-file \"/tmp/os.el\") (emacos--render-page))"'
+	scp os.el chat.el phone:/tmp/
+	ssh phone emacsclient -f server -e '"(progn (load-file \"/tmp/chat.el\") (load-file \"/tmp/os.el\") (emacos--render-page))"'
+
+test-elisp:
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

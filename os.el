@@ -1,5 +1,10 @@
 ;;; os.el --- EmacsOS -*- lexical-binding: t -*-
 
+(defgroup emacsos nil
+  "EmacsOS: malleable, agent-customizable, local-first phone OS."
+  :group 'applications
+  :prefix "emacos-")
+
 ;; Disable chrome
 (setq inhibit-startup-screen t
       inhibit-startup-message t
@@ -194,15 +199,19 @@ If the command opens the minibuffer, switch to the keyboard page."
 ;;; Page bar
 
 (defun emacos--switch-page (page)
-  "Switch to PAGE and re-render."
+  "Switch to PAGE and re-render.
+Switching to `chat' also swaps the *chat* buffer into the editor
+window; other pages never touch the top window."
   (setq emacos--current-page page)
+  (when (eq page 'chat)
+    (emacos--chat-show-top-buffer))
   (emacos--render-page)
   (emacos--refocus))
 
 (defun emacos--render-page-bar ()
-  "Insert the [KBD] [CMD] [MODE] page bar."
+  "Insert the [KBD] [CMD] [MODE] [CHAT] page bar."
   (insert "\n")
-  (dolist (entry '((keyboard . "KBD") (global . "CMD") (mode . "MODE")))
+  (dolist (entry '((keyboard . "KBD") (global . "CMD") (mode . "MODE") (chat . "CHAT")))
     (let* ((page (car entry))
            (label (cdr entry))
            (active (eq page emacos--current-page))
@@ -316,7 +325,8 @@ If the command opens the minibuffer, switch to the keyboard page."
         (pcase emacos--current-page
           ('keyboard (emacos--render-keyboard-page))
           ('global   (emacos--render-global-page))
-          ('mode     (emacos--render-mode-page)))
+          ('mode     (emacos--render-mode-page))
+          ('chat     (emacos--render-chat-page)))
         (emacos--render-page-bar))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
@@ -348,6 +358,12 @@ If the command opens the minibuffer, switch to the keyboard page."
 
 ;; Defer init until the window system is ready
 (add-hook 'window-setup-hook #'emacos--init)
+
+;; Companion modules live alongside os.el; add this file's dir to
+;; load-path so `(require 'chat)` works regardless of cwd.
+(add-to-list 'load-path
+             (file-name-directory (or load-file-name buffer-file-name)))
+(require 'chat)
 
 (provide 'os)
 ;;; os.el ends here
