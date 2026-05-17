@@ -18,7 +18,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from pydantic import BaseModel
 
 from .config import Config
@@ -163,11 +163,43 @@ def _flash_text(reply: str) -> str:
     return f"agent: {one_line}"
 
 
-# Sync (not async): the agent call + emacsclient call both block.
-# A sync handler lets FastAPI run us in its threadpool so we don't
+def _fire_back_channel(auth_contents: str, phone_host: str, flash: str) -> None:
+    """Background-task entry point: fire the post-response flash via
+    emacsclient.  Logged; never raises — failures here can't affect
+    the already-sent /chat response."""
+    expr = f"(message {_escape_elisp_string(flash)})"
+    ok, output = call_emacs(
+        auth_contents,
+        phone_host,
+        expr,
+        emacsclient=config.emacsclient,
+    )
+    if ok:
+        log.info("Back-channel flash delivered to %s", phone_host)
+    else:
+        log.warning("Back-channel emacsclient call failed: %s", output)
+
+
+# Sync (not async): the agent call blocks for tens of seconds.  A
+# sync handler lets FastAPI run us in its threadpool so we don't
 # stall the event loop for unrelated requests.
+#
+# The back-channel emacsclient call is scheduled as a BackgroundTask
+# so it fires AFTER the response has been sent.  Necessary because
+# the phone's chat.el uses url-retrieve-synchronously which blocks
+# the phone's emacs main loop until the response lands — if we
+# tried to fire the back-channel BEFORE returning, the phone
+# wouldn't be able to process the inbound emacsclient connection
+# (it's busy waiting for *our* response) and the call times out.
+# Discovered in real-LAN testing 2026-05-17; the localhost-loop
+# smoke didn't surface it because the back-channel call completed
+# fast enough to slip through.
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, request: Request) -> ChatResponse:
+def chat(
+    req: ChatRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> ChatResponse:
     if _llm_enabled():
         log.info("POST /chat msg=%r mode=llm", req.message)
         text = _agent_text(req.message)
@@ -181,17 +213,13 @@ def chat(req: ChatRequest, request: Request) -> ChatResponse:
 
     if req.phone is not None and request.client is not None:
         phone_host = request.client.host
-        expr = f"(message {_escape_elisp_string(flash)})"
-        ok, output = call_emacs(
+        background_tasks.add_task(
+            _fire_back_channel,
             req.phone.auth_file,
             phone_host,
-            expr,
-            emacsclient=config.emacsclient,
+            flash,
         )
-        if ok:
-            side_effect = f"messaged the phone at {phone_host}"
-        else:
-            log.warning("emacsclient call failed: %s", output)
+        side_effect = f"scheduled back-channel for {phone_host}"
 
     return ChatResponse(text=text, side_effect=side_effect)
 

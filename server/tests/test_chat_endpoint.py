@@ -41,6 +41,9 @@ def test_echoes_message_without_phone():
 
 
 def test_calls_emacs_when_phone_auth_present():
+    """Back-channel runs as a BackgroundTask after the response.  The
+    FastAPI TestClient runs background tasks synchronously between
+    response send and return, so the mock is reachable here."""
     with patch(
         "emacsos_server.app.call_emacs", return_value=(True, "nil")
     ) as m:
@@ -55,8 +58,12 @@ def test_calls_emacs_when_phone_auth_present():
     assert response.status_code == 200
     body = response.json()
     assert body["text"] == "echo: hi"
+    # New shape: side_effect describes the SCHEDULED back-channel
+    # rather than the post-call result (the call hasn't necessarily
+    # completed by the time we return; see the async back-channel
+    # comment in app.py).
     assert body["side_effect"] is not None
-    assert "phone" in body["side_effect"]
+    assert "back-channel" in body["side_effect"]
 
     auth_arg, host_arg, expr_arg = m.call_args.args[:3]
     assert auth_arg == "127.0.0.1:1234\nsecret\n"
@@ -65,7 +72,12 @@ def test_calls_emacs_when_phone_auth_present():
     assert 'saw: hi' in expr_arg
 
 
-def test_side_effect_null_when_emacsclient_fails():
+def test_back_channel_scheduled_even_when_call_will_fail():
+    """side_effect reflects the SCHEDULING decision, not the call
+    outcome.  Failures inside the background task get logged but
+    don't change the response (the response has already been sent
+    by then).  Deliberate change from PR #5's sync semantics; see
+    the BackgroundTasks comment in app.py."""
     with patch(
         "emacsos_server.app.call_emacs", return_value=(False, "no daemon")
     ):
@@ -77,7 +89,9 @@ def test_side_effect_null_when_emacsclient_fails():
     assert response.status_code == 200
     body = response.json()
     assert body["text"] == "echo: hi"
-    assert body["side_effect"] is None
+    # Scheduled even though the call will fail.
+    assert body["side_effect"] is not None
+    assert "back-channel" in body["side_effect"]
 
 
 @pytest.mark.parametrize(
