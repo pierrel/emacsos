@@ -45,7 +45,12 @@ phone-install:
 local-deploy:
 	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
 	scp os.el chat.el phone:$(PHONE_EMACSOS_DIR)/
-	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (emacos--render-page))"'
+	# Also (load-file) the init snippet if phone-install has been
+	# run -- the snippet re-applies (setq emacos-chat-server-url ...)
+	# which would otherwise be reset back to the defcustom default
+	# when chat.el is reloaded.  Conditional so a fresh phone (no
+	# phone-install yet) still gets a working code reload.
+	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 test-elisp:
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -f ert-run-tests-batch-and-exit
