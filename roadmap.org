@@ -1,0 +1,60 @@
+#+title: EmacsOS Roadmap
+#+date: 2026-05-17
+
+Each experiment is its own design doc + branch (see =docs/= for
+landed ones).  This file collects forward-looking work that
+doesn't fit any specific experiment yet — usability iteration,
+cross-cutting concerns, follow-ups discovered live on the phone.
+
+* Ergonomics iteration
+
+Live testing of PR #6 (assist-import) surfaced several rough edges
+in the phone UX that aren't load-bearing for any specific
+experiment but compound across all of them.  Worth a dedicated
+pass.
+
+** TODO Dynamic keyboard surface based on top buffer
+
+Currently the keyboard surface (bottom window) shows whichever
+page was last selected — KBD / CMD / MODE / CHAT.  Switching
+context across the top buffer doesn't auto-show the appropriate
+controls.  When the user is in =*chat*= they almost always want
+SEND/CLEAR visible without manually tapping CHAT; when they're
+editing an org file they usually want T9 keys, etc.
+
+Direction: derive the bottom-surface page from the top buffer's
+major mode (or buffer name).  =*chat*= → CHAT page; org-mode →
+something org-aware; everything else → KBD.  Keep a manual
+override for the moments the auto-selection is wrong.
+
+** TODO Tab button on the keyboard
+
+T9 keyboard has SPC, RET, DEL, CAPS but no TAB.  Tab is load-
+bearing in lots of contexts (completion, structured editing,
+field navigation).  Add as a utility button alongside the others.
+
+Decide: replace one of the existing util slots, or grow the row?
+Spacing budget on a 320x240 screen is tight.
+
+** TODO Keyboard layout + sizing iterations
+
+The Optimal-T9 layout from the Qin et al. paper is the v1
+baseline.  Live use will surface things the paper doesn't capture
+on this specific screen (gap proportions, scale factor between
+letter and util buttons, fingertip-vs-stylus accuracy bias,
+number row treatment, punctuation strategy).  Iterate based on
+what's actually painful in real use rather than redesigning
+preemptively.
+
+* Other / cross-cutting
+
+(Nothing yet — add as it comes up.)
+
+* Experiment-specific follow-ups
+
+For now these live in the "Out of scope, next experiments"
+section of each landed experiment's design doc:
+
+- [[file:docs/2026-05-17-assist-import.org][2026-05-17-assist-import.org]] — skill discovery, honesty
+  validation, agent-callable phone tools, streaming, persistent
+  thread state, sandbox, dotfiles bootstrap, known-good marker

@@ -227,15 +227,20 @@ No-op if a prior SEND is still in flight or the input is empty."
 
 (defun emacos--render-chat-page ()
   "Render the chat-page controls into the *keyboard* buffer.
-Big SEND, smaller CLEAR.  Sized to the keyboard window like the
-T9 letter buttons."
+Big SEND (1.75x scale), smaller CLEAR.  The :height face attribute
+on the SEND button scales the displayed character width too, so
+the button-width arg has to be DIVIDED by the scale factor — same
+pattern as the T9 letter buttons in `emacos--render-keyboard-page'.
+A naive `send-w = win-w` would produce a button ~1.75x the window
+width and overflow horizontally."
   (let* ((win      (get-buffer-window (current-buffer)))
          (win-w    (if win (window-body-width win) 20))
-         (gap-w    1.5)
-         (send-w   (floor (- win-w (* 2 gap-w))))
+         (scale    1.75)
+         ;; Divide by scale so the rendered button fits the window.
+         (send-w   (max 1 (floor (/ win-w scale))))
          (clear-w  (floor (/ win-w 2))))
     (emacos--btn (emacos--center "SEND" send-w)
-                 #'emacos--chat-send nil 1.75)
+                 #'emacos--chat-send nil scale)
     (insert "\n")
     (emacos--btn (emacos--center "CLEAR" clear-w)
                  #'emacos--chat-clear)
