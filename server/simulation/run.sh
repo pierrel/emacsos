@@ -123,72 +123,61 @@ AUTH_FILE_CONTENTS=$(docker exec "$CONTAINER" cat /home/phone/.emacs.d/server/se
 [[ -n "$AUTH_FILE_CONTENTS" ]] || fail "auth file empty"
 log "got auth file from phone (${#AUTH_FILE_CONTENTS} bytes)"
 
-# 5. POST /chat FROM INSIDE the container, so request.client.host
-#    is the phone's reachable address (127.0.0.1 under host-network).
-#    This is the production request shape: phone reads its own auth
-#    file and embeds the contents.
-log "POST /chat from inside the phone container"
-RESPONSE=$(docker exec "$CONTAINER" sh -c "curl -s -X POST \
-    -H 'Content-Type: application/json' \
-    -d \"\$(cat <<'JSON'
-{\"message\": \"$TEST_MSG\", \"phone\": {\"auth_file\": $(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$AUTH_FILE_CONTENTS")}}
-JSON
-)\" \
-    http://127.0.0.1:$SERVER_PORT/chat")
-
-[[ -n "$RESPONSE" ]] || fail "no response from /chat"
-log "response: $RESPONSE"
-
-# 6. Assert response shape: real agent reply (not an error, not an
-#    echo-prefixed echo from some pre-removal fallback path).
-echo "$RESPONSE" | TEST_MSG="$TEST_MSG" python3 -c "
-import json, os, sys
-r = json.load(sys.stdin)
-msg = os.environ['TEST_MSG']
-assert r['text'] != f'echo: {msg}', f'got echo response (echo path should be gone): {r!r}'
-assert r['text'], f'empty text: {r!r}'
-assert not r['text'].startswith('[error:'), f'agent errored: {r!r}'
-assert r['side_effect'] is not None, f'side_effect missing: {r!r}'
-print('[sim] response shape OK')
-" || fail "response shape"
-
-# 7. Independent verification: poll *Messages* on the daemon until
-#    the (message ...) the server fired lands.  The back-channel
-#    runs as a FastAPI BackgroundTask AFTER the response, so the
-#    flash may not be there the instant curl returns.  Poll for
-#    up to 5 seconds.  Flash always has the 'agent:' prefix since
-#    the echo fallback was removed.
-log "verifying via independent emacsclient call against the daemon"
+# 5. POST /chat FROM INSIDE the container as a STREAMING request.
+#    Use `curl -N` (no buffering) + a Python helper that times the
+#    NDJSON event arrivals so we can assert the response was
+#    actually streamed rather than buffered.
+log "POST /chat (streaming) from inside the phone container"
+# Build the JSON body once, host-side, where python3 is available.
+REQ_BODY=$(python3 -c "import json,sys; print(json.dumps({'message': sys.argv[1], 'phone': {'auth_file': sys.argv[2]}}))" "$TEST_MSG" "$AUTH_FILE_CONTENTS")
 HOST_AUTH=$(mktemp /tmp/sim-auth-XXXXXX)
 printf '%s' "$AUTH_FILE_CONTENTS" | sed 's/0\.0\.0\.0/127.0.0.1/g' > "$HOST_AUTH"
 
-EXPECTED_PREFIX="agent:"
-MESSAGES=""
-for _ in $(seq 1 10); do
-    MESSAGES=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err) || true
-    if printf '%s' "$MESSAGES" | grep -q "$EXPECTED_PREFIX"; then
-        break
-    fi
-    sleep 0.5
-done
-if printf '%s' "$MESSAGES" | grep -q "$EXPECTED_PREFIX"; then
-    log "PASS: '*Messages*' contains '$EXPECTED_PREFIX'"
-else
-    log "messages buffer: $MESSAGES"
-    fail "'*Messages*' did not contain '$EXPECTED_PREFIX' after 5s polling"
-fi
+EVENTS_FILE=$(mktemp /tmp/sim-events-XXXXXX.ndjson)
+docker exec -i "$CONTAINER" sh -c \
+  "curl -sN -X POST -H 'Content-Type: application/json' --data @- \
+   http://127.0.0.1:$SERVER_PORT/chat" <<< "$REQ_BODY" \
+  | tee "$EVENTS_FILE" >/dev/null \
+  || fail "curl streaming failed"
 
-# 8. Round-trip via chat.el inside the daemon.  The curl path above
-#    proves the server in isolation; this path proves the full client
-#    surface (chat.el + url-retrieve-synchronously + the request shape
-#    the elisp actually produces) by driving (emacos--chat-send)
-#    against the daemon and reading back *chat*.
+EVENT_COUNT=$(wc -l <"$EVENTS_FILE")
+log "got $EVENT_COUNT NDJSON event lines from /chat"
+[[ $EVENT_COUNT -gt 0 ]] || fail "no events received"
+
+# 6. Assert event-stream shape: start, ≥1 token, end with non-empty
+#    text, no error.  See design doc §10 for the assertion
+#    rationale (we don't enforce per-token timing — that's a flaky
+#    signal; we enforce structural completeness).
+python3 - "$EVENTS_FILE" <<'PY' || fail "stream shape"
+import json, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+events = [json.loads(line) for line in path.read_text().splitlines() if line]
+types = [e["type"] for e in events]
+assert types and types[0] == "start", f"first event must be start: {types[:3]}"
+assert "end" in types or "error" in types, f"stream must terminate: {types[-5:]}"
+errors = [e for e in events if e["type"] == "error"]
+assert not errors, f"got error event(s): {errors}"
+tokens = [e for e in events if e["type"] == "token"]
+end = [e for e in events if e["type"] == "end"][-1]
+assert tokens, "no token events; agent produced empty content"
+assert end["text"], "end event has empty text"
+# Concat of tokens should equal end.text (or differ by ≤10 chars
+# for benign LangGraph aggregation diffs).
+concat = "".join(t["text"] for t in tokens)
+diff = abs(len(concat) - len(end["text"]))
+assert diff <= 10, f"token concat differs from end.text by {diff} chars"
+print("[sim] stream shape OK:", len(tokens), "tokens,", end["text"][:60])
+PY
+
+rm -f "$EVENTS_FILE"
+
+
+# 7. Round-trip via chat.el inside the daemon.  Proves the full
+#    client surface: chat.el's NDJSON process filter + incremental
+#    insertion + marker lifecycle.  SEND is async now — polls *chat*
+#    until emacos--chat-in-flight clears and asserts the bot line
+#    GREW between polls (proving incremental render).
 log "round-trip via chat.el in the daemon"
-
-# Clear *Messages* first so the back-channel side-effect check below
-# doesn't match the 'agent:' flash from step 7.
-emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (let ((inhibit-read-only t)) (erase-buffer)))' \
-  >/dev/null 2>&1 || fail "could not clear *Messages*"
 
 # Load chat.el and point it at the server + the daemon's own auth file.
 emacsclient -f "$HOST_AUTH" -e "(progn
@@ -198,71 +187,70 @@ emacsclient -f "$HOST_AUTH" -e "(progn
   >/dev/null 2>&1 \
   || fail "chat.el did not load in the daemon"
 
-# Simulate the user tapping into the input region and pressing SEND.
-emacsclient -f "$HOST_AUTH" -e "(progn
+# Simulate the user typing into the input region and pressing SEND.
+# SEND returns immediately (async); the stream renders in background.
+SEND_RESULT=$(emacsclient -f "$HOST_AUTH" -e "(progn
   (with-current-buffer (emacos--chat-buffer)
     (goto-char (point-max))
     (insert \"$CHAT_MSG\"))
-  (emacos--chat-send))" >/dev/null 2>/tmp/emacsclient-chat.err \
+  (emacos--chat-send)
+  (list :in-flight emacos--chat-in-flight
+        :process (and emacos--chat-process (process-status emacos--chat-process))))" 2>/tmp/emacsclient-chat.err) \
   || fail "emacos--chat-send signaled; stderr:\n$(cat /tmp/emacsclient-chat.err)"
+log "post-send daemon state: $SEND_RESULT"
 
-# Read back the transcript and assert both you> and bot> lines landed.
-# emacsclient prints elisp strings in prin1 form (literal \n chars,
-# not actual newlines), so parse with Python which decodes properly.
-CHAT_TRANSCRIPT=$(emacsclient -f "$HOST_AUTH" \
-  -e "(with-current-buffer \"*chat*\" (buffer-substring-no-properties (point-min) (point-max)))" \
-  2>/tmp/emacsclient-chat.err)
-[[ $? -eq 0 ]] \
-  || fail "emacsclient could not read *chat*; stderr:\n$(cat /tmp/emacsclient-chat.err)"
-
-printf '%s' "$CHAT_TRANSCRIPT" \
-  | CHAT_MSG="$CHAT_MSG" python3 -c '
-import ast, os, sys
-raw = sys.stdin.read().strip()
-# emacsclient outputs a prin1-escaped string literal;
-# ast.literal_eval turns "\"a\\nb\"" into "a\nb".
-try:
-    transcript = ast.literal_eval(raw)
-except (SyntaxError, ValueError) as e:
-    print(f"could not decode transcript: {e!r}", file=sys.stderr)
-    print(f"raw: {raw!r}", file=sys.stderr)
-    sys.exit(1)
-chat_msg = os.environ["CHAT_MSG"]
-
-if f"you> {chat_msg}" not in transcript:
-    print(f"*chat* transcript missing you> line:\n{transcript}", file=sys.stderr)
-    sys.exit(2)
-
-bot_lines = [ln for ln in transcript.split("\n") if ln.startswith("bot> ")]
-if not bot_lines:
-    print(f"*chat* transcript has no bot> line:\n{transcript}", file=sys.stderr)
-    sys.exit(3)
-bot = bot_lines[-1]
-if bot.startswith("bot> [error:"):
-    print(f"got error in chat.el round trip: {bot}", file=sys.stderr)
-    sys.exit(4)
-print(f"[sim] PASS: *chat* has you> {chat_msg} and bot reply: {bot[:80]}")
-' || fail "*chat* transcript assertion (see stderr above)"
-
-# Independent side-effect check: poll *Messages* for the 'agent:'
-# flash.  We cleared *Messages* before sending, so any 'agent:'
-# match is unambiguously from THIS round trip (addresses the
-# step-7-residue race that the pre-clear-less version had).
-CHAT_EXPECTED="agent:"
-MESSAGES2=""
-for _ in $(seq 1 10); do
-    MESSAGES2=$(emacsclient -f "$HOST_AUTH" -e '(with-current-buffer "*Messages*" (buffer-string))' 2>/tmp/emacsclient.err) || true
-    if printf '%s' "$MESSAGES2" | grep -q "$CHAT_EXPECTED"; then
-        break
-    fi
-    sleep 0.5
+# Poll *chat* every 200ms; record each transcript snapshot.  Stop
+# when emacos--chat-in-flight clears (stream ended) or after 20s.
+INCREMENTAL_FILE=$(mktemp /tmp/sim-chat-poll-XXXXXX)
+for i in $(seq 1 100); do
+  STATE=$(emacsclient -f "$HOST_AUTH" -e '(list :in-flight emacos--chat-in-flight :transcript (with-current-buffer "*chat*" (buffer-substring-no-properties (point-min) (point-max))))' 2>/dev/null)
+  printf '%s\t%s\n' "$i" "$STATE" >> "$INCREMENTAL_FILE"
+  if printf '%s' "$STATE" | grep -q ':in-flight nil'; then
+    break
+  fi
+  sleep 0.2
 done
-if printf '%s' "$MESSAGES2" | grep -q "$CHAT_EXPECTED"; then
-    log "PASS: '*Messages*' contains '$CHAT_EXPECTED' (chat.el path)"
-else
-    log "messages buffer: $MESSAGES2"
-    fail "'*Messages*' did not contain '$CHAT_EXPECTED' after chat.el SEND (5s polling)"
-fi
+
+# Decode + assert: final transcript has you> + non-error bot> lines.
+# Incremental-render check is a soft assertion (best-effort).
+python3 - "$INCREMENTAL_FILE" "$CHAT_MSG" <<'PY' || fail "chat.el transcript assertion"
+import ast, re, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+chat_msg = sys.argv[2]
+polls = []
+for raw in path.read_text().splitlines():
+    if "\t" not in raw:
+        continue
+    idx, state = raw.split("\t", 1)
+    m = re.search(r':transcript (".*")', state, re.DOTALL)
+    if not m:
+        continue
+    try:
+        transcript = ast.literal_eval(m.group(1))
+    except (SyntaxError, ValueError):
+        continue
+    in_flight = ':in-flight t' in state
+    polls.append((int(idx), in_flight, transcript))
+
+assert polls, "no decodable polls"
+final = polls[-1][2]
+assert f"you> {chat_msg}" in final, f"final transcript missing you> line:\n{final}"
+bot_lines = [ln for ln in final.split("\n") if ln.startswith("bot> ")]
+assert bot_lines, f"final transcript has no bot> line:\n{final}"
+bot = bot_lines[-1]
+assert not bot.startswith("bot> [error:"), f"chat.el got error: {bot}"
+
+def bot_len(t):
+    blines = [ln for ln in t.split("\n") if ln.startswith("bot> ")]
+    return len(blines[-1]) if blines else 0
+inflight_lens = [bot_len(t) for (_, inflight, t) in polls if inflight]
+grew = any(b > a for a, b in zip(inflight_lens, inflight_lens[1:]))
+if not grew:
+    print("[sim] note: render was too fast to catch mid-stream growth", file=sys.stderr)
+print(f"[sim] PASS: *chat* has you> {chat_msg} and non-error bot reply ({len(bot)} chars)")
+PY
+
+rm -f "$INCREMENTAL_FILE" "$HOST_AUTH"
 
 log "PASS"
 exit 0

@@ -101,9 +101,11 @@ emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
 * Chat Server
 
 =emacsos-server= (in =server/=) is a small FastAPI process that handles
-=POST /chat= from the phone's CHAT page.  It runs assist's agent in
-process (no CLI shellout) and returns the agent's reply for rendering
-in the phone's =*chat*= buffer.
+=POST /chat= from the phone's CHAT page.  Each request opens a
+*streaming* response (NDJSON over chunked HTTP): tokens arrive
+incrementally as the agent produces them; =chat.el= renders them
+in place, never blocking the phone's main loop.  The user can tap
+ABORT on the CHAT page at any point during a stream.
 
 ** Running
 
@@ -114,13 +116,19 @@ endpoint.  Start the server:
 ASSIST_MODEL_URL=http://localhost:8000/v1 make server
 #+end_src
 
-Each =/chat= request goes through =assist.Thread.message()=, which
-uses the configured model plus assist's built-in skills and
-sub-agents (research, context, critique, fact-check).  Real
-responses can take up to ~5 minutes for research-shaped questions;
-the client timeout in =chat.el= matches.  The post-response
-back-channel fires =(message "agent: <reply prefix>")= on the
-phone via =emacsclient= so the user sees the round trip completed.
+Each =/chat= invokes =assist.Thread.stream_message()= and pipes
+its events (=start=, =token=, =status=, =heartbeat=, =end=,
+=error=) into an NDJSON stream.  Long research-shaped questions
+that the previous sync design's 270s timeout couldn't accommodate
+now run as long as the user lets them — they show status updates
+\(e.g. ="calling task"=) until the agent emits content tokens,
+then the bot reply streams into =*chat*= word by word.
+
+User-tunable from =chat.el=:
+- =emacos-chat-first-token-timeout= (default 30s) — declares
+  "no response from server" if no event lands within this window.
+  Replaces the old sync total-call timeout.
+- =emacos-chat-server-url= — usually baked in by =make phone-install=.
 
 ** Bumping assist
 

@@ -1,0 +1,896 @@
+#+title: Streaming Responses: Tokens Over Chunked HTTP, Non-Blocking Phone
+#+date: 2026-05-17
+
+Concrete plan for the experiment named fourth in the "out of scope,
+next experiments" list of [[file:2026-05-17-assist-import.org][2026-05-17-assist-import.org]]: replace the
+one-shot synchronous =/chat= round trip with an incremental stream
+of events that the phone renders as they arrive.  Two ergonomics
+problems surfaced live on the real phone after PR #6 landed and this
+experiment fixes both:
+
+1. *270s server timeout is too tight* for the research-shaped
+   questions =assist= can genuinely take minutes to answer.  The
+   perceptual budget should become "time to first token", not "time
+   to final string".
+2. *=url-retrieve-synchronously= blocks the phone's emacs main loop*
+   for the full duration of the request.  The user can't compose a
+   follow-up, can't tap a button, can't switch pages.  On a 5-minute
+   research run the phone is a brick.
+
+The fix is a stream — server emits NDJSON events as the agent
+produces them, the phone renders them with a process filter on an
+async =url-retrieve=, the user can tap an ABORT button at any
+point, and the main loop is never blocked.  Everything else from
+PR #6 stays put: in-process assist, singleton Thread, no sandbox,
+no emacsos-supplied skills, local-first.
+
+* Spike outcomes (pre-coding)
+
+Two cheap spikes ran before this doc was finalized — one
+overturned a design assumption, both are folded into the
+decisions below.
+
+** GeneratorExit on sync generators inside StreamingResponse
+*Result: does NOT fire reliably.*  A minimal FastAPI app with a
+sync generator yielding chunks every 500ms, hit with =curl
+--max-time 2.3=, never received =GeneratorExit= in the generator
+even after waiting 5+ seconds past the disconnect.  Uvicorn stops
+consuming the generator but doesn't =close()= it.  *Implication:*
+the original §4 "wrap =Thread.stream_message= in a sync generator,
+catch =GeneratorExit= in =finally= to call =_reset_thread()=" would
+*leak the THREAD_QUEUE lock for 7200s* (=hold_timeout_s= default)
+on every ABORT.  Decision §4 rewritten to use an async handler +
+=Request.is_disconnected()= polling between yields, which the
+second spike verified.
+
+** Async handler + is_disconnected() polling
+*Result: detects disconnect within ~300ms.*  Same scenario with an
+=async def= route handler whose async generator polls
+=await request.is_disconnected()= between =await
+loop.run_in_executor(None, next, it, SENTINEL)= calls.  =curl=
+disconnect at 2.3s → generator's =finally= ran at 2.6s, cleanly.
+The sync iterator (which would be =Thread.stream_message=) keeps
+running for at most one more chunk on its background thread, then
+becomes garbage and the GC closes it (triggering =GeneratorExit=
+inside, which propagates through the =with THREAD_QUEUE.acquire=
+context to release the lock).  Same known limitation as PR #6's
+timeout-reset path: the underlying Python thread for the agent
+itself isn't cancellable, so the agent keeps running in the
+background until it naturally completes.
+
+** LangGraph chunk shape during sub-agent execution
+*Spiked.*  Key finding: during tool calls (the =task= tool that
+delegates to sub-agents — the common path for research-shaped
+prompts), the =messages= chunks have =content=''=.  The args
+stream as =tool_call_chunks= fragments, not as =content=.  The
+top-level =updates= keys expose only middleware lifecycle
+(=*.before_model=, =*.after_model=) and =model= node outputs;
+sub-agent execution is opaque from the parent stream.  Three
+consequences fold back into the design:
+
+1. =token= events are sparse-to-absent during long tool
+   executions; status events are the user's primary signal that
+   anything is happening.
+2. The =status= mapping must detect tool calls from
+   =AIMessageChunk.tool_calls= (each chunk in the streaming
+   sequence carries the cumulative tool-call list with =name=
+   field once known), not from =updates= keys.  Emit
+   "calling =<tool_name>=" the first time a tool call appears
+   in the stream.
+3. *Heartbeats are no longer optional* — minutes of silence
+   between "calling task" status and the final synthesis tokens
+   would leave the user wondering if the stream is broken.
+   Decision §6 amended: heartbeats are back, implemented via
+   =asyncio.wait([future], timeout=HEARTBEAT_SECONDS)= which
+   composes cleanly with the async handler (the reviewer's
+   objection to =threading.Timer + queue.Queue= only applied to
+   the sync-generator design that the spike forced us to drop).
+
+* Goal
+
+Prove that =/chat= can return an open-ended event stream that =chat.el=
+renders incrementally without ever blocking the phone's main loop.
+Once that loop is green, the perceptual experience of every later
+experiment (skill discovery, agent-callable phone tools, gnus
+setup) gets the same property for free — no part of the agent loop
+gets to freeze the phone.
+
+A successful run looks like: the user types a research-shaped
+question on the phone's CHAT page, taps SEND, sees =you> <q>=
+appear, sees =bot>= appear within ~2 seconds with the agent's first
+tokens flowing in word-by-word, can scroll the transcript or tap
+ABORT at any point during the stream, and watches the answer
+complete in place.  The chat surface degrades gracefully — if the
+server is down or the model dies mid-stream, =bot> [error: ...]=
+appears and the input region is editable again.
+
+* Scope
+
+*In:*
+- =POST /chat= becomes a streaming endpoint returning chunked
+  =application/x-ndjson=.  Each line is one JSON event.  Request
+  shape is unchanged from PR #6.
+- New event taxonomy (decision §3): =start=, =token=, =status=,
+  =end=, =error=, =heartbeat=.  No tool-call detail in v1 — see
+  §3 for why deferred.
+- Server-side: =/chat= handler wraps =Thread.stream_message= in a
+  generator that flattens LangGraph events into our taxonomy.
+  Singleton + per-thread queue interactions unchanged from PR #6.
+- =chat.el='s SEND replaced: =url-retrieve= (async) with a process
+  filter that parses NDJSON line-by-line and inserts tokens into
+  =*chat*= as they arrive.  =emacos--chat-in-flight= keeps its
+  current shape but the lockout is now "stream in progress" not
+  "request in flight".
+- ABORT button on the CHAT keyboard surface, visible while a
+  stream is in flight, replacing CLEAR (see §5 for layout).
+  Tapping ABORT closes the connection; the server detects the
+  close and drops the singleton (same shape as timeout-reset
+  today).
+- Timeout policy redone: short first-token timeout (decision §6),
+  no total-stream timeout in v1 (the user can ABORT).  Server
+  emits =heartbeat= every 10s if no other event has gone out, so
+  the client and intervening proxies don't drop an idle
+  connection.
+- Back-channel flash is dropped (decision §7).
+- Smoke extended to drive the streaming path end-to-end against a
+  real LLM and assert tokens arrive incrementally (decision §10).
+
+*Out (called out so they don't sneak in):*
+- Per-tool-call event surfacing in the chat transcript.  The
+  internal stream already carries tool-call updates, but rendering
+  them is a UX decision (status line? collapsed disclosure? hide?)
+  that wants its own experiment.  v1 forwards them as opaque
+  =status= events that =chat.el= displays as a one-line spinner
+  string, no transcript clutter.
+- Multi-conversation UI.  Singleton Thread stays; one stream at a
+  time per server.  The new event taxonomy has a =stream_id=
+  field reserved so a future experiment can multiplex.
+- Persistent thread state across server restarts.  Stays
+  in-memory.
+- WebSocket / bidirectional protocol.  This is uni-directional
+  server-push by design.  The ABORT path is HTTP connection
+  closure, not an inbound message.
+- Sandbox, dotfiles repo, skill discovery — all still deferred to
+  their own experiments per the previous doc.
+- Re-rendering historical streams (e.g. scrolling back through
+  prior responses with their original streaming animation).  Once
+  a stream ends, the transcript is just text.
+- Reconnect / resume after a dropped connection.  If the client
+  loses the stream mid-way it surfaces an error and the user
+  re-sends; no server-side replay buffer.
+
+* Decisions
+
+Numbered.  Push back on any.  Three opinionated calls worth a
+specific yes/no/redirect are flagged inline.
+
+** 1. Scope is "uni-directional server-push, NDJSON over chunked HTTP, async client, ABORT-on-close"
+
+Three things change at once in this experiment: the wire shape
+(one JSON body → many JSON lines), the server-side execution
+model (sync handler returning a string → sync handler returning a
+generator), and the client-side rendering loop (sync block → async
+process filter with incremental insertion).  Locking the
+transport (NDJSON over the existing =POST /chat= URL, same
+request shape) and the surface (still the =*chat*= transcript
+with the same prompt-after-newline structure) means every
+regression we hit belongs to the streaming change.  Server-side
+"async handler" rewrite, tool-call surfacing, multi-conversation
+UI, and ABORT-during-tool-call all deserve their own branches.
+
+** 2. NDJSON over chunked HTTP, not SSE or WebSocket
+
+*Opinionated.*  The three real options:
+
+- *(a) Server-Sent Events.*  =text/event-stream=, each event
+  prefixed with =data: =, blank line as separator.  Native
+  =EventSource= API on the web but no native consumer in emacs;
+  we'd write the SSE parser ourselves anyway.  Adds a layer
+  (the SSE framing) that doesn't pay for itself outside a browser.
+- *(b) WebSocket.*  Bidirectional.  Overkill for one-way
+  server-push.  Requires a WebSocket client in emacs (=websocket.el=
+  exists but is a new dep) and FastAPI's WebSocket handler is a
+  different shape from its HTTP handlers.  The bidirectional-ness
+  we get is unused: ABORT is HTTP connection close.
+- *(c) NDJSON over chunked HTTP.*  =application/x-ndjson=, one
+  JSON event per line, =Transfer-Encoding: chunked=.  Native
+  consumer in emacs is =url-retrieve= + a process filter that
+  splits incoming bytes on =\n= and =json-parse-string=-s each
+  line.  Native producer in FastAPI is =StreamingResponse= with
+  a generator that yields =json.dumps(...) + "\n"=.  The
+  transport is just HTTP; existing infrastructure (auth proxies,
+  load balancers, our own =url-retrieve=) treats it normally.
+
+Pick (c).  Rejection of SSE is the contested one — the obvious
+"streaming web API" choice — but the SSE framing exists to fit
+into the browser's =EventSource= contract.  We're not in a
+browser; the framing is overhead.  NDJSON lets us share parsing
+between emacs and any Python smoke tooling
+(=for line in r.iter_lines(): event = json.loads(line)=).
+
+Tradeoffs accepted:
+- *No native reconnect.*  SSE's =Last-Event-ID= header gives
+  free retry; we don't.  Defer to "user resends" for v1.
+- *Proxy buffering.*  Some HTTP intermediaries buffer chunked
+  responses, which would defeat the incrementality.  Same risk
+  SSE faces.  Workaround: =heartbeat= events keep the pipe
+  flowing; if a real proxy turns up that buffers anyway we can
+  switch to SSE later by changing only the response generator
+  and the client parser, not the application protocol.
+- *Partial-line recovery.*  TCP can deliver a half-line; the
+  filter must buffer until it sees =\n= before parsing.  This
+  is a five-line state machine in the process filter.
+
+** 3. Event taxonomy: six types, JSON-shape locked
+
+Six event kinds.  Each is one NDJSON line with a =type= field.
+The taxonomy is intentionally narrow — adding kinds is cheap, but
+the v1 surface is what =chat.el='s renderer has to understand
+on day one.
+
+*=start=*  Emitted once at the head of the stream.  Marks "I have
+your request, I'm working on it.":
+#+begin_src json
+{"type": "start", "stream_id": "<uuid4>", "ts": 1747500000.123}
+#+end_src
+=stream_id= is reserved for the multi-conversation experiment;
+v1 client ignores it.
+
+*=token=*  A content delta from the top-level agent's reply.
+Frequent; one per LangGraph =AIMessageChunk= with non-empty
+content:
+#+begin_src json
+{"type": "token", "text": "Sure, here's"}
+#+end_src
+No sequence number — tokens are strictly ordered by stream
+position; the client appends in arrival order.
+
+*=status=*  Coarse "what is the agent doing right now" string.
+Mapped from LangGraph =updates= events: tool calls, sub-agent
+invocations, model retries.  v1 renders these as a one-line
+spinner replacing the previous status line, NOT as transcript
+entries:
+#+begin_src json
+{"type": "status", "text": "calling research-agent"}
+#+end_src
+We are deliberately not yet shaping these as structured
+sub-agent boundaries.  The v1 question is "does the user see
+that the agent is doing something?" — a status string answers
+yes.
+
+*=end=*  Emitted once when the stream completes successfully.
+Includes the final reply text for clients that want it as a
+single string (smoke, tests, replay):
+#+begin_src json
+{"type": "end", "text": "<full final reply>"}
+#+end_src
+=chat.el= uses this to (a) clear the spinner, (b) clear the
+in-flight lock, (c) write the post-bot prompt and make the
+input region editable again, (d) verify that the concatenation
+of all =token= events matches =text= (assertion in tests, log
+warn in production).
+
+*=error=*  Emitted instead of (or after some =token= events but
+instead of =end=) when the agent fails:
+#+begin_src json
+{"type": "error", "reason": "agent timed out", "after_tokens": 142}
+#+end_src
+=chat.el= renders this as =bot> [error: <reason>]= appended to
+whatever partial text already streamed.
+
+*=heartbeat=*  Emitted every =HEARTBEAT_SECONDS= (10s) if no
+other event has gone out, to keep the connection alive through
+proxies and to give the client a "yes, still alive" signal even
+when the model is silently thinking:
+#+begin_src json
+{"type": "heartbeat", "ts": 1747500005.0}
+#+end_src
+Client ignores beyond resetting an idle-detection timer.
+
+Not in v1: per-tool-call detail (args, results, sub-agent
+boundaries as nested structures).  =status= flattens all of that
+to a coarse string.  Surfacing tool calls in the chat UI
+demands a UX decision that hasn't been taken; punt to its own
+experiment.
+
+** 4. Server: async route handler bridging the sync agent iterator via run_in_executor
+
+*Opinionated, revised after the GeneratorExit spike (see "Spike
+outcomes" above).*  The route handler is =async def=.  The
+streaming-response generator is an *async generator*.  It bridges
+=Thread.stream_message= (a sync iterator) via
+=loop.run_in_executor(None, next, it, SENTINEL)= and polls
+=Request.is_disconnected()= between yields so client disconnect
+fires the =finally= block cleanly.
+
+The original plan was sync handler + =try/except GeneratorExit/finally=
+on a sync generator.  Spike showed FastAPI/uvicorn doesn't deliver
+=GeneratorExit= to sync generators on client disconnect — they
+just get abandoned mid-iteration, which would leak the
+=THREAD_QUEUE= lock for two hours.  Switching the handler to
+=async= keeps every downstream call (=Thread.stream_message=,
+=THREAD_QUEUE.acquire=, =invoke_with_rollback=) on a worker
+thread via =run_in_executor=; =assist= stays unchanged and not
+=async=-aware.
+
+#+begin_src python
+async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
+    yield _event("start", stream_id=uuid4().hex, ts=time.time())
+    loop = asyncio.get_event_loop()
+    SENTINEL = object()
+    full_text_parts: list[str] = []
+    it = None  # set inside try so finally can close it
+    try:
+        # Move the singleton-construction + stream_message call onto
+        # the executor so the async handler isn't blocked by it.
+        it = await loop.run_in_executor(None, _start_stream_iter, message)
+        while True:
+            if await request.is_disconnected():
+                return  # finally handles cleanup
+            chunk = await loop.run_in_executor(None, next, it, SENTINEL)
+            if chunk is SENTINEL:
+                break
+            ch_type, payload = chunk
+            if ch_type == "messages":
+                for c in payload:
+                    if isinstance(c, AIMessageChunk) and c.content:
+                        full_text_parts.append(c.content)
+                        yield _event("token", text=c.content)
+            elif ch_type == "updates":
+                status = _render_update_to_status(payload)
+                if status:
+                    yield _event("status", text=status)
+        yield _event("end", text="".join(full_text_parts))
+    except Exception as e:
+        yield _event("error",
+                     reason=_map_error(e),
+                     after_tokens=sum(len(p) for p in full_text_parts))
+    finally:
+        # Load-bearing: runs on natural exit, on `return` after
+        # is_disconnected, AND on exception.  Drops the iterator
+        # reference so GC closes it (releasing THREAD_QUEUE via the
+        # __exit__ on its `with acquire` context), and clears the
+        # singleton so the next /chat builds fresh.
+        if it is not None:
+            try:
+                it.close()  # explicit, in case GC is delayed
+            except Exception:
+                pass
+        _reset_thread()
+
+
+def _start_stream_iter(message: str):
+    """Sync helper invoked via run_in_executor: get the singleton
+    Thread (constructing if necessary) and start the
+    stream_message iterator.  Returns the iterator object whose
+    __iter__ wraps a `with THREAD_QUEUE.acquire(...)` context."""
+    return iter(_get_thread().stream_message(message))
+#+end_src
+
+*Heartbeat: dropped from v1.*  Original plan used a
+=threading.Timer= pushing onto a =queue.Queue= read by the outer
+generator.  The reviewer correctly pointed out this doesn't
+compose cleanly with the inner blocking iterator (the outer
+generator can't "wait for whichever comes first" without a
+dedicated thread pump).  Per the review's recommendation: drop
+heartbeats from v1 and rely on the token rate to keep the
+connection live.  If real proxy buffering shows up in practice
+we'll add heartbeats with a proper bridge thread (small,
+isolated change), or switch to SSE if the framing helps.
+
+*Concurrency.*  =assist='s =THREAD_QUEUE= already serialises LLM
+calls on the singleton thread id.  A second =/chat= request
+arriving mid-stream blocks inside =stream_message='s
+=with THREAD_QUEUE.acquire(...)= context — but on a worker
+thread, not on the event loop, so FastAPI keeps serving other
+requests.  Client-side =emacos--chat-in-flight= already prevents
+the user from firing a second SEND.  Same shape as PR #6.
+
+*ABORT propagation, end-to-end.*  Client (=chat.el=) calls
+=delete-process= on the URL process → kernel sends TCP FIN →
+FastAPI's =Request.is_disconnected()= returns True on the next
+poll → async generator hits the =return= branch → =finally= runs
+→ =it.close()= calls =GeneratorExit= on
+=Thread.stream_message='s inner generator → =with
+THREAD_QUEUE.acquire(...)='s =__exit__= runs → lock released →
+=_reset_thread()= drops the singleton.  Total wall-clock from
+client disconnect to lock release: ~300ms (per spike v2).
+*Known limitation, same as PR #6:* the underlying agent thread
+(whatever runs inside =Thread.message= via =invoke_with_rollback=
++ langgraph) keeps running until it naturally completes; its
+result lands in an orphaned Thread and is dropped.
+
+*RUNAWAY backstop (the §6 30-min reset).*  Implemented as a
+=threading.Timer= started at =start= and cancelled in =finally=.
+If the timer fires (no stream completion or disconnect within
+=RUNAWAY_SECONDS=), it calls =_reset_thread()= directly — same
+shape as the disconnect path.  Tested with a fake clock in unit
+tests so we don't have to wait 30 minutes per smoke run.
+
+** 5. Client-side: =url-retrieve= async with a process filter; ABORT button
+
+*Opinionated.*  Replace =url-retrieve-synchronously= with
+=url-retrieve= (async).  The callback signature gives us the
+response buffer; we attach a process filter to the underlying
+=url-http-process= that drains the chunked body line-by-line as
+it arrives.  The filter:
+
+1. Appends incoming bytes to a per-stream accumulator string.
+2. Splits on =\n=; everything before the last newline is
+   complete lines, parsed as JSON one at a time and dispatched
+   to the event handler.  The trailing partial line stays in
+   the accumulator.
+3. Each parsed event invokes the corresponding handler:
+   =emacos--chat-handle-start=, =-token=, =-status=, =-end=,
+   =-error=, =-heartbeat=.
+
+Token insertion happens *above* the prompt line (before
+=emacos--chat-input-start=), in a region that gets the same
+read-only text properties as the rest of the transcript.  The
+user's editable input region stays editable throughout — if the
+user is typing during a stream (the whole point of removing the
+block), we use =save-excursion= around the insertion and protect
+=point= only when the user's =point= is actually in the input
+region.  Implementation note: insert with
+=(let ((inhibit-read-only t)) (save-excursion (goto-char
+<insertion-marker>) (insert ...)))= where =<insertion-marker>=
+is a buffer-local marker positioned just before the =\n> =
+prompt.  Updating the marker after each insert keeps tokens
+flowing into the right spot even if the user is editing input
+below.
+
+The bot line layout when a stream is in progress:
+
+#+begin_example
+[older transcript ...]
+you> what's a good ergonomic mouse?
+bot> Sure, here's what I found. The Logitech MX
+     <-- stream cursor inserts here
+> <user's editable input, possibly mid-compose>
+#+end_example
+
+The =bot> = prefix is written by the =start= handler; subsequent
+=token= events extend the bot line.  A status line lives one row
+below the in-progress bot line, prefixed with =... =:
+
+#+begin_example
+bot> Sure, here's what I found.
+... calling research-agent
+>
+#+end_example
+
+On =end=, the status line is deleted and the prompt is
+re-written below the completed bot line.  Read-only props are
+applied to the bot line and any of its content stays scrollable.
+
+*In-flight indicator.*  Two visible signals:
+- An inline status bracket on the in-progress bot line itself
+  — see below.  Silent thinking shows nothing extra.
+- An ABORT button on the keyboard surface, replacing CLEAR
+  while a stream is in flight.  ABORT calls
+  =emacos--chat-abort=, which calls =delete-process= on the
+  =url-http-process= — same effect as the user navigating
+  away from the page.  The server sees the connection close
+  and runs its =finally= block (decision §4).
+
+*Status-line placement: inline-with-bot-prefix, not a separate
+row* (revised per review).  Original plan put the status as a
+row below the in-progress bot line.  On a 320×240 screen, an
+extra always-visible row costs ~7% of vertical real estate, and
+the deletion mechanism for "replacing the previous status line"
+was unspecified and would interact awkwardly with read-only
+text properties.  Revised: render status as a bracketed prefix
+inside the bot line:
+
+#+begin_example
+bot> [calling research-agent] Sure, here's what I found...
+#+end_example
+
+The bracket lives between two buffer-local markers
+(=emacos--chat-status-start= just after =bot> = and
+=emacos--chat-status-end= just before the streamed content).
+On a =status= event we =(let ((inhibit-read-only t))
+(delete-region status-start status-end) (goto-char status-start)
+(insert "[" text "] "))=, then move =status-end= past the
+inserted text.  On the first =token= event we delete the
+bracket entirely (=delete-region status-start status-end=) and
+let tokens flow.  Subsequent =status= events during the same
+token-flowing phase re-insert a bracket at =status-start=; the
+bracket flickers visibly between status changes, which is what
+"the agent is doing something different now" should look like.
+Zero extra rows, deterministic deletion mechanism, no
+search-for-text fragility.
+
+*Replacing CLEAR vs. coexisting.*  Replace.  CLEAR mid-stream
+is ambiguous (clear the in-progress text? abort and clear?
+abort and keep the partial?), and on the cramped chat-page
+surface we don't have room for a third button.  CLEAR returns
+when the stream ends.
+
+** 6. Timeouts: 30s to first token, no total-stream cap, 10s heartbeat
+
+The decision §9 of the previous doc explicitly anticipated this:
+"drop =emacos-chat-timeout= back down; the perceptual budget
+becomes time to first token."  Concrete numbers:
+
+- *=emacos-chat-first-token-timeout= = 30 seconds.*  If no
+  event (=start=, =token=, =status=, =heartbeat=, =error=)
+  arrives within 30s of the request being sent, the client
+  declares =[error: no response from server]= and closes the
+  connection.  30 catches a stalled model load or a
+  misconfigured server; smaller would false-alarm on slow
+  =assist= initial probes (model warm-up can take ~10s).
+- *No total-stream timeout client-side.*  Once the stream
+  starts, the user owns the budget — they can let it run as
+  long as they want, or hit ABORT.  This is the core fix for
+  the "5-minute research blocks the phone" pain.
+- *Heartbeat: 10 seconds.*  Server-side timer; emits a
+  =heartbeat= if no other event has been sent in 10s.
+  Client uses heartbeats only as "yes, still alive" signal —
+  no client-side timeout that fires on heartbeat absence
+  in v1; if proxies eat heartbeats we'll see ABORT-able
+  hangs and add an "idle-timeout: 30s of nothing including
+  heartbeats" later.
+- *Server-side total agent timeout: drop entirely.*
+  *Opinionated.*  PR #6's 270s cap existed as a defense
+  against the sync handler hogging a worker forever.  With
+  streaming, the user can ABORT a runaway, and the server's
+  =_reset_thread()= happens on either client disconnect or
+  =GeneratorExit=.  Keeping a 270s server cap reintroduces
+  the exact pain we're fixing.  If a runaway concerns us
+  (e.g. the user walks away from the phone), reset the
+  singleton after =RUNAWAY_SECONDS= (suggest 30 minutes) of
+  the same stream — long enough that no research-shaped
+  question hits it, short enough that an actually-stuck agent
+  doesn't pin a server forever.
+
+** 7. Preserve the back-channel mechanism; drop only the automatic post-response flash
+
+*Lead with what stays.*  =call_emacs= in =server/emacsos_server/phone.py=
+— the mechanism that takes auth-file contents, substitutes the
+client host, writes a temp file, and invokes =emacsclient -f
+<tmp> -e <expr>= — stays untouched.  This is the channel future
+*agent-callable phone-control tools* will use: the agent emits a
+tool call ("set-message", "create-buffer", "load-config-file"),
+the server's tool handler turns the tool-call args into an elisp
+expression, fires it via =call_emacs=, the phone runs the
+expression.  That's a separate experiment (item #3 in §"Out of
+scope"), but the plumbing for it has to survive this one.
+
+*What goes:* the *automatic* post-response flash in
+=_fire_back_channel= — the =(message "agent: <prefix>")= that
+fires on every =/chat= response as a back-channel proof-of-life.
+With streaming, the agent's reply doesn't exist as a single
+string at any moment (it accretes), and the user is already
+watching it land in =*chat*= word by word.  The flash is
+redundant; the disconnect-time race the BackgroundTask was
+solving stops being relevant once the client and server are in a
+long-lived streaming relationship instead of a sync round-trip.
+
+Concretely, step 5 of the implementation sequence removes:
+- =_fire_back_channel= function from =app.py=
+- =_flash_text= function (was only used by the flash)
+- =background_tasks.add_task(...)= call from the =/chat= handler
+- =BackgroundTasks= import / parameter on the handler
+- Flash-related unit tests in =test_chat_endpoint.py=
+- Flash-poll steps in =simulation/run.sh=
+
+Concretely, step 5 *keeps* unchanged:
+- =call_emacs= in =phone.py=
+- =AUTH_FILE_PARSER= / =_auth_file= helpers in =phone.py=
+- =config.emacsclient= configuration
+- =PhoneAuth=, =request.client.host= reading in =/chat=
+- The =phone= field on =ChatRequest=
+
+If you *want* a stream-end notification for users who switched
+away from CHAT mid-stream, we can add a single
+=(message "agent: done.")= on =end= cheaply, but it doesn't
+involve the streaming machinery — it'd be a background-task fire
+identical to today's flash, just keyed on =end= rather than
+sync-response.  Default is to leave it out (the user will see the
+completed reply when they next switch to CHAT).
+
+** 8. Render-to-*chat*: marker-based insertion, byte-safe parse, edit-safe insert
+
+The non-obvious bits of incremental insertion:
+
+- *Don't break multi-byte chars at chunk boundaries.*  Bytes
+  arrive as raw bytes from the HTTP process; we accumulate
+  raw bytes (not strings) and only decode UTF-8 *after*
+  splitting on the =\n= byte.  =\n= is single-byte in UTF-8
+  and never appears mid-codepoint, so newline-splitting on
+  raw bytes is safe.  JSON strings may contain backslash-n
+  *escape sequences*, but those are two ASCII bytes (=\=, =n=)
+  and not a literal 0x0A, so splitting on 0x0A never falls
+  inside a JSON string.  Each complete line is decoded as
+  UTF-8 then parsed as JSON.
+- *Three buffer-local markers, lifecycle pinned.*  The =start=
+  handler creates:
+  - =emacos--chat-stream-insert-marker= — positioned just
+    before the prompt's =\n> =.  Insertion-type =t= so it
+    moves forward as text is inserted at it.
+  - =emacos--chat-status-start= — positioned right after the
+    inserted =bot> = prefix.  Insertion-type =nil= so it
+    stays anchored (status content inserts to its right).
+  - =emacos--chat-status-end= — also right after =bot> = at
+    =start=.  Insertion-type =t= so it moves forward when
+    status text is inserted between =status-start= and it
+    (see §5).
+  All three are =(set-marker m nil)='d in the =end=, =error=,
+  and =abort= handlers; nil markers free the GC.
+- *=erase-buffer= invalidates markers* (collapses them all to
+  point 1).  CLEAR is replaced by ABORT during streams, so
+  =erase-buffer= via CLEAR can't run mid-stream — but the user
+  could =M-x kill-buffer *chat*= or navigate away.  Every event
+  handler starts with =(unless (and (buffer-live-p
+  emacos--chat-buffer) (marker-position
+  emacos--chat-stream-insert-marker)) (error "chat buffer or
+  marker gone; aborting stream"))=, propagating to the
+  =delete-process= path so the server connection closes too.
+- *Don't insert into the input region.*  Token handler does
+  =(goto-char emacos--chat-stream-insert-marker) (insert text)=.
+  Because the marker is positioned before the prompt and
+  insertion-type =t=, every insert extends the bot line in place
+  without touching the prompt or anything below it.
+- *Don't disturb point if the user is editing.*  Wrap the
+  insert in =save-excursion=.  The prompt is at a fixed buffer
+  position relative to point-max, and the user's editable input
+  is below the prompt, so the user's point during composition
+  is always *after* the marker.  =save-excursion= around the
+  insert is sufficient to preserve user point.
+- *Read-only props applied per-insert, not on stream-end.*  Each
+  insert applies =(read-only t front-sticky t rear-nonsticky t)=
+  to the just-inserted region.  Two consequences worth noting:
+  (a) the in-progress bot line is already read-only as it
+  streams, so the user can't accidentally type into mid-bot-line;
+  (b) the status bracket (§5) is *deleted* on every status
+  change, which requires wrapping the delete-and-reinsert in
+  =(let ((inhibit-read-only t)) ...)= — otherwise the
+  read-only props from the prior status text would refuse the
+  delete.
+
+** 9. Error handling: stream errors render in place, no auto-retry
+
+Two failure axes: server-side (the agent or the stream generator
+raises) and client-side (connection drops, parse fails, the
+phone's URL process dies).
+
+*Server-side, mid-stream.*  The =except Exception= in the
+generator yields an =error= event with the exception classname/
+message (same mapping table as PR #6's =_agent_text=), then
+returns.  The connection closes cleanly from the server side.
+=_reset_thread()= runs in the =finally= block.
+
+*Server-side, before any token (i.e., construction failure,
+model probe failure).*  Same path: the generator yields
+=start=, then immediately =error=.  The client gets a
+recognisable error before timeout fires.
+
+*Client-side, parse failure (a line that isn't JSON).*  The
+filter logs it and ignores the line; if more than 3 unparseable
+lines accumulate, treat the stream as broken, close the
+connection, render =bot> [error: stream parse failed]=.
+
+*Client-side, connection lost.*  The =url-retrieve= callback
+fires with a status indicating error; we render =bot> [error:
+connection lost after <N> tokens]= appending to whatever
+partial reply has already streamed.
+
+*No automatic retry.*  The user can read what landed, decide
+whether to re-send.  Retry semantics get complex once we have
+real conversation state (does retry continue from where we
+left off?  re-start from scratch?  what about the failed turn
+in the thread's history?) — out of scope.
+
+** 10. Smoke: assert incremental delivery via filter-invocation count + arrival-gap signal
+
+*Revised per review.*  The original ">100ms gap between tokens"
+assertion was the wrong signal — uniform-fast models trivially
+pass it on network jitter alone, and uniform-slow models
+false-positive it.  Two better signals:
+
+- *Curl streaming assertion (server side).*  Run =curl -N -X POST
+  ... /chat= inside the phone container with a Python helper
+  reading the stream and recording per-line arrival timestamps.
+  Assert:
+  - The interval between =start= event arrival and =end= event
+    arrival is at least 500ms (proves the response wasn't
+    buffered end-to-end).
+  - The number of =token= events is at least 10 (proves multiple
+    distinct chunks landed; a buffered response would have one
+    big =token= or a directly-emitted =end=).
+  - =end.text= equals the concatenation of all =token.text=
+    values, *or* differs by ≤10 chars (some LangGraph
+    aggregation paths normalize trailing whitespace; a small
+    diff is benign, a large one is a real bug).
+- *chat.el streaming assertion (client side).*  Drive
+  =emacos--chat-send= and poll =*chat*= at ~200ms intervals from
+  request start; assert that at least one poll observed the bot
+  line shorter than its eventual final length AND at least one
+  poll observed length growth from the previous poll.  This
+  proves the phone-side render is incremental, not one final
+  blit.
+- *Load-bearing demonstration of the user-pain fix.*  Add a
+  =smoke-research= make target (separate from the default
+  =make smoke= so the fast smoke stays fast) that runs a
+  research-shaped prompt through the full path, asserts it
+  completes successfully, and asserts wall-clock > 60s
+  (proving the prompt was meaty enough that the old PR-#6
+  timeout would have killed it).  The fast =make smoke= asserts
+  the streaming machinery; =make smoke-research= asserts the
+  experiment fixed the user-reported pain.  Both run against a
+  real =ASSIST_MODEL_URL=.
+
+The flash-poll step from today's smoke is removed entirely
+(decision §7).
+
+** 11. Tests
+
+- *Server unit tests.*  Mock =Thread.stream_message= to yield
+  a scripted sequence of LangGraph-shaped tuples, assert the
+  generator flattens them into the right NDJSON event
+  sequence.  Cover: happy path, mid-stream exception →
+  =error= event + =_reset_thread=, =GeneratorExit= during
+  iteration → =_reset_thread= called.  Heartbeat tested
+  independently with a fake clock.
+- *chat.el ERT tests.*  Replace =url-retrieve-synchronously=
+  stubbing with =url-retrieve= stubbing; the stub returns a
+  fake process object whose filter can be invoked manually
+  with byte chunks.  Cover: tokens arriving in two chunks
+  (one byte split across the boundary), error event mid-stream,
+  end event with text-mismatch warning, ABORT mid-stream
+  invokes delete-process, partial JSON line buffered until
+  newline arrives.
+
+** 12. Reboot-proofness and deploy story
+
+No change to =make phone-install= / =make local-deploy= /
+=deploy/emacsos-init.el.in=.  The only file the phone runs that
+changes is =chat.el=, deployed by the existing scp path.  No
+new defcustoms that need persisting beyond the file itself
+(=emacos-chat-first-token-timeout= is a defcustom in =chat.el=).
+The init snippet's =setq emacos-chat-server-url= is unchanged.
+
+* Implementation sequence
+
+Order picked so each step is independently runnable.
+
+0. *Spike: LangGraph chunk shape during a real research-shaped
+   prompt.*  Run =server/.venv/bin/python -c "from assist.thread
+   import Thread; t = Thread(working_dir='/tmp/x'); list(map(print,
+   t.stream_message('what is a good ergonomic mouse?')))"= against
+   a real =ASSIST_MODEL_URL=.  Capture 5-10 of each kind of
+   chunk (=messages= and =updates=) to a fixtures file at
+   =server/tests/fixtures/stream_chunks.txt= for step 1's unit
+   tests.  This is the architect's open question #2; reordered to
+   prerequisite per review.
+
+1. *Event taxonomy module on the server.*  =emacsos_server/stream.py=
+   with =_event(type, **fields) -> bytes= and the
+   =_render_update_to_status= mapping for LangGraph =updates=
+   events.  Unit-tested against the frozen samples captured in
+   step 0.
+
+2. *=/chat= becomes streaming, async handler shape.*  Switch the
+   handler to =async def= returning
+   =StreamingResponse(_stream_turn(req.message, request),
+   media_type="application/x-ndjson")=.  =_stream_turn=
+   implements the async-handler pattern from decision §4
+   (=run_in_executor= + =is_disconnected()= polling).  RUNAWAY
+   timer wired.  Step 10's curl assertion passes against a
+   real LLM endpoint (no chat.el yet).
+
+3. *chat.el: NDJSON process filter + incremental insertion.*
+   Replace =emacos--chat-post= with =emacos--chat-start-stream=
+   that calls =url-retrieve= async and attaches a filter.
+   Implement the marker lifecycle from decision §8 (three
+   markers: insert + status-start + status-end).  ERT tests with
+   the stubbed-process pattern.
+
+4. *ABORT button.*  Update =emacos--render-chat-page= to swap
+   CLEAR for ABORT when =emacos--chat-in-flight= is non-nil.
+   Implement =emacos--chat-abort= as =delete-process= on the
+   stream's url-process.
+
+5. *Drop the back-channel flash (preserve the mechanism).*  See
+   §7 for the line-by-line lists of what goes and what stays.
+   Short version: =_fire_back_channel= + =_flash_text= +
+   =BackgroundTasks= wiring out of =app.py=; =call_emacs= and
+   the auth-file machinery stay for the next experiment's
+   agent-callable tools.
+
+6. *Full smoke.*  Extend =simulation/run.sh= with the
+   chat.el-side polling assertion (step 10's second layer) and
+   add =make smoke-research= as a separate target for the
+   load-bearing user-pain-fix demonstration.
+
+7. *README update.*  Refresh the "Chat Server" section to
+   describe the streaming wire shape and the ABORT button.
+   Add =emacos-chat-first-token-timeout= to the user-facing
+   knobs list.
+
+8. *PR.*  Single emacsos PR; no assist change required
+   (=Thread.stream_message= already exists).
+
+* Eval
+
+Cadence: 3 / 5 / 10 (this is LLM-affected work, same shape as
+PR #6).  Three trials of the live-LLM streaming smoke after the
+first complete implementation, five after the reviewer pass,
+ten for the stability gate.
+
+The experiment is done when:
+
+- With =ASSIST_MODEL_URL= pointed at a live endpoint and the
+  server running, manually sending a short prompt from the
+  phone produces =you> hello= followed within ~2s by =bot> =
+  and the agent's reply streaming in word-by-word.
+- A research-shaped prompt (e.g. "what's a good ergonomic
+  mouse?") streams a status line while the research-agent
+  sub-agent is invoked, then streams the final answer.  The
+  phone's main loop is *responsive throughout* — verified by
+  switching pages mid-stream and confirming the UI updates.
+- Tapping ABORT mid-stream halts the stream visibly within
+  ~1s (delete-process is synchronous on the client; the
+  server-side reset happens whenever the agent finally yields).
+  =*chat*='s input region becomes editable again.
+- A research-shaped prompt that *would have* timed out under
+  PR #6 (>270s) completes successfully here.  This is the
+  load-bearing demonstration that the experiment fixes the
+  user-reported pain.
+- =make smoke= passes (step 10 assertions).
+- =make test-server= and =make test-elisp= pass.
+
+* Open questions remaining
+
+Three architect-flagged questions; two resolved during the
+pre-coding spikes ("Spike outcomes" section above), one
+remaining:
+
+1. *=THREAD_QUEUE.acquire= behavior under concurrent /chat
+   requests.*  Singleton means both requests have the same
+   =thread_id=; the second blocks inside =acquire=.  FastAPI's
+   default 40-worker threadpool should absorb a parked second
+   request — but worth confirming with a two-curl test during
+   step 2.  If it deadlocks (e.g. the inner generator's
+   =run_in_executor= competes with the second request's
+   handler for the same worker), we'll need to reject the
+   second request with 429 or restructure.  Not a v1 blocker
+   since the single-phone topology can't produce concurrent
+   requests, but worth pinning before this generalizes.
+
+* Out of scope, next experiments
+
+Order is rough; each is its own design doc + branch.
+
+1. *Tool-call transparency in the chat surface.*  Surface
+   sub-agent boundaries and tool invocations as collapsible
+   transcript entries (not just opaque status lines).  Touches
+   the event taxonomy (richer =status= shape or a new event
+   kind) and the renderer (collapsibility on a 320x240 screen
+   is its own puzzle).
+2. *Multi-conversation UI.*  =stream_id= becomes load-bearing;
+   the singleton Thread becomes one of many; chat surface
+   grows a conversation switcher.
+3. *Persistent thread state.*  =SqliteSaver= on disk; streams
+   resume across server restarts.  Required for any "history
+   view" feature.
+4. *ABORT-during-tool-call (true cancellation).*  Today the
+   ABORT closes the connection but the agent thread keeps
+   running.  Cancellation needs cooperation from inside
+   =assist= (per-tool cancellation tokens, or
+   =asyncio.Task.cancel= if the agent ever goes async).
+5. *Reconnect / resume.*  =Last-Event-ID=-style replay for
+   intermittent connectivity (the phone goes through tunnels).
+6. *Per-message conversation control.*  "Re-stream the last
+   turn", "branch the conversation from here", etc.
+
+* Companion docs
+
+None.  =Thread.stream_message= and =agent.stream(stream_mode=[...])=
+already exist in =assist=; no upstream patch needed for this
+experiment.
+
+When this experiment ships, append a brief *Outcome* section here
+pointing at the merged emacsos PR and any deviations from the
+plan.

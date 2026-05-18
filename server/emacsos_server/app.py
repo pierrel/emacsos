@@ -1,35 +1,39 @@
 """FastAPI app for the chat endpoint.
 
-POST /chat: invokes assist's agent and returns the reply.  Phone
-back-channel `(message ...)` flash is scheduled as a BackgroundTask
-so it fires after the response is sent (the phone's chat.el blocks
-its main loop while waiting for our response; the back-channel
-can't be processed until then).
+POST /chat: async route handler that streams NDJSON events as
+assist's agent runs.  Wire shape + decisions: see
+docs/2026-05-17-streaming-responses.org.
 
 ASSIST_MODEL_URL must be set when the server is invoked OR by the
-time the first /chat lands; without it, agent construction fails and
-the chat surface renders a clean `[error: ...]`.
+time the first /chat lands; without it, agent construction fails
+on the first chat and the client sees a clean `error` event.
 
-See docs/2026-05-17-assist-import.org for the experiment plan.
+Back-channel mechanism (call_emacs in phone.py) is preserved for
+the next experiment's agent-callable phone-control tools; the
+automatic post-response flash was removed when streaming made it
+redundant.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from typing import Optional
+import time
+import uuid
+from typing import AsyncIterator, Optional
 
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .config import Config
-from .phone import call_emacs
+from . import stream as ndjson
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("emacsos_server")
 
-app = FastAPI(title="emacsos-server", version="0.1.0")
+app = FastAPI(title="emacsos-server", version="0.2.0")
 config = Config.from_env()
 
 
@@ -42,55 +46,34 @@ class ChatRequest(BaseModel):
     phone: Optional[PhoneAuth] = None
 
 
-class ChatResponse(BaseModel):
-    text: str
-    side_effect: Optional[str] = None
-
-
 # --- assist Thread singleton (lazy, process-wide) ---
 
 # One Thread, one ongoing conversation, every /chat extends it.
-# Lazy construction: the server boots even when ASSIST_MODEL_URL
-# isn't yet pointed at a live endpoint; first /chat triggers it.
-# Lock-guarded so two concurrent first-requests don't double-construct.
-# On agent timeout (see `_run_turn`), this singleton is cleared so
-# the next /chat builds a fresh Thread — the stale agent thread
-# keeps running in the background but its result lands in an
-# orphaned Thread that nobody reads.  Loses conversation continuity
-# across timeouts; acceptable for v1 in exchange for not poisoning
-# the next conversation with a ghost-turn or queue contention
-# behind the still-running stale agent.  Design doc §3-4 + §9-10.
+# Lazy construction.  Reset on stream end / abort / error / runaway
+# so the next /chat builds fresh and doesn't queue behind a stale
+# in-flight agent thread.  Same shape as PR #6's _reset_thread()
+# pattern, just driven by more event types.
 _THREAD = None
 _THREAD_LOCK = threading.Lock()
 
-# Server-internal timeout for the agent turn (construction + call).
-# 30s under the chat.el client timeout of 300s (design doc §9) so the
-# server returns a clean error message before the client gives up.
-AGENT_TIMEOUT_SECONDS = 270
+# Heartbeat: emit a `heartbeat` event every N seconds of silence so
+# long tool runs don't look like a dead connection.  Spike showed
+# tool-call args stream as `tool_call_chunks` (no `content`) and
+# sub-agent execution is opaque from the top-level stream, so
+# silent periods between status events are routine on research-
+# shaped prompts.
+HEARTBEAT_SECONDS = 10.0
 
-# One worker is enough: assist's per-thread queue already serialises
-# LLM calls on the same thread id, and we only have one thread.
-# Workers > 1 would create contention without parallelism.
-#
-# Known limitation: `future.result(timeout=...)` unblocks the caller
-# on timeout, but the underlying Python thread keeps running until
-# the agent returns (Python threads aren't externally cancellable).
-# We reset `_THREAD = None` on timeout so the next request starts
-# on a fresh Thread; the stale agent thread keeps running and its
-# result lands in an orphaned Thread.  Process restart cleans up.
-_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="emacsos-agent")
+# Runaway backstop: reset the singleton after this many seconds
+# of the same stream so a truly-stuck agent doesn't pin the server
+# until process restart.  Far longer than any legitimate research
+# prompt; the user can always ABORT sooner.
+RUNAWAY_SECONDS = 30 * 60.0
 
 
 def _build_thread():
-    """Construct a fresh `assist.Thread`.  Raises whatever assist
-    raises during construction (e.g. model probe failure)."""
-    # Import inside so module import doesn't trigger assist's
-    # transitive imports during server startup.
     from assist.thread import Thread
-
     working_dir = tempfile.mkdtemp(prefix="emacsos-thread-")
-    # sandbox_backend=None (design doc §5); model=None lets Thread
-    # call select_chat_model itself which reads ASSIST_MODEL_URL.
     log.info("Constructing assist.Thread (working_dir=%s)", working_dir)
     t = Thread(working_dir=working_dir, sandbox_backend=None)
     log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
@@ -98,9 +81,6 @@ def _build_thread():
 
 
 def _get_thread():
-    """Return the singleton Thread, lazy-constructing under the lock.
-    Lock held only for the construction critical section; the actual
-    `.message()` call happens outside."""
     global _THREAD
     if _THREAD is not None:
         return _THREAD
@@ -112,9 +92,6 @@ def _get_thread():
 
 
 def _reset_thread():
-    """Drop the singleton reference.  Next `_get_thread()` constructs
-    fresh.  Used after timeouts so the next request doesn't queue
-    behind the stale agent or build on a ghost-turn."""
     global _THREAD
     with _THREAD_LOCK:
         if _THREAD is not None:
@@ -123,121 +100,113 @@ def _reset_thread():
             _THREAD = None
 
 
-def _run_turn(message: str) -> str:
-    """Construct (if needed) + run one agent turn under the inner
-    timeout.  The whole turn — construction probe AND `.message()`
-    — runs in the worker thread so a slow model probe also obeys
-    the timeout (otherwise lazy construction on the calling thread
-    could block past the client timeout)."""
-    def _do_turn():
-        return _get_thread().message(message)
-    future = _AGENT_EXECUTOR.submit(_do_turn)
-    return future.result(timeout=AGENT_TIMEOUT_SECONDS)
+def _start_stream_iter(message: str):
+    """Sync helper invoked via run_in_executor: get the singleton
+    Thread and start the stream_message iterator."""
+    return iter(_get_thread().stream_message(message))
 
 
-def _agent_text(message: str) -> str:
-    """Wrap `_run_turn` in the error-mapping table.  Returns the bot
-    text on success; on any exception returns a chat-recognisable
-    error string.  Design doc §10."""
+async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
+    """The async generator that drives one chat turn.  Bridges
+    assist's sync iterator via run_in_executor and polls
+    is_disconnected() between yields so client ABORT fires the
+    finally cleanly.  See design doc §4 for the cancellation chain."""
+    loop = asyncio.get_event_loop()
+    SENTINEL = object()
+    stream_id = uuid.uuid4().hex
+    full_text_parts: list[str] = []
+    seen_tool_ids: set[str] = set()
+    it = None
+    runaway_at = time.monotonic() + RUNAWAY_SECONDS
+
+    yield ndjson.event("start", stream_id=stream_id, ts=time.time())
+
     try:
-        return _run_turn(message)
-    except FutureTimeoutError:
-        log.warning("Agent timed out after %ds", AGENT_TIMEOUT_SECONDS)
-        # The stale agent keeps running in the worker; reset the
-        # singleton so the next request doesn't queue behind it or
-        # inherit the half-complete conversation turn.
-        _reset_thread()
-        return f"[error: agent timed out after {AGENT_TIMEOUT_SECONDS}s]"
-    except RuntimeError as e:
-        # select_chat_model raises RuntimeError for missing config
-        # AND for liveness/probe failures.  Narrow the explicit-
-        # config case to messages naming the env var.
-        msg = str(e)
-        if "ASSIST_MODEL_URL" in msg:
-            log.error("Agent config error: %s", e)
-            return f"[error: assist model not configured: {msg}]"
-        if "model" in msg.lower():
-            log.error("Agent model unavailable: %s", e)
-            return f"[error: assist model unavailable: {msg}]"
-        log.exception("Agent RuntimeError")
-        return f"[error: {msg}]"
-    except Exception as e:  # noqa: BLE001 — catch-all is intentional
-        log.exception("Agent call failed")
-        return f"[error: {type(e).__name__}: {e}]"
-
-
-def _escape_elisp_string(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def _flash_text(reply: str) -> str:
-    """Format `reply` for a one-line phone minibuffer flash.
-
-    Newlines collapse to spaces; the *reply portion* is capped at 60
-    chars (the `agent: ` prefix is always shown in full).  Total
-    flash is therefore up to ~67 chars — comfortable for the phone's
-    minibuffer.  Design doc §12."""
-    one_line = reply.replace("\n", " ").strip()
-    if len(one_line) > 60:
-        one_line = one_line[:57] + "..."
-    return f"agent: {one_line}"
-
-
-def _fire_back_channel(auth_contents: str, phone_host: str, flash: str) -> None:
-    """Background-task entry point: fire the post-response flash via
-    emacsclient.  Logged; never raises — failures here can't affect
-    the already-sent /chat response."""
-    expr = f"(message {_escape_elisp_string(flash)})"
-    ok, output = call_emacs(
-        auth_contents,
-        phone_host,
-        expr,
-        emacsclient=config.emacsclient,
-    )
-    if ok:
-        log.info("Back-channel flash delivered to %s", phone_host)
-    else:
-        log.warning("Back-channel emacsclient call failed: %s", output)
-
-
-# Sync (not async): the agent call blocks for tens of seconds.  A
-# sync handler lets FastAPI run us in its threadpool so we don't
-# stall the event loop for unrelated requests.
-#
-# Back-channel emacsclient call is a BackgroundTask so it fires
-# AFTER the response is sent — the phone's chat.el uses
-# url-retrieve-synchronously which blocks the phone's main loop
-# until our response lands; firing inline would deadlock.
-# Discovered in real-LAN testing 2026-05-17; the localhost smoke
-# slipped through because the timeout window was wider than the
-# fast-loop latency.
-@app.post("/chat", response_model=ChatResponse)
-def chat(
-    req: ChatRequest,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> ChatResponse:
-    log.info("POST /chat msg=%r", req.message)
-    text = _agent_text(req.message)
-    flash = _flash_text(text)
-
-    side_effect: Optional[str] = None
-    if req.phone is not None and request.client is not None:
-        phone_host = request.client.host
-        background_tasks.add_task(
-            _fire_back_channel,
-            req.phone.auth_file,
-            phone_host,
-            flash,
+        # Move singleton construction onto the executor so the
+        # async handler isn't blocked by it.  This is also the
+        # only place an ASSIST_MODEL_URL misconfig can raise.
+        it = await loop.run_in_executor(None, _start_stream_iter, message)
+        pending = None
+        while True:
+            if await request.is_disconnected():
+                log.info("Client disconnected; aborting stream %s", stream_id)
+                return
+            if time.monotonic() > runaway_at:
+                log.warning("Stream %s exceeded RUNAWAY_SECONDS=%s; aborting",
+                            stream_id, RUNAWAY_SECONDS)
+                yield ndjson.event(
+                    "error",
+                    reason=f"runaway: stream ran longer than {int(RUNAWAY_SECONDS)}s",
+                    after_tokens=sum(len(p) for p in full_text_parts),
+                )
+                return
+            if pending is None:
+                pending = asyncio.ensure_future(
+                    loop.run_in_executor(None, next, it, SENTINEL))
+            done, _ = await asyncio.wait([pending], timeout=HEARTBEAT_SECONDS)
+            if not done:
+                # Inner iter has produced nothing in HEARTBEAT_SECONDS;
+                # keep the pipe live and try again (don't cancel pending —
+                # next loop will re-await it).
+                yield ndjson.event("heartbeat", ts=time.time())
+                continue
+            chunk = await pending
+            pending = None
+            if chunk is SENTINEL:
+                break
+            ch_type, payload = chunk
+            if ch_type == "messages":
+                text = ndjson.extract_content_text(payload)
+                if text:
+                    full_text_parts.append(text)
+                    yield ndjson.event("token", text=text)
+                for tc_id, tc_name in ndjson.extract_new_tool_calls(payload):
+                    if tc_id not in seen_tool_ids:
+                        seen_tool_ids.add(tc_id)
+                        yield ndjson.event("status",
+                                           text=f"calling {tc_name}")
+            elif ch_type == "updates":
+                status = ndjson.render_update_to_status(payload)
+                if status:
+                    yield ndjson.event("status", text=status)
+            # else: other stream_mode kinds we don't subscribe to.
+        yield ndjson.event("end", text="".join(full_text_parts))
+    except Exception as e:
+        log.exception("stream %s failed", stream_id)
+        yield ndjson.event(
+            "error",
+            reason=ndjson.map_error(e),
+            after_tokens=sum(len(p) for p in full_text_parts),
         )
-        side_effect = f"scheduled back-channel for {phone_host}"
+    finally:
+        # Load-bearing: runs on natural exit, on disconnect-return,
+        # on runaway-return, AND on exception.  Drops the iterator
+        # so GC closes it (releasing THREAD_QUEUE via __exit__) and
+        # clears the singleton so the next /chat builds fresh.
+        if it is not None:
+            try:
+                it.close()
+            except ValueError:
+                # "generator already executing" — agent thread is
+                # still active on its worker.  GC will close once
+                # the agent yields/returns; nothing else to do.
+                pass
+            except Exception:
+                log.exception("error closing inner iterator")
+        _reset_thread()
 
-    return ChatResponse(text=text, side_effect=side_effect)
+
+@app.post("/chat")
+async def chat(req: ChatRequest, request: Request):
+    log.info("POST /chat msg=%r", req.message)
+    return StreamingResponse(
+        _stream_turn(req.message, request),
+        media_type="application/x-ndjson",
+    )
 
 
 def main() -> None:
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=config.port)
 
 

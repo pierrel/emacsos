@@ -1,16 +1,20 @@
 ;;; chat.el --- EmacsOS chat surface -*- lexical-binding: t -*-
 
-;; A CHAT page in the keyboard surface, a *chat* transcript buffer in
-;; the top window, and a synchronous POST to emacsos-server.  This is
-;; the user's primary channel to the agent that customizes the phone.
+;; A CHAT page in the keyboard surface, a *chat* transcript buffer
+;; in the top window, and a STREAMED POST to emacsos-server.  The
+;; phone's main loop is never blocked: the request runs through
+;; url-retrieve (async) with a process filter that drains NDJSON
+;; events as they arrive.  Tokens insert above the prompt as the
+;; agent produces them; the user can keep editing their next input
+;; in the prompt area throughout.  ABORT cancels the in-flight
+;; stream.
 ;;
-;; Loaded from os.el via (require 'chat).  The HTTP request shape
-;; matches server/emacsos_server/app.py: the server returns
-;; {text, side_effect}; we only render text (side_effect is the
-;; server's diagnostic, surfaced via its emacsclient back-channel).
+;; Loaded from os.el via (require 'chat).  Wire shape documented in
+;; emacsos/docs/2026-05-17-streaming-responses.org.
 
 (require 'json)
 (require 'url)
+(require 'url-http)
 
 ;;; Customization
 
@@ -24,32 +28,72 @@
 Sent verbatim to emacsos-server; the server substitutes the
 client's reachable IP for the 0.0.0.0 in the file.  Missing file
 is not fatal: SEND falls back to a no-`phone` request and the
-server echoes without firing its back-channel."
+server still runs the agent (the back-channel just can't fire)."
   :type 'file
   :group 'emacsos)
 
-(defcustom emacos-chat-timeout 300
-  "Seconds to wait for /chat before reporting an error.
-
-300s accommodates real assist agent runs (research, multi-step
-tools).  The server-side timeout is set 30s lower so a stalled
-agent surfaces as a clean `bot> [error: agent timed out …]'
-before the client gives up.  Bumped from 10s in the
-2026-05-17-assist-import experiment.  When streaming lands, drop
-this back down; the perceptual budget becomes \"time to first
-token\"."
+(defcustom emacos-chat-first-token-timeout 30
+  "Seconds to wait for the first stream event before reporting
+\"no response from server\".  Replaces the old sync-call total
+timeout (300s in the pre-streaming version).  No total-stream
+timeout exists by design — once the stream starts, the user owns
+the budget and can tap ABORT to cancel.  See design doc §6."
   :type 'integer
   :group 'emacsos)
 
-;;; State
+;;; State (per *chat* buffer)
 
 (defvar emacos--chat-in-flight nil
-  "Non-nil while a SEND is awaiting a response.  Re-entrancy guard.")
+  "Non-nil while a stream is open.  Re-entrancy guard for SEND.")
+
+(defvar emacos--chat-process nil
+  "The url-retrieve process backing the in-flight stream, or nil.
+Used by ABORT to delete-process.")
+
+(defvar emacos--chat-stream-insert-marker nil
+  "Buffer-local marker positioned just before the prompt at stream
+start.  Token events insert here.  Insertion-type t so it moves
+forward as tokens are inserted.")
+
+(defvar emacos--chat-status-start nil
+  "Buffer-local marker: left edge of the status bracket inside the
+in-progress bot line.  Insertion-type nil (anchored).")
+
+(defvar emacos--chat-status-end nil
+  "Buffer-local marker: right edge of the status bracket.
+Insertion-type t (moves forward as the bracket grows).")
+
+(defvar emacos--chat-byte-accumulator nil
+  "Process-filter scratch: raw bytes from the URL process not yet
+seen a newline.  Reset on each stream start.")
+
+(defvar emacos--chat-tokens-seen 0
+  "Count of `token` events received this stream.  Used by the
+first-token timer to decide whether to fire.")
+
+(defvar emacos--chat-last-event-time nil
+  "`float-time' of the most recent NDJSON event of any kind from
+this stream.  Used by the watchdog to distinguish \"still
+arriving\" from \"connection dead, no end event\".")
+
+(defvar emacos--chat-first-token-timer nil
+  "Timer that fires the no-response-from-server error if the
+first event doesn't arrive within `emacos-chat-first-token-timeout`.")
+
+(defvar emacos--chat-watchdog-timer nil
+  "Repeating timer that detects connection-closed-but-stream-not-
+cleaned-up.  Necessary because url-http kills its response buffer
+on close, sometimes before our filter has parsed the final chunk
+\(which may contain the end event).  Fires every 1s while a
+stream is in flight; on dead process, synthesizes end (if tokens
+were seen) or error (if not).")
 
 (defconst emacos--chat-prompt "\n> "
   "Marker between the transcript (read-only) and the editable input.")
 
 (defconst emacos--chat-buffer-name "*chat*")
+
+(defconst emacos--chat-bot-prefix "bot> ")
 
 ;;; Buffer + input region
 
@@ -62,7 +106,7 @@ token\"."
     buf))
 
 (defun emacos--chat-init-buffer (buf)
-  "Seed BUF with a read-only header and a fresh input prompt."
+  "Seed BUF with an empty read-only header and a fresh prompt."
   (with-current-buffer buf
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -70,18 +114,14 @@ token\"."
     (goto-char (point-max))))
 
 (defun emacos--chat-write-prompt ()
-  "Insert the prompt and mark everything before its tail read-only.
-Point is left after the prompt so the user can type."
+  "Insert the prompt and mark it read-only.  Point left after it."
   (let ((before (point)))
     (insert emacos--chat-prompt)
-    ;; Read-only covers everything up to and including the prompt.
-    ;; rear-nonsticky so text typed AFTER the prompt is editable.
     (add-text-properties before (point)
                          '(read-only t front-sticky t rear-nonsticky t))))
 
 (defun emacos--chat-input-start (buf)
-  "Position immediately after the last `emacos--chat-prompt' in BUF.
-nil if no prompt is present (buffer is uninitialized)."
+  "Position immediately after the last `emacos--chat-prompt' in BUF."
   (with-current-buffer buf
     (save-excursion
       (goto-char (point-max))
@@ -103,36 +143,214 @@ nil if no prompt is present (buffer is uninitialized)."
         (let ((inhibit-read-only t))
           (delete-region start (point-max)))))))
 
-(defun emacos--chat-append-line (buf line)
-  "Append LINE to BUF as a read-only entry, then re-write the prompt.
-Caller must have already cleared the editable input region."
-  (with-current-buffer buf
-    (let ((inhibit-read-only t))
-      (goto-char (point-max))
-      (let ((before (point)))
-        (insert "\n" line)
-        (add-text-properties before (point)
-                             '(read-only t front-sticky t rear-nonsticky t)))
-      (emacos--chat-write-prompt))
-    (goto-char (point-max))))
+;;; Stream handlers (called from the process filter, per NDJSON event)
 
-(defun emacos--chat-append-exchange (buf msg reply)
-  "Append a complete you/bot exchange to BUF."
-  (emacos--chat-clear-input buf)
-  (emacos--chat-append-line buf (concat "you> " msg))
-  (emacos--chat-append-line buf (concat "bot> " reply)))
+(defun emacos--chat-handle-start (_event)
+  "Open a new bot line in the *chat* buffer.  Sets up the three
+markers (insert / status-start / status-end) used by subsequent
+event handlers."
+  (let ((buf (emacos--chat-buffer)))
+    (with-current-buffer buf
+      ;; Clear any stale per-stream first-token timer.
+      (when (timerp emacos--chat-first-token-timer)
+        (cancel-timer emacos--chat-first-token-timer)
+        (setq emacos--chat-first-token-timer nil))
+      ;; Insert "\nbot> " above the prompt, anchored by markers.
+      (let* ((input-start (emacos--chat-input-start buf))
+             (prompt-start (when input-start
+                             (- input-start (length emacos--chat-prompt)))))
+        (when prompt-start
+          (let ((inhibit-read-only t))
+            (save-excursion
+              (goto-char prompt-start)
+              ;; Insert "\nbot> " at the prompt's position.  The
+              ;; existing prompt and input get pushed down.
+              (let ((line-start (point)))
+                (insert "\n" emacos--chat-bot-prefix)
+                ;; Insert marker sits just after "bot> " — that's where
+                ;; tokens and status both insert.  Marker insertion-type
+                ;; t so it moves forward as content is added.
+                (setq emacos--chat-stream-insert-marker
+                      (copy-marker (point) t))
+                ;; Status markers also sit here for now; status events
+                ;; insert "[ ... ] " between them, and tokens insert
+                ;; after status-end.
+                (setq emacos--chat-status-start
+                      (copy-marker (point) nil))
+                (setq emacos--chat-status-end
+                      (copy-marker (point) t))
+                ;; The "\nbot> " text we just inserted needs read-only
+                ;; props applied (the per-token insertion path applies
+                ;; props to each token).
+                (add-text-properties line-start (point)
+                                     '(read-only t front-sticky t rear-nonsticky t))))))))))
 
-(defun emacos--chat-append-error (buf msg reason)
-  "Append a you-line + bot-error to BUF."
-  (emacos--chat-clear-input buf)
-  (emacos--chat-append-line buf (concat "you> " msg))
-  (emacos--chat-append-line buf (concat "bot> [error: " reason "]")))
+(defun emacos--chat-clear-status-bracket ()
+  "Delete the status bracket between `status-start' and `status-end'.
+Caller must `inhibit-read-only`."
+  (when (and (markerp emacos--chat-status-start)
+             (markerp emacos--chat-status-end)
+             (< emacos--chat-status-start emacos--chat-status-end))
+    (delete-region emacos--chat-status-start emacos--chat-status-end)
+    ;; Both markers collapse onto the same position now.
+    (set-marker emacos--chat-status-end emacos--chat-status-start)))
 
-;;; HTTP
+(defun emacos--chat-handle-status (event)
+  "Replace the status bracket with `[<event.text>] '."
+  (let ((text (plist-get event :text))
+        (buf (get-buffer emacos--chat-buffer-name)))
+    (when (and text buf (buffer-live-p buf)
+               (markerp emacos--chat-status-start))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (emacos--chat-clear-status-bracket)
+            (goto-char emacos--chat-status-end)
+            (let ((before (point)))
+              (insert "[" text "] ")
+              (add-text-properties before (point)
+                                   '(read-only t front-sticky t rear-nonsticky t))
+              (set-marker emacos--chat-status-end (point)))))))))
+
+(defun emacos--chat-handle-token (event)
+  "Append the token text after `status-end'.  First token also
+clears any lingering status bracket (the agent is now talking, not
+working silently)."
+  (let ((text (plist-get event :text))
+        (buf (get-buffer emacos--chat-buffer-name)))
+    (when (and text buf (buffer-live-p buf)
+               (markerp emacos--chat-stream-insert-marker))
+      (with-current-buffer buf
+        (cl-incf emacos--chat-tokens-seen)
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (when (= emacos--chat-tokens-seen 1)
+              (emacos--chat-clear-status-bracket))
+            (goto-char emacos--chat-stream-insert-marker)
+            (let ((before (point)))
+              (insert text)
+              (add-text-properties before (point)
+                                   '(read-only t front-sticky t rear-nonsticky t))
+              (set-marker emacos--chat-stream-insert-marker (point)))))))))
+
+(defun emacos--chat-handle-heartbeat (_event)
+  "Heartbeat is purely transport-level — no UI change."
+  nil)
+
+(defun emacos--chat-handle-end (_event)
+  "Stream complete.  Clear status, release the in-flight lock,
+release markers, re-render the page so CLEAR returns."
+  (let ((buf (get-buffer emacos--chat-buffer-name)))
+    (when (and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (emacos--chat-clear-status-bracket))))
+    (emacos--chat-stream-cleanup)))
+
+(defun emacos--chat-handle-error (event)
+  "Render `[error: <reason>]' on the bot line and clean up.
+If start has already run (markers present), insert at the marker.
+Otherwise (error before any server response), synthesize a fresh
+`\\nbot> [error: ...]' above the prompt so the user sees something."
+  (let ((reason (or (plist-get event :reason) "unknown"))
+        (buf (get-buffer emacos--chat-buffer-name)))
+    (when (and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (cond
+             ;; Stream had a start: append to existing bot line.
+             ((markerp emacos--chat-stream-insert-marker)
+              (emacos--chat-clear-status-bracket)
+              (goto-char emacos--chat-stream-insert-marker)
+              (let ((before (point)))
+                (insert "[error: " reason "]")
+                (add-text-properties before (point)
+                                     '(read-only t front-sticky t rear-nonsticky t))))
+             ;; Error before any server response: render a fresh
+             ;; bot line above the prompt directly.
+             (t
+              (let* ((input-start (emacos--chat-input-start buf))
+                     (prompt-start (when input-start
+                                     (- input-start (length emacos--chat-prompt)))))
+                (when prompt-start
+                  (goto-char prompt-start)
+                  (let ((before (point)))
+                    (insert "\n" emacos--chat-bot-prefix "[error: " reason "]")
+                    (add-text-properties
+                     before (point)
+                     '(read-only t front-sticky t rear-nonsticky t)))))))))))
+    (emacos--chat-stream-cleanup)))
+
+(defun emacos--chat-stream-cleanup ()
+  "Tear down per-stream state.  Idempotent: safe to call from any
+of the terminal handlers (end, error, abort, watchdog)."
+  (dolist (sym '(emacos--chat-first-token-timer
+                 emacos--chat-watchdog-timer))
+    (let ((tm (symbol-value sym)))
+      (when (timerp tm) (cancel-timer tm)))
+    (set sym nil))
+  (dolist (sym '(emacos--chat-stream-insert-marker
+                 emacos--chat-status-start
+                 emacos--chat-status-end))
+    (let ((m (symbol-value sym)))
+      (when (markerp m) (set-marker m nil)))
+    (set sym nil))
+  (setq emacos--chat-byte-accumulator nil
+        emacos--chat-tokens-seen 0
+        emacos--chat-last-event-time nil
+        emacos--chat-in-flight nil
+        emacos--chat-process nil)
+  ;; Re-render the keyboard page so CLEAR returns + ABORT goes away.
+  (when (fboundp 'emacos--render-page)
+    (emacos--render-page)))
+
+(defconst emacos--chat-watchdog-quiet-secs 5.0
+  "Watchdog grace window — see `emacos--chat-watchdog-tick'.")
+
+(defun emacos--chat-watchdog-tick ()
+  "Detect connection-closed-but-stream-not-cleaned-up.
+
+Known v1 limitation: url-http sometimes kills its response buffer
+before our filter has drained the chunk containing the end event,
+or url-http swaps sentinels mid-stream so our hook is detached.
+Either way, `emacos--chat-in-flight' can stay t after the stream
+naturally ends, leaving the UI stuck on ABORT.  This timer
+notices.  The 5-second grace window after the last NDJSON event
+is generous enough that fast-streaming runs always finish
+gracefully via the real end event, and slow / no-end runs get
+synthesized cleanup within ~5s of the real connection close."
+  (when (and emacos--chat-in-flight
+             (or (not (processp emacos--chat-process))
+                 (not (process-live-p emacos--chat-process))))
+    (when (and (processp emacos--chat-process)
+               (buffer-live-p (process-buffer emacos--chat-process)))
+      (with-current-buffer (process-buffer emacos--chat-process)
+        (when (and (boundp 'url-http-end-of-headers)
+                   url-http-end-of-headers)
+          (emacos--chat-drain-body))))
+    (let ((quiet-for (if emacos--chat-last-event-time
+                         (- (float-time) emacos--chat-last-event-time)
+                       0.0)))
+      (when (>= quiet-for emacos--chat-watchdog-quiet-secs)
+        (if (> emacos--chat-tokens-seen 0)
+            (emacos--chat-handle-end nil)
+          (emacos--chat-handle-error
+           (list :type "error"
+                 :reason "connection closed without end event")))))))
+
+(defconst emacos--chat-event-handlers
+  '(("start"     . emacos--chat-handle-start)
+    ("token"     . emacos--chat-handle-token)
+    ("status"    . emacos--chat-handle-status)
+    ("end"       . emacos--chat-handle-end)
+    ("error"     . emacos--chat-handle-error)
+    ("heartbeat" . emacos--chat-handle-heartbeat)))
+
+;;; HTTP request encoding
 
 (defun emacos--chat-read-auth-file ()
-  "Return the auth file contents as a string, or nil if missing.
-Read literally so secret bytes survive round-tripping unchanged."
+  "Return the auth file contents as a string, or nil if missing."
   (when (file-readable-p emacos-chat-auth-file)
     (with-temp-buffer
       (let ((coding-system-for-read 'no-conversion))
@@ -140,8 +358,7 @@ Read literally so secret bytes survive round-tripping unchanged."
       (buffer-string))))
 
 (defun emacos--chat-encode-request (msg auth)
-  "Encode {message, phone:{auth_file}} as UTF-8 bytes.
-If AUTH is nil, omit the phone key entirely (server still echoes)."
+  "Encode {message, phone:{auth_file}} as UTF-8 bytes."
   (let* ((payload (if auth
                       (list :message msg :phone (list :auth_file auth))
                     (list :message msg)))
@@ -149,101 +366,227 @@ If AUTH is nil, omit the phone key entirely (server still echoes)."
          (body (json-encode payload)))
     (encode-coding-string body 'utf-8)))
 
-(defun emacos--chat-parse-response ()
-  "Parse JSON body in current buffer (assumed positioned past headers).
-Return the text field as a string, or signal an error."
-  (let* ((parsed (condition-case _
-                     (json-parse-buffer :object-type 'plist :null-object nil)
-                   (error (error "malformed response"))))
-         (text (plist-get parsed :text)))
-    (unless (stringp text)
-      (error "no text field"))
-    text))
+;;; Process filter (NDJSON parser)
 
-(defun emacos--chat-post (msg auth)
-  "POST MSG (+ AUTH if non-nil) to `emacos-chat-server-url'.
-Return the bot text on success; signal an error on any failure."
-  (let* ((url-request-method "POST")
-         (url-request-extra-headers
-          '(("Content-Type" . "application/json; charset=utf-8")))
-         (url-request-data (emacos--chat-encode-request msg auth))
-         (buf (condition-case err
-                  (url-retrieve-synchronously
-                   emacos-chat-server-url t t emacos-chat-timeout)
-                (error (error "%s" (error-message-string err))))))
-    (unless buf
-      (error "timeout after %ds" emacos-chat-timeout))
-    (unwind-protect
+(defun emacos--chat-make-filter (url-filter)
+  "Build a wrapping process-filter that calls URL-FILTER first
+\(so url-http's state machine processes headers + appends to the
+response buffer) then drains any new body bytes through our NDJSON
+parser.  Captures URL-FILTER in a closure rather than calling
+`url-http-generic-filter' directly, because url-http installs
+several different filter functions depending on the request mode
+\(generic, chunked, content-length); whichever was installed at
+url-retrieve time is what we must preserve."
+  (lambda (proc bytes)
+    (when (functionp url-filter)
+      (funcall url-filter proc bytes))
+    (let ((buf (process-buffer proc)))
+      (when (and buf (buffer-live-p buf))
         (with-current-buffer buf
-          (goto-char (point-min))
-          ;; Status line: HTTP/1.1 200 OK
-          (unless (looking-at "HTTP/[0-9.]+ \\([0-9]+\\)")
-            (error "no status line"))
-          (let ((code (string-to-number (match-string 1))))
-            (unless (and (>= code 200) (< code 300))
-              (error "HTTP %d" code)))
-          ;; Skip past headers.  url-retrieve-synchronously normally
-          ;; sets url-http-end-of-headers; use that when present.
-          ;; Fall back to a CRLF-tolerant search for the blank line.
-          (if (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
-              (goto-char url-http-end-of-headers)
-            (unless (re-search-forward "\r?\n\r?\n" nil t)
-              (error "no header terminator")))
-          (emacos--chat-parse-response))
-      (kill-buffer buf))))
+          (when (and (boundp 'url-http-end-of-headers)
+                     url-http-end-of-headers)
+            (emacos--chat-drain-body)))))))
 
-;;; SEND / CLEAR
+;; Note: we used to wrap the process-sentinel for client-side
+;; connection-lost detection, but url-http SWAPS its sentinel as the
+;; connection state evolves (idle → async → end-of-document → ...).
+;; A wrap captured at install time shadows later sentinels with
+;; whichever one we caught first — request never gets written.
+;; Cleanup paths today: stream events (server emits start/end/error)
+;; or the first-token timeout.  Connection-lost-without-event is
+;; therefore detected via the timeout, not the sentinel.
+
+(defun emacos--chat-drain-body ()
+  "Called inside the url process buffer with point/headers parsed.
+Reads everything after `url-http-end-of-headers' that we haven't
+seen yet, splits on \\n, dispatches each JSON line.  Idempotent —
+tracks how much body has already been processed via a buffer-local
+marker.  The marker has insertion-type nil (stationary on insert)
+so it stays at the read/unread boundary as the URL filter
+continues appending bytes after it."
+  (defvar emacos--chat-body-read-marker)
+  (unless (and (local-variable-p 'emacos--chat-body-read-marker)
+               (markerp emacos--chat-body-read-marker))
+    ;; url-http-end-of-headers is a marker pointing at the first
+    ;; byte of the body (right after the \r\n\r\n separator).
+    ;; Position our read-cursor there; nil insertion-type so url's
+    ;; filter inserts BEYOND us rather than pushing us forward.
+    (setq-local emacos--chat-body-read-marker
+                (copy-marker (marker-position url-http-end-of-headers)
+                             nil)))
+  (let ((from (marker-position emacos--chat-body-read-marker))
+        (to (point-max)))
+    (when (< from to)
+      (let* ((raw (buffer-substring-no-properties from to))
+             (last-nl (cl-position ?\n raw :from-end t)))
+        (when last-nl
+          (let ((complete (substring raw 0 (1+ last-nl))))
+            (set-marker emacos--chat-body-read-marker
+                        (+ from (length complete)))
+            (dolist (line (split-string complete "\n" t))
+              (emacos--chat-dispatch-line line))))))))
+
+(defun emacos--chat-dispatch-line (line)
+  "Parse one NDJSON line as a JSON object, dispatch to handler."
+  (let ((event (condition-case _
+                   (json-parse-string line
+                                      :object-type 'plist
+                                      :null-object nil
+                                      :array-type 'list)
+                 (error nil))))
+    (when (and event (listp event))
+      (setq emacos--chat-last-event-time (float-time))
+      (let* ((etype (plist-get event :type))
+             (handler (cdr (assoc etype emacos--chat-event-handlers))))
+        (when handler
+          (condition-case err
+              (funcall handler event)
+            (error
+             (message "chat: handler %s failed: %s" etype err))))))))
+
+(defun emacos--chat-sentinel (proc event)
+  "Cleanup when the URL process changes state.  Mirrors the
+end/error handlers so a connection-lost (without an `error` event)
+still releases the in-flight lock."
+  (when (memq (process-status proc) '(exit signal closed failed))
+    (when emacos--chat-in-flight
+      ;; If we got here without an `end` or `error` event, render a
+      ;; client-side connection-lost message.
+      (let ((buf (get-buffer emacos--chat-buffer-name)))
+        (when (and buf (buffer-live-p buf)
+                   (markerp emacos--chat-stream-insert-marker))
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (save-excursion
+                (emacos--chat-clear-status-bracket)
+                (goto-char emacos--chat-stream-insert-marker)
+                (let ((before (point)))
+                  (insert "[error: connection " (symbol-name (process-status proc)) "]")
+                  (add-text-properties before (point)
+                                       '(read-only t front-sticky t rear-nonsticky t))))))))
+      (emacos--chat-stream-cleanup))))
+
+;;; SEND / CLEAR / ABORT
 
 (defun emacos--chat-send ()
-  "Send the current input region to the server and render the exchange.
-No-op if a prior SEND is still in flight or the input is empty."
+  "Open a streaming request to /chat with the current input."
   (interactive)
   (if emacos--chat-in-flight
-      (message "chat: request in flight")
+      (message "chat: stream in flight; tap ABORT to cancel")
     (let* ((buf (emacos--chat-buffer))
            (msg (emacos--chat-current-input buf)))
       (when (and msg (not (string-empty-p msg)))
-        (setq emacos--chat-in-flight t)
-        (unwind-protect
-            (condition-case err
-                (let* ((auth (emacos--chat-read-auth-file))
-                       (reply (emacos--chat-post msg auth)))
-                  (when (buffer-live-p buf)
-                    (emacos--chat-append-exchange buf msg reply)))
-              (error
-               (when (buffer-live-p buf)
-                 (emacos--chat-append-error
-                  buf msg (error-message-string err)))))
-          (setq emacos--chat-in-flight nil))))))
+        (setq emacos--chat-in-flight t
+              emacos--chat-tokens-seen 0
+              emacos--chat-byte-accumulator nil)
+        ;; Render the you> line + clear input region right away;
+        ;; the bot line is created by the start handler.
+        (let ((inhibit-read-only t))
+          (with-current-buffer buf
+            (emacos--chat-clear-input buf)
+            (let* ((input-start (emacos--chat-input-start buf))
+                   (prompt-start (when input-start
+                                   (- input-start (length emacos--chat-prompt)))))
+              (when prompt-start
+                (save-excursion
+                  (goto-char prompt-start)
+                  (let ((before (point)))
+                    (insert "\nyou> " msg)
+                    (add-text-properties before (point)
+                                         '(read-only t front-sticky t rear-nonsticky t))))))))
+        ;; First-token watchdog.  Fires once if no event lands
+        ;; within the configured timeout AND we're still in flight.
+        (setq emacos--chat-first-token-timer
+              (run-with-timer
+               emacos-chat-first-token-timeout nil
+               (lambda ()
+                 (when (and emacos--chat-in-flight
+                            (= emacos--chat-tokens-seen 0))
+                   (emacos--chat-handle-error
+                    (list :type "error"
+                          :reason
+                          (format "no response from server after %ds"
+                                  emacos-chat-first-token-timeout)))))))
+        ;; Connection-close watchdog.  Polls every 1s; only fires
+        ;; end/error when the process is dead AND at least
+        ;; `emacos--chat-watchdog-quiet-secs' have passed since the
+        ;; last NDJSON event (lets the filter drain the final chunk).
+        (setq emacos--chat-last-event-time (float-time))
+        (setq emacos--chat-watchdog-timer
+              (run-with-timer 1 1 #'emacos--chat-watchdog-tick))
+        ;; Fire the request.  `url-retrieve` returns a BUFFER (not a
+        ;; process); the process is `get-buffer-process` on it.
+        (condition-case err
+            (let* ((auth (emacos--chat-read-auth-file))
+                   (url-request-method "POST")
+                   (url-request-extra-headers
+                    '(("Content-Type" . "application/json; charset=utf-8")))
+                   (url-request-data (emacos--chat-encode-request msg auth))
+                   (response-buf (url-retrieve emacos-chat-server-url
+                                               #'ignore nil t t))
+                   (proc (and (buffer-live-p response-buf)
+                              (get-buffer-process response-buf))))
+              (unless proc
+                (error "url-retrieve returned no live process for %s"
+                       emacos-chat-server-url))
+              (setq emacos--chat-process proc)
+              ;; Wrap (don't replace) url-http's filter.  Capture the
+              ;; CURRENT filter; url-http installs the right one before
+              ;; url-retrieve returns and doesn't swap it mid-stream.
+              ;;
+              ;; We intentionally do NOT wrap the sentinel: url-http
+              ;; SWAPS the sentinel as the connection state evolves
+              ;; (idle → async → end-of-document → ...), and any wrap
+              ;; captured at this moment would shadow later sentinels
+              ;; with whichever one we caught first.  Cleanup happens
+              ;; via stream events (server always emits start/end/error)
+              ;; or via the first-token timeout when nothing arrives.
+              (set-process-filter
+               proc (emacos--chat-make-filter (process-filter proc)))
+              ;; Re-render the keyboard page so CLEAR -> ABORT.
+              (when (fboundp 'emacos--render-page)
+                (emacos--render-page)))
+          (error
+           (emacos--chat-handle-error
+            (list :type "error"
+                  :reason (format "url-retrieve failed: %s"
+                                  (error-message-string err))))))))))
 
 (defun emacos--chat-clear ()
-  "Reset the transcript to an empty prompt.  Refuses while in flight."
+  "Reset the transcript to an empty prompt.  Refuses while in flight
+\(tap ABORT first if you want to stop a stream)."
   (interactive)
   (if emacos--chat-in-flight
-      (message "chat: request in flight")
+      (message "chat: stream in flight; tap ABORT to cancel")
     (emacos--chat-init-buffer (emacos--chat-buffer))))
+
+(defun emacos--chat-abort ()
+  "Cancel the in-flight stream.  Closes the URL process; the
+sentinel fires and renders `[error: connection ...]'."
+  (interactive)
+  (when (and emacos--chat-in-flight
+             (processp emacos--chat-process)
+             (process-live-p emacos--chat-process))
+    (delete-process emacos--chat-process)))
 
 ;;; Page integration
 
 (defun emacos--render-chat-page ()
-  "Render the chat-page controls into the *keyboard* buffer.
-Big SEND (1.75x scale), smaller CLEAR.  The :height face attribute
-on the SEND button scales the displayed character width too, so
-the button-width arg has to be DIVIDED by the scale factor — same
-pattern as the T9 letter buttons in `emacos--render-keyboard-page'.
-A naive `send-w = win-w` would produce a button ~1.75x the window
-width and overflow horizontally."
+  "Render the chat-page controls.  Big SEND, smaller second button
+\(CLEAR when idle, ABORT when a stream is in flight)."
   (let* ((win      (get-buffer-window (current-buffer)))
          (win-w    (if win (window-body-width win) 20))
          (scale    1.75)
-         ;; Divide by scale so the rendered button fits the window.
          (send-w   (max 1 (floor (/ win-w scale))))
          (clear-w  (floor (/ win-w 2))))
     (emacos--btn (emacos--center "SEND" send-w)
                  #'emacos--chat-send nil scale)
     (insert "\n")
-    (emacos--btn (emacos--center "CLEAR" clear-w)
-                 #'emacos--chat-clear)
+    (if emacos--chat-in-flight
+        (emacos--btn (emacos--center "ABORT" clear-w)
+                     #'emacos--chat-abort)
+      (emacos--btn (emacos--center "CLEAR" clear-w)
+                   #'emacos--chat-clear))
     (insert "\n")))
 
 (defun emacos--chat-show-top-buffer ()
