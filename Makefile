@@ -71,23 +71,22 @@ start-server:
 SERVER_VENV := server/.venv
 SERVER_STAMP := $(SERVER_VENV)/.installed
 
-# Assist's pyproject.toml only declares its build-time deps; its
-# Python runtime deps (langchain, langgraph, deepagents, openai,
-# docker, ...) live in `assist/requirements.txt` and aren't pulled
-# transitively by `pip install assist`.  Until assist's pyproject is
-# fixed (TODO upstream), install assist's requirements.txt alongside
-# emacsos's.  Override the location with `ASSIST_REPO_DIR=/path/to/assist`
-# if your checkout isn't at the default sibling path.
+# Install assist editably with its requirements.txt as a pip constraints
+# file: assist declares its runtime deps in pyproject.toml, and the
+# constraints file pins the versions of those deps (and their transitive
+# closure) without pulling in assist's dev tooling (pytest, ipython,
+# pylint, flake8 etc).  Override the location with
+# `ASSIST_REPO_DIR=/path/to/assist` if your checkout isn't at the default
+# sibling path.
 ASSIST_REPO_DIR ?= $(CURDIR)/../assist
 
-# Stamp depends on assist's pyproject.toml too so a build-deps bump
-# upstream triggers a re-install (without it, `pip install -e` would
-# silently reuse a stale wheel cache against the new pyproject).
+# Stamp depends on assist's pyproject.toml + requirements.txt so a
+# dep bump upstream triggers a re-install (without it, `pip install -e`
+# would silently reuse a stale wheel cache against the new pyproject).
 $(SERVER_STAMP): server/requirements.txt $(ASSIST_REPO_DIR)/requirements.txt $(ASSIST_REPO_DIR)/pyproject.toml
 	python3 -m venv $(SERVER_VENV)
 	$(SERVER_VENV)/bin/python -m pip install --upgrade pip
-	$(SERVER_VENV)/bin/python -m pip install -r $(ASSIST_REPO_DIR)/requirements.txt
-	$(SERVER_VENV)/bin/python -m pip install -e $(ASSIST_REPO_DIR)
+	$(SERVER_VENV)/bin/python -m pip install -e $(ASSIST_REPO_DIR) -c $(ASSIST_REPO_DIR)/requirements.txt
 	$(SERVER_VENV)/bin/python -m pip install -r server/requirements.txt
 	touch $@
 
