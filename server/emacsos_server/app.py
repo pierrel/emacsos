@@ -103,12 +103,20 @@ def _build_thread(phone_ctx: PhoneContext):
     # `select_chat_model` itself, which reads ASSIST_MODEL_URL.
     log.info("Constructing assist.Thread (working_dir=%s) for %s",
              working_dir, phone_ctx.phone_host)
-    t = Thread(
-        working_dir=working_dir,
-        sandbox_backend=None,
-        extra_tools=EMACS_TOOLS,
-        extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
-    )
+    try:
+        t = Thread(
+            working_dir=working_dir,
+            sandbox_backend=None,
+            extra_tools=EMACS_TOOLS,
+            extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
+        )
+    except BaseException:
+        # If Thread construction raises (eg. ASSIST_MODEL_URL misconfig
+        # or model probe failure), the caller never gets the
+        # working_dir to clean up — so rmtree it here before re-raising.
+        # Without this, every failing /chat would leak a tempdir.
+        shutil.rmtree(working_dir, ignore_errors=True)
+        raise
     log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
     return t, working_dir
 

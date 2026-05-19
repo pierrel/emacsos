@@ -290,3 +290,38 @@ def test_working_dir_is_cleaned_up_after_stream(client, tmp_path):
             _collect_events(r)
 
     assert not wd.exists(), f"working_dir leaked: {wd}"
+
+
+def test_build_thread_cleans_working_dir_on_construction_failure(tmp_path, monkeypatch):
+    """If `Thread(...)` raises (eg. ASSIST_MODEL_URL misconfig), the
+    working_dir is leaked because the caller never gets a handle to
+    rmtree it.  `_build_thread` must rmtree on failure before
+    re-raising (Copilot round 3 caught this)."""
+    import emacsos_server.app as app_mod
+    from emacsos_server.channel import PhoneContext
+
+    captured = {}
+
+    def fake_mkdtemp(prefix):
+        path = tmp_path / f"{prefix}xyz"
+        path.mkdir()
+        captured["path"] = path
+        return str(path)
+
+    monkeypatch.setattr(app_mod.tempfile, "mkdtemp", fake_mkdtemp)
+
+    class _BoomThread:
+        def __init__(self, **_kw):
+            raise RuntimeError("ASSIST_MODEL_URL not set")
+
+    # Patch Thread import in app_mod by replacing assist.thread.Thread.
+    import assist.thread as assist_thread_mod
+    monkeypatch.setattr(assist_thread_mod, "Thread", _BoomThread)
+
+    ctx = PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.1")
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="ASSIST_MODEL_URL"):
+        app_mod._build_thread(ctx)
+
+    assert not captured["path"].exists(), \
+        f"working_dir leaked on Thread construction failure: {captured['path']}"
