@@ -453,22 +453,27 @@ continues appending bytes after it."
               (emacos--chat-dispatch-line line))))))))
 
 (defun emacos--chat-dispatch-line (line)
-  "Parse one NDJSON line as a JSON object, dispatch to handler."
-  (let ((event (condition-case _
-                   (json-parse-string line
-                                      :object-type 'plist
-                                      :null-object nil
-                                      :array-type 'list)
-                 (error nil))))
-    (when (and event (listp event))
-      (setq emacos--chat-last-event-time (float-time))
-      (let* ((etype (plist-get event :type))
-             (handler (cdr (assoc etype emacos--chat-event-handlers))))
-        (when handler
-          (condition-case err
-              (funcall handler event)
-            (error
-             (message "chat: handler %s failed: %s" etype err))))))))
+  "Parse one NDJSON line as a JSON object, dispatch to handler.
+Silently drops events that arrive after `emacos--chat-in-flight'
+has cleared (eg. url-http drains buffered bytes after ABORT
+deletes the process) so a late `start' can't resurrect bot
+markers/lines after the UI has been cleaned up."
+  (when emacos--chat-in-flight
+    (let ((event (condition-case _
+                     (json-parse-string line
+                                        :object-type 'plist
+                                        :null-object nil
+                                        :array-type 'list)
+                   (error nil))))
+      (when (and event (listp event))
+        (setq emacos--chat-last-event-time (float-time))
+        (let* ((etype (plist-get event :type))
+               (handler (cdr (assoc etype emacos--chat-event-handlers))))
+          (when handler
+            (condition-case err
+                (funcall handler event)
+              (error
+               (message "chat: handler %s failed: %s" etype err)))))))))
 
 ;; Note: no process-sentinel installed.  url-http swaps sentinels
 ;; mid-stream as its state machine progresses (idle → async →

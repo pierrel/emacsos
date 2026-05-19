@@ -121,7 +121,7 @@ its events (=start=, =token=, =status=, =heartbeat=, =end=,
 =error=) into an NDJSON stream.  Long research-shaped questions
 that the previous sync design's 270s timeout couldn't accommodate
 now run as long as the user lets them — they show status updates
-\(e.g. ="calling task"=) until the agent emits content tokens,
+(e.g. ="calling task"=) until the agent emits content tokens,
 then the bot reply streams into =*chat*= word by word.
 
 User-tunable from =chat.el=:

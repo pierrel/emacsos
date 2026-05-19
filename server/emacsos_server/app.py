@@ -275,7 +275,10 @@ async def chat(req: ChatRequest, request: Request):
     log.info("POST /chat msg=%r", req.message)
     return StreamingResponse(
         _stream_turn(req.message, request),
-        media_type="application/x-ndjson",
+        # Explicit charset so emacs url-http (and any other client that
+        # defaults differently) decodes our UTF-8-encoded NDJSON
+        # correctly; non-ASCII tokens otherwise risk mojibake.
+        media_type="application/x-ndjson; charset=utf-8",
     )
 
 

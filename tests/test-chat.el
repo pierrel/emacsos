@@ -180,6 +180,7 @@ the next status's clear-bracket would wipe out streamed tokens."
 (ert-deftest chat-test-dispatch-line-routes-by-type ()
   "Parse one NDJSON line; the correct handler should fire."
   (chat-test--reset)
+  (setq emacos--chat-in-flight t)
   (let ((seen nil))
     (cl-letf (((symbol-function 'emacos--chat-handle-token)
                (lambda (event) (setq seen event))))
@@ -189,6 +190,7 @@ the next status's clear-bracket would wipe out streamed tokens."
 
 (ert-deftest chat-test-dispatch-line-ignores-malformed-json ()
   (chat-test--reset)
+  (setq emacos--chat-in-flight t)
   (let ((called nil))
     (cl-letf (((symbol-function 'emacos--chat-handle-token)
                (lambda (_) (setq called t))))
@@ -198,8 +200,19 @@ the next status's clear-bracket would wipe out streamed tokens."
 
 (ert-deftest chat-test-dispatch-line-ignores-unknown-type ()
   (chat-test--reset)
+  (setq emacos--chat-in-flight t)
   ;; Unknown type => no handler => no error.
   (emacos--chat-dispatch-line "{\"type\":\"unknown_kind\",\"x\":1}"))
+
+(ert-deftest chat-test-dispatch-line-drops-events-when-not-in-flight ()
+  "Late bytes (eg. url-http drained after ABORT) must not be dispatched."
+  (chat-test--reset)
+  (setq emacos--chat-in-flight nil)
+  (let ((called nil))
+    (cl-letf (((symbol-function 'emacos--chat-handle-token)
+               (lambda (_) (setq called t))))
+      (emacos--chat-dispatch-line "{\"type\":\"token\",\"text\":\"hi\"}")
+      (should-not called))))
 
 ;;; Request encoding (wire shape contract)
 
