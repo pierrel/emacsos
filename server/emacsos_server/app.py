@@ -145,6 +145,16 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             phone_host=request.client.host,
         )
 
+    # Fail fast on malformed requests BEFORE acquiring the lock —
+    # a missing phone-context is purely a request-shape problem and
+    # has no business queuing behind an in-flight stream.
+    if phone_ctx is None:
+        yield ndjson.event(
+            "error",
+            reason="missing phone context: request lacks phone.auth_file or client host",
+        )
+        return
+
     # Single-flight: serialize the body of the stream so two /chat
     # coroutines don't run the model in parallel.  Acquire BEFORE the
     # try so the corresponding release in finally always pairs cleanly;
@@ -157,15 +167,6 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # we've even started.  Inside the try so the finally is the
         # exclusive release path.
         runaway_at = time.monotonic() + RUNAWAY_SECONDS
-        if phone_ctx is None:
-            # Channel cannot be invoked from this request (no phone auth
-            # or unknown client host); fail fast rather than starting an
-            # agent that might call eval_elisp and get nowhere.
-            yield ndjson.event(
-                "error",
-                reason="missing phone context: request lacks phone.auth_file or client host",
-            )
-            return
         # Move Thread construction onto the executor so the async
         # handler isn't blocked by it.  This is also the only place an
         # ASSIST_MODEL_URL misconfig can raise.

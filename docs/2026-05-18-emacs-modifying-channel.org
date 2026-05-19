@@ -49,6 +49,26 @@ Post-code-review revisions (2026-05-19):
 
 * Decisions
 
+#+begin_quote
+*Heads-up: this section is the original first-draft plan, pre-revision.*
+
+The "Design-review revisions" and "Post-code-review revisions"
+sections above supersede these decisions where they conflict.  In
+particular: §1 here proposed a module-level `ContextVar` — the
+shipped design uses `RunnableConfig` injection (revision #1); §2
+described separate `phone_context.py` + `tools.py` modules — the
+shipped design has one `channel.py` (revision #2); the section
+references various other pre-revision specifics (tool arg name
+`expression`, env-var `EVAL_TIMEOUT_SECONDS`, `PhoneContext` with
+an `emacsclient` field, status-event format with truncated args)
+that were also revised.
+
+Kept the original body verbatim as a record of the design's
+evolution, not the current contract.  When reading for "what got
+built", trust the TL;DR + revisions; this section is for "how the
+design moved".
+#+end_quote
+
 ** 1. Phone context = `ContextVar`, per-request
 
 Chosen: `PHONE_CONTEXT: ContextVar[PhoneContext | None]` in a new `emacsos_server/phone_context.py`.  `_stream_turn` (`app.py:155`) sets a token after parsing `req.phone` and `request.client.host`, resets in `finally`.  Tool body reads `PHONE_CONTEXT.get()` and calls `call_emacs(...)`.
