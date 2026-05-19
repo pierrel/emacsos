@@ -367,16 +367,21 @@ def _start_stream_iter(message: str):
     return iter(_get_thread().stream_message(message))
 #+end_src
 
-*Heartbeat: dropped from v1.*  Original plan used a
-=threading.Timer= pushing onto a =queue.Queue= read by the outer
-generator.  The reviewer correctly pointed out this doesn't
-compose cleanly with the inner blocking iterator (the outer
-generator can't "wait for whichever comes first" without a
-dedicated thread pump).  Per the review's recommendation: drop
-heartbeats from v1 and rely on the token rate to keep the
-connection live.  If real proxy buffering shows up in practice
-we'll add heartbeats with a proper bridge thread (small,
-isolated change), or switch to SSE if the framing helps.
+*Heartbeat: shipped via asyncio composition (Decision §6 amended).*
+The original plan used a =threading.Timer= pushing onto a
+=queue.Queue= read by the outer generator.  Cancelled because it
+doesn't compose cleanly with the inner blocking iterator.  But
+after the spike (see top of doc), tool-call args streaming silently
+as =tool_call_chunks= meant long quiet periods are routine on
+research-shaped prompts -- so silence ≠ dead connection became
+load-bearing to discriminate, and heartbeats came back.  Shipped
+implementation: bridge the sync iterator via
+=loop.run_in_executor(None, next, it, SENTINEL)=, then
+=asyncio.wait([pending], timeout=DISCONNECT_POLL_SECONDS)= drives
+the outer loop.  When the wait times out, we re-check
+=request.is_disconnected()=, and emit a =heartbeat= event when
+=HEARTBEAT_SECONDS= has elapsed since the last one.  No bridge
+thread needed.
 
 *Concurrency.*  =assist='s =THREAD_QUEUE= already serialises LLM
 calls on the singleton thread id.  A second =/chat= request
