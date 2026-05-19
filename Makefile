@@ -86,8 +86,10 @@ ASSIST_REPO_DIR ?= $(CURDIR)/../assist
 $(SERVER_STAMP): server/requirements.txt $(ASSIST_REPO_DIR)/requirements.txt $(ASSIST_REPO_DIR)/pyproject.toml
 	python3 -m venv $(SERVER_VENV)
 	$(SERVER_VENV)/bin/python -m pip install --upgrade pip
-	$(SERVER_VENV)/bin/python -m pip install -e $(ASSIST_REPO_DIR) -c $(ASSIST_REPO_DIR)/requirements.txt
-	$(SERVER_VENV)/bin/python -m pip install -r server/requirements.txt
+	$(SERVER_VENV)/bin/python -m pip install \
+	  -e $(ASSIST_REPO_DIR) \
+	  -r server/requirements.txt \
+	  -c $(ASSIST_REPO_DIR)/requirements.txt
 	touch $@
 
 setup-server: $(SERVER_STAMP)
