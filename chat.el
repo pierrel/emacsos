@@ -25,10 +25,13 @@
 
 (defcustom emacos-chat-auth-file (expand-file-name "~/.emacs.d/server/server")
   "Path to the Emacs server auth file.
-Sent verbatim to emacsos-server; the server substitutes the
-client's reachable IP for the 0.0.0.0 in the file.  Missing file
-is not fatal: SEND falls back to a no-`phone` request and the
-server still runs the agent (the back-channel just can't fire)."
+Sent verbatim to emacsos-server in the optional `phone' field of
+each /chat request, reserving the round trip for future
+phone-control tools the agent may call.  The automatic
+post-response flash that the older sync design used is gone;
+nothing in the current request/response cycle requires this
+file, so a missing file is not fatal: SEND just omits the
+`phone' field and the stream still runs."
   :type 'file
   :group 'emacsos)
 
@@ -62,10 +65,6 @@ in-progress bot line.  Insertion-type nil (anchored).")
 (defvar emacos--chat-status-end nil
   "Buffer-local marker: right edge of the status bracket.
 Insertion-type t (moves forward as the bracket grows).")
-
-(defvar emacos--chat-byte-accumulator nil
-  "Process-filter scratch: raw bytes from the URL process not yet
-seen a newline.  Reset on each stream start.")
 
 (defvar emacos--chat-tokens-seen 0
   "Count of `token` events received this stream.  Used by the
@@ -296,8 +295,7 @@ of the terminal handlers (end, error, abort, watchdog)."
     (let ((m (symbol-value sym)))
       (when (markerp m) (set-marker m nil)))
     (set sym nil))
-  (setq emacos--chat-byte-accumulator nil
-        emacos--chat-tokens-seen 0
+  (setq emacos--chat-tokens-seen 0
         emacos--chat-last-event-time nil
         emacos--chat-in-flight nil
         emacos--chat-process nil)
@@ -358,7 +356,10 @@ synthesized cleanup within ~5s of the real connection close."
       (buffer-string))))
 
 (defun emacos--chat-encode-request (msg auth)
-  "Encode {message, phone:{auth_file}} as UTF-8 bytes."
+  "Encode the request body as UTF-8 bytes.
+With AUTH non-nil, the payload is {message, phone:{auth_file}};
+otherwise the `phone' key is omitted entirely so the server can
+treat it as absent rather than null."
   (let* ((payload (if auth
                       (list :message msg :phone (list :auth_file auth))
                     (list :message msg)))
@@ -477,8 +478,7 @@ still releases the in-flight lock."
            (msg (emacos--chat-current-input buf)))
       (when (and msg (not (string-empty-p msg)))
         (setq emacos--chat-in-flight t
-              emacos--chat-tokens-seen 0
-              emacos--chat-byte-accumulator nil)
+              emacos--chat-tokens-seen 0)
         ;; Render the you> line + clear input region right away;
         ;; the bot line is created by the start handler.
         (let ((inhibit-read-only t))
@@ -561,13 +561,19 @@ still releases the in-flight lock."
     (emacos--chat-init-buffer (emacos--chat-buffer))))
 
 (defun emacos--chat-abort ()
-  "Cancel the in-flight stream.  Closes the URL process; the
-sentinel fires and renders `[error: connection ...]'."
+  "Cancel the in-flight stream.  Closes the URL process and
+synchronously renders `[error: aborted]' + tears down
+per-stream state, so the UI returns to CLEAR immediately
+without waiting for the watchdog.  We can't rely on url-http's
+sentinel here -- it gets swapped mid-stream by the url-http
+state machine, so any sentinel-driven cleanup is unreliable."
   (interactive)
-  (when (and emacos--chat-in-flight
-             (processp emacos--chat-process)
-             (process-live-p emacos--chat-process))
-    (delete-process emacos--chat-process)))
+  (when emacos--chat-in-flight
+    (when (and (processp emacos--chat-process)
+               (process-live-p emacos--chat-process))
+      (delete-process emacos--chat-process))
+    (emacos--chat-handle-error
+     (list :type "error" :reason "aborted"))))
 
 ;;; Page integration
 

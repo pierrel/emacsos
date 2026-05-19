@@ -111,7 +111,7 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
     assist's sync iterator via run_in_executor and polls
     is_disconnected() between yields so client ABORT fires the
     finally cleanly.  See design doc §4 for the cancellation chain."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     SENTINEL = object()
     stream_id = uuid.uuid4().hex
     full_text_parts: list[str] = []
@@ -141,8 +141,9 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
                 )
                 return
             if pending is None:
-                pending = asyncio.ensure_future(
-                    loop.run_in_executor(None, next, it, SENTINEL))
+                # run_in_executor returns an asyncio.Future already, so
+                # we don't need ensure_future to make asyncio.wait happy.
+                pending = loop.run_in_executor(None, next, it, SENTINEL)
             done, _ = await asyncio.wait([pending], timeout=HEARTBEAT_SECONDS)
             if not done:
                 # Inner iter has produced nothing in HEARTBEAT_SECONDS;

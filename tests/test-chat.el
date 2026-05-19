@@ -16,8 +16,7 @@
         emacos--chat-stream-insert-marker nil
         emacos--chat-status-start nil
         emacos--chat-status-end nil
-        emacos--chat-tokens-seen 0
-        emacos--chat-byte-accumulator nil)
+        emacos--chat-tokens-seen 0)
   (when (timerp emacos--chat-first-token-timer)
     (cancel-timer emacos--chat-first-token-timer))
   (setq emacos--chat-first-token-timer nil))
@@ -195,6 +194,24 @@ on the prior bracket must not block the replacement."
       (setq emacos--chat-process 'fake-proc)
       (emacos--chat-abort)
       (should delete-called))))
+
+(ert-deftest chat-test-abort-clears-in-flight-immediately ()
+  "ABORT must reset `emacos--chat-in-flight' synchronously, without
+waiting for the watchdog timer.  Renders `[error: aborted]' on the
+bot line if a stream was open (start handler had run)."
+  (chat-test--reset)
+  (setq emacos--chat-in-flight t)
+  (let ((buf (emacos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (emacos--chat-handle-start '(:type "start"))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'processp) (lambda (_) t))
+              ((symbol-function 'delete-process) (lambda (_) nil)))
+      (setq emacos--chat-process 'fake-proc)
+      (emacos--chat-abort))
+    (should-not emacos--chat-in-flight)
+    (with-current-buffer buf
+      (should (string-match-p "\\[error: aborted\\]" (buffer-string))))))
 
 (ert-deftest chat-test-abort-noop-when-not-in-flight ()
   (chat-test--reset)

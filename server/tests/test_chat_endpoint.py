@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Iterator
 from unittest.mock import patch
 
 import pytest
@@ -51,13 +50,6 @@ def _collect_events(response) -> list[dict]:
             continue
         events.append(json.loads(raw))
     return events
-
-
-def _stub_stream(*chunks: tuple[str, Any]) -> Iterator[tuple[str, Any]]:
-    """Build a sync iterator that yields the given (ch_type, payload)
-    chunks — stand-in for Thread.stream_message."""
-    for c in chunks:
-        yield c
 
 
 # --- happy path -------------------------------------------------------------
