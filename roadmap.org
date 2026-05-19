@@ -60,9 +60,59 @@ Inter.  Try a couple, decide on the phone, codify in =os.el=
 (or a per-face block in the init snippet) so phone-install
 sets it consistently.
 
+* Tool-call transparency
+
+The emacs-modifying channel ships with `status: calling <tool_name>`
+events for each new tool invocation.  Intended UX was richer
+(`status: <tool_name>: <truncated args>`) but the implementation
+needs `tool_call_chunks` accumulation — args generally arrive across
+many continuation chunks, not on the first chunk where the tool
+name lands.  Follow-up work: stitch `tool_call_chunks` per
+tool_call_id, emit `<name>: <args>` when complete (or stream args
+character-by-character — see below).
+
+Other dimensions worth iterating once the basic args preview lands:
+- *Tool-result visibility.*  Right now elisp results stay inside the
+  langgraph trace; the user sees only the agent's prose summary
+  afterwards.  For a device the agent is MODIFYING this may be too
+  opaque — a `status: eval_elisp result: <preview>` event would let
+  the user spot a wrong-direction call early.  Trade-off: noisier
+  on multi-call sessions; might warrant a "verbose" toggle.
+- *Streaming partial args.*  Show args character-by-character as
+  they stream in (like the bot text already does).  Costs an event
+  per chunk per arg; consider only for slow tool-args generation.
+
 * Other / cross-cutting
 
-(Nothing yet — add as it comes up.)
+** TODO Phone tempdir leak
+
+`emacsos-server` now constructs a fresh `tempfile.mkdtemp(prefix=
+"emacsos-thread-")` per /chat (channel PR dropped the Thread
+singleton).  Was once-per-server-rebuild before; now once-per-
+turn.  Over a day of moderate use, `/tmp/emacsos-thread-*` will
+accumulate hundreds of directories.  systemd's PrivateTmp or
+tmpwatch will eventually deal with it, but cleanup on stream end
+(or short TTL) is cleaner.
+
+** TODO call_emacs return tuple → typed kind
+
+`channel.eval_elisp`'s `is_unreachable` classifier reverse-engineers
+`phone.call_emacs`'s error-string shapes (`emacsclient:` prefix,
+`exit N`, `[Errno N]`, `timed out`, `auth file:`, `binary not
+found`).  Brittle: changing the wording in `phone.py` silently
+breaks the no-retry hint.  Lift the classification into
+`call_emacs`'s return shape (eg. `CallResult(kind: Literal["ok",
+"unreachable", "elisp_error"], output: str)`) and switch in the
+tool.  Deletes ~12 lines of substring matching + the dedicated
+unreachable-shape tests.
+
+** TODO Redact secrets in `/chat` request log
+
+`app.py`'s `log.info("POST /chat msg=%r", req.message)` logs the
+user's chat input verbatim.  `channel._redact` exists and could be
+applied here.  Surfaced by the code-review team; not done in the
+channel PR because that PR shouldn't widen scope to `app.py`'s
+logging.
 
 * Experiment-specific follow-ups
 
