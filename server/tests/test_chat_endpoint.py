@@ -270,13 +270,3 @@ def test_get_thread_lazy_constructs():
     assert a is fake_thread
     assert b is fake_thread
     build.assert_called_once()
-
-
-def test_reset_thread_clears_singleton():
-    import emacsos_server.app as app_mod
-
-    class _FakeThread:
-        thread_id = "fake-id"
-    app_mod._THREAD = _FakeThread()
-    app_mod._reset_thread()
-    assert app_mod._THREAD is None

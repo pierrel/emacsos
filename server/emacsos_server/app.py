@@ -56,8 +56,9 @@ class ChatRequest(BaseModel):
 # never queuing behind a stale in-flight agent thread (Python threads
 # aren't externally cancellable).  The lock guards the construction
 # critical section so two concurrent first-requests don't double-
-# construct.  Same shape as PR #6's _reset_thread() pattern, just
-# driven by more event types.
+# construct.  Same shape as PR #6's reset-on-termination pattern,
+# just driven by more event types and gated on ownership via
+# `_reset_thread_if`.
 _THREAD = None
 _THREAD_LOCK = threading.Lock()
 
@@ -121,22 +122,6 @@ def _get_thread():
             return _THREAD
         _THREAD = _build_thread()
         return _THREAD
-
-
-def _reset_thread():
-    """Unconditionally drop the singleton reference; the next
-    `_get_thread()` will lazy-construct a fresh one.  Prefer
-    `_reset_thread_if(owner)` from inside `_stream_turn` so a
-    concurrent stream isn't surprised by its singleton vanishing
-    mid-flight; this unconditional form remains for callers that
-    don't have a Thread reference to compare against (eg. an
-    operator-initiated reset from a future admin endpoint)."""
-    global _THREAD
-    with _THREAD_LOCK:
-        if _THREAD is not None:
-            log.warning("Resetting assist.Thread singleton (thread_id=%s)",
-                        _THREAD.thread_id)
-            _THREAD = None
 
 
 def _reset_thread_if(owner):
