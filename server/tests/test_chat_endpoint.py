@@ -52,6 +52,13 @@ def _collect_events(response) -> list[dict]:
     return events
 
 
+def _mock_iter(iterator):
+    """Wrap an iterator as the (thread, iter) tuple `_start_stream_iter`
+    now returns.  The fake thread object is only used as an identity
+    handle for `_reset_thread_if`, so a plain `object()` is enough."""
+    return object(), iterator
+
+
 # --- happy path -------------------------------------------------------------
 
 def test_streams_start_token_end_for_simple_response(client):
@@ -60,7 +67,7 @@ def test_streams_start_token_end_for_simple_response(client):
         ("messages", (_FakeAIMessageChunk(content="Hello!"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "hi"}) as r:
             events = _collect_events(r)
 
@@ -80,7 +87,7 @@ def test_streams_multiple_tokens_concatenate_into_end_text(client):
         ("messages", (_FakeAIMessageChunk(content="is 42."), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
 
@@ -99,7 +106,7 @@ def test_empty_content_chunks_dont_produce_token_events(client):
         ("messages", (_FakeAIMessageChunk(content=""), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
 
@@ -118,7 +125,7 @@ def test_tool_call_emits_status_event(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
 
@@ -146,7 +153,7 @@ def test_repeated_tool_call_chunks_dont_repeat_status(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
 
@@ -161,7 +168,7 @@ def test_update_to_status_surfaces_named_node(client):
         ("updates", {"research-agent": {}}),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
 
@@ -192,7 +199,7 @@ def test_mid_stream_exception_yields_error_event_with_partial(client):
         yield ("messages", (_FakeAIMessageChunk(content="partial"), {}))
         raise ValueError("model died mid-stream")
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=gen()):
+               return_value=_mock_iter(gen())):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
 
@@ -215,7 +222,7 @@ def test_thread_reset_after_stream_ends(client):
     import emacsos_server.app as app_mod
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             _collect_events(r)
     assert app_mod._THREAD is None
@@ -235,7 +242,7 @@ def test_thread_reset_after_error(client):
 def test_content_type_is_ndjson(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             assert r.headers["content-type"].startswith("application/x-ndjson")
 
@@ -243,7 +250,7 @@ def test_content_type_is_ndjson(client):
 def test_start_event_carries_stream_id_and_ts(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=_mock_iter(iter(scripted))):
         with client.stream("POST", "/chat", json={"message": "q"}) as r:
             events = _collect_events(r)
     start = events[0]

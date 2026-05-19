@@ -124,9 +124,11 @@ AUTH_FILE_CONTENTS=$(docker exec "$CONTAINER" cat /home/phone/.emacs.d/server/se
 log "got auth file from phone (${#AUTH_FILE_CONTENTS} bytes)"
 
 # 5. POST /chat FROM INSIDE the container as a STREAMING request.
-#    Use `curl -N` (no buffering) + a Python helper that times the
-#    NDJSON event arrivals so we can assert the response was
-#    actually streamed rather than buffered.
+#    Use `curl -N` (no buffering) and assert the NDJSON structure is
+#    well-formed (>=1 token event, exactly one end event, and the
+#    end.text matches the concatenation of token texts).  Catches
+#    truncated / mis-encoded streams; no timing assertion is made --
+#    real-phone verification covers incremental render.
 log "POST /chat (streaming) from inside the phone container"
 # Build the JSON body once, host-side, where python3 is available.
 REQ_BODY=$(python3 -c "import json,sys; print(json.dumps({'message': sys.argv[1], 'phone': {'auth_file': sys.argv[2]}}))" "$TEST_MSG" "$AUTH_FILE_CONTENTS")

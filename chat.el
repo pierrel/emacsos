@@ -45,7 +45,14 @@ the budget and can tap ABORT to cancel.  See design doc §6."
   :type 'integer
   :group 'emacsos)
 
-;;; State (per *chat* buffer)
+;;; State (global to the chat feature)
+;;
+;; There is only ever one `*chat*' buffer in the running phone, so
+;; these are plain `defvar's rather than `defvar-local's.  The markers
+;; below are buffer-positioned *within* that one chat buffer, but the
+;; defvar bindings themselves are global.  Don't open a second chat
+;; buffer expecting independent state — that's not what this code
+;; supports.
 
 (defvar emacos--chat-in-flight nil
   "Non-nil while a stream is open.  Re-entrancy guard for SEND.")
@@ -55,16 +62,16 @@ the budget and can tap ABORT to cancel.  See design doc §6."
 Used by ABORT to delete-process.")
 
 (defvar emacos--chat-stream-insert-marker nil
-  "Buffer-local marker positioned just before the prompt at stream
-start.  Token events insert here.  Insertion-type t so it moves
-forward as tokens are inserted.")
+  "Marker into the `*chat*' buffer positioned just before the prompt
+at stream start.  Token events insert here.  Insertion-type t so it
+moves forward as tokens are inserted.")
 
 (defvar emacos--chat-status-start nil
-  "Buffer-local marker: left edge of the status bracket inside the
-in-progress bot line.  Insertion-type nil (anchored).")
+  "Marker into the `*chat*' buffer: left edge of the status bracket
+inside the in-progress bot line.  Insertion-type nil (anchored).")
 
 (defvar emacos--chat-status-end nil
-  "Buffer-local marker: right edge of the status bracket.
+  "Marker into the `*chat*' buffer: right edge of the status bracket.
 Insertion-type nil (stationary) so that token inserts at the same
 position via `emacos--chat-stream-insert-marker' do NOT drag this
 marker forward.  The handle-status path explicitly `set-marker's

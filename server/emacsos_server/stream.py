@@ -5,11 +5,14 @@ event is `(json.dumps({"type": <type>, ...}) + "\\n").encode("utf-8")`
 ready for `StreamingResponse` to push.  See
 docs/2026-05-17-streaming-responses.org §3 for the taxonomy.
 
-`render_message_chunk` and `render_update_to_status` are pure
-functions that turn LangGraph stream chunks into our taxonomy.  The
-stateful "have I emitted a status for this tool_call_id yet?"
-tracking lives in `app.py`'s `_stream_turn` (one chat session is one
-generator's local scope; no need for a class).
+Pure helpers turning LangGraph stream chunks into our taxonomy:
+`extract_content_text` and `extract_new_tool_calls` decode a
+`messages`-mode chunk (token text + any newly-seen tool calls);
+`render_update_to_status` summarises an `updates`-mode chunk into a
+"running <node>" string.  The stateful "have I emitted a status for
+this tool_call_id yet?" tracking lives in `app.py`'s `_stream_turn`
+(one chat session is one generator's local scope; no need for a
+class).
 """
 from __future__ import annotations
 

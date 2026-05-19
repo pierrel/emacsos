@@ -105,10 +105,32 @@ def _reset_thread():
             _THREAD = None
 
 
+def _reset_thread_if(owner):
+    """Reset the singleton only if it still refers to OWNER.
+
+    Concurrent /chat requests share the lazily-built singleton; if
+    request A finishes and unconditionally clears `_THREAD`, request B
+    might still be mid-stream against that same Thread instance — and
+    request C arriving next would build a fresh Thread, leaving two
+    Threads alive concurrently.  Guarding the reset on ownership means
+    finishing requests only clear their own singleton; later requests
+    arriving while another is still mid-stream skip the reset cleanly.
+    """
+    global _THREAD
+    with _THREAD_LOCK:
+        if _THREAD is owner:
+            log.warning("Resetting assist.Thread singleton (thread_id=%s)",
+                        _THREAD.thread_id)
+            _THREAD = None
+
+
 def _start_stream_iter(message: str):
     """Sync helper invoked via run_in_executor: get the singleton
-    Thread and start the stream_message iterator."""
-    return iter(_get_thread().stream_message(message))
+    Thread and start the stream_message iterator.  Returns a tuple
+    `(thread, iterator)` so the caller can later reset the singleton
+    via `_reset_thread_if(thread)` without race-ing other requests."""
+    t = _get_thread()
+    return t, iter(t.stream_message(message))
 
 
 async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
@@ -122,6 +144,7 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
     full_text_parts: list[str] = []
     seen_tool_ids: set[str] = set()
     it = None
+    my_thread = None
     runaway_at = time.monotonic() + RUNAWAY_SECONDS
 
     yield ndjson.event("start", stream_id=stream_id, ts=time.time())
@@ -130,7 +153,7 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
         # Move singleton construction onto the executor so the
         # async handler isn't blocked by it.  This is also the
         # only place an ASSIST_MODEL_URL misconfig can raise.
-        it = await loop.run_in_executor(None, _start_stream_iter, message)
+        my_thread, it = await loop.run_in_executor(None, _start_stream_iter, message)
         pending = None
         while True:
             if await request.is_disconnected():
@@ -202,7 +225,11 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
                 pass
             except Exception:
                 log.exception("error closing inner iterator")
-        _reset_thread()
+        # Only clear the singleton if it still belongs to us; protects
+        # in-flight concurrent /chat requests from losing their Thread
+        # reference mid-stream (see `_reset_thread_if` docstring).
+        if my_thread is not None:
+            _reset_thread_if(my_thread)
 
 
 @app.post("/chat")
