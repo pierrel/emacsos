@@ -125,6 +125,24 @@ on the prior bracket must not block the replacement."
       (should (string-match-p "\\[second\\]" (buffer-string)))
       (should-not (string-match-p "\\[first\\]" (buffer-string))))))
 
+(ert-deftest chat-test-status-after-tokens-preserves-tokens ()
+  "Status arriving AFTER tokens have streamed must replace its own
+bracket only — not delete the streamed content.  Pins the marker
+type-nil contract: if `status-end' moved forward with token inserts,
+the next status's clear-bracket would wipe out streamed tokens."
+  (chat-test--reset)
+  (let ((buf (emacos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (emacos--chat-handle-start '(:type "start"))
+    (emacos--chat-handle-status '(:type "status" :text "one"))
+    (emacos--chat-handle-token '(:type "token" :text "Hello "))
+    (emacos--chat-handle-token '(:type "token" :text "world!"))
+    (emacos--chat-handle-status '(:type "status" :text "two"))
+    (with-current-buffer buf
+      (should (string-match-p "\\[two\\]" (buffer-string)))
+      (should (string-match-p "Hello world!" (buffer-string)))
+      (should-not (string-match-p "\\[one\\]" (buffer-string))))))
+
 (ert-deftest chat-test-end-handler-resets-state ()
   (chat-test--reset)
   (setq emacos--chat-in-flight t)
@@ -180,6 +198,29 @@ on the prior bracket must not block the replacement."
   (chat-test--reset)
   ;; Unknown type => no handler => no error.
   (emacos--chat-dispatch-line "{\"type\":\"unknown_kind\",\"x\":1}"))
+
+;;; Request encoding (wire shape contract)
+
+(defun chat-test--decode-utf8-json (bytes)
+  "Decode the UTF-8 bytes BYTES into a JSON plist."
+  (let ((s (decode-coding-string bytes 'utf-8)))
+    (json-parse-string s :object-type 'plist :null-object nil :array-type 'list)))
+
+(ert-deftest chat-test-encode-request-includes-phone-when-auth-present ()
+  "AUTH non-nil → payload has {message, phone:{auth_file}}."
+  (let* ((bytes (emacos--chat-encode-request "hi" "127.0.0.1:1234\nsecret\n"))
+         (obj (chat-test--decode-utf8-json bytes)))
+    (should (equal (plist-get obj :message) "hi"))
+    (should (plist-member obj :phone))
+    (should (equal (plist-get (plist-get obj :phone) :auth_file)
+                   "127.0.0.1:1234\nsecret\n"))))
+
+(ert-deftest chat-test-encode-request-omits-phone-when-no-auth ()
+  "AUTH nil → payload omits the `phone' key entirely (not present as null)."
+  (let* ((bytes (emacos--chat-encode-request "hi" nil))
+         (obj (chat-test--decode-utf8-json bytes)))
+    (should (equal (plist-get obj :message) "hi"))
+    (should-not (plist-member obj :phone))))
 
 ;;; ABORT
 

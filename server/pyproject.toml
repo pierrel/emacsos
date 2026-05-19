@@ -1,6 +1,6 @@
 [project]
 name = "emacsos-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "HTTP gateway between the phone and the assist agent."
 requires-python = ">=3.11"
 dependencies = [

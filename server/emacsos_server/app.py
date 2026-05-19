@@ -48,11 +48,16 @@ class ChatRequest(BaseModel):
 
 # --- assist Thread singleton (lazy, process-wide) ---
 
-# One Thread, one ongoing conversation, every /chat extends it.
-# Lazy construction.  Reset on stream end / abort / error / runaway
-# so the next /chat builds fresh and doesn't queue behind a stale
-# in-flight agent thread.  Same shape as PR #6's _reset_thread()
-# pattern, just driven by more event types.
+# Effectively one Thread per /chat: the singleton is built lazily on
+# demand and reset in `_stream_turn`'s finally on every termination
+# path (end / abort / client-disconnect / error / runaway), so each
+# request starts on a fresh Thread.  Conversation continuity across
+# turns is therefore NOT preserved in v1 -- accepted in exchange for
+# never queuing behind a stale in-flight agent thread (Python threads
+# aren't externally cancellable).  The lock guards the construction
+# critical section so two concurrent first-requests don't double-
+# construct.  Same shape as PR #6's _reset_thread() pattern, just
+# driven by more event types.
 _THREAD = None
 _THREAD_LOCK = threading.Lock()
 

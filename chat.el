@@ -64,7 +64,11 @@ in-progress bot line.  Insertion-type nil (anchored).")
 
 (defvar emacos--chat-status-end nil
   "Buffer-local marker: right edge of the status bracket.
-Insertion-type t (moves forward as the bracket grows).")
+Insertion-type nil (stationary) so that token inserts at the same
+position via `emacos--chat-stream-insert-marker' do NOT drag this
+marker forward.  The handle-status path explicitly `set-marker's
+this to (point) after inserting its bracket text, so the
+stationary type doesn't lose tracking inside the bracket itself.")
 
 (defvar emacos--chat-tokens-seen 0
   "Count of `token` events received this stream.  Used by the
@@ -86,6 +90,14 @@ on close, sometimes before our filter has parsed the final chunk
 \(which may contain the end event).  Fires every 1s while a
 stream is in flight; on dead process, synthesizes end (if tokens
 were seen) or error (if not).")
+
+(defvar-local emacos--chat-body-read-marker nil
+  "Buffer-local cursor into the url response buffer marking the
+boundary between bytes our NDJSON parser has consumed and bytes
+url-http has appended but we haven't yet read.  Initialised on
+the first `emacos--chat-drain-body' call against this buffer.
+Insertion-type nil so url-http's filter appends BEYOND it
+rather than pushing it forward.")
 
 (defconst emacos--chat-prompt "\n> "
   "Marker between the transcript (read-only) and the editable input.")
@@ -173,11 +185,17 @@ event handlers."
                       (copy-marker (point) t))
                 ;; Status markers also sit here for now; status events
                 ;; insert "[ ... ] " between them, and tokens insert
-                ;; after status-end.
+                ;; after status-end.  Both insertion-type nil: status-
+                ;; start anchors the left edge; status-end stays put
+                ;; when tokens insert at the same position via the
+                ;; insert-marker, so a subsequent status event's
+                ;; clear-bracket can't accidentally delete streamed
+                ;; tokens.  handle-status `set-marker's status-end
+                ;; explicitly after inserting its bracket text.
                 (setq emacos--chat-status-start
                       (copy-marker (point) nil))
                 (setq emacos--chat-status-end
-                      (copy-marker (point) t))
+                      (copy-marker (point) nil))
                 ;; The "\nbot> " text we just inserted needs read-only
                 ;; props applied (the per-token insertion path applies
                 ;; props to each token).
@@ -405,7 +423,6 @@ tracks how much body has already been processed via a buffer-local
 marker.  The marker has insertion-type nil (stationary on insert)
 so it stays at the read/unread boundary as the URL filter
 continues appending bytes after it."
-  (defvar emacos--chat-body-read-marker)
   (unless (and (local-variable-p 'emacos--chat-body-read-marker)
                (markerp emacos--chat-body-read-marker))
     ;; url-http-end-of-headers is a marker pointing at the first
@@ -445,27 +462,12 @@ continues appending bytes after it."
             (error
              (message "chat: handler %s failed: %s" etype err))))))))
 
-(defun emacos--chat-sentinel (proc event)
-  "Cleanup when the URL process changes state.  Mirrors the
-end/error handlers so a connection-lost (without an `error` event)
-still releases the in-flight lock."
-  (when (memq (process-status proc) '(exit signal closed failed))
-    (when emacos--chat-in-flight
-      ;; If we got here without an `end` or `error` event, render a
-      ;; client-side connection-lost message.
-      (let ((buf (get-buffer emacos--chat-buffer-name)))
-        (when (and buf (buffer-live-p buf)
-                   (markerp emacos--chat-stream-insert-marker))
-          (with-current-buffer buf
-            (let ((inhibit-read-only t))
-              (save-excursion
-                (emacos--chat-clear-status-bracket)
-                (goto-char emacos--chat-stream-insert-marker)
-                (let ((before (point)))
-                  (insert "[error: connection " (symbol-name (process-status proc)) "]")
-                  (add-text-properties before (point)
-                                       '(read-only t front-sticky t rear-nonsticky t))))))))
-      (emacos--chat-stream-cleanup))))
+;; Note: no process-sentinel installed.  url-http swaps sentinels
+;; mid-stream as its state machine progresses (idle → async →
+;; end-of-document), so any sentinel we'd hook up would be silently
+;; detached.  Connection-lost-without-end is caught by the watchdog
+;; (synthesizes an end / error event after a quiet grace window).
+;; ABORT calls `emacos--chat-stream-cleanup' synchronously.
 
 ;;; SEND / CLEAR / ABORT
 
