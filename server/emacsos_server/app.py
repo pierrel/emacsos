@@ -2,23 +2,23 @@
 
 POST /chat: async route handler that streams NDJSON events as
 assist's agent runs.  Wire shape + decisions: see
-docs/2026-05-17-streaming-responses.org.
+docs/2026-05-17-streaming-responses.org and
+docs/2026-05-18-emacs-modifying-channel.org.
 
 ASSIST_MODEL_URL must be set when the server is invoked OR by the
 time the first /chat lands; without it, agent construction fails
 on the first chat and the client sees a clean `error` event.
 
-Back-channel mechanism (call_emacs in phone.py) is preserved for
-the next experiment's agent-callable phone-control tools; the
-automatic post-response flash was removed when streaming made it
-redundant.
+Agent-callable phone-control tools (eg. `eval_elisp`) are wired in
+via `extra_tools=EMACS_TOOLS` on `Thread`; per-request phone identity
+flows through `extra_config={"configurable": {"phone_context": ...}}`
+and tools read it via the `config: RunnableConfig` parameter.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import tempfile
-import threading
 import time
 import uuid
 from typing import AsyncIterator, Optional
@@ -27,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
 from .config import Config
 from . import stream as ndjson
 
@@ -46,29 +47,20 @@ class ChatRequest(BaseModel):
     phone: Optional[PhoneAuth] = None
 
 
-# --- assist Thread singleton (lazy, process-wide) ---
-
-# Effectively one Thread per /chat: the singleton is built lazily on
-# demand and reset in `_stream_turn`'s finally on every termination
-# path (end / abort / client-disconnect / error / runaway), so each
-# request starts on a fresh Thread.  Conversation continuity across
-# turns is therefore NOT preserved in v1 -- accepted in exchange for
-# never queuing behind a stale in-flight agent thread (Python threads
-# aren't externally cancellable).  The lock guards the construction
-# critical section so two concurrent first-requests don't double-
-# construct.  Same shape as PR #6's reset-on-termination pattern,
-# just driven by more event types and gated on ownership via
-# `_reset_thread_if`.
-_THREAD = None
-_THREAD_LOCK = threading.Lock()
-
 # Single-flight serialization for /chat streams.  EmacsOS is designed
 # for one user / one phone / one chat at a time; the lock prevents
-# concurrent /chat coroutines from sharing the singleton Thread and
-# accumulating multiple parallel Thread instances under contention.
+# concurrent /chat coroutines from running the model simultaneously.
 # A second /chat arriving mid-stream waits behind the first; the
 # `start` event is emitted *before* the lock acquire so the client
 # still gets immediate ack of receipt even when queued.
+#
+# Thread lifecycle is "fresh per stream": each /chat constructs a new
+# `assist.Thread` (in `_start_stream_iter`, bound to that request's
+# phone context via `extra_config`).  Construction is cheap — no
+# model probe — so we don't bother with a cross-request singleton.
+# This also means conversation continuity across turns is NOT
+# preserved in v1; that's accepted (matches the pre-channel
+# behavior, where the singleton was reset in finally anyway).
 _STREAM_LOCK = asyncio.Lock()
 
 # Heartbeat: emit a `heartbeat` event every N seconds of silence so
@@ -92,9 +84,11 @@ DISCONNECT_POLL_SECONDS = 1.0
 RUNAWAY_SECONDS = 30 * 60.0
 
 
-def _build_thread():
-    """Construct a fresh `assist.Thread`.  Raises whatever assist
-    raises during construction (eg. model probe failure)."""
+def _build_thread(phone_ctx: PhoneContext):
+    """Construct a fresh `assist.Thread` for one /chat turn, with the
+    phone-control toolset bound and the per-request phone context
+    threaded into the langgraph RunnableConfig.  Raises whatever
+    assist raises during construction (eg. model probe failure)."""
     # Import inside so module import doesn't trigger assist's
     # transitive imports during server startup.
     from assist.thread import Thread
@@ -103,56 +97,44 @@ def _build_thread():
     # sandbox_backend=None: emacsos runs the agent without a
     # container sandbox.  model=None lets Thread call
     # `select_chat_model` itself, which reads ASSIST_MODEL_URL.
-    log.info("Constructing assist.Thread (working_dir=%s)", working_dir)
-    t = Thread(working_dir=working_dir, sandbox_backend=None)
+    log.info("Constructing assist.Thread (working_dir=%s) for %s",
+             working_dir, phone_ctx.phone_host)
+    t = Thread(
+        working_dir=working_dir,
+        sandbox_backend=None,
+        extra_tools=EMACS_TOOLS,
+        extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
+    )
     log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
     return t
 
 
-def _get_thread():
-    """Return the singleton Thread, lazy-constructing under the lock.
-    The lock is held only for the construction critical section; the
-    actual `.stream_message()` call happens outside it so concurrent
-    streams don't serialize on Thread construction."""
-    global _THREAD
-    if _THREAD is not None:
-        return _THREAD
-    with _THREAD_LOCK:
-        if _THREAD is not None:
-            return _THREAD
-        _THREAD = _build_thread()
-        return _THREAD
+def _start_stream_iter(message: str, phone_ctx: PhoneContext):
+    """Sync helper invoked via run_in_executor: build a fresh Thread
+    for this /chat turn and start the stream_message iterator."""
+    t = _build_thread(phone_ctx)
+    return iter(t.stream_message(message))
 
 
-def _reset_thread_if(owner):
-    """Reset the singleton only if it still refers to OWNER.
-
-    Concurrent /chat requests share the lazily-built singleton; if
-    request A finishes and unconditionally clears `_THREAD`, request B
-    might still be mid-stream against that same Thread instance — and
-    request C arriving next would build a fresh Thread, leaving two
-    Threads alive concurrently.  Guarding the reset on ownership means
-    finishing requests only clear their own singleton; later requests
-    arriving while another is still mid-stream skip the reset cleanly.
-    """
-    global _THREAD
-    with _THREAD_LOCK:
-        if _THREAD is owner:
-            log.warning("Resetting assist.Thread singleton (thread_id=%s)",
-                        _THREAD.thread_id)
-            _THREAD = None
+_STATUS_ARG_MAX = 50
 
 
-def _start_stream_iter(message: str):
-    """Sync helper invoked via run_in_executor: get the singleton
-    Thread and start the stream_message iterator.  Returns a tuple
-    `(thread, iterator)` so the caller can later reset the singleton
-    via `_reset_thread_if(thread)` without race-ing other requests."""
-    t = _get_thread()
-    return t, iter(t.stream_message(message))
+def _format_tool_status(tool_name: str, arg_preview: Optional[str]) -> str:
+    """`status: <name>: <first ~50 chars of the arg, ellipsised>` so the
+    user sees what the agent is about to do on their phone.  Falls back
+    to `calling <name>` when no preview is available (eg. zero-arg tool
+    or args still streaming in via tool_call_chunks).  Newlines in args
+    collapse to spaces — the status surface is one line on a 320x240
+    screen."""
+    if not arg_preview:
+        return f"calling {tool_name}"
+    flat = " ".join(arg_preview.split())
+    if len(flat) > _STATUS_ARG_MAX:
+        flat = flat[: _STATUS_ARG_MAX - 3] + "..."
+    return f"{tool_name}: {flat}"
 
 
-async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
+async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
     """The async generator that drives one chat turn.  Bridges
     assist's sync iterator via run_in_executor and polls
     is_disconnected() between yields so client ABORT fires the
@@ -163,7 +145,6 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
     full_text_parts: list[str] = []
     seen_tool_ids: set[str] = set()
     it = None
-    my_thread = None
     # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
     # otherwise a long wait behind the lock would burn the budget
     # before we'd even started this stream's actual work.
@@ -171,11 +152,22 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
 
     yield ndjson.event("start", stream_id=stream_id, ts=time.time())
 
+    # Build the PhoneContext for this request: the auth-file contents
+    # are POSTed in the request body; the host we substitute for the
+    # untrusted `host` field in that file is the real source address of
+    # the TCP socket (FastAPI's `request.client.host`).  See `phone.py`.
+    phone_ctx: Optional[PhoneContext] = None
+    if phone_auth is not None and request.client is not None:
+        phone_ctx = PhoneContext(
+            auth_contents=phone_auth,
+            phone_host=request.client.host,
+        )
+
     # Single-flight: serialize the body of the stream so two /chat
-    # coroutines can't accumulate parallel Thread instances under
-    # contention.  Acquire BEFORE the try so the corresponding release
-    # in finally always pairs cleanly; `start` is yielded *before*
-    # acquire so queued clients still see an immediate ack of receipt.
+    # coroutines don't run the model in parallel.  Acquire BEFORE the
+    # try so the corresponding release in finally always pairs cleanly;
+    # `start` is yielded *before* acquire so queued clients still see
+    # an immediate ack of receipt.
     await _STREAM_LOCK.acquire()
     try:
         # `runaway_at` is set HERE (not before the lock acquire) so a
@@ -183,10 +175,19 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
         # we've even started.  Inside the try so the finally is the
         # exclusive release path.
         runaway_at = time.monotonic() + RUNAWAY_SECONDS
-        # Move singleton construction onto the executor so the
-        # async handler isn't blocked by it.  This is also the
-        # only place an ASSIST_MODEL_URL misconfig can raise.
-        my_thread, it = await loop.run_in_executor(None, _start_stream_iter, message)
+        if phone_ctx is None:
+            # Channel cannot be invoked from this request (no phone auth
+            # or unknown client host); fail fast rather than starting an
+            # agent that might call eval_elisp and get nowhere.
+            yield ndjson.event(
+                "error",
+                reason="missing phone context: request lacks phone.auth_file or client host",
+            )
+            return
+        # Move Thread construction onto the executor so the async
+        # handler isn't blocked by it.  This is also the only place an
+        # ASSIST_MODEL_URL misconfig can raise.
+        it = await loop.run_in_executor(None, _start_stream_iter, message, phone_ctx)
         pending = None
         last_heartbeat = time.monotonic()
         while True:
@@ -228,11 +229,19 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
                 if text:
                     full_text_parts.append(text)
                     yield ndjson.event("token", text=text)
-                for tc_id, tc_name in ndjson.extract_new_tool_calls(payload):
+                for tc_id, tc_name, tc_args in ndjson.extract_new_tool_calls(payload):
                     if tc_id not in seen_tool_ids:
                         seen_tool_ids.add(tc_id)
-                        yield ndjson.event("status",
-                                           text=f"calling {tc_name}")
+                        # User-decision (design-review): show name +
+                        # truncated arg so the phone shows what the
+                        # agent is about to do on it.  Truncate to
+                        # ~50 chars to keep the chat surface readable
+                        # on 320x240.  `tc_args` is the first non-
+                        # empty positional/kw value formatted as str.
+                        yield ndjson.event(
+                            "status",
+                            text=_format_tool_status(tc_name, tc_args),
+                        )
             elif ch_type == "updates":
                 status = ndjson.render_update_to_status(payload)
                 if status:
@@ -249,8 +258,9 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
     finally:
         # Load-bearing: runs on natural exit, on disconnect-return,
         # on runaway-return, AND on exception.  Drops the iterator
-        # so GC closes it (releasing THREAD_QUEUE via __exit__) and
-        # clears the singleton so the next /chat builds fresh.
+        # so GC closes it (releasing THREAD_QUEUE via __exit__).
+        # No singleton to reset — `_start_stream_iter` built a fresh
+        # Thread per stream and it'll GC with the iterator.
         if it is not None and hasattr(it, "close"):
             # Generators expose close(); plain list_iterators (used by
             # the test stub) do not, hence the hasattr guard -- avoids
@@ -264,11 +274,6 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
                 pass
             except Exception:
                 log.exception("error closing inner iterator")
-        # Only clear the singleton if it still belongs to us; protects
-        # in-flight concurrent /chat requests from losing their Thread
-        # reference mid-stream (see `_reset_thread_if` docstring).
-        if my_thread is not None:
-            _reset_thread_if(my_thread)
         # Release the single-flight lock so the next queued /chat can
         # proceed.  Always paired with the acquire above this try block.
         _STREAM_LOCK.release()
@@ -277,8 +282,9 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     log.info("POST /chat msg=%r", req.message)
+    phone_auth = req.phone.auth_file if req.phone is not None else None
     return StreamingResponse(
-        _stream_turn(req.message, request),
+        _stream_turn(req.message, phone_auth, request),
         # Explicit charset so emacs url-http (and any other client that
         # defaults differently) decodes our UTF-8-encoded NDJSON
         # correctly; non-ASCII tokens otherwise risk mojibake.

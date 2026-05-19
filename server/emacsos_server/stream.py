@@ -40,10 +40,15 @@ def map_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str]]:
+def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str, str | None]]:
     """From a `messages` stream chunk (a `(AIMessageChunk, metadata)`
-    tuple), yield `(tool_call_id, tool_name)` for every tool call
-    that has a non-empty `name` field.
+    tuple), yield `(tool_call_id, tool_name, arg_preview)` for every
+    tool call that has a non-empty `name` field.
+
+    `arg_preview` is a string built from the first non-empty value in
+    the tool call's `args` dict (or `None` when no args are present on
+    the first chunk).  Caller can use it for a `status: <name>:
+    <preview>` event so the user sees what the agent is about to do.
 
     Caller is responsible for de-duplicating across chunks — the
     same tool_call_id appears in many subsequent chunks as args
@@ -58,10 +63,20 @@ def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str]]:
         return
     tool_calls = getattr(ai_chunk, "tool_calls", None) or []
     for tc in tool_calls:
-        name = tc.get("name") if isinstance(tc, dict) else None
-        tc_id = tc.get("id") if isinstance(tc, dict) else None
-        if name and tc_id:
-            yield (tc_id, name)
+        if not isinstance(tc, dict):
+            continue
+        name = tc.get("name")
+        tc_id = tc.get("id")
+        if not (name and tc_id):
+            continue
+        args = tc.get("args") or {}
+        preview = None
+        if isinstance(args, dict):
+            for v in args.values():
+                if v:
+                    preview = str(v)
+                    break
+        yield (tc_id, name, preview)
 
 
 def extract_content_text(messages_chunk: Any) -> str:
