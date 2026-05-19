@@ -46,6 +46,20 @@ number row treatment, punctuation strategy).  Iterate based on
 what's actually painful in real use rather than redesigning
 preemptively.
 
+** TODO Font choice + sizing
+
+The default emacs face on the phone is whatever the system X
+fontconfig defaults pick — not optimized for a 320x240 surface
+held at arm's length.  Pick a font (and sizes for transcript /
+input / keyboard / status) that reads well at this density:
+legibility at small px counts, distinguishable lowercase l vs.
+uppercase I vs. digit 1, comfortable line-height in =*chat*=.
+Candidates: a programming font (Iosevka, JetBrains Mono) tuned
+for clarity at small sizes, or a screen-optimized humanist like
+Inter.  Try a couple, decide on the phone, codify in =os.el=
+(or a per-face block in the init snippet) so phone-install
+sets it consistently.
+
 * Other / cross-cutting
 
 (Nothing yet — add as it comes up.)
