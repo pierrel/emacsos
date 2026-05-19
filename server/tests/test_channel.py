@@ -98,6 +98,28 @@ def test_eval_elisp_binary_missing_treated_as_unreachable():
     assert "do not retry" in result
 
 
+def test_eval_elisp_os_error_treated_as_unreachable():
+    """call_emacs's OSError branch returns `str(e)` which starts with
+    `[Errno N]` for typical OS errors.  Channel must recognise this
+    as infrastructure failure, not an elisp semantic error."""
+    with patch("emacsos_server.channel.phone_mod.call_emacs",
+               return_value=(False, "[Errno 13] Permission denied")):
+        result = _invoke("(buffer-name)")
+    assert "phone unreachable" in result
+    assert "do not retry" in result
+
+
+def test_eval_elisp_empty_stderr_exit_code_treated_as_unreachable():
+    """call_emacs's empty-stderr fallback is `f'exit {N}'`.  Channel
+    must NOT mis-classify that as an elisp error and let the agent
+    retry against a host that just returned a non-zero exit."""
+    with patch("emacsos_server.channel.phone_mod.call_emacs",
+               return_value=(False, "exit 1")):
+        result = _invoke("(buffer-name)")
+    assert "phone unreachable" in result
+    assert "do not retry" in result
+
+
 def test_eval_elisp_subprocess_exception_surfaces_as_error():
     with patch("emacsos_server.channel.phone_mod.call_emacs",
                side_effect=OSError("[Errno 24] Too many open files")):
@@ -130,6 +152,3 @@ def test_redact_handles_no_secrets():
 
 def test_emacs_tools_includes_eval_elisp():
     assert eval_elisp in EMACS_TOOLS
-    # One-tool list today; if a second lands the design doc must be
-    # updated to mention it.
-    assert len(EMACS_TOOLS) == 1

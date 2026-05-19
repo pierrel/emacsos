@@ -28,7 +28,15 @@ User-resolved questions (2026-05-18):
 
 - *Rollback gating* — ship channel against real phone; rollback comes later.  Accepted v1 risk for single-user / single-phone setup.  Mitigation: smoke test exercises only safe exprs (eg. `(+ 1 2)`); the elisp skill landing in a later experiment teaches the agent safe-vs-destructive distinctions; phone-restart remains the ultimate kill switch even without a known-good marker (the last-loaded config wins on next boot — fragile but workable for v1).
 - *Scope of assist change* — bundle into the same feature, two PRs in parallel.  Open the assist PR first (smaller, single-purpose); emacsos branch pip-installs assist editably from local checkout so the two PRs can land in coordinated order (assist first, then emacsos).
-- *Phone-UX tool-call transparency* — surface tool name + truncated arg as the status event.  New wire format: `status: eval_elisp: <first 50 chars of code, ellipsised>` instead of the original `status: calling eval_elisp`.  Better UX for a device the agent is modifying.  Truncate to keep the chat surface readable on 320×240.
+- *Phone-UX tool-call transparency* — INTENT: surface tool name + truncated arg as the status event.  ACTUAL v1: `calling <tool_name>` only.  Args-in-status was implemented but the code-review team (and a real-LLM smoke from dev box) caught that `tool_calls[0].args` is generally empty on the first chunk we see — args arrive piecewise via `tool_call_chunks` continuation chunks, and the chunk-where-name-first-appears is also where we de-dup and emit status.  A proper preview needs `tool_call_chunks` accumulation across many chunks per tc_id; deferred to a v2 follow-up.  See `roadmap.org` "Tool-call transparency".
+
+Post-code-review revisions (2026-05-19):
+
+- *Args-in-status deferred* — see User-resolved questions above.  `extract_new_tool_calls` reverted to a 2-tuple (id, name); `_format_tool_status` helper removed.
+- *`is_unreachable` classifier widened* — original only matched `emacsclient:`/`timed out`/`auth file`/`binary not found`; missed `call_emacs`'s `OSError` branch (returns `str(e)`, typically `[Errno N] ...`) and the empty-stderr fallback `exit N`.  Both now classified as unreachable so the no-retry hint fires.  Cleaner long-term fix (move classification into `phone.call_emacs`'s return tuple as a typed kind) tracked as a follow-up PR; out of scope here.
+- *`Config.from_env()` lifted to module-load* in `channel.py` (was per-call) — matches `app.py`'s established `config = Config.from_env()` at-import pattern.
+- *`_redact`'s dead `or s` fallback removed* — for any non-empty input the `"\n".join(...)` was already non-empty; falsified by code-reviewer reading.
+- *Smoke extended* per design §6 — `server/simulation/run.sh` now has a second `/chat` round-trip with a prompt that should invoke `eval_elisp(+ 1 2)`, asserting (a) ≥1 `status: calling eval_elisp` event lands and (b) the final bot text mentions `3`.  Runs against the dockerized phone simulator's real emacs daemon.
 
 * TL;DR (revised after design-review team, 2026-05-18)
 

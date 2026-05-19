@@ -174,6 +174,38 @@ PY
 rm -f "$EVENTS_FILE"
 
 
+# 6b. POST /chat with an eval_elisp-shaped prompt.  Proves the
+#     emacs-modifying channel actually executes elisp end-to-end
+#     against the dockerized phone simulator's real emacs daemon.
+log "POST /chat (eval_elisp smoke) from inside the phone container"
+ELISP_MSG="Use the eval_elisp tool to evaluate (+ 1 2) and tell me the result in one short sentence."
+ELISP_REQ=$(python3 -c "import json,sys; print(json.dumps({'message': sys.argv[1], 'phone': {'auth_file': sys.argv[2]}}))" "$ELISP_MSG" "$AUTH_FILE_CONTENTS")
+ELISP_EVENTS=$(mktemp /tmp/sim-elisp-XXXXXX.ndjson)
+docker exec -i "$CONTAINER" sh -c \
+  "curl -sN -X POST -H 'Content-Type: application/json' --data @- \
+   http://127.0.0.1:$SERVER_PORT/chat" <<< "$ELISP_REQ" \
+  | tee "$ELISP_EVENTS" >/dev/null \
+  || fail "curl streaming failed (eval_elisp smoke)"
+
+python3 - "$ELISP_EVENTS" <<'PY' || fail "eval_elisp smoke shape"
+import json, sys, pathlib
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line]
+statuses = [e["text"] for e in events if e["type"] == "status"]
+end_events = [e for e in events if e["type"] == "end"]
+# (a) At least one status event names eval_elisp — proves the
+# agent actually invoked the tool (not just hallucinated the math).
+assert any("eval_elisp" in s for s in statuses), \
+    f"no eval_elisp status in stream; agent didn't invoke the tool. statuses={statuses}"
+# (b) Stream ended cleanly and the final text mentions the answer.
+assert end_events, "stream did not end"
+final = end_events[-1]["text"]
+assert "3" in final, f"final bot text does not mention the answer: {final[:200]}"
+print(f"[sim] eval_elisp smoke OK: {len(statuses)} status event(s), final mentions 3")
+PY
+
+rm -f "$ELISP_EVENTS"
+
+
 # 7. Round-trip via chat.el inside the daemon.  Proves the full
 #    client surface: chat.el's NDJSON process filter + incremental
 #    insertion + marker lifecycle.  SEND is async now — polls *chat*

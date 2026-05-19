@@ -87,7 +87,7 @@ def test_extract_content_text_malformed_chunk_returns_empty():
 
 # --- extract_new_tool_calls() ----------------------------------------------
 
-def test_extract_tool_calls_yields_id_name_arg_triples():
+def test_extract_tool_calls_yields_name_id_pairs():
     chunk = (
         _FakeMsg(tool_calls=[
             {"name": "task", "id": "tc-1"},
@@ -95,27 +95,9 @@ def test_extract_tool_calls_yields_id_name_arg_triples():
         ]),
         {},
     )
-    # No args on these chunks → arg preview is None.
     assert list(ndjson.extract_new_tool_calls(chunk)) == [
-        ("tc-1", "task", None),
-        ("tc-2", "search_internet", None),
-    ]
-
-
-def test_extract_tool_calls_includes_first_truthy_arg_as_preview():
-    chunk = (
-        _FakeMsg(tool_calls=[
-            {"name": "eval_elisp", "id": "tc-1",
-             "args": {"code": "(+ 1 2)"}},
-            # Skip empty/falsy args, pick the first truthy one.
-            {"name": "search_internet", "id": "tc-2",
-             "args": {"max_results": 0, "query": "what is rust"}},
-        ]),
-        {},
-    )
-    assert list(ndjson.extract_new_tool_calls(chunk)) == [
-        ("tc-1", "eval_elisp", "(+ 1 2)"),
-        ("tc-2", "search_internet", "what is rust"),
+        ("tc-1", "task"),
+        ("tc-2", "search_internet"),
     ]
 
 

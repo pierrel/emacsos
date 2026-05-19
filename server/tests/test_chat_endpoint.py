@@ -111,8 +111,11 @@ def test_empty_content_chunks_dont_produce_token_events(client):
 
 # --- tool-call status -------------------------------------------------------
 
-def test_tool_call_with_no_args_emits_calling_status(client):
-    """Zero-arg / args-still-streaming → fallback `calling <name>`."""
+def test_tool_call_emits_calling_status(client):
+    """v1 status format: `calling <tool_name>`.  Args-in-status is
+    deferred to v2 — real streams populate `args` via subsequent
+    `tool_call_chunks`, not on the first chunk we see, so the
+    truncated-args UX requires `tool_call_chunks` accumulation."""
     scripted = [
         ("messages", (
             _FakeAIMessageChunk(tool_calls=[{"name": "task", "id": "tc-1"}]),
@@ -127,50 +130,6 @@ def test_tool_call_with_no_args_emits_calling_status(client):
     statuses = [e for e in events if e["type"] == "status"]
     assert len(statuses) == 1
     assert statuses[0]["text"] == "calling task"
-
-
-def test_tool_call_with_args_shows_truncated_arg_in_status(client):
-    """Status surfaces what the agent is about to do on the phone."""
-    scripted = [
-        ("messages", (
-            _FakeAIMessageChunk(tool_calls=[{
-                "name": "eval_elisp",
-                "id": "tc-1",
-                "args": {"code": "(switch-to-buffer \"*scratch*\")"},
-            }]),
-            {},
-        )),
-    ]
-    with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
-        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
-            events = _collect_events(r)
-
-    statuses = [e["text"] for e in events if e["type"] == "status"]
-    assert statuses == ['eval_elisp: (switch-to-buffer "*scratch*")']
-
-
-def test_tool_call_with_long_args_truncates_with_ellipsis(client):
-    long_code = "(progn " + "(insert \"x\")" * 20 + ")"
-    scripted = [
-        ("messages", (
-            _FakeAIMessageChunk(tool_calls=[{
-                "name": "eval_elisp",
-                "id": "tc-1",
-                "args": {"code": long_code},
-            }]),
-            {},
-        )),
-    ]
-    with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
-        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
-            events = _collect_events(r)
-
-    statuses = [e["text"] for e in events if e["type"] == "status"]
-    assert len(statuses) == 1
-    assert statuses[0].endswith("...")
-    assert len(statuses[0]) <= len("eval_elisp: ") + 50
 
 
 def test_repeated_tool_call_chunks_dont_repeat_status(client):

@@ -32,6 +32,12 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
+# Read once at module load — `app.py` follows the same pattern at the
+# top of that module.  Config is server-wide and the `emacsclient`
+# path doesn't vary per request, so we don't re-parse env on every
+# tool invocation.
+_CONFIG = Config.from_env()
+
 # Hard upper bound on a single elisp eval.  Generous enough for
 # (load-file "...") on a moderately-sized config but bounded enough
 # that `(while t)` and friends return as a timeout error rather than
@@ -80,7 +86,7 @@ def _redact(s: str) -> str:
     return "\n".join(
         "<redacted>" if _REDACT_RE.search(line) else line
         for line in s.splitlines()
-    ) or s
+    )
 
 
 @tool
@@ -89,10 +95,10 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
     string.  Use this to inspect or modify the user's emacs state —
     open buffers, set variables, load files, query the environment.
 
-    The result is the value's printed representation as emacsclient -e
-    prints it (close to `prin1-to-string` but with trailing whitespace
-    stripped: strings come back wrapped in quotes, multi-line values
-    have literal newlines, `nil` is the bare token `nil`).
+    The result is whatever `emacsclient -e` prints on stdout, with
+    surrounding whitespace stripped (strings include their surrounding
+    quotes, embedded newlines come back escaped as `\\n`, `nil` is the
+    bare token `nil`, multi-line list values appear on one line).
 
     On failure the return string is prefixed with `error:` — for
     example `error: phone unreachable: ... (do not retry — surface to
@@ -116,7 +122,7 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
             ctx.auth_contents,
             ctx.phone_host,
             code,
-            emacsclient=Config.from_env().emacsclient,
+            emacsclient=_CONFIG.emacsclient,
             timeout=EVAL_TIMEOUT_SECONDS,
         )
     except Exception as e:  # noqa: BLE001 — surface any failure as a tool-result string
@@ -125,17 +131,22 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
     if ok:
         return output
     # Distinguish phone-unreachable (network/auth/timeout/binary
-    # missing) from the elisp itself signalling an error.  call_emacs
-    # returns False for both, but the message shape lets us split:
-    # emacsclient prefixes its own errors with `emacsclient:` (eg.
-    # "emacsclient: connect: Connection refused"); elisp evaluation
-    # errors arrive without that prefix.  All unreachable-shaped
-    # failures get the explicit no-retry hint baked in so a future
-    # skill doesn't have to enforce no-retry from the system prompt.
+    # missing/OS-level failure) from the elisp itself signalling an
+    # error.  call_emacs returns False for both; we check for shapes
+    # that ONLY come from infrastructure-side failures (the four
+    # `except` branches of call_emacs + the empty-stderr `exit N`
+    # fallback + emacsclient's own connect-time error prefix).  Any
+    # remaining (False, ...) is treated as an elisp semantic error
+    # the agent might recover from with a different expression.
+    # NOTE: a cleaner fix would lift the classification into
+    # `phone.call_emacs` itself (return a typed kind instead of
+    # string-sniffing here); deferred to a follow-up PR.
     is_unreachable = (
         output.startswith("emacsclient:")
+        or output.startswith("exit ")
+        or output.startswith("[Errno ")
         or "timed out" in output
-        or "auth file" in output
+        or "auth file:" in output
         or "binary not found" in output
     )
     if is_unreachable:

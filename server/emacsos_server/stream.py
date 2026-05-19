@@ -40,15 +40,10 @@ def map_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str, str | None]]:
+def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str]]:
     """From a `messages` stream chunk (a `(AIMessageChunk, metadata)`
-    tuple), yield `(tool_call_id, tool_name, arg_preview)` for every
-    tool call that has a non-empty `name` field.
-
-    `arg_preview` is a string built from the first non-empty value in
-    the tool call's `args` dict (or `None` when no args are present on
-    the first chunk).  Caller can use it for a `status: <name>:
-    <preview>` event so the user sees what the agent is about to do.
+    tuple), yield `(tool_call_id, tool_name)` for every tool call
+    that has a non-empty `name` field.
 
     Caller is responsible for de-duplicating across chunks — the
     same tool_call_id appears in many subsequent chunks as args
@@ -56,7 +51,15 @@ def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str, str 
     `tool_calls=[{name: ..., id: ...}]` populated; later chunks
     have `tool_calls=[]` and the args land in `tool_call_chunks`
     with the same id.  We yield only when `name` is present so
-    callers can use seen-set logic on id alone."""
+    callers can use seen-set logic on id alone.
+
+    NOTE: we deliberately do NOT extract args here.  The agreed UX
+    was to surface tool args in the status event ("eval_elisp: (...)")
+    but args generally are NOT populated on the first chunk we see —
+    they arrive piecewise via `tool_call_chunks` and the chunk-where-
+    name-first-appears is also the one that fires the status event.
+    A proper args preview requires `tool_call_chunks` accumulation
+    across many chunks per tc_id; deferred to v2."""
     try:
         ai_chunk, _meta = messages_chunk
     except (TypeError, ValueError):
@@ -67,16 +70,8 @@ def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str, str 
             continue
         name = tc.get("name")
         tc_id = tc.get("id")
-        if not (name and tc_id):
-            continue
-        args = tc.get("args") or {}
-        preview = None
-        if isinstance(args, dict):
-            for v in args.values():
-                if v:
-                    preview = str(v)
-                    break
-        yield (tc_id, name, preview)
+        if name and tc_id:
+            yield (tc_id, name)
 
 
 def extract_content_text(messages_chunk: Any) -> str:

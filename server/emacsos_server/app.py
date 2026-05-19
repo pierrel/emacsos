@@ -116,24 +116,6 @@ def _start_stream_iter(message: str, phone_ctx: PhoneContext):
     return iter(t.stream_message(message))
 
 
-_STATUS_ARG_MAX = 50
-
-
-def _format_tool_status(tool_name: str, arg_preview: Optional[str]) -> str:
-    """`status: <name>: <first ~50 chars of the arg, ellipsised>` so the
-    user sees what the agent is about to do on their phone.  Falls back
-    to `calling <name>` when no preview is available (eg. zero-arg tool
-    or args still streaming in via tool_call_chunks).  Newlines in args
-    collapse to spaces — the status surface is one line on a 320x240
-    screen."""
-    if not arg_preview:
-        return f"calling {tool_name}"
-    flat = " ".join(arg_preview.split())
-    if len(flat) > _STATUS_ARG_MAX:
-        flat = flat[: _STATUS_ARG_MAX - 3] + "..."
-    return f"{tool_name}: {flat}"
-
-
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
     """The async generator that drives one chat turn.  Bridges
     assist's sync iterator via run_in_executor and polls
@@ -229,19 +211,11 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
                 if text:
                     full_text_parts.append(text)
                     yield ndjson.event("token", text=text)
-                for tc_id, tc_name, tc_args in ndjson.extract_new_tool_calls(payload):
+                for tc_id, tc_name in ndjson.extract_new_tool_calls(payload):
                     if tc_id not in seen_tool_ids:
                         seen_tool_ids.add(tc_id)
-                        # User-decision (design-review): show name +
-                        # truncated arg so the phone shows what the
-                        # agent is about to do on it.  Truncate to
-                        # ~50 chars to keep the chat surface readable
-                        # on 320x240.  `tc_args` is the first non-
-                        # empty positional/kw value formatted as str.
-                        yield ndjson.event(
-                            "status",
-                            text=_format_tool_status(tc_name, tc_args),
-                        )
+                        yield ndjson.event("status",
+                                           text=f"calling {tc_name}")
             elif ch_type == "updates":
                 status = ndjson.render_update_to_status(payload)
                 if status:
