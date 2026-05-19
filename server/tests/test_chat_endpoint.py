@@ -62,7 +62,7 @@ def test_streams_start_token_end_for_simple_response(client):
         ("messages", (_FakeAIMessageChunk(content="Hello!"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
 
@@ -82,7 +82,7 @@ def test_streams_multiple_tokens_concatenate_into_end_text(client):
         ("messages", (_FakeAIMessageChunk(content="is 42."), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -100,7 +100,7 @@ def test_empty_content_chunks_dont_produce_token_events(client):
         ("messages", (_FakeAIMessageChunk(content=""), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -123,7 +123,7 @@ def test_tool_call_emits_calling_status(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -146,7 +146,7 @@ def test_repeated_tool_call_chunks_dont_repeat_status(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -161,7 +161,7 @@ def test_update_to_status_surfaces_named_node(client):
         ("updates", {"research-agent": {}}),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -189,7 +189,7 @@ def test_mid_stream_exception_yields_error_event_with_partial(client):
         yield ("messages", (_FakeAIMessageChunk(content="partial"), {}))
         raise ValueError("model died mid-stream")
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=gen()):
+               return_value=(gen(), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -219,7 +219,7 @@ def test_missing_phone_yields_error_event(client):
 def test_content_type_is_ndjson(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             assert r.headers["content-type"].startswith("application/x-ndjson")
 
@@ -227,7 +227,7 @@ def test_content_type_is_ndjson(client):
 def test_start_event_carries_stream_id_and_ts(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=iter(scripted)):
+               return_value=(iter(scripted), None)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
     start = events[0]
@@ -250,11 +250,13 @@ def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
 
     def fake_build(phone_ctx):
         captured["ctx"] = phone_ctx
-        # Return a thread-like object with a no-op stream_message.
+        # Return a (thread, working_dir) tuple matching the real
+        # `_build_thread`'s shape (added in Copilot round 2 fix for
+        # the per-/chat tempdir leak).
         class _T:
             def stream_message(self, _msg):
                 return iter([])
-        return _T()
+        return _T(), None
 
     with patch.object(app_mod, "_build_thread", side_effect=fake_build):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
@@ -265,3 +267,26 @@ def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
     assert ctx.auth_contents == _FAKE_AUTH
     # TestClient sets client.host to "testclient" by default.
     assert ctx.phone_host == "testclient"
+
+
+def test_working_dir_is_cleaned_up_after_stream(client, tmp_path):
+    """Per-/chat working_dir must be rmtree'd in `_stream_turn`'s
+    finally — otherwise /tmp/emacsos-thread-* leaks one entry per
+    request (Copilot round 2 caught this)."""
+    import emacsos_server.app as app_mod
+
+    wd = tmp_path / "emacsos-thread-xyz"
+    wd.mkdir()
+    assert wd.exists()
+
+    def fake_build(_phone_ctx):
+        class _T:
+            def stream_message(self, _msg):
+                return iter([])
+        return _T(), str(wd)
+
+    with patch.object(app_mod, "_build_thread", side_effect=fake_build):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
+            _collect_events(r)
+
+    assert not wd.exists(), f"working_dir leaked: {wd}"

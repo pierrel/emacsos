@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import tempfile
 import time
 import uuid
@@ -87,7 +88,10 @@ RUNAWAY_SECONDS = 30 * 60.0
 def _build_thread(phone_ctx: PhoneContext):
     """Construct a fresh `assist.Thread` for one /chat turn, with the
     phone-control toolset bound and the per-request phone context
-    threaded into the langgraph RunnableConfig.  Raises whatever
+    threaded into the langgraph RunnableConfig.  Returns
+    `(thread, working_dir)` — caller is responsible for `rmtree`'ing
+    `working_dir` when the stream is done so we don't leak one
+    `/tmp/emacsos-thread-*` directory per /chat.  Raises whatever
     assist raises during construction (eg. model probe failure)."""
     # Import inside so module import doesn't trigger assist's
     # transitive imports during server startup.
@@ -106,14 +110,16 @@ def _build_thread(phone_ctx: PhoneContext):
         extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
     )
     log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
-    return t
+    return t, working_dir
 
 
 def _start_stream_iter(message: str, phone_ctx: PhoneContext):
     """Sync helper invoked via run_in_executor: build a fresh Thread
-    for this /chat turn and start the stream_message iterator."""
-    t = _build_thread(phone_ctx)
-    return iter(t.stream_message(message))
+    for this /chat turn and start the stream_message iterator.
+    Returns `(iterator, working_dir)` — caller stores the working_dir
+    for cleanup in `_stream_turn`'s finally."""
+    t, working_dir = _build_thread(phone_ctx)
+    return iter(t.stream_message(message)), working_dir
 
 
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
@@ -127,6 +133,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     full_text_parts: list[str] = []
     seen_tool_ids: set[str] = set()
     it = None
+    working_dir: Optional[str] = None
     # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
     # otherwise a long wait behind the lock would burn the budget
     # before we'd even started this stream's actual work.
@@ -170,7 +177,8 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # Move Thread construction onto the executor so the async
         # handler isn't blocked by it.  This is also the only place an
         # ASSIST_MODEL_URL misconfig can raise.
-        it = await loop.run_in_executor(None, _start_stream_iter, message, phone_ctx)
+        it, working_dir = await loop.run_in_executor(
+            None, _start_stream_iter, message, phone_ctx)
         pending = None
         last_heartbeat = time.monotonic()
         while True:
@@ -249,6 +257,14 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
                 pass
             except Exception:
                 log.exception("error closing inner iterator")
+        # Remove the per-stream working_dir so /tmp/emacsos-thread-*
+        # doesn't accumulate one entry per /chat.  Best-effort —
+        # cleanup failures get logged but don't break the stream.
+        if working_dir is not None:
+            try:
+                shutil.rmtree(working_dir, ignore_errors=False)
+            except Exception:
+                log.exception("error removing working_dir %s", working_dir)
         # Release the single-flight lock so the next queued /chat can
         # proceed.  Always paired with the acquire above this try block.
         _STREAM_LOCK.release()
