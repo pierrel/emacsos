@@ -92,8 +92,16 @@ RUNAWAY_SECONDS = 30 * 60.0
 
 
 def _build_thread():
+    """Construct a fresh `assist.Thread`.  Raises whatever assist
+    raises during construction (eg. model probe failure)."""
+    # Import inside so module import doesn't trigger assist's
+    # transitive imports during server startup.
     from assist.thread import Thread
+
     working_dir = tempfile.mkdtemp(prefix="emacsos-thread-")
+    # sandbox_backend=None: emacsos runs the agent without a
+    # container sandbox.  model=None lets Thread call
+    # `select_chat_model` itself, which reads ASSIST_MODEL_URL.
     log.info("Constructing assist.Thread (working_dir=%s)", working_dir)
     t = Thread(working_dir=working_dir, sandbox_backend=None)
     log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
@@ -101,6 +109,10 @@ def _build_thread():
 
 
 def _get_thread():
+    """Return the singleton Thread, lazy-constructing under the lock.
+    The lock is held only for the construction critical section; the
+    actual `.stream_message()` call happens outside it so concurrent
+    streams don't serialize on Thread construction."""
     global _THREAD
     if _THREAD is not None:
         return _THREAD
@@ -112,6 +124,13 @@ def _get_thread():
 
 
 def _reset_thread():
+    """Unconditionally drop the singleton reference; the next
+    `_get_thread()` will lazy-construct a fresh one.  Prefer
+    `_reset_thread_if(owner)` from inside `_stream_turn` so a
+    concurrent stream isn't surprised by its singleton vanishing
+    mid-flight; this unconditional form remains for callers that
+    don't have a Thread reference to compare against (eg. an
+    operator-initiated reset from a future admin endpoint)."""
     global _THREAD
     with _THREAD_LOCK:
         if _THREAD is not None:
