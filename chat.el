@@ -506,17 +506,18 @@ continues appending bytes after it."
                                          '(read-only t front-sticky t rear-nonsticky t))))))))
         ;; First-token watchdog.  Fires once if no event lands
         ;; within the configured timeout AND we're still in flight.
+        ;; Uses `emacos--chat-terminate-stream' so the URL process is
+        ;; actually killed -- otherwise a late-arriving response would
+        ;; keep delivering events into the just-cleaned-up UI.
         (setq emacos--chat-first-token-timer
               (run-with-timer
                emacos-chat-first-token-timeout nil
                (lambda ()
                  (when (and emacos--chat-in-flight
                             (= emacos--chat-tokens-seen 0))
-                   (emacos--chat-handle-error
-                    (list :type "error"
-                          :reason
-                          (format "no response from server after %ds"
-                                  emacos-chat-first-token-timeout)))))))
+                   (emacos--chat-terminate-stream
+                    (format "no response from server after %ds"
+                            emacos-chat-first-token-timeout))))))
         ;; Connection-close watchdog.  Polls every 1s; only fires
         ;; end/error when the process is dead AND at least
         ;; `emacos--chat-watchdog-quiet-secs' have passed since the
@@ -576,20 +577,27 @@ continues appending bytes after it."
       (message "chat: stream in flight; tap ABORT to cancel")
     (emacos--chat-init-buffer (emacos--chat-buffer))))
 
-(defun emacos--chat-abort ()
-  "Cancel the in-flight stream.  Closes the URL process and
-synchronously renders `[error: aborted]' + tears down
-per-stream state, so the UI returns to CLEAR immediately
-without waiting for the watchdog.  We can't rely on url-http's
-sentinel here -- it gets swapped mid-stream by the url-http
-state machine, so any sentinel-driven cleanup is unreliable."
-  (interactive)
+(defun emacos--chat-terminate-stream (reason)
+  "Kill the in-flight stream's URL process (if any) and render
+`[error: REASON]' on the bot line, then tear down per-stream
+state.  Used by ABORT and by the first-token timeout so neither
+leaves a half-killed stream that keeps delivering events into a
+cleaned-up UI.  Safe no-op when no stream is in flight."
   (when emacos--chat-in-flight
     (when (and (processp emacos--chat-process)
                (process-live-p emacos--chat-process))
       (delete-process emacos--chat-process))
     (emacos--chat-handle-error
-     (list :type "error" :reason "aborted"))))
+     (list :type "error" :reason reason))))
+
+(defun emacos--chat-abort ()
+  "Cancel the in-flight stream.  Synchronously kills the URL process
+and renders `[error: aborted]', so the UI returns to CLEAR
+immediately without waiting for the watchdog.  We can't rely on
+url-http's sentinel here -- it gets swapped mid-stream by the
+url-http state machine, so any sentinel-driven cleanup is unreliable."
+  (interactive)
+  (emacos--chat-terminate-stream "aborted"))
 
 ;;; Page integration
 

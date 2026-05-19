@@ -61,6 +61,15 @@ class ChatRequest(BaseModel):
 _THREAD = None
 _THREAD_LOCK = threading.Lock()
 
+# Single-flight serialization for /chat streams.  EmacsOS is designed
+# for one user / one phone / one chat at a time; the lock prevents
+# concurrent /chat coroutines from sharing the singleton Thread and
+# accumulating multiple parallel Thread instances under contention.
+# A second /chat arriving mid-stream waits behind the first; the
+# `start` event is emitted *before* the lock acquire so the client
+# still gets immediate ack of receipt even when queued.
+_STREAM_LOCK = asyncio.Lock()
+
 # Heartbeat: emit a `heartbeat` event every N seconds of silence so
 # long tool runs don't look like a dead connection.  Spike showed
 # tool-call args stream as `tool_call_chunks` (no `content`) and
@@ -68,6 +77,12 @@ _THREAD_LOCK = threading.Lock()
 # silent periods between status events are routine on research-
 # shaped prompts.
 HEARTBEAT_SECONDS = 10.0
+
+# How often the inner loop wakes to check `request.is_disconnected()`.
+# Decoupled from HEARTBEAT_SECONDS so an ABORT (client disconnect)
+# frees the executor thread/queue within ~1s rather than waiting up
+# to a full heartbeat cycle.
+DISCONNECT_POLL_SECONDS = 1.0
 
 # Runaway backstop: reset the singleton after this many seconds
 # of the same stream so a truly-stuck agent doesn't pin the server
@@ -145,16 +160,31 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
     seen_tool_ids: set[str] = set()
     it = None
     my_thread = None
-    runaway_at = time.monotonic() + RUNAWAY_SECONDS
+    # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
+    # otherwise a long wait behind the lock would burn the budget
+    # before we'd even started this stream's actual work.
+    runaway_at = float("inf")
 
     yield ndjson.event("start", stream_id=stream_id, ts=time.time())
 
+    # Single-flight: serialize the body of the stream so two /chat
+    # coroutines can't accumulate parallel Thread instances under
+    # contention.  Acquire BEFORE the try so the corresponding release
+    # in finally always pairs cleanly; `start` is yielded *before*
+    # acquire so queued clients still see an immediate ack of receipt.
+    await _STREAM_LOCK.acquire()
     try:
+        # `runaway_at` is set HERE (not before the lock acquire) so a
+        # long wait behind the lock doesn't burn the budget before
+        # we've even started.  Inside the try so the finally is the
+        # exclusive release path.
+        runaway_at = time.monotonic() + RUNAWAY_SECONDS
         # Move singleton construction onto the executor so the
         # async handler isn't blocked by it.  This is also the
         # only place an ASSIST_MODEL_URL misconfig can raise.
         my_thread, it = await loop.run_in_executor(None, _start_stream_iter, message)
         pending = None
+        last_heartbeat = time.monotonic()
         while True:
             if await request.is_disconnected():
                 log.info("Client disconnected; aborting stream %s", stream_id)
@@ -172,12 +202,17 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
                 # run_in_executor returns an asyncio.Future already, so
                 # we don't need ensure_future to make asyncio.wait happy.
                 pending = loop.run_in_executor(None, next, it, SENTINEL)
-            done, _ = await asyncio.wait([pending], timeout=HEARTBEAT_SECONDS)
+            # Wait on the inner-iter future for DISCONNECT_POLL_SECONDS;
+            # this caps client-disconnect latency at ~1s independently of
+            # the heartbeat cadence.  If the wait times out and a full
+            # HEARTBEAT_SECONDS has elapsed since the last heartbeat,
+            # emit one to keep the pipe live; otherwise just loop and
+            # re-check disconnect.
+            done, _ = await asyncio.wait([pending], timeout=DISCONNECT_POLL_SECONDS)
             if not done:
-                # Inner iter has produced nothing in HEARTBEAT_SECONDS;
-                # keep the pipe live and try again (don't cancel pending —
-                # next loop will re-await it).
-                yield ndjson.event("heartbeat", ts=time.time())
+                if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
+                    yield ndjson.event("heartbeat", ts=time.time())
+                    last_heartbeat = time.monotonic()
                 continue
             chunk = await pending
             pending = None
@@ -230,6 +265,9 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
         # reference mid-stream (see `_reset_thread_if` docstring).
         if my_thread is not None:
             _reset_thread_if(my_thread)
+        # Release the single-flight lock so the next queued /chat can
+        # proceed.  Always paired with the acquire above this try block.
+        _STREAM_LOCK.release()
 
 
 @app.post("/chat")
