@@ -189,7 +189,10 @@ async def _stream_turn(message: str, request: Request) -> AsyncIterator[bytes]:
         # on runaway-return, AND on exception.  Drops the iterator
         # so GC closes it (releasing THREAD_QUEUE via __exit__) and
         # clears the singleton so the next /chat builds fresh.
-        if it is not None:
+        if it is not None and hasattr(it, "close"):
+            # Generators expose close(); plain list_iterators (used by
+            # the test stub) do not, hence the hasattr guard -- avoids
+            # a noisy AttributeError-as-Exception log on every test.
             try:
                 it.close()
             except ValueError:

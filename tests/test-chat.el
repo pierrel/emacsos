@@ -17,9 +17,11 @@
         emacos--chat-status-start nil
         emacos--chat-status-end nil
         emacos--chat-tokens-seen 0)
-  (when (timerp emacos--chat-first-token-timer)
-    (cancel-timer emacos--chat-first-token-timer))
-  (setq emacos--chat-first-token-timer nil))
+  (dolist (sym '(emacos--chat-first-token-timer
+                 emacos--chat-watchdog-timer))
+    (let ((tm (symbol-value sym)))
+      (when (timerp tm) (cancel-timer tm)))
+    (set sym nil)))
 
 (defun chat-test--seed-you-line (buf msg)
   "Simulate emacos--chat-send having just inserted the you> line.

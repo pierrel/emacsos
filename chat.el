@@ -12,6 +12,7 @@
 ;; Loaded from os.el via (require 'chat).  Wire shape documented in
 ;; emacsos/docs/2026-05-17-streaming-responses.org.
 
+(require 'cl-lib)
 (require 'json)
 (require 'url)
 (require 'url-http)
@@ -524,8 +525,14 @@ continues appending bytes after it."
                    (url-request-extra-headers
                     '(("Content-Type" . "application/json; charset=utf-8")))
                    (url-request-data (emacos--chat-encode-request msg auth))
+                   ;; url-retrieve args: URL, CALLBACK, CBARGS, SILENT,
+                   ;; INHIBIT-COOKIES.  (No TIMEOUT arg in Emacs >=24;
+                   ;; we rely on `emacos--chat-first-token-timer' and
+                   ;; the watchdog for cancellation instead.)
                    (response-buf (url-retrieve emacos-chat-server-url
-                                               #'ignore nil t t))
+                                               #'ignore nil
+                                               t   ; SILENT
+                                               t)) ; INHIBIT-COOKIES
                    (proc (and (buffer-live-p response-buf)
                               (get-buffer-process response-buf))))
               (unless proc
