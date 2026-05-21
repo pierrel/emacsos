@@ -73,7 +73,8 @@ def test_uses_caller_host_not_posted_host():
     captured = {}
 
     def fake_run(cmd, **_kwargs):
-        with open(cmd[2]) as f:
+        # cmd layout: [emacsclient, -q, -f, <auth path>, -e, <expr>]
+        with open(cmd[3]) as f:
             captured["auth"] = f.read()
         return MagicMock(returncode=0, stdout="ok\n", stderr="")
 
@@ -117,10 +118,14 @@ def test_passes_expr_and_auth_path_to_emacsclient():
             emacsclient="ec",
         )
 
+    # `-q` first to suppress emacsclient's "connected to remote socket"
+    # stdout chatter so the agent's tool result is just the elisp value.
+    # See `phone.call_emacs` comment.
     assert captured["cmd"][0] == "ec"
-    assert captured["cmd"][1] == "-f"
-    assert captured["cmd"][3] == "-e"
-    assert captured["cmd"][4] == '(message "hi")'
+    assert captured["cmd"][1] == "-q"
+    assert captured["cmd"][2] == "-f"
+    assert captured["cmd"][4] == "-e"
+    assert captured["cmd"][5] == '(message "hi")'
 
 
 def test_returns_failure_on_nonzero_exit():

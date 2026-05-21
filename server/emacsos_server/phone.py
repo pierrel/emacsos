@@ -90,8 +90,15 @@ def call_emacs(
     """
     try:
         with _auth_file(auth_contents, phone_host) as path:
+            # `-q` suppresses emacsclient's "connected to remote socket
+            # at <host>" success message — which (surprise) goes to
+            # STDOUT, not stderr, and otherwise ends up prefixing the
+            # elisp result we hand to the agent.  The eval_elisp tool
+            # caller treats this stdout as the value, so without -q the
+            # agent reads `"connected to remote socket at 1.2.3.4\\n3"`
+            # and may echo the diagnostic in its reply.
             result = subprocess.run(
-                [emacsclient, "-f", path, "-e", expr],
+                [emacsclient, "-q", "-f", path, "-e", expr],
                 capture_output=True,
                 text=True,
                 timeout=timeout,

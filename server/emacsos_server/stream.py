@@ -51,15 +51,25 @@ def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str]]:
     `tool_calls=[{name: ..., id: ...}]` populated; later chunks
     have `tool_calls=[]` and the args land in `tool_call_chunks`
     with the same id.  We yield only when `name` is present so
-    callers can use seen-set logic on id alone."""
+    callers can use seen-set logic on id alone.
+
+    NOTE: we deliberately do NOT extract args here.  The agreed UX
+    was to surface tool args in the status event ("eval_elisp: (...)")
+    but args generally are NOT populated on the first chunk we see —
+    they arrive piecewise via `tool_call_chunks` and the chunk-where-
+    name-first-appears is also the one that fires the status event.
+    A proper args preview requires `tool_call_chunks` accumulation
+    across many chunks per tc_id; deferred to v2."""
     try:
         ai_chunk, _meta = messages_chunk
     except (TypeError, ValueError):
         return
     tool_calls = getattr(ai_chunk, "tool_calls", None) or []
     for tc in tool_calls:
-        name = tc.get("name") if isinstance(tc, dict) else None
-        tc_id = tc.get("id") if isinstance(tc, dict) else None
+        if not isinstance(tc, dict):
+            continue
+        name = tc.get("name")
+        tc_id = tc.get("id")
         if name and tc_id:
             yield (tc_id, name)
 

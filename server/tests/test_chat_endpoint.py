@@ -1,9 +1,14 @@
 """Tests for the streaming POST /chat endpoint.
 
-The endpoint now returns an NDJSON event stream rather than a JSON
-object.  Tests mock `Thread.stream_message` so we never hit a real
-model and drive the stream through FastAPI's TestClient, collecting
-events from the response body.
+The endpoint returns an NDJSON event stream rather than a JSON object.
+Tests mock `_start_stream_iter` (which builds the per-request Thread
+and starts its `stream_message` iterator) so we never hit a real model
+and drive the stream through FastAPI's TestClient, collecting events
+from the response body.
+
+Every test sends a `phone.auth_file` in the request body so
+`_stream_turn`'s phone-context guard is satisfied — see the dedicated
+`test_missing_phone_yields_error_event` for the negative case.
 """
 from __future__ import annotations
 
@@ -15,20 +20,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-@pytest.fixture(autouse=True)
-def _reset_thread_singleton():
-    """Clear the module-level Thread between tests so the lazy
-    _build_thread path is exercised cleanly each time."""
-    import emacsos_server.app as app_mod
-    app_mod._THREAD = None
-    yield
-    app_mod._THREAD = None
-
-
 @pytest.fixture
 def client():
     from emacsos_server.app import app
     return TestClient(app)
+
+
+# Minimal but parseable auth file: `host:port pid\nsecret\n`.  Host gets
+# discarded server-side (replaced with request.client.host) — see phone.py.
+_FAKE_AUTH = "0.0.0.0:1234 555\nsecret\n"
+
+
+def _chat_body(message: str = "hi") -> dict:
+    return {"message": message, "phone": {"auth_file": _FAKE_AUTH}}
 
 
 @dataclass
@@ -42,8 +46,7 @@ class _FakeAIMessageChunk:
 
 
 def _collect_events(response) -> list[dict]:
-    """Drain an NDJSON streaming response into a list of parsed
-    event dicts."""
+    """Drain an NDJSON streaming response into a list of parsed events."""
     events = []
     for raw in response.iter_lines():
         if not raw:
@@ -52,23 +55,15 @@ def _collect_events(response) -> list[dict]:
     return events
 
 
-def _mock_iter(iterator):
-    """Wrap an iterator as the (thread, iter) tuple `_start_stream_iter`
-    now returns.  The fake thread object is only used as an identity
-    handle for `_reset_thread_if`, so a plain `object()` is enough."""
-    return object(), iterator
-
-
 # --- happy path -------------------------------------------------------------
 
 def test_streams_start_token_end_for_simple_response(client):
-    """A simple message → start, one token, end."""
     scripted = [
         ("messages", (_FakeAIMessageChunk(content="Hello!"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "hi"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
 
     types = [e["type"] for e in events]
@@ -87,8 +82,8 @@ def test_streams_multiple_tokens_concatenate_into_end_text(client):
         ("messages", (_FakeAIMessageChunk(content="is 42."), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     tokens = [e["text"] for e in events if e["type"] == "token"]
@@ -98,16 +93,15 @@ def test_streams_multiple_tokens_concatenate_into_end_text(client):
 
 
 def test_empty_content_chunks_dont_produce_token_events(client):
-    """The spike showed warmup/cleanup chunks have empty content;
-    they must not produce noise token events."""
+    """Spike showed warmup/cleanup chunks have empty content; no noise."""
     scripted = [
         ("messages", (_FakeAIMessageChunk(content=""), {})),
         ("messages", (_FakeAIMessageChunk(content="x"), {})),
         ("messages", (_FakeAIMessageChunk(content=""), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     tokens = [e for e in events if e["type"] == "token"]
@@ -117,7 +111,11 @@ def test_empty_content_chunks_dont_produce_token_events(client):
 
 # --- tool-call status -------------------------------------------------------
 
-def test_tool_call_emits_status_event(client):
+def test_tool_call_emits_calling_status(client):
+    """v1 status format: `calling <tool_name>`.  Args-in-status is
+    deferred to v2 — real streams populate `args` via subsequent
+    `tool_call_chunks`, not on the first chunk we see, so the
+    truncated-args UX requires `tool_call_chunks` accumulation."""
     scripted = [
         ("messages", (
             _FakeAIMessageChunk(tool_calls=[{"name": "task", "id": "tc-1"}]),
@@ -125,8 +123,8 @@ def test_tool_call_emits_status_event(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     statuses = [e for e in events if e["type"] == "status"]
@@ -135,26 +133,21 @@ def test_tool_call_emits_status_event(client):
 
 
 def test_repeated_tool_call_chunks_dont_repeat_status(client):
-    """Same tc_id across many chunks (typical: continuations as
-    args stream in) → only one status emitted."""
     scripted = [
         ("messages", (
             _FakeAIMessageChunk(tool_calls=[{"name": "task", "id": "tc-1"}]),
             {},
         )),
-        # Continuations: args streaming in via tool_call_chunks;
-        # tool_calls=[] on these.
         ("messages", (_FakeAIMessageChunk(tool_calls=[]), {})),
         ("messages", (_FakeAIMessageChunk(tool_calls=[]), {})),
-        # Different tool, different id → another status.
         ("messages", (
             _FakeAIMessageChunk(tool_calls=[{"name": "search", "id": "tc-2"}]),
             {},
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     statuses = [e["text"] for e in events if e["type"] == "status"]
@@ -168,8 +161,8 @@ def test_update_to_status_surfaces_named_node(client):
         ("updates", {"research-agent": {}}),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     statuses = [e["text"] for e in events if e["type"] == "status"]
@@ -179,18 +172,15 @@ def test_update_to_status_surfaces_named_node(client):
 # --- error path -------------------------------------------------------------
 
 def test_construction_error_yields_error_event(client):
-    """When the iterator construction itself raises (e.g., model
-    misconfig), the error event maps the reason."""
-    def boom(_msg):
+    def boom(_msg, _ctx):
         raise RuntimeError("ASSIST_MODEL_URL not set")
     with patch("emacsos_server.app._start_stream_iter", side_effect=boom):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     errors = [e for e in events if e["type"] == "error"]
     assert len(errors) == 1
     assert "ASSIST_MODEL_URL" in errors[0]["reason"]
-    # No `end` after an error.
     assert not [e for e in events if e["type"] == "end"]
 
 
@@ -199,8 +189,8 @@ def test_mid_stream_exception_yields_error_event_with_partial(client):
         yield ("messages", (_FakeAIMessageChunk(content="partial"), {}))
         raise ValueError("model died mid-stream")
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(gen())):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(gen(), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
     tokens = [e["text"] for e in events if e["type"] == "token"]
@@ -208,33 +198,20 @@ def test_mid_stream_exception_yields_error_event_with_partial(client):
     assert tokens == ["partial"]
     assert len(errors) == 1
     assert "ValueError" in errors[0]["reason"]
-    # after_tokens reports the partial-content byte count for the
-    # client's "we got this far" rendering.
     assert errors[0]["after_tokens"] == len("partial")
 
 
-# --- thread singleton lifecycle --------------------------------------------
+def test_missing_phone_yields_error_event(client):
+    """The channel needs phone context; a request without `phone` is
+    rejected with a clean error event rather than starting an agent
+    that would have nowhere to invoke eval_elisp."""
+    with client.stream("POST", "/chat", json={"message": "hi"}) as r:
+        events = _collect_events(r)
 
-def test_thread_reset_after_stream_ends(client):
-    """Stream end must reset the singleton so the next request
-    builds a fresh Thread.  Verified by asserting _THREAD is None
-    after the stream completes."""
-    import emacsos_server.app as app_mod
-    scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
-    with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
-            _collect_events(r)
-    assert app_mod._THREAD is None
-
-
-def test_thread_reset_after_error(client):
-    import emacsos_server.app as app_mod
-    with patch("emacsos_server.app._start_stream_iter",
-               side_effect=RuntimeError("boom")):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
-            _collect_events(r)
-    assert app_mod._THREAD is None
+    errors = [e for e in events if e["type"] == "error"]
+    assert len(errors) == 1
+    assert "phone" in errors[0]["reason"].lower()
+    assert not [e for e in events if e["type"] == "end"]
 
 
 # --- response shape --------------------------------------------------------
@@ -242,16 +219,16 @@ def test_thread_reset_after_error(client):
 def test_content_type_is_ndjson(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             assert r.headers["content-type"].startswith("application/x-ndjson")
 
 
 def test_start_event_carries_stream_id_and_ts(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=_mock_iter(iter(scripted))):
-        with client.stream("POST", "/chat", json={"message": "q"}) as r:
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
     start = events[0]
     assert start["type"] == "start"
@@ -259,14 +236,92 @@ def test_start_event_carries_stream_id_and_ts(client):
     assert isinstance(start["ts"], (int, float))
 
 
-# --- thread singleton tests (independent of /chat) -------------------------
+# --- _start_stream_iter wires phone_ctx into Thread -------------------------
 
-def test_get_thread_lazy_constructs():
+def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
+    """The /chat handler must pass the parsed PhoneContext through to
+    `_start_stream_iter` so the Thread is built with the right
+    `extra_config`.  Mocks at the build-thread boundary and asserts
+    on the captured PhoneContext."""
     import emacsos_server.app as app_mod
-    fake_thread = object()
-    with patch("emacsos_server.app._build_thread", return_value=fake_thread) as build:
-        a = app_mod._get_thread()
-        b = app_mod._get_thread()
-    assert a is fake_thread
-    assert b is fake_thread
-    build.assert_called_once()
+    from emacsos_server.channel import PhoneContext
+
+    captured = {}
+
+    def fake_build(phone_ctx):
+        captured["ctx"] = phone_ctx
+        # Return a (thread, working_dir) tuple matching the real
+        # `_build_thread`'s shape (added in Copilot round 2 fix for
+        # the per-/chat tempdir leak).
+        class _T:
+            def stream_message(self, _msg):
+                return iter([])
+        return _T(), None
+
+    with patch.object(app_mod, "_build_thread", side_effect=fake_build):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
+            _collect_events(r)
+
+    ctx = captured["ctx"]
+    assert isinstance(ctx, PhoneContext)
+    assert ctx.auth_contents == _FAKE_AUTH
+    # TestClient sets client.host to "testclient" by default.
+    assert ctx.phone_host == "testclient"
+
+
+def test_working_dir_is_cleaned_up_after_stream(client, tmp_path):
+    """Per-/chat working_dir must be rmtree'd in `_stream_turn`'s
+    finally — otherwise /tmp/emacsos-thread-* leaks one entry per
+    request (Copilot round 2 caught this)."""
+    import emacsos_server.app as app_mod
+
+    wd = tmp_path / "emacsos-thread-xyz"
+    wd.mkdir()
+    assert wd.exists()
+
+    def fake_build(_phone_ctx):
+        class _T:
+            def stream_message(self, _msg):
+                return iter([])
+        return _T(), str(wd)
+
+    with patch.object(app_mod, "_build_thread", side_effect=fake_build):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
+            _collect_events(r)
+
+    assert not wd.exists(), f"working_dir leaked: {wd}"
+
+
+def test_build_thread_cleans_working_dir_on_construction_failure(tmp_path, monkeypatch):
+    """If `Thread(...)` raises (eg. ASSIST_MODEL_URL misconfig), the
+    working_dir is leaked because the caller never gets a handle to
+    rmtree it.  `_build_thread` must rmtree on failure before
+    re-raising (Copilot round 3 caught this)."""
+    import emacsos_server.app as app_mod
+    from emacsos_server.channel import PhoneContext
+
+    captured = {}
+
+    def fake_mkdtemp(prefix):
+        path = tmp_path / f"{prefix}xyz"
+        path.mkdir()
+        captured["path"] = path
+        return str(path)
+
+    monkeypatch.setattr(app_mod.tempfile, "mkdtemp", fake_mkdtemp)
+
+    class _BoomThread:
+        def __init__(self, **_kw):
+            raise RuntimeError("ASSIST_MODEL_URL not set")
+
+    # Patch Thread import in app_mod by replacing assist.thread.Thread.
+    import assist.thread as assist_thread_mod
+    monkeypatch.setattr(assist_thread_mod, "Thread", _BoomThread)
+
+    ctx = PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.1")
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="ASSIST_MODEL_URL"):
+        app_mod._build_thread(ctx)
+
+    assert not captured["path"].exists(), \
+        f"working_dir leaked on Thread construction failure: {captured['path']}"
