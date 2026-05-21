@@ -740,3 +740,189 @@ None.  All machinery is local elisp in =os.el= + a new
 
 When this ships, append an *Outcome* section pointing at the merged
 PR and any deviations from the plan.
+
+* Rework: single keyboard + commands combo (2026-05-21)
+
+The dynamic *swap-page* surface above (Decisions 4–7, the page bar, the
+=auto=/=pinned= state machine, the =AUTO= chip) was *rejected on PR #11
+review*.  User's verbatim feedback:
+
+#+begin_quote
+shows keyboard and "top commands" under the keyboard always
+always shows the "M-x" command somewhere for manually entering
+#+end_quote
+
+So the bottom =*keyboard*= window stops being a *switch* between pages
+and becomes ONE fixed composite that is always fully shown.  TAB
+(Decisions 1–2) is unaffected and stays exactly as built.
+
+This section supersedes Decisions 4, 5 (its *page-routing*; the
+fallback survives as "empty/global strip"), 6, 7, and the page-bar
+decision.  Run through the Phase-1 flow again (architect + a
+three-lens design-review team: simplicity, user-guidance,
+clean-interfaces — agentic-best-practices skipped, pure-elisp UI).
+
+** Layout (top → bottom in the =*keyboard*= window)
+
+1. *3 letter rows* — unchanged (=btn-w=, =scale= 1.75).  The hot path;
+   not touched.
+2. *Action row* SPC/RET/DEL/TAB — unchanged (=action-w=, =scale= 1.75).
+3. *Utility row* =[caps] [M-x] [Chat]= — three persistent affordances
+   at =util-w= (3-up).  =caps= toggles (as today); =M-x= runs
+   =execute-extended-command=; =Chat= shows =*chat*= on top.  =Chat=
+   gets the old page-bar active face (dodger blue) so the phone's
+   primary app reads as the app, not plumbing.
+4. *Command strip* — ONE row of the *top buffer's* commands (the "top
+   commands under the keyboard"), normal scale, truncate-no-wrap.
+
+Vertical budget is ≈ unchanged: the deleted page bar (1 row) is spent
+on the command strip; M-x/Chat fold into the utility row's spare
+=util-w= columns (=floor((win-w-2)/3)= already budgets 3) at 0 extra
+rows.
+
+** Decisions (rework)
+
+*** R1. No state machine; following is unconditional
+
+=emacos--current-page=, =emacos--page-mode= (auto/pinned), the AUTO
+chip, =emacos--switch-page='s pinning, =emacos--follow=, and
+=emacos--switch-to-auto= all existed only to override a "wrong page".
+With the keyboard always shown and the strip always following the top
+buffer, there is no page to be wrong about.  *Delete the whole axis.*
+
+*** R2. Command strip = one row, truncate-no-wrap, ordering = priority
+
+=emacos--commands-fitting(commands width)= (pure, width passed in,
+counts *displayed* width incl. the =" LABEL "= padding + inter-button
+gap) returns the prefix that fits one ~36-col row.  Earlier entries in
+each =emacos-mode-commands= list survive truncation, so the alist
+author orders by priority.  Overflow is reachable via *M-x* — that is
+M-x's job and why it's always present.
+
+*** R3. Globals don't vanish into M-x — strip falls back to =emacos-global-commands=
+
+Typing =M-x find-file RET= on a T9 multi-tap keyboard is ~20 taps.
+When the top buffer's mode has *no* command set (fundamental-mode,
+text modes — the common "just typing" case), the strip shows
+=emacos-global-commands= (Save / Undo / Find File / Switch Buffer,
+truncated to fit) instead of an empty row.  Modes *with* a command set
+show theirs; M-x remains the catch-all for everything.  (user-guidance
+design-review BLOCKER.)
+
+*** R4. =emacos--derive-page= → =emacos--top-commands= (replacement, not rename)
+
+Returns a command *list* =((LABEL . CMD) ...)= for the top buffer, not
+a page symbol.  One =cond=: active minibuffer → nil (you're typing a
+prompt; strip stays empty); =*chat*= by buffer identity →
+=emacos--chat-command-set=; a mode in =emacos-mode-commands= →
+=emacos--mode-commands-for=; else → =emacos-global-commands= (R3).
+Named =top-commands= because "target" already means the editing
+*window* in this file (=emacos--target=).  (clean-interfaces.)
+
+*** R5. Chat folds into the strip as a dynamic command set; keep SEND prominent
+
+=emacos--chat-command-set= (new, in *chat.el* — it owns
+=emacos--chat-in-flight=) returns =SEND= plus =CLEAR= (idle) /
+=ABORT= (in flight).  The abort path MUST survive: the strip is
+re-derived on every render, and chat.el's existing =emacos--render-page=
+calls (on send / on stream cleanup) refresh it, flipping CLEAR↔ABORT.
+=emacos--render-chat-page= is removed.
+
+SEND is the device's single most-used action (chat-first device); it
+must NOT shrink to the uniform 1.0 strip scale.  Command-strip entries
+may optionally carry a height: an entry is =(LABEL . CMD)= (default
+scale) *or* =(LABEL CMD HEIGHT)=.  =emacos--command-spec= normalizes
+both.  SEND carries ~1.5 (prominent, but below the old chat-page's 1.75
+because the keyboard now coexists with it — tune live).  Only chat uses
+the height field today.  (user-guidance BLOCKER + simplicity: one small
+normalizer, no per-label special-casing.)
+
+*** R6. Uniform dispatch + reachability
+
+Every strip/utility command button dispatches through
+=emacos--run-command= → =call-interactively= (mode commands, chat
+SEND/CLEAR/ABORT, M-x, Chat) so there's one execution path.
+=emacos--chat-show-top-buffer= is made =(interactive)= so the Chat
+button (and M-x) can reach it.
+
+*** R7. =emacos--run-command= collapses
+
+The force-keyboard-page-then-restore dance (it existed so a minibuffer
+prompt had a T9 surface) is dead — the keyboard is always shown.
+Collapse to: =call-interactively= in the target window under
+=unwind-protect=, then =emacos--render-page= (refreshes the strip in
+case the command changed the top buffer's mode *in place* —
+=window-buffer-change-functions= doesn't fire for an in-place
+=M-x <mode>=) + =emacos--refocus=.
+
+*** R8. Keep =emacos--in-render= (override the architect)
+
+The architect proposed deleting the re-entry guard (the loop path it
+guarded — a buffer swap inside render firing
+=window-buffer-change-functions= — is gone with =emacos--switch-page=).
+*Kept anyway* (simplicity design-review): it's ~2 lines defending
+against an infinite re-render that *bricks the phone*; cheapest-worst-
+case wins, and PR #11's review already adjudicated this.  The follower
+(=emacos--on-window-buffer-change=) bails when set, and additionally
+no-ops when the derived command set is unchanged (absorbs transient
+=*Completions*=/=*Help*= popups — only the strip row could flicker, the
+keyboard never moves).
+
+** Symbol fates
+
+REMOVE: =emacos--current-page=, =emacos--page-mode=, =emacos--follow=,
+=emacos--switch-to-auto=, =emacos--switch-page=, =emacos--page-bar-chip=,
+=emacos--render-page-bar=, =emacos--render-global-page=,
+=emacos--render-mode-page=, =emacos--render-chat-page= (chat.el).
+REPLACE: =emacos--derive-page= → =emacos--top-commands= (R4).
+KEEP+simplify: =emacos--on-window-buffer-change= (unconditional re-render
++ in-render guard + unchanged-set no-op), =emacos--render-page= (drop the
+page =pcase= + page-bar; render the composite), =emacos--run-command=
+(R7), =emacos--init= (drop the derive-page line).
+KEEP: =emacos--in-render= (R8), =emacos-mode-commands=,
+=emacos--mode-commands-for=, all TAB code.
+ADD: =emacos-global-commands=, =emacos--top-commands=,
+=emacos--commands-fitting=, =emacos--command-spec=,
+=emacos--render-command-strip=, =emacos--render-utility-row=,
+=emacos--chat-command-set= (chat.el).
+
+** Tests (rework)
+
+DELETE (test removed machinery): the =switch-page-pins=,
+=switch-to-auto-rederives=, =follower-noop-when-pinned=,
+=follower-noop-when-derived-equals-shown= tests + the
+=test-os--with-page-state= macro.  KEEP the =follower-noop-during-render=
+test (the guard is kept, R8) — adapt to the simplified follower.
+REWRITE the 5 =derive-page= tests → =emacos--top-commands= asserting
+command LISTS: fundamental → =emacos-global-commands= (R3, not nil),
+minibuffer → nil, org → org's set, dired → dired's set, =*chat*= →
+SEND+CLEAR, and =*chat*= in-flight → SEND+ABORT.  KEEP the
+=mode-commands-for= + both TAB tests.  ADD: =commands-fitting= is
+order-preserving + width-accurate; =command-spec= normalizes both entry
+shapes; M-x + Chat always emitted in the utility row.
+
+** Roadmap
+
+roadmap.org §"Dynamic keyboard surface based on top buffer" still
+prescribes the *rejected* swap model + manual override.  Rewrite it to
+the always-on composite (so a future session doesn't cite it and
+rebuild the swap machinery), and organize the ergonomics follow-ups
+(=emacos-mode-commands= enrichment, number row, transient-buffer
+ignore-list) under it.
+
+** Risks (rework — for the code-review team)
+
+1. *Strip width accounting* (highest impl risk).  The "fits one row"
+   math must count =" LABEL "= padding + gaps, not =(length label)=, or
+   the strip wraps and busts the vertical budget.  =commands-fitting= is
+   pure + unit-tested with explicit widths to de-risk off-device; the
+   live pass confirms no wrap at the real ~36 cols.
+2. *SEND at 1.5 + always-on keyboard* may overflow the window
+   vertically on the real 240px screen (the old chat page had no
+   keyboard under it).  Live pass; fall back to 1.0 SEND if it clips.
+3. *Transient flicker* — the strip (only) flips on =*Completions*=/
+   =*Help*= popups; the unchanged-set no-op (R8) absorbs most.  Live
+   tolerated; ignore-list is a follow-up.
+4. *=*chat*= reachability* — if =emacos--chat-show-top-buffer= isn't
+   interactive, M-x/Chat can't reach it and the user gets stuck out of
+   chat.  R6 fixes; verify on the live pass that Chat round-trips.

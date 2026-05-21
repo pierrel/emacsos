@@ -604,28 +604,29 @@ url-http state machine, so any sentinel-driven cleanup is unreliable."
   (interactive)
   (emacos--chat-terminate-stream "aborted"))
 
-;;; Page integration
+;;; Command-strip integration
 
-(defun emacos--render-chat-page ()
-  "Render the chat-page controls.  Big SEND, smaller second button
-\(CLEAR when idle, ABORT when a stream is in flight)."
-  (let* ((win      (get-buffer-window (current-buffer)))
-         (win-w    (if win (window-body-width win) 20))
-         (scale    1.75)
-         (send-w   (max 1 (floor (/ win-w scale))))
-         (clear-w  (floor (/ win-w 2))))
-    (emacos--btn (emacos--center "SEND" send-w)
-                 #'emacos--chat-send nil scale)
-    (insert "\n")
-    (if emacos--chat-in-flight
-        (emacos--btn (emacos--center "ABORT" clear-w)
-                     #'emacos--chat-abort)
-      (emacos--btn (emacos--center "CLEAR" clear-w)
-                   #'emacos--chat-clear))
-    (insert "\n")))
+(defun emacos--chat-command-set ()
+  "Command-strip entries for the *chat* buffer: SEND (the device's hot
+path, rendered prominent via the optional height field) plus CLEAR
+when idle / ABORT while a stream is in flight.  Dynamic — re-derived on
+every `emacos--render-page', so the second button flips as
+`emacos--chat-in-flight' changes (the abort path stays reachable
+mid-stream)."
+  (list
+   ;; (LABEL CMD HEIGHT): SEND carries a height so the strip renders it
+   ;; larger than the uniform command buttons.  Below the old chat-page's
+   ;; 1.75 because the keyboard now coexists with it (vertical budget).
+   (list "SEND" #'emacos--chat-send 1.5)
+   (if emacos--chat-in-flight
+       (cons "ABORT" #'emacos--chat-abort)
+     (cons "CLEAR" #'emacos--chat-clear))))
 
 (defun emacos--chat-show-top-buffer ()
-  "Display *chat* in the editor (target) window.  Idempotent."
+  "Display *chat* in the editor (target) window.  Idempotent.
+Interactive so the Chat utility button (and M-x) can reach it — it's
+how the user returns to the phone's home app from any other buffer."
+  (interactive)
   (let ((buf (emacos--chat-buffer))
         (w (emacos--target)))
     (when (and w (not (eq (window-buffer w) buf)))

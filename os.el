@@ -34,28 +34,21 @@
 (defvar emacos--commit-timer nil)
 (defvar emacos--caps nil)
 
-;; Page state
-(defvar emacos--current-page 'keyboard
-  "The concrete page currently shown in the *keyboard* buffer.
-One of `keyboard', `global', `mode', or `chat'.  Whether this value
-is followed (auto-derived from the top buffer) or held fixed is
-governed by `emacos--page-mode'.")
-
-(defvar emacos--page-mode 'auto
-  "Whether the keyboard surface follows the top buffer or is pinned.
-`auto' (default): the surface re-derives from the top buffer's major
-mode on every top-buffer change (see `emacos--derive-page').
-`pinned': the user tapped a specific page in the bar; the follower is
-inert until they tap the AUTO chip.")
-
+;; Render state
 (defvar emacos--in-render nil
   "Non-nil while `emacos--render-page' is running.
-Transient re-entry guard so the window-buffer-change follower can't
-recurse into a render that is already in progress.  Belt-and-
-suspenders: the chosen hook does not fire on the in-place keyboard
-re-render, but a future render that swaps a window's buffer would
-reintroduce the loop hazard, and on a phone an infinite re-render
-bricks the device.")
+Transient re-entry guard so the `window-buffer-change-functions'
+follower can't recurse into a render that is already in progress.
+The chosen hook does not fire on our in-place re-render today, but a
+future render that swaps a window's buffer would reintroduce the loop
+hazard, and on a phone an infinite re-render bricks the device.  Two
+cheap lines of insurance against a catastrophic failure mode.")
+
+(defvar emacos--last-commands 'unset
+  "The command set `emacos--render-command-strip' last rendered.
+The follower re-renders only when the top buffer's derived command set
+actually changes, so transient buffers (*Completions*, *Help*) don't
+flicker the strip — the keyboard itself never moves.")
 
 (defun emacos--target ()
   "Return the editing window (not the keyboard).
@@ -179,9 +172,12 @@ context (region, `this-command', `tab-always-indent', etc.)."
   (let ((s (if emacos--caps (upcase kg) kg)))
     s))
 
-(defun emacos--btn (label action &optional arg height)
+(defun emacos--btn (label action &optional arg height bg)
   "Insert a clickable button showing LABEL that calls ACTION (with ARG).
-HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller)."
+HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller).
+BG, if given, overrides the default gray background — used to accent a
+high-priority affordance (the Chat button) so it reads as the app, not
+plumbing."
   (insert-text-button
    label
    'action (if arg
@@ -189,7 +185,7 @@ HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller)."
             (lambda (_) (funcall action)))
    'follow-link t
    'face `(:box (:line-width (1 . 1) :style released-button)
-           :background "gray25" :foreground "white"
+           :background ,(or bg "gray25") :foreground "white"
            ,@(when height `(:height ,height)))
    'mouse-face '(:box (:line-width (1 . 1) :style pressed-button)
                  :background "gray45" :foreground "white")))
@@ -197,26 +193,19 @@ HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller)."
 ;;; Command execution
 
 (defun emacos--run-command (cmd)
-  "Run CMD interactively in the target window.
-Shows the keyboard page while the command runs (so a minibuffer
-prompt has the T9 surface to type into), then restores the surface:
-in `auto' mode re-derive from the (possibly changed) top buffer; in
-`pinned' mode restore the page that was showing before."
-  (let ((w (emacos--target))
-        (prior emacos--current-page))
+  "Run CMD interactively in the target (editing) window, then refresh.
+The keyboard surface is always shown, so unlike the old swap model
+there is no page to force/restore — just run, re-render (in case CMD
+changed the top buffer's major mode IN PLACE, which the
+window-buffer-change follower wouldn't catch), and refocus.  The
+`unwind-protect' keeps the refresh+refocus even when CMD throws (a bad
+find-file path, a user-error, an aborted kill-buffer query)."
+  (let ((w (emacos--target)))
     (when w
-      (setq emacos--current-page 'keyboard)
-      (emacos--render-page)
-      ;; unwind-protect so a command that throws (bad find-file path,
-      ;; a user-error, an aborted kill-buffer query) still restores the
-      ;; surface instead of stranding it on the forced keyboard page.
       (unwind-protect
           (with-selected-window w
             (call-interactively cmd))
-        (if (eq emacos--page-mode 'auto)
-            (emacos--follow)
-          (setq emacos--current-page prior)
-          (emacos--render-page))
+        (emacos--render-page)
         (emacos--refocus)))))
 
 ;;; Mode-specific commands
@@ -238,10 +227,21 @@ in `auto' mode re-derive from the (possibly changed) top buffer; in
      ("Refresh" . revert-buffer)))
   "Alist mapping major modes to lists of (LABEL . COMMAND) pairs.
 Command-centric modes (where the user invokes commands more than they
-type) belong here; text-entry modes are intentionally absent so they
-auto-derive to the T9 keyboard (see `emacos--derive-page').  Grow
-this incrementally — the keyboard fallback means an un-listed mode
-degrades gracefully.")
+type) belong here.  A mode absent from this alist falls back to
+`emacos-global-commands' in the strip (see `emacos--top-commands').
+Order each list by PRIORITY: the command strip is one row and shows
+only as many commands as fit (earlier = kept); the rest are reachable
+via M-x.  Grow this incrementally.")
+
+(defvar emacos-global-commands
+  '(("Save"          . save-buffer)
+    ("Undo"          . undo)
+    ("Find File"     . find-file)
+    ("Switch Buffer" . switch-to-buffer))
+  "Command-strip fallback for buffers whose major mode has no entry in
+`emacos-mode-commands'.  Keeps the universal actions (save, undo, open,
+switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
+~20 multi-taps.  Ordered by priority (the strip truncates to one row).")
 
 (defun emacos--mode-commands-for (mode)
   "Return the command list for MODE, walking up parent modes."
@@ -251,120 +251,57 @@ degrades gracefully.")
       (setq m (get m 'derived-mode-parent)))
     result))
 
-;;; Auto-following surface
+;;; Top-buffer command set (feeds the command strip)
 
 ;; Defined in chat.el (required at the bottom of this file).  Forward-
-;; declared so the byte-compiler doesn't warn about a free variable in
-;; `emacos--derive-page'; resolved at call time, after the require.
+;; declared so the byte-compiler doesn't warn about the free variable /
+;; unknown functions in `emacos--top-commands' and the utility row;
+;; resolved at call time, after the require.
 (defvar emacos--chat-buffer-name)
+(declare-function emacos--chat-command-set "chat")
+(declare-function emacos--chat-show-top-buffer "chat")
 
-(defun emacos--derive-page ()
-  "Map the top (editing) buffer to the page symbol auto mode should show.
-Order matters: an active minibuffer means the user is typing into a
-prompt, so the T9 keyboard is the right surface regardless of the
-underlying buffer's mode.  Then: the *chat* buffer (by identity) →
-`chat'; a major mode with a command set → `mode'; everything else →
-`keyboard' so the phone can always type."
+(defun emacos--top-commands ()
+  "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
+buffer — the contents of the command strip.  One `cond':
+an active minibuffer → nil (you're typing into a prompt; the strip
+stays empty); the *chat* buffer (by identity) →
+`emacos--chat-command-set'; a major mode with a command set →
+`emacos--mode-commands-for'; everything else → `emacos-global-commands'
+so a plain text buffer still has Save/Undo/Find File one tap away
+rather than only M-x."
   (cond
-   ((active-minibuffer-window) 'keyboard)
+   ((active-minibuffer-window) nil)
    (t
     (let* ((target (emacos--target))
            (buf (and target (window-buffer target)))
            (mode (if buf (buffer-local-value 'major-mode buf)
                    'fundamental-mode)))
       (cond
-       ((and buf (eq buf (get-buffer emacos--chat-buffer-name))) 'chat)
-       ((emacos--mode-commands-for mode) 'mode)
-       (t 'keyboard))))))
-
-(defun emacos--follow ()
-  "In `auto' mode, sync the shown page to the derived page and render.
-Home for the \"auto means `emacos--current-page' tracks
-`emacos--derive-page'\" invariant; called by the AUTO chip
-\(`emacos--switch-to-auto') and the `emacos--run-command' tail.  The
-window-buffer-change follower does NOT call this — it needs the
-re-entry guard and a no-op-render-when-unchanged optimization for
-loop-safety, so it inlines its own variant.  No-op when pinned."
-  (when (eq emacos--page-mode 'auto)
-    (let ((derived (emacos--derive-page)))
-      (unless (eq derived emacos--current-page)
-        (setq emacos--current-page derived))
-      (emacos--render-page))))
+       ((and buf (eq buf (get-buffer emacos--chat-buffer-name)))
+        (emacos--chat-command-set))
+       ((emacos--mode-commands-for mode))
+       (t emacos-global-commands))))))
 
 (defun emacos--on-window-buffer-change (_frame)
-  "Re-derive the surface when the TOP buffer changes, in `auto' mode.
-Registered on `window-buffer-change-functions'.  Inert when pinned or
-already rendering.  NOTE: unlike `emacos--switch-page', this does NOT
-swap *chat* onto the top window — derivation is driven BY the top
-buffer (the chat buffer is already on top when we derive `chat'),
-whereas manual selection drives the top buffer."
-  (unless (or emacos--in-render (not (eq emacos--page-mode 'auto)))
-    (let ((derived (emacos--derive-page)))
-      (unless (eq derived emacos--current-page)
-        (setq emacos--current-page derived)
-        (emacos--render-page)))))
-
-(defun emacos--switch-to-auto ()
-  "Hand control back to the follower: re-enter `auto' and re-derive."
-  (setq emacos--page-mode 'auto)
-  (emacos--follow)
-  (emacos--refocus))
-
-;;; Page bar
-
-(defun emacos--switch-page (page)
-  "Switch to PAGE and re-render.  A manual tap PINS the surface.
-Switching to `chat' also swaps the *chat* buffer into the editor
-window; other pages never touch the top window.  (The auto-follower
-`emacos--on-window-buffer-change' deliberately does NOT do this swap
-— it reacts to *chat* already being on top.)"
-  (setq emacos--page-mode 'pinned)
-  (setq emacos--current-page page)
-  (when (eq page 'chat)
-    (emacos--chat-show-top-buffer))
-  (emacos--render-page)
-  (emacos--refocus))
-
-(defun emacos--page-bar-chip (label active action)
-  "Insert one page-bar chip: LABEL, highlighted if ACTIVE, calling ACTION."
-  (insert-text-button
-   (concat " " label " ")
-   'action action
-   'follow-link t
-   'face (if active
-             '(:box (:line-width (1 . 1) :style released-button)
-               :background "dodger blue" :foreground "white" :weight bold)
-           '(:box (:line-width (1 . 1) :style released-button)
-             :background "gray25" :foreground "gray70"))
-   'mouse-face '(:box (:line-width (1 . 1) :style pressed-button)
-                 :background "gray45" :foreground "white"))
-  (insert " "))
-
-(defun emacos--render-page-bar ()
-  "Insert the [KBD] [CMD] [MODE] [CHAT] [AUTO] page bar.
-The shown-page chip is always active-highlighted; the AUTO chip is
-active iff `emacos--page-mode' is `auto' — so the bar reads both
-\"which surface\" and \"following or pinned\" at a glance."
-  (insert "\n")
-  (dolist (entry '((keyboard . "KBD") (global . "CMD") (mode . "MODE") (chat . "CHAT")))
-    (let ((page (car entry)))
-      (emacos--page-bar-chip
-       (cdr entry)
-       (eq page emacos--current-page)
-       (lambda (_) (emacos--switch-page page)))))
-  ;; AUTO chip: tapping it hands control back to the follower.
-  (emacos--page-bar-chip
-   "AUTO"
-   (eq emacos--page-mode 'auto)
-   (lambda (_) (emacos--switch-to-auto))))
+  "Re-render when the top buffer changes the strip's command set.
+Registered on `window-buffer-change-functions'.  No-ops while a render
+is in progress (the `emacos--in-render' re-entry guard) and when the
+derived command set is unchanged — so transient buffers (*Completions*,
+*Help*) don't flicker the strip.  The keyboard itself never moves; only
+the bottom strip row could change."
+  (unless (or emacos--in-render
+              (equal (emacos--top-commands) emacos--last-commands))
+    (emacos--render-page)))
 
 ;;; Page renderers
 
-(defun emacos--render-keyboard-page ()
-  "Render the Optimal-T9 keyboard, sized to fit the keyboard window."
+(defun emacos--render-keyboard ()
+  "Render the Optimal-T9 letter rows + the SPC/RET/DEL/TAB action row,
+sized to fit the keyboard window.  The caps toggle lives in the
+utility row (`emacos--render-utility-row'), not here."
   (let* ((win      (get-buffer-window (current-buffer)))
          (win-w    (if win (window-body-width win) 20))
-         (win-lines (if win (window-body-height win) 9))
          ;; gap-w: visual width of the gap between buttons, in character widths.
          ;; Can be fractional; btn-w shrinks to compensate.
          (gap-w  1.5)
@@ -376,9 +313,7 @@ active iff `emacos--page-mode' is `auto' — so the bar reads both
          (btn-w  (max 1 (floor (/ (- win-w (* 2 gap-w)) (* 3 scale)))))
          ;; Action row (SPC/RET/DEL/TAB) is 4-up with its OWN width so
          ;; adding TAB doesn't shrink the letter keys (the hot path).
-         (action-w (max 1 (floor (/ (- win-w (* 3 gap-w)) (* 4 scale)))))
-         ;; Utility buttons use full-width columns at normal scale.
-         (util-w (floor (/ (- win-w 2) 3))))
+         (action-w (max 1 (floor (/ (- win-w (* 3 gap-w)) (* 4 scale))))))
     ;; Letter rows — :height scale makes each row ~1.75x taller automatically
     (dolist (row emacos-t9-layout)
       (let ((i 0))
@@ -403,76 +338,91 @@ active iff `emacos--page-mode' is `auto' — so the bar reads both
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "TAB" action-w) #'emacos--tap-tab nil scale)
-    (insert "\n")
-    ;; Caps toggle
+    (insert "\n")))
+
+(defun emacos--render-utility-row ()
+  "Render the persistent utility row: caps, M-x, and Chat.
+The non-letter affordances always within reach — `caps' is a keyboard
+modifier (toggles + re-renders); `M-x' runs `execute-extended-command'
+\(the manual command-entry escape hatch); `Chat' shows the *chat*
+buffer (the phone's home app, so it carries the accent face).  All
+three are 3-up at `util-w'."
+  (let* ((win   (get-buffer-window (current-buffer)))
+         (win-w (if win (window-body-width win) 20))
+         (util-w (floor (/ (- win-w 2) 3))))
     (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
                  #'emacos--tap-caps)
-    (setq-local line-spacing 0)))
+    (insert " ")
+    (emacos--btn (emacos--center "M-x" util-w)
+                 #'emacos--run-command #'execute-extended-command)
+    (insert " ")
+    (emacos--btn (emacos--center "Chat" util-w)
+                 #'emacos--run-command #'emacos--chat-show-top-buffer
+                 nil "dodger blue")
+    (insert "\n")))
 
-(defun emacos--render-global-page ()
-  "Render global command buttons into the current buffer."
-  (let ((commands '(("Find File"     . find-file)
-                    ("Save"          . save-buffer)
-                    ("Save As"       . write-file)
-                    ("Switch Buffer" . switch-to-buffer)
-                    ("Kill Buffer"   . kill-buffer)
-                    ("Undo"          . undo)
-                    ("Goto Line"     . goto-line)))
-        (col 0))
-    (dolist (entry commands)
-      (let ((label (car entry))
-            (cmd (cdr entry)))
-        (when (> col 0) (insert " "))
-        (emacos--btn (concat " " label " ") #'emacos--run-command cmd)
-        (setq col (1+ col))
-        (when (>= col 3)
-          (insert "\n")
-          (setq col 0))))
-    (when (> col 0) (insert "\n"))))
+(defun emacos--command-spec (entry)
+  "Normalize a command-strip ENTRY to (LABEL CMD HEIGHT).
+ENTRY is either (LABEL . CMD) — the common shape, HEIGHT nil — or
+(LABEL CMD HEIGHT) when a command wants a non-default button height
+\(only chat's SEND does today; see `emacos--chat-command-set')."
+  (if (consp (cdr entry))
+      (list (car entry) (cadr entry) (caddr entry))
+    (list (car entry) (cdr entry) nil)))
 
-(defun emacos--render-mode-page ()
-  "Render mode-specific command buttons into the current buffer."
-  (let* ((target (emacos--target))
-         (mode (if target
-                   (buffer-local-value 'major-mode (window-buffer target))
-                 'fundamental-mode))
-         (commands (emacos--mode-commands-for mode)))
-    (if (not commands)
-        (insert (format " No commands for %s\n" mode))
-      (let ((col 0))
-        (dolist (entry commands)
-          (let ((label (car entry))
-                (cmd (cdr entry)))
-            (when (> col 0) (insert " "))
-            (emacos--btn (concat " " label " ") #'emacos--run-command cmd)
-            (setq col (1+ col))
-            (when (>= col 3)
-              (insert "\n")
-              (setq col 0))))
-        (when (> col 0) (insert "\n"))))))
+(defun emacos--commands-fitting (commands width)
+  "Return the prefix of COMMANDS whose buttons fit one row of WIDTH cols.
+Each button renders as \" LABEL \" (label + 2 padding) plus a one-space
+inter-button gap, so the Nth button costs (length label) + 3.  Order is
+priority: earlier entries survive, the rest fall to M-x.  Pure — WIDTH
+is passed in, so it's testable off the device."
+  (let ((used 0) (kept '()))
+    (catch 'done
+      (dolist (entry commands)
+        (let ((cost (+ (length (car entry)) 3)))
+          (if (<= (+ used cost) width)
+              (setq used (+ used cost)
+                    kept (cons entry kept))
+            (throw 'done nil)))))
+    (nreverse kept)))
+
+(defun emacos--render-command-strip ()
+  "Render one row of the top buffer's commands (the \"top commands under
+the keyboard\"), truncated to a single row; overflow is reachable via
+M-x.  Caches the derived set in `emacos--last-commands' so the follower
+can no-op when nothing changed."
+  (let* ((win   (get-buffer-window (current-buffer)))
+         (win-w (if win (window-body-width win) 20))
+         (commands (emacos--top-commands)))
+    (setq emacos--last-commands commands)
+    (dolist (entry (emacos--commands-fitting commands win-w))
+      (let* ((spec (emacos--command-spec entry)))
+        (emacos--btn (concat " " (nth 0 spec) " ")
+                     #'emacos--run-command (nth 1 spec) (nth 2 spec))
+        (insert " ")))
+    (insert "\n")))
 
 ;;; Page dispatch
 
 (defun emacos--render-page ()
-  "Render the current page into the *keyboard* buffer.
-Binds `emacos--in-render' for the duration so the window-buffer-change
+  "Render the *keyboard* window: the always-on composite of the T9
+keyboard, the utility row, and the top-buffer command strip.  Binds
+`emacos--in-render' for the duration so the window-buffer-change
 follower can't recurse into an in-progress render."
   (let ((buf (get-buffer-create "*keyboard*"))
         (emacos--in-render t))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (pcase emacos--current-page
-          ('keyboard (emacos--render-keyboard-page))
-          ('global   (emacos--render-global-page))
-          ('mode     (emacos--render-mode-page))
-          ('chat     (emacos--render-chat-page)))
-        (emacos--render-page-bar))
+        (emacos--render-keyboard)
+        (emacos--render-utility-row)
+        (emacos--render-command-strip))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
       (setq-local truncate-lines t)
       (setq-local auto-hscroll-mode nil)
+      (setq-local line-spacing 0)
       ;; Only reset hscroll when *keyboard* is actually displayed.
       ;; The load-time follower can reach render before the keyboard
       ;; window exists (eg. a buffer change between os.el load and
@@ -499,11 +449,9 @@ follower can't recurse into an in-progress render."
     (set-window-parameter kw 'no-other-window t)
     (set-window-parameter kw 'no-delete-other-windows t)
     (setq emacos--target-window (selected-window)))
-  ;; Auto-follow (default 'auto): derive the initial surface so boot
-  ;; lands on the right page.  The follower hook itself is registered
-  ;; at load time (below) so it survives hot-reloads via `local-deploy'.
-  (setq emacos--current-page (emacos--derive-page))
-  ;; Render after window is visible so dimensions are known
+  ;; Render after the window is visible so dimensions are known.  The
+  ;; command strip derives from the top buffer at render time, and the
+  ;; follower hook (registered at load time, below) keeps it in sync.
   (emacos--render-page))
 
 ;; Defer init until the window system is ready

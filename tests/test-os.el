@@ -1,24 +1,16 @@
-;;; test-os.el --- Tests for os.el page derivation + state -*- lexical-binding: t -*-
+;;; test-os.el --- Tests for os.el command strip + utility row -*- lexical-binding: t -*-
 
-;; Covers the pure / state-machine pieces of the dynamic-surface +
-;; TAB work: `emacos--derive-page', `emacos--mode-commands-for'
-;; parent-walking, the auto/pinned state transitions, and
-;; `emacos--tap-tab' dispatch.  Hook firing, real window geometry,
-;; and the page-bar visuals are validated by smoke + a live phone
-;; pass, not here.
+;; Covers the pure pieces of the single keyboard + commands combo:
+;; `emacos--top-commands' (the strip's command set for the top buffer),
+;; `emacos--mode-commands-for' parent-walking, the pure layout helpers
+;; (`emacos--command-spec', `emacos--commands-fitting'), the follower's
+;; change-detection guard, the chat command set, and `emacos--tap-tab'
+;; dispatch.  Hook firing and real window geometry are validated by
+;; smoke + a live phone pass, not here.
 
 (require 'ert)
 (require 'cl-lib)
 (require 'os)
-
-;;; Helpers
-
-(defmacro test-os--with-page-state (&rest body)
-  "Run BODY with page state reset, restoring it afterward."
-  (declare (indent 0))
-  `(let ((emacos--current-page 'keyboard)
-         (emacos--page-mode 'auto))
-     ,@body))
 
 ;;; emacos--mode-commands-for (parent walk)
 
@@ -38,123 +30,151 @@ though only the parent is in the alist."
 (ert-deftest test-os-mode-commands-unknown-is-nil ()
   (should-not (emacos--mode-commands-for 'fundamental-mode)))
 
-;;; emacos--derive-page
+;;; emacos--top-commands (the strip's command set)
 
-(ert-deftest test-os-derive-minibuffer-is-keyboard ()
-  "Active minibuffer always derives to keyboard (you're typing a prompt)."
+(ert-deftest test-os-top-commands-minibuffer-is-empty ()
+  "An active minibuffer means you're typing a prompt — empty strip."
   (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () 'mb)))
-    (should (eq (emacos--derive-page) 'keyboard))))
+    (should-not (emacos--top-commands))))
 
-(ert-deftest test-os-derive-fundamental-is-keyboard ()
-  "A mode with no command set falls back to the keyboard, never a dead
-\" No commands\" surface."
+(ert-deftest test-os-top-commands-fundamental-falls-back-to-globals ()
+  "A mode with no command set shows the global commands (Save/Undo/...),
+never an empty strip — so a plain text buffer keeps them one tap away."
   (with-temp-buffer
     (fundamental-mode)
     (let ((buf (current-buffer)))
       (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
                 ((symbol-function 'emacos--target) (lambda () 'w))
                 ((symbol-function 'window-buffer) (lambda (_) buf)))
-        (should (eq (emacos--derive-page) 'keyboard))))))
+        (should (equal (emacos--top-commands) emacos-global-commands))))))
 
-(ert-deftest test-os-derive-org-is-mode ()
+(ert-deftest test-os-top-commands-org-is-org-set ()
   (with-temp-buffer
     (let ((buf (current-buffer)))
       (setq-local major-mode 'org-mode)
       (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
                 ((symbol-function 'emacos--target) (lambda () 'w))
                 ((symbol-function 'window-buffer) (lambda (_) buf)))
-        (should (eq (emacos--derive-page) 'mode))))))
+        (should (equal (emacos--top-commands)
+                       (cdr (assq 'org-mode emacos-mode-commands))))))))
 
-(ert-deftest test-os-derive-dired-is-mode ()
-  "dired-mode was seeded into the alist, so it derives to a command surface."
+(ert-deftest test-os-top-commands-dired-is-dired-set ()
   (with-temp-buffer
     (let ((buf (current-buffer)))
       (setq-local major-mode 'dired-mode)
       (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
                 ((symbol-function 'emacos--target) (lambda () 'w))
                 ((symbol-function 'window-buffer) (lambda (_) buf)))
-        (should (eq (emacos--derive-page) 'mode))))))
+        (should (equal (emacos--top-commands)
+                       (cdr (assq 'dired-mode emacos-mode-commands))))))))
 
-(ert-deftest test-os-derive-chat-is-chat ()
-  "The *chat* buffer (by identity) derives to the chat page."
+(ert-deftest test-os-top-commands-chat-buffer-idle ()
+  "The *chat* buffer (by identity) derives to the chat command set."
   (let ((chat-buf (get-buffer-create emacos--chat-buffer-name)))
     (unwind-protect
         (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
                   ((symbol-function 'emacos--target) (lambda () 'w))
                   ((symbol-function 'window-buffer) (lambda (_) chat-buf)))
-          (should (eq (emacos--derive-page) 'chat)))
+          (let ((emacos--chat-in-flight nil))
+            (should (equal (mapcar #'car (emacos--top-commands))
+                           '("SEND" "CLEAR")))))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer chat-buf)))))
 
-;;; State transitions: auto / pinned
+;;; emacos--chat-command-set (dynamic: CLEAR idle / ABORT in flight)
 
-(ert-deftest test-os-switch-page-pins ()
-  (test-os--with-page-state
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () nil))
-              ((symbol-function 'emacos--refocus) (lambda () nil))
-              ((symbol-function 'emacos--chat-show-top-buffer) (lambda () nil)))
-      (emacos--switch-page 'global)
-      (should (eq emacos--page-mode 'pinned))
-      (should (eq emacos--current-page 'global)))))
+(ert-deftest test-os-chat-command-set-idle ()
+  (let ((emacos--chat-in-flight nil))
+    (should (equal (mapcar #'car (emacos--chat-command-set))
+                   '("SEND" "CLEAR")))))
 
-(ert-deftest test-os-switch-to-auto-rederives ()
-  (test-os--with-page-state
-    (setq emacos--page-mode 'pinned
-          emacos--current-page 'global)
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () nil))
-              ((symbol-function 'emacos--refocus) (lambda () nil))
-              ((symbol-function 'emacos--derive-page) (lambda () 'mode)))
-      (emacos--switch-to-auto)
-      (should (eq emacos--page-mode 'auto))
-      (should (eq emacos--current-page 'mode)))))
+(ert-deftest test-os-chat-command-set-in-flight-shows-abort ()
+  "The abort path must survive mid-stream: in flight, the second button
+is ABORT, not CLEAR."
+  (let ((emacos--chat-in-flight t))
+    (should (equal (mapcar #'car (emacos--chat-command-set))
+                   '("SEND" "ABORT")))))
 
-(ert-deftest test-os-follower-noop-when-pinned ()
-  "The window-buffer-change follower must NOT touch state when pinned."
-  (test-os--with-page-state
-    (setq emacos--page-mode 'pinned
-          emacos--current-page 'global)
-    (let ((rendered nil))
-      (cl-letf (((symbol-function 'emacos--render-page)
-                 (lambda () (setq rendered t)))
-                ((symbol-function 'emacos--derive-page) (lambda () 'mode)))
-        (emacos--on-window-buffer-change nil)
-        (should (eq emacos--current-page 'global))
-        (should-not rendered)))))
+(ert-deftest test-os-chat-send-carries-prominent-height ()
+  "SEND (the device's hot path) carries a height so the strip renders it
+larger than the uniform command buttons."
+  (let ((emacos--chat-in-flight nil))
+    (should (equal (emacos--command-spec (car (emacos--chat-command-set)))
+                   '("SEND" emacos--chat-send 1.5)))))
 
-(ert-deftest test-os-follower-rederives-when-auto ()
-  (test-os--with-page-state
-    (setq emacos--current-page 'keyboard)
-    (let ((rendered nil))
-      (cl-letf (((symbol-function 'emacos--render-page)
-                 (lambda () (setq rendered t)))
-                ((symbol-function 'emacos--derive-page) (lambda () 'mode)))
-        (emacos--on-window-buffer-change nil)
-        (should (eq emacos--current-page 'mode))
-        (should rendered)))))
+;;; emacos--command-spec (normalize both entry shapes)
 
-(ert-deftest test-os-follower-noop-when-derived-equals-shown ()
-  "No re-render when the derived page already matches what's shown."
-  (test-os--with-page-state
-    (setq emacos--current-page 'mode)
-    (let ((rendered nil))
-      (cl-letf (((symbol-function 'emacos--render-page)
-                 (lambda () (setq rendered t)))
-                ((symbol-function 'emacos--derive-page) (lambda () 'mode)))
-        (emacos--on-window-buffer-change nil)
-        (should-not rendered)))))
+(ert-deftest test-os-command-spec-cons-shape ()
+  (should (equal (emacos--command-spec '("X" . foo)) '("X" foo nil))))
+
+(ert-deftest test-os-command-spec-list-shape-with-height ()
+  (should (equal (emacos--command-spec '("Y" bar 1.5)) '("Y" bar 1.5))))
+
+;;; emacos--commands-fitting (one row, order = priority, width-accurate)
+
+(ert-deftest test-os-commands-fitting-keeps-order-preserving-prefix ()
+  "Stops at the first button that would overflow; keeps the prefix.
+Each button costs (length label) + 3 (\" LABEL \" padding + gap), so
+\"AAA\"=6, \"BBB\"=6: width 13 fits two (12), the third (18) overflows."
+  (should (equal (emacos--commands-fitting
+                  '(("AAA" . a) ("BBB" . b) ("CCC" . c)) 13)
+                 '(("AAA" . a) ("BBB" . b)))))
+
+(ert-deftest test-os-commands-fitting-all-fit-when-wide ()
+  (should (equal (emacos--commands-fitting
+                  '(("AAA" . a) ("BBB" . b)) 100)
+                 '(("AAA" . a) ("BBB" . b)))))
+
+(ert-deftest test-os-commands-fitting-width-accounts-for-label-length ()
+  "Width counts the displayed label, not a fixed slot: a long first
+label can crowd out a short second one."
+  (should (equal (emacos--commands-fitting
+                  '(("Heading" . h) ("X" . x)) 10)  ; "Heading"=10, fits; "X"=4 overflows
+                 '(("Heading" . h)))))
+
+(ert-deftest test-os-commands-fitting-empty-when-nothing-fits ()
+  (should-not (emacos--commands-fitting '(("AAA" . a)) 2)))
+
+;;; Follower: re-render only when the command set changed
+
+(ert-deftest test-os-follower-rerenders-on-command-set-change ()
+  (let ((rendered nil)
+        (emacos--in-render nil)
+        (emacos--last-commands '(("OLD" . old))))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacos--top-commands) (lambda () '(("NEW" . new)))))
+      (emacos--on-window-buffer-change nil)
+      (should rendered))))
+
+(ert-deftest test-os-follower-noop-when-command-set-unchanged ()
+  (let ((rendered nil)
+        (emacos--in-render nil)
+        (emacos--last-commands '(("SAME" . same))))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacos--top-commands) (lambda () '(("SAME" . same)))))
+      (emacos--on-window-buffer-change nil)
+      (should-not rendered))))
 
 (ert-deftest test-os-follower-noop-during-render ()
-  "Re-entry guard: follower bails when a render is already in progress."
-  (test-os--with-page-state
-    (setq emacos--current-page 'keyboard)
-    (let ((emacos--in-render t)
-          (rendered nil))
-      (cl-letf (((symbol-function 'emacos--render-page)
-                 (lambda () (setq rendered t)))
-                ((symbol-function 'emacos--derive-page) (lambda () 'mode)))
-        (emacos--on-window-buffer-change nil)
-        (should-not rendered)
-        (should (eq emacos--current-page 'keyboard))))))
+  "Re-entry guard (the brick-insurance): the follower bails when a render
+is already in progress, even if the command set differs."
+  (let ((rendered nil)
+        (emacos--in-render t)
+        (emacos--last-commands '(("OLD" . old))))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacos--top-commands) (lambda () '(("NEW" . new)))))
+      (emacos--on-window-buffer-change nil)
+      (should-not rendered))))
+
+;;; Utility row: caps + M-x + Chat are always present
+
+(ert-deftest test-os-utility-row-always-has-caps-mx-chat ()
+  (with-temp-buffer
+    (emacos--render-utility-row)
+    (let ((s (buffer-string)))
+      (should (string-match-p "caps" s))
+      (should (string-match-p "M-x" s))
+      (should (string-match-p "Chat" s)))))
 
 ;;; emacos--tap-tab dispatch
 

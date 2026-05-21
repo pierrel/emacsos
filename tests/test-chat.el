@@ -279,21 +279,19 @@ bot line if a stream was open (start handler had run)."
       (emacos--chat-abort)
       (should-not delete-called))))
 
-;;; Page integration
+;;; Command-strip integration
 
-(ert-deftest chat-test-page-shows-abort-when-in-flight ()
+(ert-deftest chat-test-command-set-shows-abort-when-in-flight ()
+  "The chat command set's second button is CLEAR when idle and ABORT
+while a stream is in flight (the strip re-derives this on every render)."
   (chat-test--reset)
   (require 'os)
-  (with-temp-buffer
-    (setq emacos--chat-in-flight nil)
-    (emacos--render-chat-page)
-    (should (string-match-p "CLEAR" (buffer-string)))
-    (should-not (string-match-p "ABORT" (buffer-string))))
-  (with-temp-buffer
-    (setq emacos--chat-in-flight t)
-    (emacos--render-chat-page)
-    (should (string-match-p "ABORT" (buffer-string)))
-    (should-not (string-match-p "CLEAR" (buffer-string))))
+  (let ((emacos--chat-in-flight nil))
+    (should (equal (mapcar #'car (emacos--chat-command-set))
+                   '("SEND" "CLEAR"))))
+  (let ((emacos--chat-in-flight t))
+    (should (equal (mapcar #'car (emacos--chat-command-set))
+                   '("SEND" "ABORT"))))
   (setq emacos--chat-in-flight nil))
 
 (ert-deftest chat-test-switch-shows-top-buffer ()
