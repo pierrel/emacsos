@@ -239,9 +239,18 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             # (the ToolMessage), the single source of truth.  Works
             # regardless of which stream mode surfaces the result; the
             # seen-set de-dupes if it shows up in both.
+            #
+            # Only the two COMMITTED outcomes (`applied:` clean,
+            # `applied-but-broken:` loaded-with-error) get the event —
+            # both have a git commit the user can revert.  NOT
+            # `applied-but-unrecorded:` (loaded but the commit failed):
+            # there's nothing in history to roll back to, so offering
+            # ROLLBACK there would revert to the *wrong* state.  The
+            # colon-terminated prefixes are mutually exclusive, so this
+            # excludes `applied-but-unrecorded:` cleanly.
             for tc_id, tname, content in ndjson.extract_tool_results(payload):
                 if (tname == "apply_config" and tc_id not in seen_applied
-                        and content.startswith("applied")):
+                        and content.startswith(("applied:", "applied-but-broken:"))):
                     seen_applied.add(tc_id)
                     yield ndjson.event(
                         "applied",
@@ -327,6 +336,7 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
         return {"status": "noop", "detail": result.detail}
     # Load the reverted config (the new HEAD) on the phone so the live
     # state matches the repo again.  apply_to_phone classifies honestly.
+    # `result.version` is guaranteed non-None when `ok` (ConfigRepo.rollback).
     ar = apply_mod.apply_to_phone(phone_ctx, result.version.body)
     return {"status": ar.status, "detail": ar.detail}
 

@@ -26,6 +26,11 @@ if TYPE_CHECKING:  # avoid a channel<->apply import cycle at runtime
 
 log = logging.getLogger(__name__)
 
+# Read env once at import (matching channel._CONFIG / app.config) rather
+# than re-parsing on every apply — `emacsclient` is server-wide config
+# that doesn't vary per call.
+_CONFIG = Config.from_env()
+
 # Matches channel.EVAL_TIMEOUT_SECONDS; defined locally so apply.py
 # doesn't import channel (which imports apply) — see the cycle note.
 APPLY_TIMEOUT_SECONDS = 15.0
@@ -82,7 +87,7 @@ def apply_to_phone(ctx: PhoneContext, body: str) -> ApplyResult:
             ctx.auth_contents,
             ctx.phone_host,
             expr,
-            emacsclient=Config.from_env().emacsclient,
+            emacsclient=_CONFIG.emacsclient,
             timeout=APPLY_TIMEOUT_SECONDS,
         )
     except Exception as e:  # noqa: BLE001 — surface as a structured result

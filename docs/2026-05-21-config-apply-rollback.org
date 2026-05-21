@@ -72,6 +72,33 @@ Rejected / kept against a reviewer:
   lock+disconnect+heartbeat+finally helper from =_stream_turn= IF duplication is substantial; else
   keep =_rollback_turn= standalone.  Not pre-committing.
 
+* Phase-2 implementation deltas (2026-05-21)
+
+Decisions made while coding that DEVIATE from the body above — recorded here so the body's
+reasoning isn't mistaken for what shipped:
+
+1. *Apply-then-commit, not commit-before-apply* (reverses Q5/Q6).  The body committed to commit-first
+   and argued against apply-then-commit; the code does apply-then-commit anyway, because it's the
+   better trade: an *unreachable* apply (the likely failure) leaves git untouched instead of writing a
+   phantom commit for a config the phone never received.  Commit happens only when the phone was
+   reached (=applied= or =load_error=), so git HEAD == the phone's current config.
+2. *New honest outcome =applied-but-unrecorded:=*.  Consequence of (1): if the phone loads the config
+   but the git commit then fails, the config is LIVE but unrecorded.  Distinct token; the docstring
+   tells the model to surface it and not retry; =app.py= does NOT emit the =applied= event for it (no
+   commit to roll back to, so no ROLLBACK button).  The =applied= event fires only for the two
+   committed prefixes =applied:= / =applied-but-broken:= (colon-terminated, mutually exclusive).
+3. */rollback is a plain-JSON endpoint, not a streamed mirror of /chat* (resolves the open scaffold
+   item toward "standalone").  Rollback is a fast git-revert + one =emacsclient= apply — no model, no
+   long tool runs — so streaming/heartbeat buys nothing.  =chat.el='s =emacos--chat-rollback= POSTs it
+   ASYNC anyway (a SYNC request would deadlock: the server calls =emacsclient= back into the same
+   emacs to load the reverted config, which a blocked emacs can't service).
+
+Deferred to live testing (NOT done in this PR — flag in PR description):
+- *Multi-apply LLM smoke* (revision #8): that Qwen3 reliably restates the COMPLETE config across two
+  =apply_config= calls is unit-mocked + the transport is live-tested on the phone, but the
+  model-restates-everything behavior is exercised by the user driving the full chat loop, not by an
+  automated eval here.
+
 * TL;DR (decisions)
 
 - *Config artifact* = a single file =agent.el= inside a git repo =emacsos-server= owns at

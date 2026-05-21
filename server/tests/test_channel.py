@@ -209,6 +209,24 @@ def test_apply_config_too_large_does_not_commit(tmp_path):
     assert repo.current().body == ""
 
 
+def test_apply_config_commit_failure_is_unrecorded(tmp_path):
+    """Phone loaded it but git failed: honest `applied-but-unrecorded`,
+    NOT a clean `applied:` (it has no commit to roll back to)."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch.object(repo, "write_and_commit", side_effect=OSError("disk full")):
+        out = apply_config.invoke({"elisp": "(setq x 1)", "summary": "s"},
+                                  config=cfg)
+    assert out.startswith("applied-but-unrecorded:")
+    assert "disk full" in out
+    # Must NOT masquerade as a clean apply (which would offer a bad rollback).
+    assert not out.startswith("applied:")
+
+
 def test_apply_config_missing_context_is_server_bug_error(tmp_path):
     out, _repo = _apply("(setq x 1)", "set x", tmp_path, ctx=None,
                         apply_result=ApplyResult("applied", "ok: loaded"))

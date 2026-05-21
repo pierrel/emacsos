@@ -169,6 +169,13 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     - `error: phone unreachable: ... (do not retry — surface to user)` —
       nothing was committed; the phone couldn't be reached.
     - `error: config too large: ...` — nothing was committed.
+    - `applied-but-unrecorded: ...` — the config is LIVE on the phone
+      but the server failed to record it in git, so it can't be rolled
+      back from history.  Tell the user; do NOT retry (that would just
+      re-apply the same live config).
+
+    Match the FULL prefix up to the colon when reasoning about the
+    result: `applied:` is clean; the `applied-but-*` variants are not.
     """
     cfg = (config or {}).get("configurable") or {}
     ctx = cfg.get(PHONE_CONTEXT_KEY)
@@ -213,4 +220,10 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
 # via `Thread(..., extra_tools=EMACS_TOOLS)`.  `eval_elisp` inspects /
 # experiments; `apply_config` ships a verified config to the phone with
 # a git-backed, rollback-able commit.
+#
+# These must stay TOP-LEVEL tools (not buried in a sub-agent's
+# toolset): app.py derives the `applied` event by watching the
+# top-level message stream for apply_config's ToolMessage.  Move it into
+# a sub-agent and the result stops surfacing — the event silently never
+# fires and the ROLLBACK button never appears.
 EMACS_TOOLS = [eval_elisp, apply_config]

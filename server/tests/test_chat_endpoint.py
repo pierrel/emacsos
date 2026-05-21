@@ -394,6 +394,21 @@ def test_non_apply_config_tool_result_emits_no_applied(client):
     assert not [e for e in events if e["type"] == "applied"]
 
 
+def test_applied_but_unrecorded_emits_no_applied_event(client):
+    # Loaded on the phone but the git commit failed → no rollback target,
+    # so NO `applied` event (the colon-terminated prefix excludes it).
+    scripted = [
+        ("messages", (_FakeToolMessage(
+            name="apply_config",
+            content="applied-but-unrecorded: live but not in git"), {})),
+    ]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert not [e for e in events if e["type"] == "applied"]
+
+
 # --- /rollback --------------------------------------------------------------
 
 def test_rollback_missing_phone_returns_error(client):
