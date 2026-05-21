@@ -16,13 +16,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from . import phone as phone_mod
-from .channel import EVAL_TIMEOUT_SECONDS, PhoneContext
 from .config import Config
 
+if TYPE_CHECKING:  # avoid a channel<->apply import cycle at runtime
+    from .channel import PhoneContext
+
 log = logging.getLogger(__name__)
+
+# Matches channel.EVAL_TIMEOUT_SECONDS; defined locally so apply.py
+# doesn't import channel (which imports apply) — see the cycle note.
+APPLY_TIMEOUT_SECONDS = 15.0
 
 # Default phone path, matched by the boot snippet's `emacos-agent-file`
 # defvar (deploy/emacsos-init.el.in).  The apply expr prefers the
@@ -77,7 +83,7 @@ def apply_to_phone(ctx: PhoneContext, body: str) -> ApplyResult:
             ctx.phone_host,
             expr,
             emacsclient=Config.from_env().emacsclient,
-            timeout=EVAL_TIMEOUT_SECONDS,
+            timeout=APPLY_TIMEOUT_SECONDS,
         )
     except Exception as e:  # noqa: BLE001 — surface as a structured result
         log.exception("apply_to_phone raised")
