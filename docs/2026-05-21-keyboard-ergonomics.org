@@ -1,6 +1,18 @@
 #+title: Keyboard Ergonomics: TAB Button + Dynamic Mode-Following Surface
 #+date: 2026-05-21
 
+#+begin_quote
+*Reading note.* The "Dynamic mode-following surface" *swap-page* design
+below (Goal, Scope, Decisions 3-8, Risks, the page-bar / =emacos--init=
+hook references) was *rejected on PR #11 review* and is kept only as
+history.  The shipped design is the *single keyboard + commands combo*
+in the "* Rework" section at the end — that section is authoritative
+for everything except the TAB button (Decisions 1-2, still in force).
+Where the historical text says "page", "auto/pinned", "AUTO chip", or
+"follower registered in =emacos--init=", read the Rework section
+instead.
+#+end_quote
+
 Two ergonomics fixes batched into one feature branch
 (=ergonomics-tab-and-dynamic-kbd=), both pulled from the roadmap's
 "Ergonomics iteration" section ([[file:../roadmap.org][roadmap.org]] §"Tab button on the

@@ -195,9 +195,13 @@ plumbing."
 (defun emacos--run-command (cmd)
   "Run CMD interactively in the target (editing) window, then refresh.
 The keyboard surface is always shown, so unlike the old swap model
-there is no page to force/restore — just run, re-render (in case CMD
-changed the top buffer's major mode IN PLACE, which the
-window-buffer-change follower wouldn't catch), and refocus.  The
+there is no page to force/restore.  Re-render only when CMD actually
+changed the strip's command set: an in-place `M-x <mode>' won't fire
+`window-buffer-change-functions', so the follower can't catch it — but
+a CMD that swaps the top buffer DOES fire the hook, so rendering here
+unconditionally would render twice (and flicker).  Comparing against
+`emacos--last-commands' covers the in-place case, leaves buffer swaps
+to the follower, and skips the render entirely when nothing changed.
 `unwind-protect' keeps the refresh+refocus even when CMD throws (a bad
 find-file path, a user-error, an aborted kill-buffer query)."
   (let ((w (emacos--target)))
@@ -205,7 +209,8 @@ find-file path, a user-error, an aborted kill-buffer query)."
       (unwind-protect
           (with-selected-window w
             (call-interactively cmd))
-        (emacos--render-page)
+        (unless (equal (emacos--top-commands) emacos--last-commands)
+          (emacos--render-page))
         (emacos--refocus)))))
 
 ;;; Mode-specific commands
