@@ -95,6 +95,16 @@ def test_ensure_recovers_from_interrupted_staging(tmp_path):
     assert staged == ""
 
 
+def test_ensure_recreates_missing_agent_file(tmp_path):
+    r = _repo(tmp_path)
+    r.write_and_commit("(setq foo 1)", "v1")
+    os.remove(r.agent_path)
+    r.ensure()  # self-heal a working-tree file deleted out of band
+    assert os.path.isfile(r.agent_path)
+    # Restored from HEAD (the real last config), not scaffolded empty.
+    assert r.current().body == "(setq foo 1)"
+
+
 def test_render_extract_body_round_trip():
     assert _extract_body(_render("(message \"hi\")")) == "(message \"hi\")"
     assert _extract_body(_render("")) == ""

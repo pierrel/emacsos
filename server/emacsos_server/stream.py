@@ -99,14 +99,16 @@ def extract_tool_results(chunk_payload: Any) -> Iterable[tuple[str, str, str]]:
     truth for deriving downstream events — `app.py` uses this to emit
     the `applied` event from `apply_config`'s result string rather than
     a side-channel.  Caller de-dupes on tool_call_id (a ToolMessage can
-    surface in both stream modes for one call)."""
+    surface in both stream modes for one call), so we require a truthy
+    `tool_call_id` (matching `extract_new_tool_calls`): an empty/missing
+    id would collide in the de-dup set and suppress unrelated results."""
     for m in _tool_messages(chunk_payload):
         if getattr(m, "type", None) != "tool":
             continue
         name = getattr(m, "name", None)
         content = getattr(m, "content", None)
-        tc_id = getattr(m, "tool_call_id", None) or ""
-        if name and isinstance(content, str):
+        tc_id = getattr(m, "tool_call_id", None)
+        if name and tc_id and isinstance(content, str):
             yield (tc_id, name, content)
 
 

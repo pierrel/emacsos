@@ -105,14 +105,13 @@ class ConfigRepo:
     def ensure(self) -> None:
         """Idempotent: create the repo + scaffold commit if absent.
         Also resets any leftover staging so a prior interrupted commit
-        doesn't poison the next one."""
+        doesn't poison the next one, and self-heals a missing agent file
+        (deleted out of band) so `current()`/`rollback()` can't hit a
+        FileNotFoundError."""
         if not os.path.isdir(os.path.join(self.repo_dir, ".git")):
             os.makedirs(self.repo_dir, exist_ok=True)
             self._git("init", "-q")
-            with open(self.agent_path, "w") as f:
-                f.write(_render(""))
-            self._git("add", AGENT_FILE)
-            self._git(*_GIT_IDENTITY, "commit", "-q", "-m", "scaffold: empty agent config")
+            self._scaffold()
             log.info("Initialized config repo at %s", self.repo_dir)
         else:
             # Idempotent recovery: drop any staged-but-uncommitted state
@@ -121,6 +120,24 @@ class ConfigRepo:
                 ["git", "-C", self.repo_dir, "reset", "-q"],
                 capture_output=True, text=True,
             )
+            # Self-heal a missing working-tree agent file.  Restore it
+            # from HEAD (recovers the real last config); scaffold only if
+            # HEAD has none (truly fresh/corrupt repo).
+            if not os.path.isfile(self.agent_path):
+                r = subprocess.run(
+                    ["git", "-C", self.repo_dir, "checkout", "HEAD", "--", AGENT_FILE],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0 or not os.path.isfile(self.agent_path):
+                    self._scaffold()
+                log.warning("Recovered missing agent file in %s", self.repo_dir)
+
+    def _scaffold(self) -> None:
+        """Write the empty-config scaffold file and commit it."""
+        with open(self.agent_path, "w") as f:
+            f.write(_render(""))
+        self._git("add", AGENT_FILE)
+        self._git(*_GIT_IDENTITY, "commit", "-q", "-m", "scaffold: empty agent config")
 
     def write_and_commit(self, body: str, summary: str) -> str:
         """Replace agent.el's body, commit, return the commit sha."""

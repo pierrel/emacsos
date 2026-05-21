@@ -121,9 +121,10 @@ Deferred to live testing (NOT done in this PR — flag in PR description):
   ApplyResult=): builds the write+load expr, calls =call_emacs=, classifies =applied= / =load_error=
   (file written but elisp broke — the honesty case) / =unreachable= (infra).  HEAD-of-repo ==
   currently-applied; no separate tracking.
-- *Rollback* = new =POST /rollback= endpoint (mirrors =/chat='s NDJSON stream + phone-auth body +
-  shared =_STREAM_LOCK=).  Implemented as =git revert --no-edit HEAD= (rolled-back-from stays in
-  history → roll-forward possible) + re-apply HEAD via the same =apply.py= path.
+- *Rollback* = new =POST /rollback= endpoint (phone-auth body + shared =_STREAM_LOCK=).  Implemented
+  as =git revert --no-edit HEAD= (rolled-back-from stays in history → roll-forward possible) +
+  re-apply HEAD via the same =apply.py= path.  SHIPPED AS PLAIN JSON, not an NDJSON stream — it's a
+  fast git op + one =emacsclient= apply, so streaming buys nothing (see Phase-2 deltas).
 - *ROLLBACK affordance* = a chat-page button in =chat.el= that appears after a successful apply
   (server emits a new =applied= NDJSON event; chat.el sets a flag, re-renders so ROLLBACK joins
   SEND/CLEAR).  No new page.

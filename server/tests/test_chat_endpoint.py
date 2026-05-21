@@ -445,6 +445,16 @@ def test_do_rollback_reverts_and_applies(tmp_path):
     assert m.call_args.args[1] == "(setq x 1)"
 
 
+def test_do_rollback_returns_structured_error_on_exception(tmp_path):
+    """A git/repo failure must come back as {status: error}, not a 500."""
+    from emacsos_server.app import _do_rollback
+    from emacsos_server.channel import PhoneContext
+    with patch("emacsos_server.app.ConfigRepo", side_effect=RuntimeError("git boom")):
+        out = _do_rollback(PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.5"))
+    assert out["status"] == "error"
+    assert "git boom" in out["detail"]
+
+
 def test_do_rollback_noop_when_nothing_to_roll_back(tmp_path):
     from emacsos_server.app import _do_rollback
     from emacsos_server.channel import PhoneContext

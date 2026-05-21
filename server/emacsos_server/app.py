@@ -328,17 +328,24 @@ async def chat(req: ChatRequest, request: Request):
 def _do_rollback(phone_ctx: PhoneContext) -> dict:
     """Sync rollback (run on the executor): git-revert the config repo's
     HEAD, then load the resulting config on the phone.  Returns a small
-    status dict for the JSON response."""
-    repo = ConfigRepo(config.config_dir)
-    repo.ensure()
-    result = repo.rollback()
-    if not result.ok:
-        return {"status": "noop", "detail": result.detail}
-    # Load the reverted config (the new HEAD) on the phone so the live
-    # state matches the repo again.  apply_to_phone classifies honestly.
-    # `result.version` is guaranteed non-None when `ok` (ConfigRepo.rollback).
-    ar = apply_mod.apply_to_phone(phone_ctx, result.version.body)
-    return {"status": ar.status, "detail": ar.detail}
+    status dict for the JSON response.  Any git/repo failure is caught
+    and returned as a structured error — never a bare 500 (apply_to_phone
+    already returns structured results, but ConfigRepo can raise on a
+    revert conflict / corrupted repo)."""
+    try:
+        repo = ConfigRepo(config.config_dir)
+        repo.ensure()
+        result = repo.rollback()
+        if not result.ok:
+            return {"status": "noop", "detail": result.detail}
+        # Load the reverted config (the new HEAD) on the phone so the live
+        # state matches the repo again.  apply_to_phone classifies honestly.
+        # `result.version` is non-None when `ok` (ConfigRepo.rollback).
+        ar = apply_mod.apply_to_phone(phone_ctx, result.version.body)
+        return {"status": ar.status, "detail": ar.detail}
+    except Exception as e:  # noqa: BLE001 — structured error, never a 500
+        log.exception("rollback failed")
+        return {"status": "error", "detail": f"{type(e).__name__}: {e}"}
 
 
 @app.post("/rollback")

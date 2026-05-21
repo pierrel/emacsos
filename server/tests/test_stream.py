@@ -146,6 +146,14 @@ def test_extract_tool_results_skips_non_string_content():
     assert list(ndjson.extract_tool_results(chunk)) == []
 
 
+def test_extract_tool_results_skips_missing_tool_call_id():
+    # No tool_call_id → skip (an empty id would collide in app.py's
+    # de-dup set and suppress unrelated results).
+    chunk = (_FakeToolMsg(name="apply_config", content="applied: x",
+                          tool_call_id=None), {})
+    assert list(ndjson.extract_tool_results(chunk)) == []
+
+
 def test_extract_tool_results_malformed_payload_is_empty():
     assert list(ndjson.extract_tool_results(object())) == []
     assert list(ndjson.extract_tool_results(None)) == []
