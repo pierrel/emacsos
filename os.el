@@ -153,7 +153,7 @@ Prefer the minibuffer when it is active."
 
 (defun emacos--tap-tab ()
   "Context-aware TAB: complete in the minibuffer, else indent.
-Mirrors `emacos--tap-return''s minibuffer special-case.  Uses
+Mirrors the minibuffer special-case in `emacos--tap-return'.  Uses
 `call-interactively' so the underlying commands read their own
 context (region, `this-command', `tab-always-indent', etc.)."
   (emacos--commit)
@@ -473,7 +473,13 @@ follower can't recurse into an in-progress render."
       (setq-local mode-line-format nil)
       (setq-local truncate-lines t)
       (setq-local auto-hscroll-mode nil)
-      (set-window-hscroll (get-buffer-window buf) 0)
+      ;; Only reset hscroll when *keyboard* is actually displayed.
+      ;; The load-time follower can reach render before the keyboard
+      ;; window exists (eg. a buffer change between os.el load and
+      ;; `emacos--init' creating the split), where `get-buffer-window'
+      ;; is nil and `set-window-hscroll' would error.
+      (when-let ((kw (get-buffer-window buf)))
+        (set-window-hscroll kw 0))
       (goto-char (point-min)))))
 
 ;;; Initialization
