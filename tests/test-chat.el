@@ -12,6 +12,7 @@
     (let ((kill-buffer-query-functions nil))
       (kill-buffer emacos--chat-buffer-name)))
   (setq emacos--chat-in-flight nil
+        emacos--chat-can-rollback nil
         emacos--chat-process nil
         emacos--chat-stream-insert-marker nil
         emacos--chat-status-start nil
@@ -304,6 +305,83 @@ while a stream is in flight (re-derived on every render)."
           (emacos--chat-show-top-buffer)
           (should (eq (window-buffer w)
                       (get-buffer emacos--chat-buffer-name))))))))
+
+;;; Rollback UI
+
+(ert-deftest chat-test-endpoint-derives-rollback-url ()
+  "The /rollback URL is derived from the configured /chat URL so they
+share one host:port."
+  (let ((emacos-chat-server-url "http://10.0.0.5:8765/chat"))
+    (should (equal (emacos--chat-endpoint "/rollback")
+                   "http://10.0.0.5:8765/rollback"))))
+
+
+(ert-deftest chat-test-encode-rollback-with-and-without-auth ()
+  (let ((with-auth (decode-coding-string
+                    (emacos--chat-encode-rollback "host:1 2\nsec\n") 'utf-8))
+        (no-auth (decode-coding-string
+                  (emacos--chat-encode-rollback nil) 'utf-8)))
+    (should (string-match-p "\"auth_file\"" with-auth))
+    (should (equal no-auth "{}"))))
+
+
+(ert-deftest chat-test-applied-event-offers-rollback ()
+  (chat-test--reset)
+  (emacos--chat-buffer)  ; init so the note has a prompt to insert above
+  (emacos--chat-handle-applied
+   (list :type "applied" :detail "blue cursor (vabc123)" :broken :false))
+  (should emacos--chat-can-rollback)
+  (with-current-buffer emacos--chat-buffer-name
+    (should (string-match-p "blue cursor" (buffer-string)))
+    ;; A non-broken apply must NOT be flagged BROKEN (JSON false parses
+    ;; to the symbol :false, which is truthy in elisp — regression guard).
+    (should-not (string-match-p "BROKEN" (buffer-string)))))
+
+
+(ert-deftest chat-test-applied-broken-event-warns ()
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (emacos--chat-handle-applied
+   (list :type "applied" :detail "x (vabc123)" :broken t))
+  (should emacos--chat-can-rollback)
+  (with-current-buffer emacos--chat-buffer-name
+    (should (string-match-p "BROKEN" (buffer-string)))))
+
+
+(ert-deftest chat-test-rollback-in-command-set-gated-on-can-rollback ()
+  "ROLLBACK appears in the chat command set only after an apply, and as
+the LAST entry (rarely used)."
+  (chat-test--reset)
+  (let ((emacos--chat-in-flight nil)
+        (emacos--chat-can-rollback nil))
+    (should-not (member "ROLLBACK" (mapcar #'car (emacos--chat-command-set)))))
+  (let ((emacos--chat-in-flight nil)
+        (emacos--chat-can-rollback t))
+    (let ((labels (mapcar #'car (emacos--chat-command-set))))
+      (should (member "ROLLBACK" labels))
+      (should (equal (car (last labels)) "ROLLBACK")))))  ; at the very bottom
+
+
+(ert-deftest chat-test-rollback-callback-clears-flag-on-reached ()
+  "A reached rollback (applied/load_error) consumes the one-level undo."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t)
+  (with-temp-buffer
+    (insert "HTTP/1.1 200 OK\n\n{\"status\":\"applied\",\"detail\":\"ok: loaded\"}")
+    (emacos--chat-rollback-callback nil))
+  (should-not emacos--chat-can-rollback))
+
+
+(ert-deftest chat-test-rollback-callback-keeps-flag-on-noop ()
+  "A noop rollback (nothing to roll back) leaves ROLLBACK available."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t)
+  (with-temp-buffer
+    (insert "HTTP/1.1 200 OK\n\n{\"status\":\"noop\",\"detail\":\"nothing to roll back\"}")
+    (emacos--chat-rollback-callback nil))
+  (should emacos--chat-can-rollback))
 
 (provide 'test-chat)
 ;;; test-chat.el ends here

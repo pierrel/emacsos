@@ -57,6 +57,12 @@ the budget and can tap ABORT to cancel.  See design doc §6."
 (defvar emacos--chat-in-flight nil
   "Non-nil while a stream is open.  Re-entrancy guard for SEND.")
 
+(defvar emacos--chat-can-rollback nil
+  "Non-nil when the last turn applied a config (an `applied' event
+arrived), so the chat page should offer a ROLLBACK button.  Cleared on
+a successful rollback (v1 is one-level undo — apply again to get a new
+rollback point).")
+
 (defvar emacos--chat-process nil
   "The url-retrieve process backing the in-flight stream, or nil.
 Used by ABORT to delete-process.")
@@ -307,6 +313,40 @@ Otherwise (error before any server response), synthesize a fresh
                      '(read-only t front-sticky t rear-nonsticky t)))))))))))
     (emacos--chat-stream-cleanup)))
 
+(defun emacos--chat-note (text)
+  "Insert TEXT as a read-only `bot> ' note line above the input prompt
+in *chat*.  Used for applied / rollback notices (system messages, not
+streamed bot output)."
+  (let ((buf (get-buffer emacos--chat-buffer-name)))
+    (when (and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        (let* ((inhibit-read-only t)
+               (input-start (emacos--chat-input-start buf))
+               (prompt-start (when input-start
+                               (- input-start (length emacos--chat-prompt)))))
+          (when prompt-start
+            (save-excursion
+              (goto-char prompt-start)
+              (let ((before (point)))
+                (insert "\n" emacos--chat-bot-prefix text)
+                (add-text-properties before (point)
+                                     '(read-only t front-sticky t rear-nonsticky t))))))))))
+
+(defun emacos--chat-handle-applied (event)
+  "Handle the `applied' event: the agent shipped a config to the phone.
+Note it in the transcript and offer a ROLLBACK button.  `:broken' t
+means it was committed but errored while loading (a JSON false parses
+as the symbol `:false', so test for `t' explicitly)."
+  (let ((detail (or (plist-get event :detail) "config applied"))
+        (broken (eq (plist-get event :broken) t)))
+    (emacos--chat-note
+     (if broken
+         (format "[applied but BROKEN — consider rolling back: %s]" detail)
+       (format "[%s]" detail)))
+    (setq emacos--chat-can-rollback t)
+    (when (fboundp 'emacos--render-page)
+      (emacos--render-page))))
+
 (defun emacos--chat-stream-cleanup ()
   "Tear down per-stream state.  Idempotent: safe to call from any
 of the terminal handlers (end, error, abort, watchdog)."
@@ -369,9 +409,19 @@ synthesized cleanup within ~5s of the real connection close."
     ("status"    . emacos--chat-handle-status)
     ("end"       . emacos--chat-handle-end)
     ("error"     . emacos--chat-handle-error)
+    ("applied"   . emacos--chat-handle-applied)
     ("heartbeat" . emacos--chat-handle-heartbeat)))
 
 ;;; HTTP request encoding
+
+(defun emacos--chat-endpoint (path)
+  "Return the server URL for PATH (e.g. \"/rollback\"), derived from
+`emacos-chat-server-url' by swapping its path component.  Keeping one
+configured base URL means /chat and /rollback can't drift to different
+hosts."
+  (let ((u (url-generic-parse-url emacos-chat-server-url)))
+    (setf (url-filename u) path)
+    (url-recreate-url u)))
 
 (defun emacos--chat-read-auth-file ()
   "Return the auth file contents as a string, or nil if missing."
@@ -391,6 +441,14 @@ treat it as absent rather than null."
                     (list :message msg)))
          (json-encoding-pretty-print nil)
          (body (json-encode payload)))
+    (encode-coding-string body 'utf-8)))
+
+(defun emacos--chat-encode-rollback (auth)
+  "Encode the /rollback request body as UTF-8 bytes: {phone:{auth_file}}
+when AUTH is non-nil, else {}."
+  (let* ((payload (if auth (list :phone (list :auth_file auth)) nil))
+         (json-encoding-pretty-print nil)
+         (body (json-encode (or payload (make-hash-table)))))
     (encode-coding-string body 'utf-8)))
 
 ;;; Process filter (NDJSON parser)
@@ -607,17 +665,78 @@ url-http state machine, so any sentinel-driven cleanup is unreliable."
 ;;; Command-list integration
 
 (defun emacos--chat-command-set ()
-  "Command-list entries for the *chat* buffer: SEND plus CLEAR when idle
-/ ABORT while a stream is in flight.  Plain (LABEL . CMD) conses like
-every other command entry (buttons are uniform height).  Dynamic —
-re-derived on every `emacos--render-page', so the second button flips
-as `emacos--chat-in-flight' changes (the abort path stays reachable
-mid-stream)."
-  (list
-   (cons "SEND" #'emacos--chat-send)
-   (if emacos--chat-in-flight
-       (cons "ABORT" #'emacos--chat-abort)
-     (cons "CLEAR" #'emacos--chat-clear))))
+  "Command-list entries for the *chat* buffer: SEND, then CLEAR (idle) /
+ABORT (in flight), and — only after a config apply — ROLLBACK at the
+very bottom (rarely used).  Plain (LABEL . CMD) conses like every other
+command entry (uniform-height buttons).  Dynamic — re-derived on every
+`emacos--render-page', so the second button flips as
+`emacos--chat-in-flight' changes and ROLLBACK appears/disappears with
+`emacos--chat-can-rollback'."
+  (append
+   (list (cons "SEND" #'emacos--chat-send)
+         (if emacos--chat-in-flight
+             (cons "ABORT" #'emacos--chat-abort)
+           (cons "CLEAR" #'emacos--chat-clear)))
+   ;; ROLLBACK last — rarely used, and only available after an apply.
+   (when emacos--chat-can-rollback
+     (list (cons "ROLLBACK" #'emacos--chat-rollback)))))
+
+;;; Rollback
+
+(defun emacos--chat-rollback ()
+  "Roll back the last applied config by POSTing /rollback.
+
+ASYNC on purpose: the server's /rollback handler calls back INTO this
+emacs (via emacsclient) to load the reverted config, so a synchronous
+request would deadlock — this emacs would be blocked waiting for the
+response it must itself service.  The result is reported in the
+transcript by `emacos--chat-rollback-callback'."
+  (interactive)
+  (if emacos--chat-in-flight
+      (message "chat: stream in flight; ABORT before rolling back")
+    (let* ((auth (emacos--chat-read-auth-file))
+           (url-request-method "POST")
+           (url-request-extra-headers
+            '(("Content-Type" . "application/json; charset=utf-8")))
+           (url-request-data (emacos--chat-encode-rollback auth)))
+      (emacos--chat-note "[rolling back…]")
+      (condition-case err
+          (url-retrieve (emacos--chat-endpoint "/rollback")
+                        #'emacos--chat-rollback-callback nil t t)
+        (error
+         (emacos--chat-note
+          (format "[rollback failed: %s]" (error-message-string err))))))))
+
+(defun emacos--chat-rollback-callback (status &rest _)
+  "Parse the /rollback JSON response and report it in the transcript.
+Runs in the url-retrieve response buffer."
+  (let ((result
+         (condition-case err
+             (if (plist-get status :error)
+                 (list :status "error"
+                       :detail (format "%S" (plist-get status :error)))
+               ;; Skip past the HTTP headers to the JSON body.  Search
+               ;; the blank-line boundary (handles \r\n\r\n real
+               ;; responses and \n\n test fixtures) rather than relying
+               ;; on url-http-end-of-headers, which is a buffer-local
+               ;; marker that's awkward to reproduce off the wire.
+               (goto-char (point-min))
+               (re-search-forward "\r?\n\r?\n" nil t)
+               (json-parse-buffer :object-type 'plist
+                                  :null-object nil
+                                  :array-type 'list))
+           (error (list :status "error"
+                        :detail (error-message-string err))))))
+    (let ((st (or (plist-get result :status) "error"))
+          (detail (or (plist-get result :detail) "")))
+      (emacos--chat-note (format "[rollback %s: %s]" st detail))
+      ;; A reached rollback (applied / load_error) consumes the undo;
+      ;; hide ROLLBACK until the next apply.  noop/unreachable/error keep
+      ;; it available to retry.
+      (when (member st '("applied" "load_error"))
+        (setq emacos--chat-can-rollback nil))
+      (when (fboundp 'emacos--render-page)
+        (emacos--render-page)))))
 
 (defun emacos--chat-show-top-buffer ()
   "Display *chat* in the editor (target) window.  Idempotent.
