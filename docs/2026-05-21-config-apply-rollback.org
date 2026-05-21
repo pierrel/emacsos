@@ -27,6 +27,51 @@ marker remains the real fix (deferred); this is the v1 floor alongside "the user
 =agent.el=".  The boot snippet wraps the load:
 =(condition-case err (when (file-exists-p f) (load-file f)) (error (message "emacsos: agent.el failed to load: %S" err)))=.
 
+* Design-review revisions (2026-05-21)
+
+Four-lens design-review team (simplicity, agentic best practices, user guidance, clean interfaces).
+Folded in:
+
+1. *DROP the request-scoped mutable sink* (all four lenses converged — the weakest piece).  Instead
+   =_stream_turn= detects the =apply_config= tool RESULT in the =messages= stream (the =ToolMessage=
+   content) and emits the =applied= event from that.  The tool return string is the single source of
+   truth; the event is DERIVED from it (no drift, no config side-channel, no assist-side change).
+   Considered+rejected =stream_mode="custom"= + =get_stream_writer()= (idiomatic but needs a cross-repo
+   assist change to subscribe =custom=).  =apply_config='s success return starts with a distinctive
+   token (=applied:=) that =eval_elisp= never emits, so detection is unambiguous.
+2. *Move =_is_unreachable= to =phone.py=* (clean-interfaces BLOCKER) — next to =call_emacs= whose
+   output it classifies, not =channel.py=.  Both =channel= and =apply= import it from =phone=; moves
+   toward the roadmap's =call_emacs= → typed-kind refactor, not away.
+3. *Distinct lexical prefix for =load_error=* (agentic).  NOT the bare =error:= (=eval_elisp= uses
+   that to mean "nothing happened, retry" — a small model would rewrite instead of rolling back) and
+   NOT the =(do not retry)= token (reserved for =unreachable=).  Use =applied-but-broken: <detail> —
+   the config is the new HEAD but failed to load; roll back or apply a fix=, leading with STATE.
+4. *=apply_config= docstring carries the contract* (agentic), not the deferred skill: "pass the
+   COMPLETE config — this REPLACES agent.el" + "only call after verifying via eval_elisp".
+5. *Phone owns the agent.el path* (clean-interfaces).  Boot snippet defines
+   =(defvar emacos-agent-file "~/.emacs.d/emacsos/agent.el")=; the apply expr references
+   =(or (bound-and-true-p emacos-agent-file) "<default>")=.  Kills the silent server-constant-vs-
+   Makefile-path divergence (applies work live but reboots lose config).  Smoke asserts the path the
+   BOOT snippet loads.
+6. *One server base URL* (clean-interfaces) — no separate =emacos-chat-rollback-url=; keep
+   =emacos-chat-server-url= and derive the =/rollback= path (=emacos--chat-endpoint= helper) so the
+   endpoints can't drift to different hosts.
+7. *v1 ROLLBACK-only (one-level undo)* (user-guidance).  Agent prose + docstring must NOT promise
+   mark-known-good or roll-forward (deferred).  Success string stays "applied; the user can roll back".
+8. *Multi-apply eval in the smoke* (simplicity / small-model targeting): apply A, then B, assert A's
+   effect survives — the whole-file-replace model only works if Qwen3 reliably restates the COMPLETE
+   config; verify it.
+
+Rejected / kept against a reviewer:
+- *Keep =config_repo.py= + =apply.py= separate* (simplicity wanted a merge): distinct deps + test
+  setups (=config_repo= is =tmp_path=-pure, no mocks; =apply= mocks =call_emacs=) — the mock-free git
+  test is a real win.
+- *Keep =git revert= over =checkout=*: checkout needs its own commit to keep HEAD==applied anyway, so
+  revert isn't more complex and preserves roll-forward.
+- *Shared =/rollback= streaming scaffold* (clean TIGHTEN): decide at implementation — extract a light
+  lock+disconnect+heartbeat+finally helper from =_stream_turn= IF duplication is substantial; else
+  keep =_rollback_turn= standalone.  Not pre-committing.
+
 * TL;DR (decisions)
 
 - *Config artifact* = a single file =agent.el= inside a git repo =emacsos-server= owns at
