@@ -13,28 +13,43 @@ in the phone UX that aren't load-bearing for any specific
 experiment but compound across all of them.  Worth a dedicated
 pass.
 
-** TODO Dynamic keyboard surface based on top buffer
+** DONE Dynamic keyboard surface based on top buffer
 
-Currently the keyboard surface (bottom window) shows whichever
-page was last selected — KBD / CMD / MODE / CHAT.  Switching
-context across the top buffer doesn't auto-show the appropriate
-controls.  When the user is in =*chat*= they almost always want
-SEND/CLEAR visible without manually tapping CHAT; when they're
-editing an org file they usually want T9 keys, etc.
+Shipped as the *single keyboard + commands combo*
+([[file:docs/2026-05-21-keyboard-ergonomics.org][docs/2026-05-21-keyboard-ergonomics.org]], §"Rework", PR #11).  An
+earlier swap-page design (the bottom window showed ONE of
+KBD/CMD/MODE/CHAT at a time, auto/pinned) was *rejected on review* —
+it hid the keyboard.  As built: the T9 keyboard is ALWAYS visible; a
+one-row *command strip* under it shows the top buffer's mode commands
+(=*chat*= → SEND + CLEAR/ABORT; a mode in =emacos-mode-commands= → its
+set; everything else → =emacos-global-commands=); a persistent utility
+row =[caps] [M-x] [Chat]= keeps manual command entry and the chat app
+one tap away.  The strip follows the top buffer via
+=window-buffer-change-functions=.
 
-Direction: derive the bottom-surface page from the top buffer's
-major mode (or buffer name).  =*chat*= → CHAT page; org-mode →
-something org-aware; everything else → KBD.  Keep a manual
-override for the moments the auto-selection is wrong.
+Remaining follow-ups (the combo makes these safe to grow incrementally
+— the global-commands fallback means an un-enriched mode still works):
 
-** TODO Tab button on the keyboard
+*** TODO Enrich =emacos-mode-commands= for more modes
 
-T9 keyboard has SPC, RET, DEL, CAPS but no TAB.  Tab is load-
-bearing in lots of contexts (completion, structured editing,
-field navigation).  Add as a utility button alongside the others.
+Today: org, emacs-lisp, dired.  Add magit, prog-mode/text-mode
+defaults, etc.  Order each list by priority — the strip is one row and
+truncates to what fits (overflow → M-x).  React on the phone to decide
+which commands earn a slot.
 
-Decide: replace one of the existing util slots, or grow the row?
-Spacing budget on a 320x240 screen is tight.
+*** TODO Transient-buffer derivation ignore-list
+
+The strip re-derives on =window-buffer-change=; transient popups
+(=*Completions*=, =*Help*=) briefly on top can flip it.  The
+unchanged-set no-op absorbs most, but a popup whose mode has a command
+set would flicker.  Add an ignore-list (or special-mode skip) if it's
+annoying live.
+
+** DONE Tab button on the keyboard
+
+Shipped in PR #11: TAB is the 4th button on the SPC/RET/DEL action row
+(its own =action-w= so the letter keys don't shrink).  Context-aware —
+=minibuffer-complete= in the minibuffer, else =indent-for-tab-command=.
 
 ** TODO Keyboard layout + sizing iterations
 
