@@ -17,6 +17,7 @@ class ConfigError(SystemExit):
 class Config:
     port: int
     emacsclient: str
+    config_dir: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -31,7 +32,14 @@ class Config:
             raise ConfigError(
                 f"EMACSOS_SERVER_PORT out of range (1..65535): {port}"
             )
+        # The git-backed config repo emacsos-server owns (one agent.el).
+        # Default computed at runtime from $HOME so no literal operator
+        # path lands in source (CLAUDE.md no-real-local-paths rule).
+        default_config_dir = os.path.join(
+            os.path.expanduser("~"), ".config", "emacsos", "config-repo"
+        )
         return cls(
             port=port,
             emacsclient=os.environ.get("EMACSOS_EMACSCLIENT", "emacsclient"),
+            config_dir=os.environ.get("EMACSOS_CONFIG_DIR", default_config_dir),
         )

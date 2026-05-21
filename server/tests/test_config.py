@@ -16,6 +16,18 @@ def test_custom_port(monkeypatch):
     assert Config.from_env().port == 12345
 
 
+def test_default_config_dir_under_home(monkeypatch):
+    monkeypatch.delenv("EMACSOS_CONFIG_DIR", raising=False)
+    cd = Config.from_env().config_dir
+    # Default is computed from $HOME, never a literal path in source.
+    assert cd.endswith("/.config/emacsos/config-repo")
+
+
+def test_custom_config_dir(monkeypatch):
+    monkeypatch.setenv("EMACSOS_CONFIG_DIR", "/tmp/my-config-repo")
+    assert Config.from_env().config_dir == "/tmp/my-config-repo"
+
+
 def test_non_numeric_port_raises_with_clear_message(monkeypatch):
     monkeypatch.setenv("EMACSOS_SERVER_PORT", "not-a-number")
     with pytest.raises(ConfigError) as ex:
