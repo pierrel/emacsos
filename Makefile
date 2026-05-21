@@ -53,7 +53,7 @@ local-deploy:
 	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 test-elisp:
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

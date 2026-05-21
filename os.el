@@ -36,8 +36,26 @@
 
 ;; Page state
 (defvar emacos--current-page 'keyboard
-  "Current page shown in the *keyboard* buffer.
-One of `keyboard', `global', or `mode'.")
+  "The concrete page currently shown in the *keyboard* buffer.
+One of `keyboard', `global', `mode', or `chat'.  Whether this value
+is followed (auto-derived from the top buffer) or held fixed is
+governed by `emacos--page-mode'.")
+
+(defvar emacos--page-mode 'auto
+  "Whether the keyboard surface follows the top buffer or is pinned.
+`auto' (default): the surface re-derives from the top buffer's major
+mode on every top-buffer change (see `emacos--derive-page').
+`pinned': the user tapped a specific page in the bar; the follower is
+inert until they tap the AUTO chip.")
+
+(defvar emacos--in-render nil
+  "Non-nil while `emacos--render-page' is running.
+Transient re-entry guard so the window-buffer-change follower can't
+recurse into a render that is already in progress.  Belt-and-
+suspenders: the chosen hook does not fire on the in-place keyboard
+re-render, but a future render that swaps a window's buffer would
+reintroduce the loop hazard, and on a phone an infinite re-render
+bricks the device.")
 
 (defun emacos--target ()
   "Return the editing window (not the keyboard).
@@ -133,6 +151,19 @@ Prefer the minibuffer when it is active."
   (emacos--render-page)
   (emacos--refocus))
 
+(defun emacos--tap-tab ()
+  "Context-aware TAB: complete in the minibuffer, else indent.
+Mirrors `emacos--tap-return''s minibuffer special-case.  Uses
+`call-interactively' so the underlying commands read their own
+context (region, `this-command', `tab-always-indent', etc.)."
+  (emacos--commit)
+  (let ((w (emacos--target)))
+    (when w
+      (if (active-minibuffer-window)
+          (with-selected-window w (call-interactively #'minibuffer-complete))
+        (with-selected-window w (call-interactively #'indent-for-tab-command))
+        (emacos--refocus)))))
+
 ;;; Rendering helpers
 
 (defun emacos--center (text width)
@@ -167,13 +198,22 @@ HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller)."
 
 (defun emacos--run-command (cmd)
   "Run CMD interactively in the target window.
-If the command opens the minibuffer, switch to the keyboard page."
-  (let ((w (emacos--target)))
+Shows the keyboard page while the command runs (so a minibuffer
+prompt has the T9 surface to type into), then restores the surface:
+in `auto' mode re-derive from the (possibly changed) top buffer; in
+`pinned' mode restore the page that was showing before."
+  (let ((w (emacos--target))
+        (prior emacos--current-page))
     (when w
       (setq emacos--current-page 'keyboard)
       (emacos--render-page)
       (with-selected-window w
         (call-interactively cmd))
+      ;; Restore the right surface now the command is done.
+      (if (eq emacos--page-mode 'auto)
+          (emacos--follow)
+        (setq emacos--current-page prior)
+        (emacos--render-page))
       (emacos--refocus))))
 
 ;;; Mode-specific commands
@@ -185,8 +225,20 @@ If the command opens the minibuffer, switch to the keyboard page."
      ("Export"  . org-export-dispatch))
     (emacs-lisp-mode
      ("Eval Buffer"    . eval-buffer)
-     ("Eval Last Sexp" . eval-last-sexp)))
-  "Alist mapping major modes to lists of (LABEL . COMMAND) pairs.")
+     ("Eval Last Sexp" . eval-last-sexp))
+    (dired-mode
+     ("Open"   . dired-find-file)
+     ("Up"     . dired-up-directory)
+     ("Rename" . dired-do-rename)
+     ("Copy"   . dired-do-copy)
+     ("Delete" . dired-do-delete)
+     ("Refresh" . revert-buffer)))
+  "Alist mapping major modes to lists of (LABEL . COMMAND) pairs.
+Command-centric modes (where the user invokes commands more than they
+type) belong here; text-entry modes are intentionally absent so they
+auto-derive to the T9 keyboard (see `emacos--derive-page').  Grow
+this incrementally — the keyboard fallback means an un-listed mode
+degrades gracefully.")
 
 (defun emacos--mode-commands-for (mode)
   "Return the command list for MODE, walking up parent modes."
@@ -196,38 +248,110 @@ If the command opens the minibuffer, switch to the keyboard page."
       (setq m (get m 'derived-mode-parent)))
     result))
 
+;;; Auto-following surface
+
+;; Defined in chat.el (required at the bottom of this file).  Forward-
+;; declared so the byte-compiler doesn't warn about a free variable in
+;; `emacos--derive-page'; resolved at call time, after the require.
+(defvar emacos--chat-buffer-name)
+
+(defun emacos--derive-page ()
+  "Map the top (editing) buffer to the page symbol auto mode should show.
+Order matters: an active minibuffer means the user is typing into a
+prompt, so the T9 keyboard is the right surface regardless of the
+underlying buffer's mode.  Then: the *chat* buffer (by identity) →
+`chat'; a major mode with a command set → `mode'; everything else →
+`keyboard' so the phone can always type."
+  (cond
+   ((active-minibuffer-window) 'keyboard)
+   (t
+    (let* ((target (emacos--target))
+           (buf (and target (window-buffer target)))
+           (mode (if buf (buffer-local-value 'major-mode buf)
+                   'fundamental-mode)))
+      (cond
+       ((and buf (eq buf (get-buffer emacos--chat-buffer-name))) 'chat)
+       ((emacos--mode-commands-for mode) 'mode)
+       (t 'keyboard))))))
+
+(defun emacos--follow ()
+  "In `auto' mode, sync the shown page to the derived page and render.
+The single home for the \"auto means `emacos--current-page' tracks
+`emacos--derive-page'\" invariant; called by the window-buffer-change
+follower, the AUTO chip, and `emacos--run-command'.  No-op when pinned."
+  (when (eq emacos--page-mode 'auto)
+    (let ((derived (emacos--derive-page)))
+      (unless (eq derived emacos--current-page)
+        (setq emacos--current-page derived))
+      (emacos--render-page))))
+
+(defun emacos--on-window-buffer-change (_frame)
+  "Re-derive the surface when the TOP buffer changes, in `auto' mode.
+Registered on `window-buffer-change-functions'.  Inert when pinned or
+already rendering.  NOTE: unlike `emacos--switch-page', this does NOT
+swap *chat* onto the top window — derivation is driven BY the top
+buffer (the chat buffer is already on top when we derive `chat'),
+whereas manual selection drives the top buffer."
+  (unless (or emacos--in-render (not (eq emacos--page-mode 'auto)))
+    (let ((derived (emacos--derive-page)))
+      (unless (eq derived emacos--current-page)
+        (setq emacos--current-page derived)
+        (emacos--render-page)))))
+
+(defun emacos--switch-to-auto ()
+  "Hand control back to the follower: re-enter `auto' and re-derive."
+  (setq emacos--page-mode 'auto)
+  (setq emacos--current-page (emacos--derive-page))
+  (emacos--render-page)
+  (emacos--refocus))
+
 ;;; Page bar
 
 (defun emacos--switch-page (page)
-  "Switch to PAGE and re-render.
+  "Switch to PAGE and re-render.  A manual tap PINS the surface.
 Switching to `chat' also swaps the *chat* buffer into the editor
-window; other pages never touch the top window."
+window; other pages never touch the top window.  (The auto-follower
+`emacos--on-window-buffer-change' deliberately does NOT do this swap
+— it reacts to *chat* already being on top.)"
+  (setq emacos--page-mode 'pinned)
   (setq emacos--current-page page)
   (when (eq page 'chat)
     (emacos--chat-show-top-buffer))
   (emacos--render-page)
   (emacos--refocus))
 
+(defun emacos--page-bar-chip (label active action)
+  "Insert one page-bar chip: LABEL, highlighted if ACTIVE, calling ACTION."
+  (insert-text-button
+   (concat " " label " ")
+   'action action
+   'follow-link t
+   'face (if active
+             '(:box (:line-width (1 . 1) :style released-button)
+               :background "dodger blue" :foreground "white" :weight bold)
+           '(:box (:line-width (1 . 1) :style released-button)
+             :background "gray25" :foreground "gray70"))
+   'mouse-face '(:box (:line-width (1 . 1) :style pressed-button)
+                 :background "gray45" :foreground "white"))
+  (insert " "))
+
 (defun emacos--render-page-bar ()
-  "Insert the [KBD] [CMD] [MODE] [CHAT] page bar."
+  "Insert the [KBD] [CMD] [MODE] [CHAT] [AUTO] page bar.
+The shown-page chip is always active-highlighted; the AUTO chip is
+active iff `emacos--page-mode' is `auto' — so the bar reads both
+\"which surface\" and \"following or pinned\" at a glance."
   (insert "\n")
   (dolist (entry '((keyboard . "KBD") (global . "CMD") (mode . "MODE") (chat . "CHAT")))
-    (let* ((page (car entry))
-           (label (cdr entry))
-           (active (eq page emacos--current-page))
-           (switch-fn (lambda (_) (emacos--switch-page page))))
-      (insert-text-button
-       (concat " " label " ")
-       'action switch-fn
-       'follow-link t
-       'face (if active
-                 '(:box (:line-width (1 . 1) :style released-button)
-                   :background "dodger blue" :foreground "white" :weight bold)
-               '(:box (:line-width (1 . 1) :style released-button)
-                 :background "gray25" :foreground "gray70"))
-       'mouse-face '(:box (:line-width (1 . 1) :style pressed-button)
-                     :background "gray45" :foreground "white")))
-    (insert " ")))
+    (let ((page (car entry)))
+      (emacos--page-bar-chip
+       (cdr entry)
+       (eq page emacos--current-page)
+       (lambda (_) (emacos--switch-page page)))))
+  ;; AUTO chip: tapping it hands control back to the follower.
+  (emacos--page-bar-chip
+   "AUTO"
+   (eq emacos--page-mode 'auto)
+   (lambda (_) (emacos--switch-to-auto))))
 
 ;;; Page renderers
 
@@ -243,6 +367,9 @@ window; other pages never touch the top window."
          ;; btn-w shrinks so 3 scaled buttons + 2 gaps still fill the window.
          (scale  1.75)
          (btn-w  (floor (/ (- win-w (* 2 gap-w)) (* 3 scale))))
+         ;; Action row (SPC/RET/DEL/TAB) is 4-up with its OWN width so
+         ;; adding TAB doesn't shrink the letter keys (the hot path).
+         (action-w (floor (/ (- win-w (* 3 gap-w)) (* 4 scale))))
          ;; Utility buttons use full-width columns at normal scale.
          (util-w (floor (/ (- win-w 2) 3))))
     ;; Letter rows — :height scale makes each row ~1.75x taller automatically
@@ -258,14 +385,17 @@ window; other pages never touch the top window."
             (emacos--btn (emacos--center s btn-w) #'emacos--tap-key kg scale))
           (setq i (1+ i))))
       (insert "\n"))
-    ;; Space, Return, Backspace — same scale as letter buttons
-    (emacos--btn (emacos--center "SPC" btn-w) #'emacos--tap-space nil scale)
+    ;; Action row: Space, Return, Backspace, Tab — 4-up at action-w
+    (emacos--btn (emacos--center "SPC" action-w) #'emacos--tap-space nil scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "RET" btn-w) #'emacos--tap-return nil scale)
+    (emacos--btn (emacos--center "RET" action-w) #'emacos--tap-return nil scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "DEL" btn-w) #'emacos--tap-backspace nil scale)
+    (emacos--btn (emacos--center "DEL" action-w) #'emacos--tap-backspace nil scale)
+    (insert " ")
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
+    (emacos--btn (emacos--center "TAB" action-w) #'emacos--tap-tab nil scale)
     (insert "\n")
     ;; Caps toggle
     (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
@@ -317,8 +447,11 @@ window; other pages never touch the top window."
 ;;; Page dispatch
 
 (defun emacos--render-page ()
-  "Render the current page into the *keyboard* buffer."
-  (let ((buf (get-buffer-create "*keyboard*")))
+  "Render the current page into the *keyboard* buffer.
+Binds `emacos--in-render' for the duration so the window-buffer-change
+follower can't recurse into an in-progress render."
+  (let ((buf (get-buffer-create "*keyboard*"))
+        (emacos--in-render t))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -353,11 +486,21 @@ window; other pages never touch the top window."
     (set-window-parameter kw 'no-other-window t)
     (set-window-parameter kw 'no-delete-other-windows t)
     (setq emacos--target-window (selected-window)))
+  ;; Auto-follow (default 'auto): derive the initial surface so boot
+  ;; lands on the right page.  The follower hook itself is registered
+  ;; at load time (below) so it survives hot-reloads via `local-deploy'.
+  (setq emacos--current-page (emacos--derive-page))
   ;; Render after window is visible so dimensions are known
   (emacos--render-page))
 
 ;; Defer init until the window system is ready
 (add-hook 'window-setup-hook #'emacos--init)
+
+;; Register the auto-follow hook at load time (not inside `emacos--init')
+;; so a hot-reload of os.el — the agent-driven-customization workflow —
+;; keeps the follower active without a full restart.  `add-hook'
+;; de-dupes, so re-loading doesn't double-register.
+(add-hook 'window-buffer-change-functions #'emacos--on-window-buffer-change)
 
 ;; Companion modules live alongside os.el; add this file's dir to
 ;; load-path so `(require 'chat)` works regardless of cwd.

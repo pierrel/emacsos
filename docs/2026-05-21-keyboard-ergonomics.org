@@ -1,0 +1,742 @@
+#+title: Keyboard Ergonomics: TAB Button + Dynamic Mode-Following Surface
+#+date: 2026-05-21
+
+Two ergonomics fixes batched into one feature branch
+(=ergonomics-tab-and-dynamic-kbd=), both pulled from the roadmap's
+"Ergonomics iteration" section ([[file:../roadmap.org][roadmap.org]] §"Tab button on the
+keyboard" and §"Dynamic keyboard surface based on top buffer").
+Neither is load-bearing for a specific experiment, but both compound
+across every phone session.
+
+1. *TAB is missing from the T9 keyboard.*  The utility row has SPC /
+   RET / DEL and a =caps= toggle, but no TAB.  TAB is load-bearing
+   for completion, indentation, structured editing, and minibuffer
+   field navigation.  Without it the phone can't drive a huge class
+   of interactions that "just work" on a hardware keyboard.
+
+2. *The keyboard surface doesn't follow context.*  The bottom
+   window shows whichever page (=keyboard= / =global= / =mode= /
+   =chat=) was *last manually tapped* in the page bar.  Walk into
+   =*chat*= and you still see the T9 letters until you tap CHAT;
+   open an org file and you still see whatever you left up.  The
+   surface should *auto-derive from the top (editing) buffer's
+   major mode* and show that mode's common commands — with a manual
+   override for when the auto-pick is wrong.
+
+Everything the dynamic-surface feature needs already exists in
+=os.el=: =emacos-mode-commands= (the major-mode → commands alist,
+=os.el:181=), =emacos--mode-commands-for= (parent-walking lookup,
+=os.el:191=), and =emacos--render-mode-page= (=os.el:296=).  The MODE
+page is already a working surface — it's just *manually selected*.
+Feature 2 is mostly about *auto-selecting* it on top-buffer change,
+plus a sensible fallback when a mode has no command set, NOT about
+building mode-commands from scratch.
+
+* Goal
+
+After this branch:
+
+- A *TAB* button appears on the keyboard page and does the
+  context-right thing (indent / complete / field-nav), mirroring how
+  =emacos--tap-return= already special-cases the minibuffer.
+- When the user switches the top buffer (or its major mode changes),
+  the bottom surface *automatically* re-derives: =*chat*= → CHAT
+  page, a mode with a command set → MODE page, anything else → the
+  T9 keyboard (so the phone can always type).
+- A *manual override* still works: tapping a page in the bar *pins*
+  that page until the user taps an *AUTO* affordance to hand control
+  back to the follower.  The page bar shows whether it's in AUTO or
+  pinned.
+- No re-render loop, no overflow of the keyboard window on 320x240,
+  no new dependencies.
+
+A good live session looks like: the user is editing =scratch=
+(fundamental-mode) and sees the T9 keyboard; they =find-file= an org
+file and the surface flips to org commands without a tap; they tap
+KBD to type some prose (pinning the keyboard), finish, tap AUTO, and
+when they switch to =*chat*= the CHAT page appears on its own.
+
+* Scope
+
+*In:*
+- A =TAB= utility button on the keyboard page (=emacos--render-keyboard-page=,
+  =os.el:234=) and an =emacos--tap-tab= handler.
+- An auto-follow state model: =emacos--page-mode= ('auto / 'pinned),
+  =emacos--current-page= keeps its current meaning as "the page
+  being shown right now".  A new =emacos--derive-page= maps the top
+  buffer to a page symbol.
+- A single lightweight hook on top-buffer change
+  (=window-buffer-change-functions=) that, when in 'auto mode,
+  re-derives and re-renders.
+- Page-bar changes (=emacos--render-page-bar=, =os.el:211=): an
+  AUTO/PIN indicator + a way to return to auto.
+- Reconciliation of the two existing page-switch side effects with
+  auto mode: the =chat= buffer-swap special case
+  (=emacos--switch-page=, =os.el:201=) and the post-command
+  page reset in =emacos--run-command= (=os.el:168=).
+- A new =tests/test-os.el= ERT suite covering the pure parts
+  (page derivation + state transitions) and wiring it into the
+  =test-elisp= Makefile target.
+
+*Out (called out so they don't sneak in):*
+- *Enriching =emacos-mode-commands= for many modes.*  Today it has
+  =org-mode= and =emacs-lisp-mode= (=os.el:181=).  This branch wires
+  auto-selection and leaves the alist roughly as-is (see Decision 6
+  for the one small addition).  Growing the per-mode command sets
+  (dired, magit, prog-mode defaults, text-mode, etc.) is a
+  follow-up — listed in §"Out of scope, next experiments".  The
+  fallback-to-T9 design (Decision 5) means an un-enriched mode
+  degrades gracefully to a usable keyboard, so the alist can grow
+  later without blocking this branch.
+- *Number row / punctuation / symbol layers.*  Roadmap item
+  "Keyboard layout + sizing iterations" owns those; TAB is the only
+  new key here.
+- *Buffer-name-based derivation beyond =*chat*=.*  Derivation keys
+  off =major-mode= (plus the =*chat*= special case).  Per-buffer-name
+  rules ("=*Messages*= → ...") are not in v1.
+- *Persisting the pin across reboots.*  =emacos--page-mode= is
+  in-memory; a fresh boot starts in 'auto.
+- *Font / sizing changes* (separate roadmap item).
+
+* Decisions
+
+Numbered.  Push back on any.  Opinionated calls flagged inline.
+
+** 1. TAB goes on the SPC/RET/DEL row as a 4th column; all four shrink
+
+*Opinionated.*  Three placements were considered against the
+320x240 budget:
+
+- *(a) 4th button on the scaled SPC/RET/DEL row.*  Today that row
+  is 3 columns at =scale= 1.75, with =btn-w = floor((win-w - 2*gap-w)
+  / (3*scale))= (=os.el:245=).  Adding TAB makes it
+  =floor((win-w - 3*gap-w) / (4*scale))=.  On a ~36-col keyboard
+  window that's roughly =btn-w= 4→3 — SPC/RET/DEL/TAB still render
+  their 3-char labels (the labels are already substring-clamped to
+  =btn-w= for letter keys but the util labels are 3 chars, so a
+  =btn-w= of 3 still fits "SPC"/"TAB" exactly).  One row, four
+  evenly-sized big targets, no new vertical real estate consumed.
+- *(b) TAB next to =caps= on the bottom util row.*  The caps row
+  uses =util-w = floor((win-w - 2) / 3)= (=os.el:247=) but currently
+  draws only one button in a 3-column budget.  Putting TAB there is
+  cheap vertically but mixes a frequently-used key (TAB) onto the
+  rarely-used modifier row, and leaves the SPC/RET/DEL row visually
+  unbalanced (3 big buttons) while the caps row has 2 — asymmetric
+  and easy to mis-tap.
+- *(c) A whole new row.*  Costs ~1.75 rows of vertical space on a
+  screen where the keyboard window is already 3/4 of 240px split
+  across letter rows + util row + caps row + page bar.  Rejected:
+  vertical budget is the scarce one.
+
+Pick *(a)*.  The horizontal shrink from 4→3 char-widths is within
+the existing substring-clamp behavior and keeps all four
+"action" keys (the ones you hit constantly) on one balanced row.
+The change is local to =emacos--render-keyboard-page= (=os.el:261=):
+recompute =btn-w= for a 4-up row (or introduce =act-w= so the letter
+rows keep their 3-up =btn-w= and only the action row goes 4-up — see
+the risk on letter/action width divergence in §"Risks"), then emit a
+4th =emacos--btn= with the existing =gap-w= spacer pattern
+(=os.el:262-269=).
+
+Recommended concrete shape: keep the letter rows at the current 3-up
+=btn-w=, and compute a *separate* =act-w = floor((win-w - 3*gap-w) /
+(4*scale))= used only for the SPC/RET/DEL/TAB row.  This decouples
+"how wide are letter groups" from "how wide are action keys", so TAB
+doesn't shrink the letter keys.  The caps row stays as-is.
+
+** 2. =emacos--tap-tab= calls a context-aware TAB, mirroring RET's minibuffer special-case
+
+*Opinionated.*  Three handler behaviors were considered:
+
+- *(a) Literal =(insert "\t")=.*  Simple, but wrong in almost every
+  context the roadmap names TAB as load-bearing for: in a code
+  buffer you want indent, at a completion point you want completion,
+  in the minibuffer you want completion.  A literal tab is the one
+  thing the user rarely means.
+- *(b) =indent-for-tab-command=.*  Context-aware in *file* buffers
+  (indents per major-mode rules, or completes via
+  =tab-always-indent=), but it's not the right command in the
+  minibuffer, where TAB is bound to =minibuffer-complete=.
+- *(c) Dispatch on context, mirroring =emacos--tap-return= (=os.el:109=).*
+  =emacos--tap-return= already branches: minibuffer active →
+  =exit-minibuffer=, else =newline=.  TAB wants the same shape:
+  minibuffer active → =minibuffer-complete=, else
+  =indent-for-tab-command=.
+
+Pick *(c)*.  It reuses the established pattern in the file and gives
+the user the behavior they expect in each context.  Sketch:
+
+#+begin_src elisp
+(defun emacos--tap-tab ()
+  "Indent / complete with TAB, or complete in the minibuffer."
+  (emacos--commit)
+  (let ((w (emacos--target)))
+    (when w
+      (if (active-minibuffer-window)
+          (with-selected-window w (call-interactively #'minibuffer-complete))
+        (with-selected-window w (call-interactively #'indent-for-tab-command))
+        (emacos--refocus)))))
+#+end_src
+
+Notes that fold into implementation:
+- Use =call-interactively= (not a bare funcall) so commands that
+  read their own context (=indent-for-tab-command= consults
+  =this-command=, =last-command=, region state) behave normally.
+- =emacos--commit= first (=os.el:68=), same as the other utility
+  handlers, so a half-finished multi-tap letter is committed before
+  TAB acts.
+- In the minibuffer branch, do NOT =emacos--refocus= afterward (the
+  RET handler doesn't either — exiting/competing the minibuffer
+  manages focus itself).  This mirrors =os.el:114-117= exactly.
+
+** 3. Auto-follow trigger: =window-buffer-change-functions=, NOT =buffer-list-update-hook=
+
+*Opinionated, and the riskiest single decision — see §"Risks".*
+Candidates:
+
+- *=buffer-list-update-hook=.*  Fires on nearly any buffer
+  activity, including =get-buffer-create= and =with-current-buffer=.
+  Since =emacos--render-page= does =(get-buffer-create "*keyboard*")=
+  + =with-current-buffer= + =erase-buffer= (=os.el:321-337=), this
+  hook would fire *from our own render*, and re-derive → re-render →
+  fire again: an infinite loop.  Rejected.
+- *=window-selection-change-functions=.*  Fires when the *selected
+  window* changes.  But =emacos--refocus= (=os.el:58=) re-selects
+  the top window after every tap, and rendering the keyboard
+  doesn't change selection — so this misses "top buffer changed
+  while staying selected" (e.g. =find-file= replacing the buffer in
+  the already-selected top window) and over-fires on focus bounces.
+  Rejected.
+- *=window-buffer-change-functions=.*  Fires when a window starts
+  displaying a *different buffer* than before.  Crucially:
+  =emacos--render-page= renders into =*keyboard*= *in place* — it
+  never calls =set-window-buffer= on the keyboard window (the
+  keyboard window is dedicated, =os.el:352=), so re-rendering does
+  NOT change any window's displayed buffer and does NOT fire this
+  hook.  The one place we *do* swap a window's buffer is
+  =emacos--chat-show-top-buffer= (=chat.el:627=,
+  =set-window-buffer= on the top window) — and that's exactly a case
+  we *want* to react to.  This hook fires precisely on "the top
+  buffer changed", which is the trigger we want.
+
+Pick *window-buffer-change-functions*.  It's frame-local-or-global
+(we add it globally with =add-hook=); the handler is called with the
+frame as argument.  The handler:
+
+#+begin_src elisp
+(defun emacos--on-window-buffer-change (_frame)
+  "Re-derive the surface when the TOP buffer changes, in auto mode."
+  (when (eq emacos--page-mode 'auto)
+    (let ((derived (emacos--derive-page)))
+      (unless (eq derived emacos--current-page)
+        (setq emacos--current-page derived)
+        (emacos--render-page)))))
+#+end_src
+
+Two guards make this loop-safe and cheap:
+1. *=(eq emacos--page-mode 'auto)=* — when pinned, the hook is inert.
+2. *=(unless (eq derived emacos--current-page) ...)=* — only
+   re-renders when the *derived* page actually differs from what's
+   already shown.  Even if the hook fired spuriously, an unchanged
+   derivation is a no-op (no =erase-buffer=, no re-entry).
+
+Belt-and-suspenders: a dynamic re-entry guard
+(=emacos--rendering= let-bound around =emacos--render-page='s body)
+is *cheap insurance* against any hook we didn't anticipate; include
+it (see §"Risks").
+
+Registration goes in =emacos--init= (=os.el:341=) alongside the
+existing =window-setup-hook= wiring, with a matching teardown only if
+we ever add a shutdown path (we don't today; the hook lives for the
+process lifetime, same as the page state).
+
+** 4. State model: =emacos--page-mode= ('auto | 'pinned), AUTO is the default; tapping a page pins, an AUTO chip un-pins
+
+*Opinionated.*  The requirement is "auto-follow, but a manual
+override for when auto is wrong."  Two ways to model it:
+
+- *(a) Sentinel value in =emacos--current-page=* (e.g. an =auto=
+  member alongside =keyboard=/=global=/=mode=/=chat=).  Rejected:
+  =emacos--current-page= is read in many places as "what to render"
+  (the =pcase= at =os.el:325=, the active-highlight in the page bar
+  at =os.el:217=).  Overloading it with a "derive it" sentinel means
+  every reader has to resolve the sentinel first.  Muddier.
+- *(b) Orthogonal mode flag.*  Add =emacos--page-mode= (='auto or
+  'pinned).  =emacos--current-page= keeps its exact current meaning:
+  "the concrete page being shown right now."  In 'auto, the
+  follower keeps =emacos--current-page= in sync with the derived
+  value; in 'pinned, the follower leaves it alone.  Every existing
+  reader of =emacos--current-page= is untouched.
+
+Pick *(b)*.  Concrete semantics:
+
+- *Default = 'auto.*  Fresh boot follows the top buffer.
+- *Tapping a page in the bar pins.*  =emacos--switch-page= (=os.el:201=)
+  gains =(setq emacos--page-mode 'pinned)= as its first act.  So
+  any manual page tap = "I want this page, stop following."
+- *Returning to auto.*  The page bar grows an =AUTO= chip
+  (rightmost).  Tapping it sets =emacos--page-mode 'auto=, derives
+  the current page immediately, and re-renders.  Sketch handler:
+  =emacos--switch-to-auto= → set mode, =(setq emacos--current-page
+  (emacos--derive-page))=, =emacos--render-page=, =emacos--refocus=.
+- *Page-bar reflection* (=emacos--render-page-bar=, =os.el:211=):
+  the existing four chips render as today; append an =AUTO= chip.
+  Highlight rule: when ='auto, the AUTO chip gets the active
+  (dodger-blue) face AND the chip matching =emacos--current-page=
+  gets a subtle "this is what auto picked" treatment (reuse the
+  active face — in auto mode the derived page IS active).  When
+  'pinned, the tapped page chip is active and AUTO is inactive.
+  Simplest rule that's unambiguous: *active face = the currently
+  shown page chip always; AUTO chip is active iff =emacos--page-mode=
+  is 'auto.*  That way the user can always read both "which surface
+  am I looking at" and "is it following or pinned" off the bar.
+
+This keeps the two concepts independent and leaves the hot path
+(=emacos--render-page='s =pcase=) reading a single unambiguous
+=emacos--current-page=.
+
+** 5. Fallback when a mode has no command set: fall back to the T9 KEYBOARD, never the empty " No commands" message
+
+*Opinionated, and a hard requirement of a phone.*  =emacos--render-mode-page=
+(=os.el:296=) currently inserts =" No commands for <mode>"= when
+=emacos--mode-commands-for= returns nil (=os.el:303-304=).  That's
+acceptable for a *manually selected* MODE page (the user asked for
+it).  It is *not* acceptable as an *auto* destination: auto-deriving
+into a dead surface with no way to type would brick the phone for
+any mode not in the alist — which is most modes.
+
+So the *derivation* function, not the renderer, owns the fallback:
+
+#+begin_src elisp
+(defun emacos--derive-page ()
+  "Map the top buffer to a page symbol for auto mode."
+  (let* ((target (emacos--target))
+         (buf (and target (window-buffer target)))
+         (mode (if buf (buffer-local-value 'major-mode buf)
+                 'fundamental-mode)))
+    (cond
+     ;; chat buffer (by name) -> CHAT page
+     ((and buf (equal (buffer-name buf) emacos--chat-buffer-name)) 'chat)
+     ;; mode with a known command set -> MODE page
+     ((emacos--mode-commands-for mode) 'mode)
+     ;; everything else -> T9 keyboard (always able to type)
+     (t 'keyboard))))
+#+end_src
+
+Consequence: the " No commands" branch in =emacos--render-mode-page=
+becomes *unreachable via auto* (auto only derives 'mode when commands
+exist).  Leave the branch in place anyway — it's still reachable if
+the user *manually* taps MODE on a no-command buffer, and that's a
+fine "you asked, there's nothing here" message in the pinned case.
+No change to the renderer is required for the fallback; the
+derivation simply never routes a no-command mode to it.
+
+Note the dependency: =emacos--derive-page= references
+=emacos--chat-buffer-name= (defined in =chat.el:113=).  =os.el=
+already =(require 'chat)= at load (=os.el:366=), so the constant is
+available; placement of =emacos--derive-page= must be after that
+require, or reference the literal name guarded by =boundp=.  Cleanest:
+define =emacos--derive-page= in =os.el= below the require, or have it
+use =(get-buffer "*chat*")= identity rather than the constant to
+avoid the cross-module name coupling.  *Recommendation:* compare
+against =(get-buffer emacos--chat-buffer-name)= by buffer identity,
+matching how =emacos--target='s walk compares against the keyboard
+buffer object (=os.el:49-55=), and keep =os.el= depending on
+=chat.el= as it already does.
+
+** 6. =*chat*= auto-derivation reuses the existing buffer-swap path; no conflict
+
+The =chat= page is special: =emacos--switch-page= swaps =*chat*= into
+the *top* window when you select it (=os.el:206-207=,
+=emacos--chat-show-top-buffer=).  Auto mode must not fight this.
+Resolution:
+
+- *Auto deriving INTO chat:* When the top buffer *is already* =*chat*=
+  (the user switched to it some other way) =emacos--derive-page=
+  returns 'chat and the follower sets =emacos--current-page = 'chat=
+  + renders the chat page.  It must NOT call
+  =emacos--chat-show-top-buffer= — the chat buffer is already on top
+  (that's why we derived 'chat).  So the *follower path*
+  (=emacos--on-window-buffer-change=) deliberately does NOT replicate
+  the buffer-swap that =emacos--switch-page= does; it only sets the
+  page + renders.  This is correct precisely because derivation is
+  driven *by* the top buffer, whereas manual selection drives the top
+  buffer.
+- *Manual chat selection still swaps* (and pins): tapping CHAT goes
+  through =emacos--switch-page=, which both pins (Decision 4) and
+  swaps =*chat*= on top (existing behavior, =os.el:206=).  After the
+  swap, =window-buffer-change-functions= fires — but
+  =emacos--page-mode= is now 'pinned, so the follower is inert.  No
+  double-render, no loop.
+- *Leaving chat:* if the user switches the top buffer away from
+  =*chat*= while in auto, the hook fires, derivation returns
+  'mode-or-keyboard, and the surface follows.  Good.  (The =*chat*=
+  buffer is left wherever it is; we don't force it off-screen — same
+  as today.)
+
+There's a small asymmetry to document in code: in auto mode, the
+CHAT surface appears *because* =*chat*= is on top; in pinned mode,
+=*chat*= is forced on top *because* you tapped CHAT.  Both are
+correct; a comment at =emacos--on-window-buffer-change= should say
+why the follower omits the swap.
+
+** 7. =emacos--run-command='s page reset reconciled with auto mode
+
+=emacos--run-command= (=os.el:168=) currently hard-sets
+=emacos--current-page = 'keyboard= and re-renders *before* running
+the command (=os.el:173-174=) — so that if the command opens the
+minibuffer, the user is looking at the T9 keyboard to type into it.
+
+In auto mode this is *mostly already right*: most minibuffer-opening
+commands want the keyboard, and =emacos--tap-return='s minibuffer
+special-case + the new =emacos--tap-tab= minibuffer completion make
+the keyboard the correct surface during a minibuffer read.  But the
+unconditional =setq= to 'keyboard would silently *desync* auto mode:
+after the command finishes and the minibuffer closes, the surface is
+stuck on 'keyboard even though the top buffer's mode might warrant
+the MODE page, until the next =window-buffer-change=.
+
+Resolution (minimal): leave =emacos--run-command='s pre-command
+"show keyboard for the minibuffer" behavior as-is (it's correct for
+the during-minibuffer moment), but recognize that when the command
+completes, one of two things happens:
+- The command changed the top buffer (e.g. =find-file=,
+  =switch-to-buffer=) → =window-buffer-change-functions= fires →
+  auto re-derives.  Self-healing, no code needed.
+- The command did NOT change the top buffer (e.g. =save-buffer=,
+  =org-todo=) → no hook fires → surface stays on 'keyboard.
+
+For the second case, add a *post-command re-derive* at the tail of
+=emacos--run-command=: after =call-interactively= returns, if
+=emacos--page-mode= is 'auto, set =emacos--current-page=
+=(emacos--derive-page)= and re-render before =emacos--refocus=.  This
+keeps the "keyboard during the minibuffer" behavior while snapping
+back to the derived surface once the command is done.  In 'pinned
+mode, keep today's exact behavior (reset to keyboard) OR — cleaner —
+restore the *pinned* page rather than forcing keyboard.  *Recommendation:*
+in 'pinned mode, leave =emacos--run-command='s existing reset-to-keyboard
+as-is for v1 (it's the current behavior; changing it is scope creep);
+only the 'auto branch gets the post-command re-derive.  Document the
+asymmetry.
+
+** 8. Tests: add =tests/test-os.el= for the pure functions; hook + render stay manual/smoke
+
+The new logic splits cleanly into *pure, ERT-testable* pieces and
+*hook-driven, hard-to-unit-test* pieces:
+
+- *Pure (test in a new =tests/test-os.el=):*
+  - =emacos--derive-page=: with a stubbed =emacos--target= (the
+    =cl-letf= pattern is already used in =test-chat.el:305=),
+    assert: a fundamental-mode buffer → 'keyboard; an org-mode
+    buffer → 'mode (org-mode is in the alist, =os.el:182=); the
+    =*chat*= buffer → 'chat; a buffer in a mode *not* in the alist →
+    'keyboard (the fallback, Decision 5).
+  - =emacos--mode-commands-for= parent-walking (=os.el:191=): assert
+    a derived child of =emacs-lisp-mode= resolves to the elisp
+    command set even though only the parent is in the alist.  (No
+    test exists for this today; cheap to add and it underpins
+    derivation.)
+  - State transitions: =emacos--switch-page= sets 'pinned;
+    =emacos--switch-to-auto= sets 'auto and re-derives;
+    =emacos--on-window-buffer-change= is a no-op when 'pinned and
+    re-derives when 'auto (assert =emacos--current-page= via a
+    stubbed =emacos--target= + stubbed =emacos--render-page= to
+    avoid touching a real window).
+  - =emacos--tap-tab=: with a stubbed target window and =cl-letf= on
+    =minibuffer-complete= / =indent-for-tab-command=, assert the
+    minibuffer branch calls complete and the buffer branch calls
+    indent.  Mirror =test-chat.el='s =cl-letf= command-capture
+    pattern (=test-chat.el:185-189=).
+- *Hook-driven / rendering (NOT unit-tested; rely on smoke + live):*
+  Actual =window-buffer-change-functions= firing, real window
+  geometry for the 4-up TAB row width, and the page-bar visuals are
+  validated by =make smoke= + a hand pass on the phone
+  (=make local-deploy=), per CLAUDE.md §"Project conventions"
+  ("The phone is the user", "Real-phone smoke after refactors that
+  touch the boot path").
+
+*Makefile change required:* =test-elisp= currently loads only
+=tests/test-chat.el= (=Makefile= =test-elisp= target).  Add
+=-l tests/test-os.el= to that target so the new suite runs in CI.
+=test-os.el= must =(require 'os)= (which pulls =chat= transitively);
+=test-chat.el= already does =(require 'os)= inside one test
+(=test-chat.el:286=), so loading both in one batch is known-safe.
+
+A minimal =tests/test-os.el= is *warranted*: the derivation +
+state-transition logic is the genuinely new behavior and is fully
+pure-function testable, exactly the kind of regression net the
+three-phase workflow wants before a live phone test.
+
+* Risks
+
+1. *Re-render loop (the headline hazard).*  Any hook that fires from
+   inside =emacos--render-page= turns "re-derive on change" into an
+   infinite loop.  Mitigations, layered:
+   (a) chose =window-buffer-change-functions=, which does NOT fire on
+   in-place keyboard re-render (Decision 3);
+   (b) the follower no-ops unless the derived page actually differs
+   from the shown page;
+   (c) the follower is inert in 'pinned mode;
+   (d) *add a dynamic re-entry guard* — let-bind =emacos--rendering=
+   to =t= around =emacos--render-page='s body and have
+   =emacos--on-window-buffer-change= bail when it's set.  (d) is the
+   one that saves us if a future change introduces a buffer swap
+   inside render we didn't foresee.  Verify on the phone that a
+   =find-file= → mode change settles in exactly one re-render
+   (=*Messages*= won't show it; eyeball that the surface doesn't
+   flicker).
+2. *Letter-key vs action-key width divergence (TAB row).*  If TAB is
+   added by recomputing the *shared* =btn-w= for 4-up, the letter
+   rows shrink too (they use the same =btn-w=, =os.el:258=) and may
+   clip a 6-letter group's display worse than today.  Mitigation:
+   use a *separate* =act-w= for the action row only (Decision 1), so
+   letter rows are untouched.  Risk that =act-w= at =btn-w=3 makes
+   "SPC"/"RET"/"DEL"/"TAB" tap targets too narrow on the real
+   screen — only the phone can tell; flagged for the live pass, and
+   the fallback is placement (b) (TAB on the caps row) if 4-up is
+   too cramped.
+3. *Hook over-fire / latency on the main loop.*  =window-buffer-change-functions=
+   can fire on transient buffer displays (help popups, completion
+   buffers shown in the top window).  The derive+compare is cheap
+   (one =buffer-local-value=, one alist walk), and the no-op guard
+   means a transient that derives to the same page costs nothing.
+   But a transient that derives to a *different* page (e.g. a
+   =*Completions*= buffer briefly shown on top) could flicker the
+   surface.  Mitigation for v1: derivation keys only on =major-mode=
+   and the =*chat*= identity; =*Completions*=/=*Help*= are
+   special-modes that derive to 'keyboard (no command set) — same as
+   most buffers, so the flicker is "→ keyboard and back", tolerable.
+   If it's annoying live, a follow-up can ignore transient/special
+   buffers in derivation.  Noted, not fixed in v1.
+4. *=emacos--target= identity during the hook.*  The follower calls
+   =emacos--target= (=os.el:42=), which itself can mutate
+   =emacos--target-window= via its =walk-windows= fallback.  During
+   a =window-buffer-change= the window topology is settled (the hook
+   runs after the change), so =emacos--target= returns the top
+   window correctly.  But if the *minibuffer* is active when the hook
+   fires, =emacos--target= returns the minibuffer window
+   (=os.el:45=), and derivation would key off the minibuffer's mode.
+   Mitigation: in =emacos--derive-page=, if =(active-minibuffer-window)=
+   is non-nil, return 'keyboard (you're typing into a prompt; the T9
+   surface is what you want) — this also matches Decision 7's "show
+   keyboard during minibuffer" intent.  Add this as the first =cond=
+   clause.
+5. *Cross-module ordering (=os.el= referencing =chat=).*
+   =emacos--derive-page= needs the chat buffer identity and the chat
+   page renderer must exist when 'chat is derived.  =os.el= already
+   =(require 'chat)= (=os.el:366=) and the =pcase= already dispatches
+   'chat to =emacos--render-chat-page= (=os.el:329=), so this is
+   established; just keep new defuns after the require or rely on the
+   late binding (functions resolve at call time).  Low risk, called
+   out so it isn't reintroduced.
+
+* Functions / defvars to add or change
+
+*Add (=os.el=):*
+- =emacos--page-mode= (defvar, default ='auto) — orthogonal
+  auto/pinned flag.  Place near =emacos--current-page= (=os.el:38=).
+- =emacos--rendering= (defvar, default nil) — re-entry guard.
+- =emacos--derive-page= — top-buffer → page symbol (Decision 5);
+  minibuffer guard (Risk 4); =*chat*= identity; alist lookup;
+  fallback 'keyboard.
+- =emacos--on-window-buffer-change= (=_frame=) — the follower
+  (Decision 3); guarded by 'auto + diff + re-entry.
+- =emacos--switch-to-auto= — page-bar AUTO chip handler (Decision 4).
+- =emacos--tap-tab= — context-aware TAB (Decision 2).
+
+*Change (=os.el=):*
+- =emacos--render-keyboard-page= (=os.el:234=) — add =act-w=
+  computation and a 4th =emacos--btn= (TAB) on the SPC/RET/DEL row
+  (Decision 1), wired to =emacos--tap-tab=.
+- =emacos--switch-page= (=os.el:201=) — set =emacos--page-mode 'pinned=
+  on entry (Decision 4).
+- =emacos--render-page-bar= (=os.el:211=) — append an AUTO chip;
+  active-face rule reflects 'auto vs 'pinned (Decision 4).
+- =emacos--render-page= (=os.el:319=) — wrap body in
+  =(let ((emacos--rendering t)) ...)= (Risk 1d).
+- =emacos--run-command= (=os.el:168=) — append a post-command
+  re-derive in the 'auto branch (Decision 7).
+- =emacos--init= (=os.el:341=) — =(add-hook 'window-buffer-change-functions
+  #'emacos--on-window-buffer-change)= (Decision 3); ensure
+  =emacos--page-mode= starts 'auto and the first
+  =emacos--render-page= reflects the derived page (init currently
+  renders whatever =emacos--current-page= defaults to — set it from
+  =emacos--derive-page= before the initial render so boot lands on
+  the right surface).
+- =emacos--current-page= docstring (=os.el:38=) — note it's now "the
+  concrete page shown", with =emacos--page-mode= governing whether
+  it's followed or pinned, and add 'chat to the enumerated values
+  (the docstring currently lists only keyboard/global/mode,
+  =os.el:39-40=, even though 'chat already exists — fix in passing).
+
+*Change (=Makefile=):*
+- =test-elisp= target — add =-l tests/test-os.el=.
+
+*Add (=tests/test-os.el=):*
+- ERT suite per Decision 8.
+
+*No changes needed in =chat.el=* — the auto-follow reacts to
+=emacos--chat-show-top-buffer='s existing =set-window-buffer=; the
+chat page renderer is unchanged.
+
+* Implementation sequence
+
+Order picked so each step is independently runnable / testable.
+
+1. *TAB button + handler.*  Add =emacos--tap-tab= (Decision 2) and
+   the 4th button + =act-w= in =emacos--render-keyboard-page=
+   (Decision 1).  Pure-ish; testable by =make start= on the desktop
+   and an ERT test for the handler dispatch.  Ship-able on its own.
+2. *Derivation function.*  Add =emacos--derive-page= (Decision 5 +
+   Risk 4 minibuffer guard).  Unit-test in =tests/test-os.el=.
+3. *State model.*  Add =emacos--page-mode=, =emacos--rendering=;
+   make =emacos--switch-page= pin; add =emacos--switch-to-auto=;
+   update =emacos--render-page-bar= (AUTO chip) and
+   =emacos--render-page= (re-entry guard).  Unit-test the
+   transitions.
+4. *Follower hook.*  Add =emacos--on-window-buffer-change=, register
+   in =emacos--init=, set initial page from derivation at boot.
+   Unit-test the follower's guard logic with stubs; eyeball the loop
+   safety on the desktop.
+5. *=emacos--run-command= reconciliation* (Decision 7, 'auto branch
+   post-command re-derive).
+6. *Makefile + tests.*  Wire =tests/test-os.el= into =test-elisp=;
+   =make test-elisp= green (both suites).
+7. *Live phone pass.*  =make local-deploy=; verify: TAB indents in a
+   code buffer and completes in the minibuffer; =find-file= an org
+   file flips to MODE; tapping KBD pins; AUTO chip un-pins; entering
+   =*chat*= shows the CHAT page; no surface flicker / loop.  Run
+   =make smoke= (boot path unaffected, but cheap insurance per
+   CLAUDE.md).
+8. *PR → Copilot loop* per CLAUDE.md Phase 3.
+
+* Eval
+
+Cadence: this is local-only elisp UX work (no LLM in the loop), so
+the heavy 3/5/10 live-LLM cadence from the streaming doc doesn't
+apply.  Done when:
+
+- =make test-elisp= passes with both =test-chat.el= and the new
+  =test-os.el=.
+- On the phone: switching the top buffer auto-flips the surface
+  (org → MODE, scratch → KBD, =*chat*= → CHAT) with no manual tap
+  and no visible flicker/loop.
+- TAB indents in a file buffer and completes in the minibuffer.
+- A manual page tap pins; the AUTO chip returns to following; the
+  page bar unambiguously shows which state it's in.
+- A mode with no command set lands on the T9 keyboard (never the
+  dead " No commands" surface) in auto mode.
+
+* Design-review revisions (2026-05-21)
+
+Three-lens design-review team (simplicity, user-guidance, clean
+interfaces; agentic-best-practices skipped — pure-elisp UI, no
+LLM/langchain surface).  Folded in:
+
+*Content policy (the user-guidance BLOCKER) — partially accepted.*
+The reviewer argued the feature under-delivers "show the most common
+commands for the current mode" because the alist only has org +
+elisp, so most buffers fall back to the T9 keyboard.  Counter-weight:
+for what gets *live-tested*, the existing seed already demonstrates a
+genuinely dynamic surface — =scratch= (fundamental) → keyboard,
+=*chat*= → CHAT (the roadmap's headline example), an org file → org
+commands, an elisp file → elisp commands.  That's four distinct
+auto-surfaces, enough to prove the feature on the phone.  *Resolution:*
+seed ONE more high-value, definitely-built-in, command-centric mode
+(=dired-mode=) so the demo is richer, but keep the fallback-to-keyboard
+for text-entry / unknown modes — because for a *typing* mode the most
+common action genuinely IS typing, which matches the roadmap's own
+example ("editing an org file they usually want T9 keys").  Enriching
+the alist further (magit, prog-mode, etc.) stays a follow-up the user
+can drive by reacting on the phone; the fallback makes that safe to
+grow.  *Surface this call to the user so they can redirect live.*
+
+*Keep separate action-row width (rename =act-w= → =action-w=).*
+Simplicity argued for one shared =btn-w= at 4-up; rejected — that
+shrinks the LETTER keys (the hot path: every keystroke) to make room
+for TAB (occasional).  Don't degrade typing for TAB.  Letter rows
+keep their 3-up =btn-w=; only the SPC/RET/DEL/TAB row uses the
+4-up =action-w=.  (Clean-interfaces concurred; rename for clarity.)
+
+*Keep the re-entry guard, rename =emacos--rendering= → =emacos--in-render=.*
+Simplicity argued to cut it (the chosen hook can't fire from in-place
+render).  Kept anyway: it's 3 lines defending against a phone-*brick*
+(infinite re-render loop), and a future render change that adds a
+buffer swap would reintroduce the hazard silently.  Cheap insurance
+for a catastrophic failure mode.  Renamed so it reads as a transient
+let-bound guard, not durable page state.
+
+*Extract =emacos--follow= helper (clean-interfaces).*  The "if 'auto,
+set =emacos--current-page= = =(emacos--derive-page)=, re-render" dance
+appears in three places (the window-buffer-change follower,
+=emacos--switch-to-auto=, the =emacos--run-command= tail).  Extract
+into one =emacos--follow= so the "auto means current-page tracks
+derive-page" invariant lives in a single function.  Collapses
+Decision 7's auto/pinned asymmetry: =emacos--run-command= saves the
+prior page, forces keyboard for the command, then on completion calls
+=emacos--follow= (auto) or restores the saved page (pinned) — no
+documented wart.
+
+*Page-bar highlight: drop the "subtle treatment" paragraph.*  Use only
+the final unambiguous rule: the shown-page chip is active always; the
+AUTO chip is active iff =emacos--page-mode= is 'auto.  (Simplicity.)
+
+*derive-page chat check: buffer identity, not string compare.*  Use
+=(eq buf (get-buffer emacos--chat-buffer-name))= (matches
+=emacos--target='s keyboard-buffer identity check), not
+=(equal (buffer-name buf) ...)= — a stray buffer literally named
+=*chat*= shouldn't derive to the chat page.  (Clean + simplicity.)
+
+*Comment the chat-swap asymmetry at BOTH call sites* (=emacos--switch-page='s
+=(when (eq page 'chat) ...)= and the follower), so a reader sees from
+either function why only manual selection swaps =*chat*= on top.
+
+*Live-test note (user-guidance):* verify the AUTO chip + active-page
+highlight is legible on the 320x240 bar (now 5 chips); simplify if it
+reads as noise.
+
+* Open questions
+
+1. *act-w narrowness on the real screen* (Risk 2).  4-up action row
+   at =btn-w=3 may be too tight to tap reliably.  Resolve live: if
+   cramped, fall back to TAB-on-caps-row (placement b).  Flagged for
+   the phone pass, not pre-decided.
+2. *Transient-buffer flicker* (Risk 3).  Whether =*Completions*= /
+   =*Help*= popups on top cause an annoying "→ keyboard and back"
+   flip is unknown until live.  v1 tolerates it; a derivation
+   ignore-list is the follow-up if needed.
+3. *Pinned-mode =run-command= reset* (Decision 7).  v1 keeps the
+   existing reset-to-keyboard in pinned mode for minimal scope;
+   open whether pinned should instead restore the pinned page after
+   a command.  Defer unless it bites live.
+
+* Out of scope, next experiments
+
+Each is its own follow-up (roadmap or a future doc):
+
+1. *Enrich =emacos-mode-commands= for more modes* (=os.el:181=) —
+   dired, magit, prog-mode/text-mode defaults, etc.  The
+   fallback-to-T9 design means this can grow incrementally without
+   touching the auto-follow machinery.  Roadmap §"Dynamic keyboard
+   surface" direction ("something org-aware; everything else → KBD")
+   is satisfied by v1's fallback; richer per-mode sets are the
+   iteration.
+2. *Number row / punctuation / symbol layers* — roadmap §"Keyboard
+   layout + sizing iterations".
+3. *Transient/special-buffer derivation rules* — ignore-list or
+   buffer-name rules so popups don't flip the surface (Open
+   question 2).
+4. *Persist the pin / last surface across reboots* — currently
+   in-memory, boots to 'auto.
+5. *Per-buffer-name derivation beyond =*chat*=* — e.g. dedicated
+   surfaces for specific named buffers.
+
+* Companion docs
+
+None.  All machinery is local elisp in =os.el= + a new
+=tests/test-os.el=; no server, wire-protocol, or =chat.el= changes.
+=emacos-mode-commands= / =emacos--mode-commands-for= /
+=emacos--render-mode-page= already exist (=os.el:181=, =:191=, =:296=).
+
+When this ships, append an *Outcome* section pointing at the merged
+PR and any deviations from the plan.
