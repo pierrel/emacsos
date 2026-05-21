@@ -114,6 +114,52 @@ applied here.  Surfaced by the code-review team; not done in the
 channel PR because that PR shouldn't widen scope to `app.py`'s
 logging.
 
+** TODO Remote connectivity: WireGuard for the away phone
+
+Today the whole channel assumes the phone and server share a LAN.
+The phone POSTs =/chat= to the server's local IP, and the server
+reaches *back* to the phone's emacs daemon via =emacsclient=
+(=phone.call_emacs=), targeting whatever address the HTTP request
+came from (=request.client.host=).  That return path only works
+because both are on the same network.
+
+The real deployment: *server stays home, phone goes out into the
+world.*  When the phone is remote it connects home over WireGuard.
+Two problems to solve:
+
+1. *Server must be a WireGuard peer the phone can be reached at.*
+   The back-channel (=eval_elisp= → =call_emacs= → phone) needs the
+   server to *initiate* a connection to the phone.  That means a wg
+   topology where the server can route to the phone's tunnel IP
+   (phone as a peer with appropriate =AllowedIPs=; server side
+   configured to reach it).  Without this, the agent can receive a
+   request from the away phone but can't act on it.
+
+2. *Home-vs-away detection → pick the route.*  When home, reach the
+   phone at its LAN IP (lower latency, no tunnel); when away, reach
+   it at its wg IP.  The existing =request.client.host= substitution
+   in =phone.py= may already do most of this for free: if the phone
+   always POSTs from the interface it's reachable on (LAN IP at
+   home, wg IP away), then the source address of the request IS the
+   correct return address.  Worth validating that assumption against
+   the actual wg routing before building anything fancier — we may
+   not need explicit home/away state at all, just correct wg config
+   + the address-from-request trick we already have.
+
+Open questions for the future design doc:
+- Does the phone's outbound =/chat= reliably egress on the same
+  interface the server should return on?  (Determines whether
+  =request.client.host= is sufficient or we need explicit detection.)
+- wg keepalive / NAT-traversal so the server-initiated back-channel
+  survives the phone being behind cellular CGNAT.
+- Latency budget: =call_emacs= has a 15s timeout (=EVAL_TIMEOUT_
+  SECONDS=); a wg round trip over cellular may need a higher cap for
+  the away case.
+- Auth-file host field: =parse_auth_file= already discards the
+  posted host and substitutes =request.client.host=, so the phone
+  doesn't need to know its own reachable address — good, that part
+  already generalises to wg.
+
 * Experiment-specific follow-ups
 
 For now these live in the "Out of scope, next experiments"
