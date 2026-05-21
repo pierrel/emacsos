@@ -94,8 +94,8 @@ emacsclient -f ./server-file -e '(with-selected-window (emacos--target) (erase-b
 *** Running commands
 
 #+begin_src sh
-emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'
-emacsclient -f ./server-file -e '(emacos--switch-page '\''global)'
+emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'   # run a command in the editor
+emacsclient -f ./server-file -e '(emacos--chat-show-top-buffer)'          # switch the editor to the chat app
 #+end_src
 
 * Chat Server

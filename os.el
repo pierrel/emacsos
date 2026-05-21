@@ -41,8 +41,8 @@ Transient re-entry guard so the `window-buffer-change-functions'
 follower can't recurse into a render that is already in progress.
 The chosen hook does not fire on our in-place re-render today, but a
 future render that swaps a window's buffer would reintroduce the loop
-hazard, and on a phone an infinite re-render bricks the device.  Two
-cheap lines of insurance against a catastrophic failure mode.")
+hazard, and on a phone an infinite re-render bricks the device — so the
+guard is kept even though nothing can trip it now.")
 
 (defvar emacos--last-commands 'unset
   "The command set `emacos--render-command-strip' last rendered.
@@ -294,7 +294,7 @@ the bottom strip row could change."
               (equal (emacos--top-commands) emacos--last-commands))
     (emacos--render-page)))
 
-;;; Page renderers
+;;; Surface renderers (the three bands of the composite)
 
 (defun emacos--render-keyboard ()
   "Render the Optimal-T9 letter rows + the SPC/RET/DEL/TAB action row,
@@ -365,7 +365,9 @@ three are 3-up at `util-w'."
   "Normalize a command-strip ENTRY to (LABEL CMD HEIGHT).
 ENTRY is either (LABEL . CMD) — the common shape, HEIGHT nil — or
 (LABEL CMD HEIGHT) when a command wants a non-default button height
-\(only chat's SEND does today; see `emacos--chat-command-set')."
+\(only chat's SEND does today; see `emacos--chat-command-set').
+Discriminated by `(consp (cdr entry))': the cons shape's cdr is the
+command symbol (an atom), the list shape's cdr is (CMD HEIGHT)."
   (if (consp (cdr entry))
       (list (car entry) (cadr entry) (caddr entry))
     (list (car entry) (cdr entry) nil)))
@@ -375,7 +377,9 @@ ENTRY is either (LABEL . CMD) — the common shape, HEIGHT nil — or
 Each button renders as \" LABEL \" (label + 2 padding) plus a one-space
 inter-button gap, so the Nth button costs (length label) + 3.  Order is
 priority: earlier entries survive, the rest fall to M-x.  Pure — WIDTH
-is passed in, so it's testable off the device."
+is passed in, so it's testable off the device.  The cost counts a
+trailing gap after the last button, so it under-fills by one space —
+safe on a narrow screen; don't \"optimize\" that into an overflow."
   (let ((used 0) (kept '()))
     (catch 'done
       (dolist (entry commands)
@@ -396,13 +400,13 @@ can no-op when nothing changed."
          (commands (emacos--top-commands)))
     (setq emacos--last-commands commands)
     (dolist (entry (emacos--commands-fitting commands win-w))
-      (let* ((spec (emacos--command-spec entry)))
+      (let ((spec (emacos--command-spec entry)))
         (emacos--btn (concat " " (nth 0 spec) " ")
                      #'emacos--run-command (nth 1 spec) (nth 2 spec))
         (insert " ")))
     (insert "\n")))
 
-;;; Page dispatch
+;;; Render dispatch
 
 (defun emacos--render-page ()
   "Render the *keyboard* window: the always-on composite of the T9

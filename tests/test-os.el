@@ -77,7 +77,11 @@ never an empty strip — so a plain text buffer keeps them one tap away."
                   ((symbol-function 'window-buffer) (lambda (_) chat-buf)))
           (let ((emacos--chat-in-flight nil))
             (should (equal (mapcar #'car (emacos--top-commands))
-                           '("SEND" "CLEAR")))))
+                           '("SEND" "CLEAR"))))
+          ;; In flight, the strip's abort path must surface via top-commands.
+          (let ((emacos--chat-in-flight t))
+            (should (equal (mapcar #'car (emacos--top-commands))
+                           '("SEND" "ABORT")))))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer chat-buf)))))
 
