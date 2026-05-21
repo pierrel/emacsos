@@ -130,26 +130,11 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
         return f"error: {type(e).__name__}: {e}"
     if ok:
         return output
-    # Distinguish phone-unreachable (network/auth/timeout/binary
-    # missing/OS-level failure) from the elisp itself signalling an
-    # error.  call_emacs returns False for both; we check for shapes
-    # that ONLY come from infrastructure-side failures (the four
-    # `except` branches of call_emacs + the empty-stderr `exit N`
-    # fallback + emacsclient's own connect-time error prefix).  Any
-    # remaining (False, ...) is treated as an elisp semantic error
-    # the agent might recover from with a different expression.
-    # NOTE: a cleaner fix would lift the classification into
-    # `phone.call_emacs` itself (return a typed kind instead of
-    # string-sniffing here); deferred to a follow-up PR.
-    is_unreachable = (
-        output.startswith("emacsclient:")
-        or output.startswith("exit ")
-        or output.startswith("[Errno ")
-        or "timed out" in output
-        or "auth file:" in output
-        or "binary not found" in output
-    )
-    if is_unreachable:
+    # Distinguish phone-unreachable (network/auth/timeout/binary) from
+    # an elisp-level error the agent might recover from with a
+    # different expression.  Classifier lives in phone.py next to
+    # call_emacs (whose output shapes it reads).
+    if phone_mod.is_unreachable(output):
         return f"error: phone unreachable: {output} (do not retry — surface to user)"
     return f"error: {output}"
 

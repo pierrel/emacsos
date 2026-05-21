@@ -162,3 +162,21 @@ def test_returns_failure_when_binary_missing():
         )
     assert not ok
     assert "not found" in err
+
+
+# --- is_unreachable classifier ---
+
+def test_is_unreachable_matches_infra_failures():
+    from emacsos_server.phone import is_unreachable
+    assert is_unreachable("emacsclient: connect: Connection refused")
+    assert is_unreachable("emacsclient timed out after 15.0s")
+    assert is_unreachable("emacsclient binary not found: emacsclient")
+    assert is_unreachable("auth file: must have header + secret lines")
+    assert is_unreachable("[Errno 24] Too many open files")
+    assert is_unreachable("exit 1")
+
+
+def test_is_unreachable_false_for_elisp_errors():
+    from emacsos_server.phone import is_unreachable
+    assert not is_unreachable("Symbol's value as variable is void: foo")
+    assert not is_unreachable("3")

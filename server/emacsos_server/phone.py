@@ -114,3 +114,26 @@ def call_emacs(
     if result.returncode == 0:
         return True, result.stdout.strip()
     return False, result.stderr.strip() or f"exit {result.returncode}"
+
+
+def is_unreachable(output: str) -> bool:
+    """Classify a `call_emacs` failure ``output`` (the str from a
+    ``(False, output)`` return) as an infrastructure failure
+    (phone/network/binary) vs. an elisp-level error.
+
+    Lives here, next to `call_emacs`, because every shape it matches is
+    produced by `call_emacs`'s own `except` branches + the
+    empty-stderr `exit N` fallback + emacsclient's connect-time error
+    prefix.  Both the eval_elisp tool and the config-apply path import
+    it from here so the classification has one owner.  (A future
+    refactor returns a typed kind from `call_emacs` directly — see
+    roadmap; this is the intermediate step toward it.)
+    """
+    return (
+        output.startswith("emacsclient:")
+        or output.startswith("exit ")
+        or output.startswith("[Errno ")
+        or "timed out" in output
+        or "auth file:" in output
+        or "binary not found" in output
+    )
