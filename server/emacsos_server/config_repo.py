@@ -2,9 +2,11 @@
 
 A single file =agent.el= lives in a git repo at ``config_dir``.  The
 agent never touches git; the server commits each applied config and
-navigates history for rollback.  HEAD-of-repo == currently-applied
-config (the one documented exception is an unreachable apply, where
-the commit lands but the phone never loaded it — see apply.py).
+navigates history for rollback.  The server applies FIRST and commits
+only when the phone was reached, so HEAD-of-repo tracks what's actually
+on the phone.  The one exception is a commit FAILURE after a successful
+apply (`applied-but-unrecorded` in channel.py): the phone then has a
+config git doesn't, and that change isn't rollback-able from history.
 
 Pure git + filesystem; no langgraph/assist imports, so this is
 unit-testable against a tmp repo with no mocks.  Design doc:

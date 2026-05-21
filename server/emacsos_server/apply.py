@@ -66,7 +66,7 @@ def _build_apply_expr(body: str) -> str:
                                    {_elisp_string(DEFAULT_PHONE_AGENT_FILE)})))
           (body {body_lit}))
       (make-directory (file-name-directory f) t)
-      (let ((tmp (make-temp-file (file-name-directory f) nil ".el")))
+      (let ((tmp (make-temp-file (concat (file-name-directory f) "agent-") nil ".el")))
         (with-temp-file tmp (insert body))
         (rename-file tmp f t))
       (load-file f)
@@ -76,10 +76,11 @@ def _build_apply_expr(body: str) -> str:
 
 def apply_to_phone(ctx: PhoneContext, body: str) -> ApplyResult:
     """Write+load BODY on the phone, classify the outcome honestly."""
-    if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+    n_bytes = len(body.encode("utf-8"))
+    if n_bytes > MAX_BODY_BYTES:
         return ApplyResult(
             status="too_large",
-            detail=f"config is {len(body)} bytes; max {MAX_BODY_BYTES}",
+            detail=f"config is {n_bytes} bytes; max {MAX_BODY_BYTES}",
         )
     expr = _build_apply_expr(body)
     try:
