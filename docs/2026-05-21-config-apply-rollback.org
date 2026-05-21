@@ -1,0 +1,307 @@
+#+title: Versioned Config Apply + Rollback
+#+date: 2026-05-21
+
+The apply+rollback half of the agent-driven-customization lifecycle: =emacsos-server= owns a
+git-backed config repo, the agent persists a config change into a single file (=agent.el=),
+the server commits it and applies it live to the phone (write-file-then-load-file over the
+existing emacsclient channel), surfaces an HONEST result, and offers a single-tap ROLLBACK that
+navigates commit history and re-applies.  Layer named in the MVP sequence of
+[[file:2026-05-12-agent-driven-customization.org][2026-05-12-agent-driven-customization.org]]
+("dotfiles repo bootstrap → known-good marker + roll-back affordances").  Builds directly on the
+emacs-modifying channel shipped in
+[[file:2026-05-18-emacs-modifying-channel.org][2026-05-18-emacs-modifying-channel.org]]
+(=eval_elisp=, =PhoneContext=, =RunnableConfig= injection, =EMACS_TOOLS=, single-flight =/chat=).
+
+This is deliberately a SMALL slice.  Explicitly NOT in scope (see "Out of scope / next layers"):
+known-good marker (git tags) + boot target, =init.el= + per-feature-module split, inner loop against
+stub upstreams, info-page semantic index, deferred-apply queue when the phone is unreachable.
+
+* Resolved open risk (main Claude, 2026-05-21)
+
+The architect flagged the *broken-config-at-boot* gap: this slice defers the known-good-marker (the
+real protection against a config bad enough to wedge the phone at next restart).  *Decision: include
+the boot-time =condition-case= guard now.*  It's one line, strictly safer, and does NOT pull the
+marker layer into scope — a broken-but-present =agent.el= will fail to load with a logged message
+instead of erroring out of init and leaving the phone without its keyboard/UI.  The full known-good
+marker remains the real fix (deferred); this is the v1 floor alongside "the user can delete
+=agent.el=".  The boot snippet wraps the load:
+=(condition-case err (when (file-exists-p f) (load-file f)) (error (message "emacsos: agent.el failed to load: %S" err)))=.
+
+* TL;DR (decisions)
+
+- *Config artifact* = a single file =agent.el= inside a git repo =emacsos-server= owns at
+  =$EMACSOS_CONFIG_DIR= (env, like assist's threads dir; defaults to
+  =~/.config/emacsos/config-repo=).  Bootstrapped lazily on first apply: =git init=, scaffold
+  =agent.el=, initial commit "scaffold".  The phone loads it via a one-time
+  =(load-file ".../agent.el")= line added by =make phone-install=; steady-state apply re-=load-file=s
+  it each turn (no init change needed per apply).
+- *Agent change → file write* = a NEW explicit tool =apply_config(elisp, summary)= added to
+  =EMACS_TOOLS=.  The agent keeps =eval_elisp= for live experimentation; when satisfied it calls
+  =apply_config= ONCE with the net elisp + a one-line prose summary.  The server (not the agent)
+  owns git: writes =agent.el=, commits, applies to the phone, returns an honest result string.
+- *File → phone transport* = reuse the existing emacsclient channel; NO scp.  =apply_config= sends a
+  single elisp expr that writes =agent.el='s contents via temp-write + atomic rename, then
+  =load-file=s it, wrapped in =condition-case= so a load failure comes back as a structured error.
+  One transport, one auth path (=phone.call_emacs= already substitutes the trusted host).
+- *Apply state machine* = new =emacsos_server/config_repo.py= (=ConfigRepo=: =ensure=,
+  =write_and_commit=, =current=, =rollback=, =history=).  Pure git+fs; unit-testable with a tmp repo.
+- *Apply transport + honesty* = new =emacsos_server/apply.py= (=apply_to_phone(ctx, body) ->
+  ApplyResult=): builds the write+load expr, calls =call_emacs=, classifies =applied= / =load_error=
+  (file written but elisp broke — the honesty case) / =unreachable= (infra).  HEAD-of-repo ==
+  currently-applied; no separate tracking.
+- *Rollback* = new =POST /rollback= endpoint (mirrors =/chat='s NDJSON stream + phone-auth body +
+  shared =_STREAM_LOCK=).  Implemented as =git revert --no-edit HEAD= (rolled-back-from stays in
+  history → roll-forward possible) + re-apply HEAD via the same =apply.py= path.
+- *ROLLBACK affordance* = a chat-page button in =chat.el= that appears after a successful apply
+  (server emits a new =applied= NDJSON event; chat.el sets a flag, re-renders so ROLLBACK joins
+  SEND/CLEAR).  No new page.
+
+* Why these choices (the 8 design questions)
+
+** Q1 — Config artifact, location, bootstrap, phone load wiring
+
+*Artifact:* one =agent.el= (NOT =init.el= + modules — a later layer).
+
+*Location:* a git repo the server owns, path from new env =EMACSOS_CONFIG_DIR=, default
+=os.path.join(os.path.expanduser("~"), ".config", "emacsos", "config-repo")=.  Mirrors assist's
+threads-dir pattern + the "no real local paths in tracked files" rule (computed at runtime from
+=$HOME=, never literal).  Added to =Config= in =config.py= as =config_dir= with a =from_env= read.
+
+*Bootstrap (lazy, on first apply — NOT server startup):* =ConfigRepo.ensure()= is idempotent.  If
+=config_dir/.git= absent: =makedirs=, =git init=, scaffold =agent.el= (header + =(provide 'agent)=),
+=git add=, =git -c user.email=... -c user.name=... commit -m "scaffold"=.  Lazy because a server that
+never applies shouldn't create state and startup must stay side-effect-free.  First apply → TWO
+commits (scaffold, then change); the scaffold is the natural "roll back lands here" floor.
+
+*Phone load wiring:*
+- *At boot:* =make phone-install= grows its snippet (=deploy/emacsos-init.el.in=) with a
+  =condition-case=-wrapped guarded =(when (file-exists-p f) (load-file f))= after =(require 'os)= (see
+  "Resolved open risk").  New Makefile var =PHONE_AGENT_FILE ?= ~/.emacs.d/emacsos/agent.el=.
+- *On each apply:* the server's apply expr does the =load-file= itself, so an apply does NOT require
+  re-running =phone-install=; only the FILE path must agree between the apply expr and the boot
+  snippet (server constant =PHONE_AGENT_PATH = "~/.emacs.d/emacsos/agent.el"=, expanded on the phone).
+
+** Q2 — How the agent's change becomes a file write
+
+*Decision: a dedicated =apply_config= tool, but the SERVER owns git.*  Master doc: "=emacsos-server=
+owns the dotfiles repo end-to-end; the user never manages the repo."  The agent's mental model:
+"=eval_elisp= to experiment, =apply_config= to make it stick" — it shouldn't know there's a git repo.
+Plain =@tool=, same shape as =eval_elisp=, reads =PhoneContext= from =RunnableConfig=.
+
+Rejected: capturing eval_elisp history (the agent re-states the net elisp anyway), and server-diffing
+(exploratory calls aren't a clean changeset).
+
+*Single-file semantics for v1:* =apply_config(elisp)= REPLACES the entire body of =agent.el=.  The
+agent's =elisp= arg is "the whole user config" (a future modules layer makes this per-file).  Keeps
+rollback a clean whole-file revert.  The (later) skill tells the agent "pass the COMPLETE config."
+
+** Q3 — How the file reaches the phone (transport)
+
+*Decision: send file CONTENTS as an elisp string over the existing channel; NO scp.*  The apply expr:
+
+#+begin_src elisp
+(condition-case err
+    (let ((f (expand-file-name "~/.emacs.d/emacsos/agent.el"))
+          (body <ELISP-STRING-LITERAL>))
+      (make-directory (file-name-directory f) t)
+      (let ((tmp (make-temp-file (file-name-directory f) nil ".el")))
+        (with-temp-file tmp (insert body))
+        (rename-file tmp f t))
+      (load-file f)
+      "ok: loaded")
+  (error (format "load-error: %S" err)))
+#+end_src
+
+=<ELISP-STRING-LITERAL>= is the body encoded server-side (=apply._elisp_string=: wrap in quotes,
+escape =\= and ="=) so it round-trips exactly.  Why over scp: one transport / one auth path
+(=call_emacs= already substitutes the trusted host; scp needs a second auth surface — the channel doc
+deliberately constrained to "reuse the emacsclient channel"); honesty for free (the =condition-case=
+makes a broken load a printed value, exit 0, distinct from unreachable); small file fits the 15s
+=EVAL_TIMEOUT_SECONDS=.  Tradeoff: a pathologically large config could overflow argv — not real for
+one-file v1; cap =body= size server-side with an honest =error: config too large= (Risk 4).
+
+** Q4 — Rollback trigger + transport + UI location
+
+*=POST /rollback= endpoint* the phone hits, mirroring =/chat=: body ={ "phone": { "auth_file": ... }
+}= (new =RollbackRequest=, no =message=); same NDJSON stream (=start=/=status=/=applied=/=error=/=end=)
+so =chat.el='s existing filter + handlers render it with no new parsing; shares =_STREAM_LOCK=.  Over
+a "special chat message": a rollback is structured + no-LLM; routing through the agent wastes a model
+call and risks misfire.  Over the back-channel: the phone is the actor (user tap); phone→server HTTP
+is the established direction.
+
+*UI: a chat-page button in =chat.el=, appearing after a successful apply.*  Server emits a new
+=applied= event ({summary, commit}) before =end= when =apply_config= succeeded.  =chat.el=
+=emacos--chat-handle-applied= sets =emacos--chat-can-rollback t=; =emacos--render-chat-page= adds a
+ROLLBACK button (when flag set + not in-flight) bound to =emacos--chat-rollback=, which POSTs
+=/rollback= via the SAME streaming plumbing as SEND (factor a shared
+=emacos--chat-start-stream(url body)= out of =emacos--chat-send=).  No new page (320x240 constraint).
+
+** Q5 — Honesty contract
+
+Three outcomes classified in =apply.apply_to_phone= from =call_emacs='s =(ok, output)=:
+1. =ok= → =(True, "ok: loaded")= → =applied=.
+2. =load_error= → =(True, "load-error: ...")= (emacsclient ran; the elisp's =condition-case= caught a
+   load failure).  The honesty-critical case: the config is BROKEN.  *The commit is still made* (exists
+   in history) but =apply_config= returns =error: config applied to repo but failed to load on phone:
+   <detail> — broken; roll back or fix=.  Never a false success.
+3. =unreachable= → =(False, ...)= (non-zero exit / timeout / auth / OS).  Reuse the EXACT classifier
+   from =channel.py= (extracted to a shared =_is_unreachable=).  =error: phone unreachable: <reason>
+   (do not retry — surface to user)=; no dangling "applied" claim.
+
+*Commit-before-apply ordering:* if apply fails =unreachable=, the commit exists but HEAD != phone (the
+agent told the user "unreachable").  Accepted, documented exception; next apply/rollback re-syncs.
+Alternative (apply-then-commit) loses the version on a crash between and complicates rollback's
+"HEAD == applied" invariant.  We do NOT detect a config that loads cleanly but is subtly wrong — that's
+the inner-loop / marker layer; =apply_config= honestly reports =applied= because it loaded.
+
+** Q6 — State the server tracks
+
+*HEAD of the repo == currently-applied.*  No separate tracking.  Single documented exception: the
+=unreachable= apply (repo one commit ahead of phone); not auto-healed (fail-fast).  *Rollback =
+=git revert --no-edit HEAD=* (NOT reset, NOT checkout): creates an inverse commit, leaving the
+rolled-back-from commit in history → roll-forward possible (master doc requirement).  =reset --hard=
+destroys history (rejected); =checkout <prev> -- agent.el= is equivalent for one file but =revert= is
+idiomatic + generalizes to multi-file.  Rollback re-applies the NEW HEAD via the same apply path
+(honesty classification applies to rollback too).
+
+** Q7 — Concurrency / single-flight
+
+=/rollback= acquires the SAME =_STREAM_LOCK= as =/chat=.  A rollback mid-=/chat= QUEUES (and
+vice-versa) — a =git revert= can't race an =apply_config= =git commit=.  =apply_config= (a tool inside
+a =/chat= turn) runs while that turn holds the lock, so git ops are single-threaded by construction;
+no separate git lock.  The =applied= event is plumbed via a MUTABLE request-scoped sink in the
+=RunnableConfig= (=apply_config= appends its result; =_stream_turn= reads it after the iterator drains,
+before =end=).  The tool can't yield NDJSON (it returns a string), so the sink is the clean seam; it
+must be a mutable object captured by reference.
+
+** Q8 — Bootstrap + first-run
+
+=ConfigRepo.ensure()= at the top of =write_and_commit= / =rollback= / =history=, idempotent, lazy.
+First =apply_config= → repo + scaffold commit + change commit.  =/rollback= before any apply →
+=ensure()= finds only scaffold (or nothing) → =error: nothing to roll back (no config applied yet)=.
+
+* New files / functions / endpoints
+
+** New =server/emacsos_server/config_repo.py=
+- =class ConfigRepo(repo_dir)=: =ensure()= (idempotent init + scaffold + reset staging on entry);
+  =write_and_commit(elisp, summary) -> sha=; =current() -> ConfigVersion=; =rollback() -> RollbackResult=
+  (=git revert --no-edit HEAD=; "nothing to roll back" when <2 real commits); =history(limit=20)=.
+  =subprocess.run(["git","-C",repo_dir, ...])= with explicit =-c user.email/-c user.name= so commits
+  don't depend on operator git config.  Dataclasses =ConfigVersion(sha, summary, body)=, =RollbackResult=.
+  No langgraph/assist imports → unit-testable against =tmp_path=.
+
+** New =server/emacsos_server/apply.py=
+- =PHONE_AGENT_PATH = "~/.emacs.d/emacsos/agent.el"=; =_elisp_string(body) -> str= (escape =\=, =");
+  =_build_apply_expr(body)= (the =condition-case= write+rename+load); =apply_to_phone(ctx, body) ->
+  ApplyResult= (build expr, =call_emacs(timeout=EVAL_TIMEOUT_SECONDS)=, classify); cap =body= size.
+  =dataclass ApplyResult(status: Literal["applied","load_error","unreachable"], detail)=.
+
+** =channel.py=
+- =@tool apply_config(elisp, summary, config: RunnableConfig) -> str= (docstring: pass COMPLETE config;
+  on success the user can roll back; report load_error honestly; no retry on unreachable).  Reads
+  =PhoneContext=, calls =ConfigRepo(config_dir).ensure()+write_and_commit= then =apply.apply_to_phone=;
+  records =applied= into the request-scoped sink.  =EMACS_TOOLS = [eval_elisp, apply_config]=.  Extract
+  =_is_unreachable(output)= helper from the inline classifier so =apply.py= reuses it.
+
+** =config.py=
+- Add =config_dir= field + =from_env= read of =EMACSOS_CONFIG_DIR= (runtime-computed default).
+
+** =app.py=
+- =class RollbackRequest(BaseModel)= (=phone= only); =@app.post("/rollback")= → =_rollback_turn= async
+  generator (same StreamingResponse + NDJSON + =_STREAM_LOCK=; runs =ensure()+rollback()+apply_to_phone=
+  on the executor; no agent).  Request-scoped =apply_sink= added to the =extra_config={"configurable":
+  {...}}= passed to =Thread=; after the iterator drains in =_stream_turn=, if the sink has an =applied=
+  result, emit =ndjson.event("applied", summary=..., commit=...)= before =end=.
+
+** =stream.py=
+- No new helper needed (=event()= is generic); =applied= is just =ndjson.event("applied", ...)=.
+
+** =chat.el=
+- defvars =emacos--chat-can-rollback=, =emacos--chat-last-applied-summary=.
+  =emacos--chat-handle-applied= (registered in =emacos--chat-event-handlers=).  Factor
+  =emacos--chat-start-stream(url body)= out of =emacos--chat-send=.  =emacos--chat-rollback= (POST
+  =/rollback=).  =emacos--render-chat-page= ROLLBACK button row.  CLEAR resets the flag.  New
+  =emacos-chat-rollback-url= defcustom (or derive both from a base).
+
+** =deploy/emacsos-init.el.in= + =Makefile=
+- Snippet: =condition-case=-guarded boot-load of =agent.el= after =(require 'os)= (placeholder
+  =@@AGENT_FILE@@= filled by =phone-install='s =sed=).  Makefile var =PHONE_AGENT_FILE=.
+
+* Risks
+
+1. *Phone unreachable mid-apply.*  =unreachable= → no-retry error; repo HEAD one commit ahead of phone
+   (documented exception).  No queue/retry (fail-fast; deferred-apply queue is a later layer).  Atomic
+   write-temp-then-=rename-file= inside ONE elisp expr → the daemon ran the whole expr or none (one
+   round trip), so no half-written =agent.el=.
+2. *Broken config that won't load.*  Runtime: =load_error= reported honestly, commit kept.  Boot:
+   handled by the =condition-case= boot guard (see "Resolved open risk").  Full fix = known-good
+   marker (deferred); user can also delete =agent.el=.
+3. *Git-history corruption / partial commit.*  Single-file + whole-file replace → =git revert= can't
+   content-conflict; =ensure()= idempotent + resets staging on entry; commits use explicit =-c user.*=.
+   Unit-test interrupted-staging recovery.
+4. *scp-vs-elisp-string transport.*  Chose elisp-string.  A too-large =agent.el= overflows argv and
+   would mis-report as =unreachable=; cap =body= size server-side with an honest =error: config too
+   large= so it's not a silent network-looking failure.  scp is the escape hatch if configs grow.
+5. *=applied= sink plumbing.*  Rides the same =configurable= propagation =eval_elisp= proved on real
+   hardware; the sink must be a mutable object captured by reference so the tool's append is visible to
+   =_stream_turn=.
+
+* Test approach
+
+** Unit (pytest, mockable)
+- =test_config_repo.py=: =ensure()= idempotency; first =write_and_commit= → scaffold+change commits;
+  =current()= round-trips body; =rollback()= creates revert + HEAD body == prior; empty-repo rollback →
+  "nothing to roll back"; interrupted-staging recovery.  Against =tmp_path=.
+- =test_apply.py=: =_elisp_string= round-trip; =_build_apply_expr= contents; =apply_to_phone=
+  classification (mock =call_emacs=: ok→applied, load-error→load_error, exit≠0→unreachable, oversize→error).
+- =test_channel.py= (extend): =apply_config= happy/load_error/unreachable + sink record + in EMACS_TOOLS.
+- =test_chat_endpoint.py= (extend): scripted stream with sink set → =applied= event before =end=.  New
+  =test_rollback_endpoint.py=: mock repo+apply → start/applied/end; unreachable→error; empty→error.
+- ERT (=tests/test-chat.el=): =handle-applied= sets flag + re-renders; ROLLBACK shows only when flag +
+  not in-flight; CLEAR resets; =rollback= no-ops when not in-flight / flag nil.
+
+** Smoke (extend =server/simulation/run.sh=, after the eval_elisp smoke)
+- Export an isolated =EMACSOS_CONFIG_DIR= tmpdir for the server.
+- =/chat= prompt driving =apply_config= with a SAFE observable config (=(setq emacsos-smoke-applied t)=)
+  → assert =status calling apply_config=, an =applied= event, AND independently =emacsclient -e
+  "(boundp 'emacsos-smoke-applied)"= → =t= + =agent.el= exists in the container (the load-bearing "it
+  landed + loaded" check).
+- =POST /rollback= → =applied= (revert) event + the var reverted on fresh load.
+- A BROKEN-config apply → assert =error= / =load_error= in the stream, NOT a false =applied= (honesty).
+
+** Live phone
+=make phone-install= (now writing the agent-load snippet), a chat turn applying a visible change
+(relative line numbers), confirm live, tap ROLLBACK, confirm revert live.  Only this proves the
+boot-snippet wiring + the real transport against the device.
+
+* Out of scope / next layers
+- *Known-good marker + boot target* (git tags, bootloader loads last tag).  THE real broken-config
+  mitigation; deferred.  Today's floor: boot =condition-case= guard + user can delete =agent.el=.
+- *=init.el= + per-feature-module split.*  We collapse to one =agent.el=.
+- *Inner loop against stub upstreams.*  We apply straight to the live phone.
+- *Deferred-apply queue* when unreachable.  We fail-fast.
+- *Info-page index*, *elisp skill* teaching apply discipline, *authinfo.gpg path*.
+- *Roll-forward affordance + history view* (=ConfigRepo.history()= stubbed for it; v1 ROLLBACK is
+  "undo last apply" only).
+- *call_emacs → typed return kind* refactor (roadmap) — we extract =_is_unreachable= but leave the
+  deeper typed-result refactor to its own follow-up.
+
+* Implementation sequence
+1. =config.py=: =config_dir= + env read + test.
+2. =config_repo.py=: =ConfigRepo= + dataclasses + unit tests (tmp repo).
+3. =apply.py=: expr builder + =_elisp_string= + =apply_to_phone= classification + tests; extract
+   =_is_unreachable= from =channel.py=.
+4. =channel.py=: =apply_config= tool + =EMACS_TOOLS= + sink wiring + tests.
+5. =app.py=: =applied= event from sink in =_stream_turn=; =/rollback= + =_rollback_turn= + tests.
+6. =chat.el=: =handle-applied=, =start-stream= refactor, =rollback=, ROLLBACK button, defvars + ERT.
+7. =deploy/emacsos-init.el.in= + =Makefile=: boot-load snippet + =PHONE_AGENT_FILE=.
+8. Extend =server/simulation/run.sh=: apply + rollback + broken-config honesty smoke (isolated
+   =EMACSOS_CONFIG_DIR=).
+9. Live phone test → code-review team → PR → Copilot.
+
+* Critical files
+- =server/emacsos_server/channel.py=
+- =server/emacsos_server/app.py=
+- =server/emacsos_server/phone.py=
+- =chat.el=
+- =Makefile=
