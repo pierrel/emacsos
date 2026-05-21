@@ -45,6 +45,14 @@ class _FakeAIMessageChunk:
             self.tool_calls = []
 
 
+@dataclass
+class _FakeToolMessage:
+    name: str
+    content: str
+    tool_call_id: str = "tc-1"
+    type: str = "tool"
+
+
 def _collect_events(response) -> list[dict]:
     """Drain an NDJSON streaming response into a list of parsed events."""
     events = []
@@ -325,3 +333,111 @@ def test_build_thread_cleans_working_dir_on_construction_failure(tmp_path, monke
 
     assert not captured["path"].exists(), \
         f"working_dir leaked on Thread construction failure: {captured['path']}"
+
+
+# --- applied event (derived from apply_config's tool result) ----------------
+
+def test_apply_config_result_emits_applied_event(client):
+    scripted = [
+        ("messages", (_FakeToolMessage(
+            name="apply_config",
+            content="applied: blue cursor (vabc123) — loaded cleanly"), {})),
+    ]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    applied = [e for e in events if e["type"] == "applied"]
+    assert len(applied) == 1
+    assert applied[0]["broken"] is False
+    assert "blue cursor" in applied[0]["detail"]
+
+
+def test_apply_config_load_error_sets_broken_flag(client):
+    scripted = [
+        ("messages", (_FakeToolMessage(
+            name="apply_config",
+            content="applied-but-broken: x (vabc123) — errored while loading"), {})),
+    ]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    applied = [e for e in events if e["type"] == "applied"]
+    assert len(applied) == 1
+    assert applied[0]["broken"] is True
+
+
+def test_applied_event_deduped_across_stream_modes(client):
+    # The same ToolMessage can surface in both messages and updates mode;
+    # the seen-set must emit `applied` exactly once.
+    tm = _FakeToolMessage(name="apply_config", content="applied: x", tool_call_id="tc-7")
+    scripted = [
+        ("messages", (tm, {})),
+        ("updates", {"tools": {"messages": [tm]}}),
+    ]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert len([e for e in events if e["type"] == "applied"]) == 1
+
+
+def test_non_apply_config_tool_result_emits_no_applied(client):
+    scripted = [
+        ("messages", (_FakeToolMessage(name="eval_elisp", content="applied: nope"), {})),
+    ]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=(iter(scripted), None)):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert not [e for e in events if e["type"] == "applied"]
+
+
+# --- /rollback --------------------------------------------------------------
+
+def test_rollback_missing_phone_returns_error(client):
+    r = client.post("/rollback", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
+    assert "missing phone context" in body["detail"]
+
+
+def test_rollback_endpoint_returns_do_rollback_result(client):
+    with patch("emacsos_server.app._do_rollback",
+               return_value={"status": "applied", "detail": "ok: loaded"}):
+        r = client.post("/rollback", json={"phone": {"auth_file": _FAKE_AUTH}})
+    assert r.status_code == 200
+    assert r.json() == {"status": "applied", "detail": "ok: loaded"}
+
+
+def test_do_rollback_reverts_and_applies(tmp_path):
+    from emacsos_server.app import _do_rollback
+    from emacsos_server.channel import PhoneContext
+    from emacsos_server.config_repo import ConfigRepo
+    from emacsos_server.apply import ApplyResult
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit("(setq x 1)", "v1")
+    repo.write_and_commit("(setq x 2)", "v2")
+    with patch("emacsos_server.app.ConfigRepo", lambda _d: repo), \
+         patch("emacsos_server.app.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")) as m:
+        out = _do_rollback(PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.5"))
+    assert out["status"] == "applied"
+    # Reverted to v1's body, and that's what got applied to the phone.
+    assert repo.current().body == "(setq x 1)"
+    assert m.call_args.args[1] == "(setq x 1)"
+
+
+def test_do_rollback_noop_when_nothing_to_roll_back(tmp_path):
+    from emacsos_server.app import _do_rollback
+    from emacsos_server.channel import PhoneContext
+    from emacsos_server.config_repo import ConfigRepo
+    repo = ConfigRepo(str(tmp_path / "repo"))  # scaffold only after ensure
+    with patch("emacsos_server.app.ConfigRepo", lambda _d: repo), \
+         patch("emacsos_server.app.apply_mod.apply_to_phone") as m:
+        out = _do_rollback(PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.5"))
+    assert out["status"] == "noop"
+    assert "nothing to roll back" in out["detail"]
+    m.assert_not_called()

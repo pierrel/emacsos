@@ -30,6 +30,8 @@ from pydantic import BaseModel
 
 from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
 from .config import Config
+from .config_repo import ConfigRepo
+from . import apply as apply_mod
 from . import stream as ndjson
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -46,6 +48,20 @@ class PhoneAuth(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     phone: Optional[PhoneAuth] = None
+
+
+class RollbackRequest(BaseModel):
+    phone: Optional[PhoneAuth] = None
+
+
+def _phone_ctx(phone_auth: Optional[str], request: Request) -> Optional[PhoneContext]:
+    """Build the per-request PhoneContext: the posted auth-file contents
+    plus the real source address of the socket (the untrusted host field
+    in the auth file is discarded — see `phone.py`).  Returns None when
+    the request lacks an auth file or a client host."""
+    if phone_auth is not None and request.client is not None:
+        return PhoneContext(auth_contents=phone_auth, phone_host=request.client.host)
+    return None
 
 
 # Single-flight serialization for /chat streams.  EmacsOS is designed
@@ -140,6 +156,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     stream_id = uuid.uuid4().hex
     full_text_parts: list[str] = []
     seen_tool_ids: set[str] = set()
+    seen_applied: set[str] = set()
     it = None
     working_dir: Optional[str] = None
     # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
@@ -153,12 +170,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     # are POSTed in the request body; the host we substitute for the
     # untrusted `host` field in that file is the real source address of
     # the TCP socket (FastAPI's `request.client.host`).  See `phone.py`.
-    phone_ctx: Optional[PhoneContext] = None
-    if phone_auth is not None and request.client is not None:
-        phone_ctx = PhoneContext(
-            auth_contents=phone_auth,
-            phone_host=request.client.host,
-        )
+    phone_ctx: Optional[PhoneContext] = _phone_ctx(phone_auth, request)
 
     # Fail fast on malformed requests BEFORE acquiring the lock —
     # a missing phone-context is purely a request-shape problem and
@@ -223,6 +235,19 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             if chunk is SENTINEL:
                 break
             ch_type, payload = chunk
+            # Derive the `applied` event from apply_config's tool RESULT
+            # (the ToolMessage), the single source of truth.  Works
+            # regardless of which stream mode surfaces the result; the
+            # seen-set de-dupes if it shows up in both.
+            for tc_id, tname, content in ndjson.extract_tool_results(payload):
+                if (tname == "apply_config" and tc_id not in seen_applied
+                        and content.startswith("applied")):
+                    seen_applied.add(tc_id)
+                    yield ndjson.event(
+                        "applied",
+                        detail=content,
+                        broken=content.startswith("applied-but-broken"),
+                    )
             if ch_type == "messages":
                 text = ndjson.extract_content_text(payload)
                 if text:
@@ -289,6 +314,43 @@ async def chat(req: ChatRequest, request: Request):
         # correctly; non-ASCII tokens otherwise risk mojibake.
         media_type="application/x-ndjson; charset=utf-8",
     )
+
+
+def _do_rollback(phone_ctx: PhoneContext) -> dict:
+    """Sync rollback (run on the executor): git-revert the config repo's
+    HEAD, then load the resulting config on the phone.  Returns a small
+    status dict for the JSON response."""
+    repo = ConfigRepo(config.config_dir)
+    repo.ensure()
+    result = repo.rollback()
+    if not result.ok:
+        return {"status": "noop", "detail": result.detail}
+    # Load the reverted config (the new HEAD) on the phone so the live
+    # state matches the repo again.  apply_to_phone classifies honestly.
+    ar = apply_mod.apply_to_phone(phone_ctx, result.version.body)
+    return {"status": ar.status, "detail": ar.detail}
+
+
+@app.post("/rollback")
+async def rollback(req: RollbackRequest, request: Request):
+    """Roll the phone config back one version: `git revert` the config
+    repo's HEAD and load the result on the phone.  Not a stream — it's a
+    fast git op + one emacsclient apply — so it returns plain JSON.
+    Serialized behind the same `_STREAM_LOCK` as /chat so it can't race
+    a stream's phone access."""
+    log.info("POST /rollback")
+    phone_ctx = _phone_ctx(req.phone.auth_file if req.phone is not None else None,
+                           request)
+    if phone_ctx is None:
+        return {"status": "error",
+                "detail": "missing phone context: request lacks "
+                          "phone.auth_file or client host"}
+    loop = asyncio.get_running_loop()
+    await _STREAM_LOCK.acquire()
+    try:
+        return await loop.run_in_executor(None, _do_rollback, phone_ctx)
+    finally:
+        _STREAM_LOCK.release()
 
 
 def main() -> None:

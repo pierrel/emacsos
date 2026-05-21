@@ -74,6 +74,42 @@ def extract_new_tool_calls(messages_chunk: Any) -> Iterable[tuple[str, str]]:
             yield (tc_id, name)
 
 
+def _tool_messages(chunk_payload: Any) -> Iterable[Any]:
+    """Yield candidate message objects from a stream chunk payload,
+    handling both shapes the agent emits under
+    `stream_mode=["messages", "updates"]`:
+    - `messages` mode: `(message, metadata)` — yield the message.
+    - `updates` mode: `{node: {"messages": [...]}, ...}` — yield each
+      message in every node's output."""
+    if isinstance(chunk_payload, tuple) and len(chunk_payload) == 2:
+        yield chunk_payload[0]
+        return
+    if isinstance(chunk_payload, dict):
+        for node_out in chunk_payload.values():
+            if isinstance(node_out, dict):
+                for m in node_out.get("messages", []) or []:
+                    yield m
+
+
+def extract_tool_results(chunk_payload: Any) -> Iterable[tuple[str, str, str]]:
+    """Yield `(tool_call_id, tool_name, content)` for every ToolMessage
+    in a `messages`- or `updates`-mode chunk payload.
+
+    A tool's RETURN value (the ToolMessage) is the single source of
+    truth for deriving downstream events — `app.py` uses this to emit
+    the `applied` event from `apply_config`'s result string rather than
+    a side-channel.  Caller de-dupes on tool_call_id (a ToolMessage can
+    surface in both stream modes for one call)."""
+    for m in _tool_messages(chunk_payload):
+        if getattr(m, "type", None) != "tool":
+            continue
+        name = getattr(m, "name", None)
+        content = getattr(m, "content", None)
+        tc_id = getattr(m, "tool_call_id", None) or ""
+        if name and isinstance(content, str):
+            yield (tc_id, name, content)
+
+
 def extract_content_text(messages_chunk: Any) -> str:
     """From a `messages` stream chunk, return the AIMessageChunk's
     text content (may be empty).  Returns "" for any chunk we can't

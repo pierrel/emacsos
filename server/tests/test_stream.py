@@ -108,6 +108,49 @@ def test_extract_tool_calls_skips_unnamed_continuations():
     assert list(ndjson.extract_new_tool_calls(chunk)) == []
 
 
+# --- extract_tool_results() ------------------------------------------------
+
+@dataclass
+class _FakeToolMsg:
+    name: str
+    content: Any
+    tool_call_id: str = "tc-1"
+    type: str = "tool"
+
+
+def test_extract_tool_results_from_messages_mode():
+    chunk = (_FakeToolMsg(name="apply_config", content="applied: ok"), {})
+    assert list(ndjson.extract_tool_results(chunk)) == [
+        ("tc-1", "apply_config", "applied: ok"),
+    ]
+
+
+def test_extract_tool_results_from_updates_mode():
+    """updates mode wraps tool output as {node: {messages: [...]}}."""
+    chunk = {"tools": {"messages": [
+        _FakeToolMsg(name="apply_config", content="applied: ok", tool_call_id="tc-9"),
+    ]}}
+    assert list(ndjson.extract_tool_results(chunk)) == [
+        ("tc-9", "apply_config", "applied: ok"),
+    ]
+
+
+def test_extract_tool_results_skips_non_tool_messages():
+    # An AIMessage chunk (type != "tool") yields nothing.
+    chunk = (_FakeMsg(content="hi"), {})
+    assert list(ndjson.extract_tool_results(chunk)) == []
+
+
+def test_extract_tool_results_skips_non_string_content():
+    chunk = (_FakeToolMsg(name="apply_config", content=None), {})
+    assert list(ndjson.extract_tool_results(chunk)) == []
+
+
+def test_extract_tool_results_malformed_payload_is_empty():
+    assert list(ndjson.extract_tool_results(object())) == []
+    assert list(ndjson.extract_tool_results(None)) == []
+
+
 def test_extract_tool_calls_skips_name_or_id_missing():
     chunk = (
         _FakeMsg(tool_calls=[

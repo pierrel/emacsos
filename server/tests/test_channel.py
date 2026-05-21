@@ -6,13 +6,16 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from emacsos_server.apply import ApplyResult
 from emacsos_server.channel import (
     EMACS_TOOLS,
     PHONE_CONTEXT_KEY,
     PhoneContext,
     _redact,
+    apply_config,
     eval_elisp,
 )
+from emacsos_server.config_repo import ConfigRepo
 
 
 _CTX = PhoneContext(auth_contents="0.0.0.0:1234 555\nsecret\n",
@@ -148,7 +151,75 @@ def test_redact_handles_no_secrets():
     assert _redact(src) == src
 
 
+# --- apply_config -----------------------------------------------------------
+
+def _apply(elisp, summary, tmp_path, ctx=_CTX, apply_result=None):
+    """Invoke apply_config with apply_to_phone mocked and ConfigRepo
+    pointed at a tmp repo, so we exercise the commit-if-reached
+    orchestration without a real phone.  Returns (result_string, repo)."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    # Pre-init so `repo.current()` works in assertions even on the
+    # no-commit paths (unreachable / too_large return before ensure()).
+    # apply_config's own ensure() is idempotent on the reached paths.
+    repo.ensure()
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: ctx}} if ctx is not None else {}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=apply_result), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo):
+        out = apply_config.invoke(
+            {"elisp": elisp, "summary": summary}, config=cfg)
+    return out, repo
+
+
+def test_apply_config_applied_commits_and_reports_version(tmp_path):
+    out, repo = _apply("(setq x 1)", "set x", tmp_path,
+                       apply_result=ApplyResult("applied", "ok: loaded"))
+    assert out.startswith("applied:")
+    assert "set x" in out
+    # Committed: the body round-trips from the repo's current version.
+    assert repo.current().body == "(setq x 1)"
+
+
+def test_apply_config_load_error_is_applied_but_broken_and_commits(tmp_path):
+    out, repo = _apply(
+        "(foo)", "call foo", tmp_path,
+        apply_result=ApplyResult("load_error", "load-error: (void-function foo)"))
+    assert out.startswith("applied-but-broken:")
+    assert "void-function" in out
+    # A broken config that reached the phone is still recorded (it IS
+    # the phone's current config), so rollback has a prior to revert to.
+    assert repo.current().body == "(foo)"
+
+
+def test_apply_config_unreachable_does_not_commit(tmp_path):
+    out, repo = _apply(
+        "(setq x 1)", "set x", tmp_path,
+        apply_result=ApplyResult("unreachable", "emacsclient: connection refused"))
+    assert out.startswith("error: phone unreachable")
+    assert "do not retry" in out
+    # Nothing committed beyond the scaffold — no phantom version.
+    assert repo.current().body == ""
+
+
+def test_apply_config_too_large_does_not_commit(tmp_path):
+    out, repo = _apply(
+        "(setq x 1)", "set x", tmp_path,
+        apply_result=ApplyResult("too_large", "config is 200000 bytes; max 100000"))
+    assert out.startswith("error: config too large")
+    assert repo.current().body == ""
+
+
+def test_apply_config_missing_context_is_server_bug_error(tmp_path):
+    out, _repo = _apply("(setq x 1)", "set x", tmp_path, ctx=None,
+                        apply_result=ApplyResult("applied", "ok: loaded"))
+    assert out.startswith("error: phone context not set")
+
+
 # --- EMACS_TOOLS exported list ---------------------------------------------
 
 def test_emacs_tools_includes_eval_elisp():
     assert eval_elisp in EMACS_TOOLS
+
+
+def test_emacs_tools_includes_apply_config():
+    assert apply_config in EMACS_TOOLS

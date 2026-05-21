@@ -27,8 +27,10 @@ from dataclasses import dataclass
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
+from . import apply as apply_mod
 from . import phone as phone_mod
 from .config import Config
+from .config_repo import ConfigRepo
 
 log = logging.getLogger(__name__)
 
@@ -139,9 +141,76 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
     return f"error: {output}"
 
 
+@tool
+def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
+    """Replace the user's emacs config with ELISP and load it live on
+    their phone.
+
+    Pass the COMPLETE config — this REPLACES the config file wholesale,
+    it is NOT appended.  Whatever you leave out is GONE after the next
+    restart, so include everything the config should contain, not only
+    the line you're changing.
+
+    SUMMARY is a short imperative description of the change (e.g. "make
+    the cursor blue").  It becomes the git commit message and is shown
+    to the user.
+
+    Only call this AFTER you have verified the elisp works via
+    `eval_elisp` — apply is for shipping a config you already know is
+    good, not for experimenting.
+
+    Returns one of:
+    - `applied: ...` — committed and loaded cleanly.  The user gets a
+      ROLLBACK affordance in the chat UI; tell them it's applied.
+    - `applied-but-broken: ...` — committed as the new config but it
+      errored while loading on the phone.  Tell the user and suggest
+      rolling back; do NOT just retry the same elisp (it'll fail the
+      same way) — send a corrected config or let them roll back.
+    - `error: phone unreachable: ... (do not retry — surface to user)` —
+      nothing was committed; the phone couldn't be reached.
+    - `error: config too large: ...` — nothing was committed.
+    """
+    cfg = (config or {}).get("configurable") or {}
+    ctx = cfg.get(PHONE_CONTEXT_KEY)
+    if not isinstance(ctx, PhoneContext):
+        return ("error: phone context not set (server bug — channel "
+                "tool invoked outside a /chat turn)")
+
+    log.info("apply_config on %s: %s", ctx.phone_host, _redact(summary))
+    # Apply FIRST, commit only if the phone actually received it: this
+    # keeps the git repo == what's on the phone (no phantom commit for a
+    # config the phone never saw).  A load_error still counts as
+    # "received" — the phone wrote the file then errored loading it, so
+    # it IS the phone's current config and belongs in history.
+    ar = apply_mod.apply_to_phone(ctx, elisp)
+    if ar.status == "too_large":
+        return f"error: config too large: {ar.detail}"
+    if ar.status == "unreachable":
+        return (f"error: phone unreachable: {ar.detail} "
+                "(do not retry — surface to user)")
+
+    try:
+        repo = ConfigRepo(_CONFIG.config_dir)
+        repo.ensure()
+        sha = repo.write_and_commit(elisp, summary)
+    except Exception as e:  # noqa: BLE001 — report as a tool-result string
+        log.exception("apply_config: git commit failed")
+        return (f"applied-but-unrecorded: loaded on the phone but the "
+                f"server failed to record it in git ({e}); the change is "
+                "live but cannot be rolled back from history")
+
+    short = sha[:7]
+    if ar.status == "applied":
+        return (f"applied: {summary} (v{short}) — loaded cleanly on the "
+                "phone; the user can roll back from the chat UI")
+    # load_error: HEAD is the new (broken) config; rollback is the fix.
+    return (f"applied-but-broken: {summary} (v{short}) — committed as the "
+            f"new config but it errored while loading ({ar.detail}); roll "
+            "back or send a corrected config")
+
+
 # The exported set of tools emacsos-server adds to every /chat agent
-# via `Thread(..., extra_tools=EMACS_TOOLS)`.  One tool today; the
-# list shape is so a future second tool (eg. a structured one if the
-# agent's free-form elisp composition turns out to need scaffolding)
-# can land without touching app.py's wiring.
-EMACS_TOOLS = [eval_elisp]
+# via `Thread(..., extra_tools=EMACS_TOOLS)`.  `eval_elisp` inspects /
+# experiments; `apply_config` ships a verified config to the phone with
+# a git-backed, rollback-able commit.
+EMACS_TOOLS = [eval_elisp, apply_config]
