@@ -13,6 +13,15 @@
 
 (require 'os)
 
+;; Where the agent-applied config lives.  THE PHONE OWNS THIS PATH:
+;; `apply_config` (server) reads this defvar over the wire and writes
+;; here, falling back to the same literal if it's somehow unbound — so
+;; the server constant and this path can't silently diverge (which
+;; would make applies work live but vanish on reboot).  Keep in sync
+;; with apply.DEFAULT_PHONE_AGENT_FILE.
+(defvar emacos-agent-file "~/.emacs.d/emacsos/agent.el"
+  "File the agent's applied config is written to and loaded from.")
+
 ;; Chat server URL.  Baked in at install time from DEV_BOX_URL.
 ;; Re-run `make phone-install DEV_BOX_URL=...` to change.
 (setq emacos-chat-server-url "@@CHAT_URL@@")
@@ -24,6 +33,19 @@
       server-host "0.0.0.0")
 (unless (and (boundp 'server-process) (server-running-p))
   (server-start))
+
+;; Load the agent-applied config LAST so it layers on top of the base
+;; (and can override it).  Guarded: a config that errors must not brick
+;; boot — it just logs and leaves the phone on the last-known-good base.
+;; This is the boot-time half of the apply/rollback honesty contract:
+;; `apply_config` reports a load error live, and the user rolls back;
+;; here we make sure a bad config that slipped through can't wedge the
+;; device on the next restart.
+(let ((f (expand-file-name emacos-agent-file)))
+  (condition-case err
+      (when (file-exists-p f)
+        (load-file f))
+    (error (message "emacsos: agent.el failed to load: %S" err))))
 
 (provide 'emacsos-init)
 ;;; emacsos-init.el ends here
