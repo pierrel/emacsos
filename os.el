@@ -207,14 +207,17 @@ in `auto' mode re-derive from the (possibly changed) top buffer; in
     (when w
       (setq emacos--current-page 'keyboard)
       (emacos--render-page)
-      (with-selected-window w
-        (call-interactively cmd))
-      ;; Restore the right surface now the command is done.
-      (if (eq emacos--page-mode 'auto)
-          (emacos--follow)
-        (setq emacos--current-page prior)
-        (emacos--render-page))
-      (emacos--refocus))))
+      ;; unwind-protect so a command that throws (bad find-file path,
+      ;; a user-error, an aborted kill-buffer query) still restores the
+      ;; surface instead of stranding it on the forced keyboard page.
+      (unwind-protect
+          (with-selected-window w
+            (call-interactively cmd))
+        (if (eq emacos--page-mode 'auto)
+            (emacos--follow)
+          (setq emacos--current-page prior)
+          (emacos--render-page))
+        (emacos--refocus)))))
 
 ;;; Mode-specific commands
 
@@ -276,9 +279,12 @@ underlying buffer's mode.  Then: the *chat* buffer (by identity) →
 
 (defun emacos--follow ()
   "In `auto' mode, sync the shown page to the derived page and render.
-The single home for the \"auto means `emacos--current-page' tracks
-`emacos--derive-page'\" invariant; called by the window-buffer-change
-follower, the AUTO chip, and `emacos--run-command'.  No-op when pinned."
+Home for the \"auto means `emacos--current-page' tracks
+`emacos--derive-page'\" invariant; called by the AUTO chip
+\(`emacos--switch-to-auto') and the `emacos--run-command' tail.  The
+window-buffer-change follower does NOT call this — it needs the
+re-entry guard and a no-op-render-when-unchanged optimization for
+loop-safety, so it inlines its own variant.  No-op when pinned."
   (when (eq emacos--page-mode 'auto)
     (let ((derived (emacos--derive-page)))
       (unless (eq derived emacos--current-page)
@@ -301,8 +307,7 @@ whereas manual selection drives the top buffer."
 (defun emacos--switch-to-auto ()
   "Hand control back to the follower: re-enter `auto' and re-derive."
   (setq emacos--page-mode 'auto)
-  (setq emacos--current-page (emacos--derive-page))
-  (emacos--render-page)
+  (emacos--follow)
   (emacos--refocus))
 
 ;;; Page bar
@@ -366,10 +371,12 @@ active iff `emacos--page-mode' is `auto' — so the bar reads both
          ;; Letter buttons are scale times taller (and wider) than default.
          ;; btn-w shrinks so 3 scaled buttons + 2 gaps still fill the window.
          (scale  1.75)
-         (btn-w  (floor (/ (- win-w (* 2 gap-w)) (* 3 scale))))
+         ;; max 1 so a pathologically narrow window can't drive widths
+         ;; <=0 (which would crash the letter-key `substring' below).
+         (btn-w  (max 1 (floor (/ (- win-w (* 2 gap-w)) (* 3 scale)))))
          ;; Action row (SPC/RET/DEL/TAB) is 4-up with its OWN width so
          ;; adding TAB doesn't shrink the letter keys (the hot path).
-         (action-w (floor (/ (- win-w (* 3 gap-w)) (* 4 scale))))
+         (action-w (max 1 (floor (/ (- win-w (* 3 gap-w)) (* 4 scale)))))
          ;; Utility buttons use full-width columns at normal scale.
          (util-w (floor (/ (- win-w 2) 3))))
     ;; Letter rows — :height scale makes each row ~1.75x taller automatically

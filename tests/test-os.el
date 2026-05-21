@@ -20,13 +20,6 @@
          (emacos--page-mode 'auto))
      ,@body))
 
-(defun test-os--fake-target-buffer (buf)
-  "Return a thunk usable to stub `emacos--target' so the editing
-window's buffer is BUF.  We stub at the `window-buffer' boundary by
-faking `emacos--target' to return a symbol and `window-buffer' to
-map it to BUF."
-  (lambda () 'fake-window))
-
 ;;; emacos--mode-commands-for (parent walk)
 
 (ert-deftest test-os-mode-commands-direct ()
