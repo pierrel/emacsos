@@ -289,12 +289,16 @@ First =apply_config= → repo + scaffold commit + change commit.  =/rollback= be
 ** =stream.py=
 - No new helper needed (=event()= is generic); =applied= is just =ndjson.event("applied", ...)=.
 
-** =chat.el=
-- defvars =emacos--chat-can-rollback=, =emacos--chat-last-applied-summary=.
-  =emacos--chat-handle-applied= (registered in =emacos--chat-event-handlers=).  Factor
-  =emacos--chat-start-stream(url body)= out of =emacos--chat-send=.  =emacos--chat-rollback= (POST
-  =/rollback=).  =emacos--render-chat-page= ROLLBACK button row.  CLEAR resets the flag.  New
-  =emacos-chat-rollback-url= defcustom (or derive both from a base).
+** =chat.el= (AS SHIPPED — supersedes the pre-impl sketch; see Phase-2 deltas)
+- defvar =emacos--chat-can-rollback= (no =-last-applied-summary=; the detail rides on the =applied=
+  event, not a defvar).  =emacos--chat-handle-applied= (registered in
+  =emacos--chat-event-handlers=) sets the flag + notes the change.  =emacos--chat-rollback= POSTs
+  =/rollback= ASYNC (a sync request would deadlock — the server emacsclients back into this emacs);
+  =emacos--chat-rollback-callback= parses the JSON + kills the response buffer.
+  =emacos--render-chat-page= shows a ROLLBACK button gated on the flag.  CLEAR (via
+  =emacos--chat-init-buffer=) resets the flag.  /rollback URL is DERIVED from
+  =emacos-chat-server-url= via =emacos--chat-endpoint= (no separate defcustom).  No
+  =emacos--chat-start-stream= factor-out was needed.
 
 ** =deploy/emacsos-init.el.in= + =Makefile=
 - Snippet: =condition-case=-guarded boot-load of =agent.el= after =(require 'os)= (placeholder

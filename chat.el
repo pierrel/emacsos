@@ -131,7 +131,10 @@ rather than pushing it forward.")
     buf))
 
 (defun emacos--chat-init-buffer (buf)
-  "Seed BUF with an empty read-only header and a fresh prompt."
+  "Seed BUF with an empty read-only header and a fresh prompt.
+Also clears `emacos--chat-can-rollback' so a fresh / CLEARed transcript
+doesn't dangle a ROLLBACK button with no surrounding context."
+  (setq emacos--chat-can-rollback nil)
   (with-current-buffer buf
     (let ((inhibit-read-only t))
       (erase-buffer)

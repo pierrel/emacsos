@@ -102,10 +102,17 @@ def apply_to_phone(ctx: PhoneContext, content: str) -> ApplyResult:
         return ApplyResult(status="unreachable", detail=f"{type(e).__name__}: {e}")
 
     if ok:
-        # call_emacs succeeded; the value is our wrapper's return.
-        if output.startswith("load-error:"):
-            return ApplyResult(status="load_error", detail=output)
-        return ApplyResult(status="applied", detail=output)
+        # call_emacs returns Emacs' PRINTED representation; our expr
+        # returns a string, so it arrives quoted (`"ok: loaded"` /
+        # `"load-error: ..."`).  Strip the surrounding read-syntax quotes
+        # before the prefix check — otherwise a load failure starts with
+        # `"` and gets misclassified as `applied`.
+        text = (output[1:-1]
+                if len(output) >= 2 and output[0] == '"' == output[-1]
+                else output)
+        if text.startswith("load-error:"):
+            return ApplyResult(status="load_error", detail=text)
+        return ApplyResult(status="applied", detail=text)
     # call_emacs itself failed.
     if phone_mod.is_unreachable(output):
         return ApplyResult(status="unreachable", detail=output)

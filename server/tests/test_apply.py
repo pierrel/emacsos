@@ -34,18 +34,33 @@ def test_build_apply_expr_uses_phone_defvar_and_loads():
 
 
 # --- classification ---
+# call_emacs returns Emacs' PRINTED form; a string result comes back
+# QUOTED (verified live: `emacsclient -e '"x"'` prints `"x"`).  The
+# mocks below use the quoted form to match the real wire — apply.py must
+# strip the read-syntax quotes before classifying, or a quoted
+# "load-error: ..." gets misread as applied.
 
 def test_apply_ok_is_applied():
-    with _patch_call_emacs((True, "ok: loaded")):
+    with _patch_call_emacs((True, '"ok: loaded"')):
         r = apply_to_phone(_CTX, "(setq foo 1)")
     assert r.status == "applied"
+    assert r.detail == "ok: loaded"  # quotes stripped
 
 
 def test_apply_load_error_is_load_error():
-    with _patch_call_emacs((True, "load-error: (void-function foo)")):
+    with _patch_call_emacs((True, '"load-error: (void-function foo)"')):
         r = apply_to_phone(_CTX, "(foo)")
     assert r.status == "load_error"
     assert "void-function" in r.detail
+    assert not r.detail.startswith('"')  # quotes stripped
+
+
+def test_apply_unquoted_result_still_classifies():
+    # Defensive: if a result ever arrives unquoted, classification still
+    # works (the strip is conditional on surrounding quotes).
+    with _patch_call_emacs((True, "load-error: boom")):
+        r = apply_to_phone(_CTX, "(foo)")
+    assert r.status == "load_error"
 
 
 def test_apply_unreachable_classified():

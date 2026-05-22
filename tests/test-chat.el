@@ -383,6 +383,15 @@ the LAST entry (rarely used)."
     (emacos--chat-rollback-callback nil))
   (should emacos--chat-can-rollback))
 
+(ert-deftest chat-test-clear-resets-rollback-flag ()
+  "CLEAR (via init-buffer) hides ROLLBACK: a fresh/cleared transcript
+shouldn't dangle the button without context."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t)
+  (emacos--chat-clear)
+  (should-not emacos--chat-can-rollback))
+
 (ert-deftest chat-test-rollback-callback-kills-response-buffer ()
   "The url-retrieve response buffer must be killed so repeated rollbacks
 don't leak ` *http*' buffers."
