@@ -391,22 +391,27 @@ separate bands — see `emacos--render-page'."
       (insert "\n"))))
 
 (defun emacos--render-action-row ()
-  "Render the editing keys: SPC on its own FULL-WIDTH row (the spec makes
-SPACE the most prominent key), then DEL / TAB / RET with RET DOUBLE-WIDE."
+  "Render the editing keys across two rows: DEL (1/3, like a letter key)
++ SPC (2/3) on one row, then CAPS / TAB / RET with RET DOUBLE-WIDE."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))
          (gap-w emacos--btn-gap)
-         (spc-w (emacos--unit-width win-w gap-w 1 0))
-         ;; DEL(1) + TAB(1) + RET(2) = 4 units, with 2 gaps between the
-         ;; three buttons.
+         ;; DEL(1) + SPC(2) = 3 units, 1 gap.  DEL is ~1/3, like a letter
+         ;; key; SPC takes the remaining 2/3.
+         (third (emacos--unit-width win-w gap-w 3 1))
+         ;; CAPS(1) + TAB(1) + RET(2) = 4 units, 2 gaps.
          (unit  (emacos--unit-width win-w gap-w 4 2)))
-    ;; Row 4: SPC, full width.
-    (emacos--btn (emacos--center "SPC" spc-w) #'emacos--tap-space nil
+    ;; Row: DEL (left, 1/3), SPC (right, 2/3).
+    (emacos--btn (emacos--center "DEL" third) #'emacos--tap-backspace nil
+                 emacos--btn-scale)
+    (insert " ")
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
+    (emacos--btn (emacos--center "SPC" (* 2 third)) #'emacos--tap-space nil
                  emacos--btn-scale)
     (insert "\n")
-    ;; Row 5: DEL, TAB, RET (RET double-wide).
-    (emacos--btn (emacos--center "DEL" unit) #'emacos--tap-backspace nil
-                 emacos--btn-scale)
+    ;; Row: CAPS, TAB, RET (RET double-wide).  CAPS sits where DEL was.
+    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") unit)
+                 #'emacos--tap-caps nil emacos--btn-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "TAB" unit) #'emacos--tap-tab nil
@@ -418,15 +423,15 @@ SPACE the most prominent key), then DEL / TAB / RET with RET DOUBLE-WIDE."
     (insert "\n")))
 
 (defun emacos--render-utility-row ()
-  "Render the persistent utility row: QUIT, M-x, Chat, CAPS (4-up).
+  "Render the persistent utility row: QUIT, M-x, Chat (3-up).
 `QUIT' (`emacos--tap-quit') clears popup/minibuffer clutter off the top;
 `M-x' runs `execute-extended-command' (manual command entry); `Chat'
-shows the *chat* buffer (the phone's home app — accent face); `CAPS'
-toggles caps lock."
+shows the *chat* buffer (the phone's home app — accent face).  CAPS
+lives on the action row (`emacos--render-action-row')."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))
          (gap-w emacos--btn-gap)
-         (util-w (emacos--unit-width win-w gap-w 4 3)))
+         (util-w (emacos--unit-width win-w gap-w 3 2)))
     (emacos--btn (emacos--center "QUIT" util-w) #'emacos--tap-quit nil
                  emacos--btn-scale)
     (insert " ")
@@ -439,10 +444,6 @@ toggles caps lock."
     (emacos--btn (emacos--center "Chat" util-w)
                  #'emacos--run-command #'emacos--chat-show-top-buffer
                  emacos--btn-scale "dodger blue")
-    (insert " ")
-    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
-                 #'emacos--tap-caps nil emacos--btn-scale)
     (insert "\n")))
 
 ;; Cap on the command list.  No mode currently has this many; it's a

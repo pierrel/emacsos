@@ -23,11 +23,11 @@ it hid the keyboard.  As built: the T9 keyboard is ALWAYS visible; a
 *command list* under it shows up to 10 of the top buffer's mode commands
 (=*chat*= → SEND + CLEAR/ABORT; a mode in =emacos-mode-commands= → its
 set; everything else → =emacos-global-commands=); a persistent utility
-row =[QUIT] [M-x] [Chat] [CAPS]= keeps escape, manual command entry, the
-chat app, and caps one tap away.  The list follows the top buffer via
+row =[QUIT] [M-x] [Chat]= keeps escape, manual command entry, and the
+chat app one tap away.  The list follows the top buffer via
 =window-buffer-change-functions=.  (Layout v2: uniform button height,
-scrollable; SPC full-width; DEL/TAB/RET with double-wide RET; QUIT =
-smart escape that clears popup/minibuffer clutter off the top.)
+scrollable; DEL (1/3) + SPC (2/3); CAPS/TAB/RET with double-wide RET;
+QUIT = smart escape that clears popup/minibuffer clutter off the top.)
 
 Remaining follow-ups (the combo makes these safe to grow incrementally
 — the global-commands fallback means an un-enriched mode still works):

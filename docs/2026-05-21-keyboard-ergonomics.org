@@ -949,11 +949,16 @@ vertical space is no longer a constraint (we don't shrink to fit).
 
 ** Layout (top → bottom)
 1-3. T9 letter rows (unchanged).
-4.   *SPC* on its own row, *full width* (the most prominent key).
-5.   *DEL, TAB, RET* — RET *double-wide* (DEL 1u / TAB 1u / RET 2u).
-6.   Utility row: *QUIT, M-x, Chat, CAPS* (4-up; CAPS moved here).
+4.   *DEL* (1/3, ~one letter-key wide) + *SPC* (2/3) — DEL on the left.
+5.   *CAPS, TAB, RET* — RET *double-wide* (CAPS 1u / TAB 1u / RET 2u);
+     CAPS sits where DEL used to be.
+6.   Utility row: *QUIT, M-x, Chat* (3-up).
 7.   *Command list*: up to =emacos--max-commands= (10) of the top
      buffer's commands (the =emacos--top-commands= source), ONE PER ROW.
+
+(Layout revised 2026-05-22 per user feedback: DEL joined the SPC row at
+1/3 width; CAPS moved from the utility row to the action row's leftmost
+slot.)
 
 ** Decisions
 - *Uniform button height.*  One =emacos--btn-scale= (defconst 1.75),

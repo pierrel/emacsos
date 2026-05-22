@@ -134,14 +134,26 @@ floor((36 - 3*1.5) / (4*1.75)) = floor(31.5/7.0) = 4."
   "A pathologically narrow window can't drive a width <= 0."
   (should (= (emacos--unit-width 1 1.5 4 3) 1)))
 
-(ert-deftest test-os-action-row-width-ordering ()
-  "Spec prominence: SPC (full width) > RET (2 units) > DEL (1 unit)."
+(ert-deftest test-os-action-row-widths ()
+  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: CAPS/TAB 1 unit,
+RET 2 units (double-wide).  All positive; the wide ones beat the narrow."
   (let* ((win-w 36) (gap 1.5)
-         (spc  (emacos--unit-width win-w gap 1 0))   ; full-width SPC
-         (unit (emacos--unit-width win-w gap 4 2)))  ; DEL/TAB = 1u, RET = 2u
-    (should (> spc (* 2 unit)))    ; SPC beats double-wide RET
-    (should (> (* 2 unit) unit))   ; RET (2u) beats DEL (1u)
-    (should (> unit 0))))
+         (third (emacos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
+         (unit  (emacos--unit-width win-w gap 4 2)))   ; CAPS/TAB=1u, RET=2u
+    (should (> third 0))
+    (should (> unit 0))
+    (should (> (* 2 third) third))   ; SPC (2/3) wider than DEL (1/3)
+    (should (> (* 2 unit) unit))))   ; RET (2u) wider than CAPS/TAB (1u)
+
+(ert-deftest test-os-action-row-renders-del-spc-caps-tab-ret ()
+  (with-temp-buffer
+    (emacos--render-action-row)
+    (let ((s (buffer-string)))
+      (should (string-match-p "DEL" s))
+      (should (string-match-p "SPC" s))
+      (should (string-match-p "caps" s))
+      (should (string-match-p "TAB" s))
+      (should (string-match-p "RET" s)))))
 
 ;;; Follower: re-render only when the command set changed
 
@@ -174,16 +186,17 @@ is already in progress, even if the command set differs."
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
 
-;;; Utility row: QUIT + M-x + Chat + CAPS are always present
+;;; Utility row: QUIT + M-x + Chat (CAPS lives on the action row)
 
-(ert-deftest test-os-utility-row-has-quit-mx-chat-caps ()
+(ert-deftest test-os-utility-row-has-quit-mx-chat ()
   (with-temp-buffer
     (emacos--render-utility-row)
     (let ((s (buffer-string)))
       (should (string-match-p "QUIT" s))
       (should (string-match-p "M-x" s))
       (should (string-match-p "Chat" s))
-      (should (string-match-p "caps" s)))))
+      ;; CAPS moved to the action row.
+      (should-not (string-match-p "caps\\|CAPS" s)))))
 
 ;;; emacos--tap-quit (smart escape)
 
