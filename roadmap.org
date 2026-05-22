@@ -47,6 +47,15 @@ unchanged-set no-op absorbs most, but a popup whose mode has a command
 set would flicker.  Add an ignore-list (or special-mode skip) if it's
 annoying live.
 
+*** TODO Chat button doubles as SEND inside *chat*; drop the SEND button
+
+The utility row's =Chat= button switches the top window to =*chat*=.
+When you're ALREADY in =*chat*=, "go to chat" is a no-op — so make the
+=Chat= button SEND the current input instead, and remove the dedicated
+SEND entry from the chat command list.  Net: one fewer button, and the
+most-used chat action moves to the always-present utility row.  =Chat= =
+"open chat" when elsewhere, "send" when already in =*chat*=.
+
 ** DONE Tab button on the keyboard
 
 Shipped in PR #11: TAB is the 4th button on the SPC/RET/DEL action row
