@@ -110,6 +110,19 @@ Other dimensions worth iterating once the basic args preview lands:
 
 * Other / cross-cutting
 
+** TODO Conversation persistence across /chat requests
+
+Today `_build_thread` (app.py) constructs a FRESH `assist.Thread` per
+/chat request, so there is NO conversation history — every turn starts
+from scratch (the agent can't remember the previous exchange).  The
+phone is a chat-first device; multi-turn continuity is table stakes.
+Reuse a Thread / checkpointer across requests, keyed by the phone
+(session), so follow-ups ("now make it bigger", "undo that") see the
+prior turns.  Interacts with the per-turn tempdir (above) and the
+threads.db growth concerns from the assist side — pick a retention
+policy.  Was deliberately deferred in the channel PR ("fresh per
+stream") to match the pre-channel behavior; now it's the gap.
+
 ** TODO Phone tempdir leak
 
 `emacsos-server` now constructs a fresh `tempfile.mkdtemp(prefix=
