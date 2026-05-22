@@ -1,5 +1,7 @@
 ;;; os.el --- EmacsOS -*- lexical-binding: t -*-
 
+(require 'seq)  ; seq-take, used by `emacos--render-commands'
+
 (defgroup emacsos nil
   "EmacsOS: malleable, agent-customizable, local-first phone OS."
   :group 'applications

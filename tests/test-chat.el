@@ -279,11 +279,11 @@ bot line if a stream was open (start handler had run)."
       (emacos--chat-abort)
       (should-not delete-called))))
 
-;;; Command-strip integration
+;;; Command-list integration
 
 (ert-deftest chat-test-command-set-shows-abort-when-in-flight ()
   "The chat command set's second button is CLEAR when idle and ABORT
-while a stream is in flight (the strip re-derives this on every render)."
+while a stream is in flight (re-derived on every render)."
   (chat-test--reset)
   (require 'os)
   (let ((emacos--chat-in-flight nil))

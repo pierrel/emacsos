@@ -938,3 +938,58 @@ ignore-list) under it.
 4. *=*chat*= reachability* — if =emacos--chat-show-top-buffer= isn't
    interactive, M-x/Chat can't reach it and the user gets stuck out of
    chat.  R6 fixes; verify on the live pass that Chat round-trips.
+
+* Rework v2: QUIT escape, uniform height, SPC/RET prominence, command list (2026-05-22)
+
+User feedback on the v1 combo (above), folded in for shipping PR #11.
+*Supersedes the v1 "Rework" decisions R2 (one-row strip), R5's SEND
+height, and the strip width-fitting* — read THIS section for the shipped
+keyboard.  The keyboard window is now *vertically scrollable*, so
+vertical space is no longer a constraint (we don't shrink to fit).
+
+** Layout (top → bottom)
+1-3. T9 letter rows (unchanged).
+4.   *SPC* on its own row, *full width* (the most prominent key).
+5.   *DEL, TAB, RET* — RET *double-wide* (DEL 1u / TAB 1u / RET 2u).
+6.   Utility row: *QUIT, M-x, Chat, CAPS* (4-up; CAPS moved here).
+7.   *Command list*: up to =emacos--max-commands= (10) of the top
+     buffer's commands (the =emacos--top-commands= source), ONE PER ROW.
+
+** Decisions
+- *Uniform button height.*  One =emacos--btn-scale= (defconst 1.75),
+  passed as the =:height= to EVERY button.  Drops v1's per-command
+  height — chat's SEND is now a plain =(LABEL . CMD)= cons like the rest
+  (supersedes v1 R5's prominent SEND; uniform-at-1.75 is already big).
+- *=emacos--unit-width(win-w gap-w units gaps)=* — one pure, testable
+  width helper for every row.  UNITS and the button count can differ (a
+  button may span >1 unit, e.g. RET = 2 units); GAPS is the actual
+  inter-button gap count.  Routes letters (3u,2g), SPC (1u,0g),
+  DEL/TAB/RET (4u,2g; RET = 2×unit), utility (4u,3g).
+- *Four render bands* — =emacos--render-keyboard= (letters),
+  =-action-row= (SPC + DEL/TAB/RET), =-utility-row=, =-commands=;
+  composed by =emacos--render-page=.
+- *Removed* =emacos--command-spec= + =emacos--commands-fitting= (the
+  height-normalizer and one-row truncation are both obsolete).
+
+** QUIT = "smart escape" (=emacos--tap-quit=)
+One tap to clear whatever's cluttering the TOP area, without touching the
+keyboard.  Active minibuffer → =abort-recursive-edit= (NOT
+=keyboard-quit=, which would signal =quit= out of the button callback).
+Otherwise, in the editing window: =quit-window= a help/special-mode /
+=completion-list-mode= popup (the latter's parent is nil in Emacs 30, so
+checked explicitly), then =delete-other-windows= to collapse popup
+splits — the dedicated keyboard window survives via its
+=no-delete-other-windows= parameter.  The clutter decision is computed
+from =(window-buffer w)= BEFORE =with-selected-window= (so it's
+unit-testable).  *Out of v1 scope:* cancelling a non-recursive pending
+state (isearch, an active region, a prefix arg) — the user's overload is
+popups/minibuffer, which this covers.
+
+** Validation
+=make test-elisp= green.  Live on the phone (emacs 30.1, 26-col window):
+rows render per spec (SPC alone; "DEL TAB RET"; "QUIT M-x Chat caps";
+Save/Undo/Find File/Switch Buffer one-per-row); QUIT dismissed a real
+=*Help*= popup and left a clean =*scratch*= + =*keyboard*=; uniform 1.75
+height confirmed.  Needs a human eyeball for: SPC visually full-width /
+RET visually 2× at the real font, tap-target feel, and the scroll
+gesture reaching the command list.

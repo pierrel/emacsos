@@ -1,4 +1,4 @@
-;;; test-os.el --- Tests for os.el command strip + utility row -*- lexical-binding: t -*-
+;;; test-os.el --- Tests for the os.el keyboard surface -*- lexical-binding: t -*-
 
 ;; Covers the pure pieces of the keyboard: `emacos--top-commands' (the
 ;; command set for the top buffer), `emacos--mode-commands-for'
@@ -30,16 +30,16 @@ though only the parent is in the alist."
 (ert-deftest test-os-mode-commands-unknown-is-nil ()
   (should-not (emacos--mode-commands-for 'fundamental-mode)))
 
-;;; emacos--top-commands (the strip's command set)
+;;; emacos--top-commands (the command set for the top buffer)
 
 (ert-deftest test-os-top-commands-minibuffer-is-empty ()
-  "An active minibuffer means you're typing a prompt — empty strip."
+  "An active minibuffer means you're typing a prompt — empty command set."
   (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () 'mb)))
     (should-not (emacos--top-commands))))
 
 (ert-deftest test-os-top-commands-fundamental-falls-back-to-globals ()
   "A mode with no command set shows the global commands (Save/Undo/...),
-never an empty strip — so a plain text buffer keeps them one tap away."
+never an empty list — so a plain text buffer keeps them one tap away."
   (with-temp-buffer
     (fundamental-mode)
     (let ((buf (current-buffer)))
@@ -123,13 +123,12 @@ is ABORT, not CLEAR."
 
 (ert-deftest test-os-unit-width-full-width-single-button ()
   "1 unit, 0 gaps → floor(win-w / scale).  At scale 1.75, win-w 35 → 20."
-  (should (= (emacos--unit-width 35 1.5 1 0)
-             (floor (/ 35 emacos--btn-scale)))))
+  (should (= (emacos--unit-width 35 1.5 1 0) 20)))
 
 (ert-deftest test-os-unit-width-accounts-for-gaps ()
-  "N units with G gaps subtract G*gap before dividing by N*scale."
-  (should (= (emacos--unit-width 36 1.5 4 3)
-             (max 1 (floor (/ (- 36 (* 3 1.5)) (* 4 emacos--btn-scale)))))))
+  "N units with G gaps subtract G*gap before dividing by N*scale:
+floor((36 - 3*1.5) / (4*1.75)) = floor(31.5/7.0) = 4."
+  (should (= (emacos--unit-width 36 1.5 4 3) 4)))
 
 (ert-deftest test-os-unit-width-min-1 ()
   "A pathologically narrow window can't drive a width <= 0."
