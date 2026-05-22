@@ -128,10 +128,11 @@ class ConfigRepo:
             self._scaffold()
             log.warning("Scaffolded commit-less repo at %s", self.repo_dir)
         else:
-            subprocess.run(
-                ["git", "-C", self.repo_dir, "reset", "--hard", "-q", "HEAD"],
-                capture_output=True, text=True,
-            )
+            # Use _git (raises ConfigRepoError on failure) — a failed
+            # hard reset means a genuinely broken repo, and the callers
+            # (apply_config, _do_rollback) catch it into a structured
+            # error rather than continuing on a partially-reset repo.
+            self._git("reset", "--hard", "-q", "HEAD")
             # Defensive: a hard reset restores tracked files, so agent.el
             # is back unless HEAD genuinely lacks it (shouldn't happen
             # post-scaffold) — scaffold if so.
