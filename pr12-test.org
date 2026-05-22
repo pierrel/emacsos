@@ -1,0 +1,161 @@
+#+title: Testing PR #12 — versioned config + apply-to-phone + rollback
+#+date: 2026-05-22
+
+How to drive the full 2-phase workflow live: the agent VERIFIES a config
+change with =eval_elisp=, SHIPS it with =apply_config= (git-committed +
+loaded on the phone), you see it, and you ROLL it back.
+
+* 0. Heads-up before you start
+
+PR #12 is *not what's currently running.*  The phone + server are on the
+keyboard branch (=ergonomics-tab-and-dynamic-kbd=); the =applied= event
+handling and the ROLLBACK button only exist on =config-apply-rollback=.
+Those two branches *conflict in =chat.el=*, so deploying PR #12 to test
+it *temporarily reverts the keyboard* to the pre-#11 surface
+(KBD/CMD/MODE/CHAT page bar).  That's fine — the keyboard isn't what
+you're testing here.  Restore the keyboard afterward (§6).
+
+(Once you're happy with both, the clean end state is: merge #11 to main,
+rebase #12 onto it, resolve =chat.el= by moving the ROLLBACK button into
+the v2 command list — then one deploy has both.)
+
+* 1. Setup (deploy the config branch)
+
+On the dev box:
+
+1. =git checkout config-apply-rollback=
+
+2. *Server* — emacsos-server must run THIS branch's code (it gains the
+   =apply_config= tool + the =/rollback= endpoint).  If =make server= is
+   already up with =--reload=, the checkout auto-reloads it; otherwise:
+   #+begin_src sh
+   ASSIST_MODEL_URL=<your local vLLM /v1 URL> make server
+   #+end_src
+   Optional: =EMACSOS_CONFIG_DIR=/path= (default
+   =~/.config/emacsos/config-repo=) — the git repo auto-creates on first
+   apply.
+
+3. *Phone* — hot-reload the config branch's =chat.el= (the ROLLBACK
+   handler) + =os.el=:
+   #+begin_src sh
+   make local-deploy
+   #+end_src
+   Only needed for *reboot-persistence* (§5, Test D): if the phone has
+   never had the =emacos-agent-file= boot snippet, also
+   =make phone-install DEV_BOX_URL=<...>= once.  (apply works without it
+   — it falls back to the default agent.el path — but the boot-time
+   re-load needs the snippet.)
+
+* 2. Test A — happy path (apply + rollback)
+
+On the phone, in the *chat* buffer, send:
+
+#+begin_quote
+Make my cursor bright blue and save it to my config so it sticks.
+#+end_quote
+
+The "save it to my config / so it sticks" is the load-bearing part — it
+nudges the agent toward =apply_config= (persistent) rather than
+=eval_elisp= (one-off).
+
+*Watch for, in order:*
+1. =[calling eval_elisp]= status (the agent testing the elisp), then
+   =[calling apply_config]=.
+2. The cursor turns *blue* live.
+3. A =[applied: make cursor blue (v…) — loaded cleanly…]= note in the
+   transcript.
+4. A *ROLLBACK* button appears in the chat controls (next to SEND/CLEAR).
+
+*Then tap ROLLBACK:*
+- The cursor reverts to the default.
+- A =[rollback applied: …]= note appears.
+- The ROLLBACK button disappears (v1 is one-level undo).
+
+If all of that happens, the core loop works.
+
+* 3. Test B — multi-apply (the most important probe)
+
+This is the deferred-to-live check: the apply model REPLACES the whole
+config file each time, so a *second* apply only preserves the first if
+the small model (Qwen3-Coder-30B) restates the COMPLETE config.
+
+After Test A's apply (cursor is blue), send:
+
+#+begin_quote
+Now also make the cursor a tall bar — and keep it blue.
+#+end_quote
+
+*The decisive observation:*
+- *PASS* — the cursor is blue AND a bar.  The model restated the full
+  config (blue + bar) in the second =apply_config=.
+- *FAIL* — the cursor becomes a bar but loses blue.  The model dropped
+  the prior config (the whole-file-replace gap).  Note it — that's the
+  signal we wanted from a live run; it tells us whether we need a skill
+  / system-prompt nudge to "always include the existing config."
+
+* 4. Test C — honesty on a broken config (optional)
+
+Try to get a config that errors on load, e.g.:
+
+#+begin_quote
+Set my cursor color to "not-a-real-color" in my config.
+#+end_quote
+
+If the agent ships it and it errors while loading, you should see
+=[applied but BROKEN — consider rolling back: load-error: …]= and a
+ROLLBACK button.  Tap ROLLBACK to recover.  (The agent may instead catch
+the bad value and fix it before applying — also a fine outcome; this one
+is hard to force.)
+
+* 5. Test D — reboot persistence (needs the §1 boot snippet)
+
+After an apply, restart the phone's emacs (or reboot the device).  The
+applied config should *reload at boot* (the boot snippet loads
+=agent.el= inside a =condition-case=).  If you'd applied a *broken*
+config and rebooted, boot should NOT hang/brick — it logs
+=emacsos: agent.el failed to load: …= and continues on the
+last-known-good base.
+
+* 6. Cleanup — restore the keyboard
+
+#+begin_src sh
+git checkout ergonomics-tab-and-dynamic-kbd
+make local-deploy
+#+end_src
+
+* 7. Confirm it server-side (optional)
+
+The git config repo records every applied config:
+
+#+begin_src sh
+DIR=$${EMACSOS_CONFIG_DIR:-~/.config/emacsos/config-repo}
+git -C "$DIR" log --oneline          # one commit per apply (+ scaffold)
+git -C "$DIR" show HEAD:agent.el     # the committed file (lexical-binding header + your body)
+#+end_src
+
+A rollback shows up as a =Revert "…"= commit (history preserved, so
+roll-forward stays possible).
+
+* 8. If no ROLLBACK button appears
+
+Most likely the agent used =eval_elisp= (one-off) instead of
+=apply_config= — the change happened but wasn't committed, so there's
+nothing to roll back.  Re-prompt more explicitly:
+
+#+begin_quote
+Save that to my config file so it survives a restart.
+#+end_quote
+
+There's no skill telling the agent the verify→ship workflow yet (it
+relies on the two tools' docstrings + your phrasing).  How reliably the
+small model reaches for =apply_config= on a persistent request is itself
+a thing worth noting from this test.
+
+* What to report back
+
+- Did the agent pick =apply_config= for a persistent request, or did it
+  need the explicit "save to my config" nudge?
+- Multi-apply (Test B): did it keep the prior config, or drop it?
+- Did ROLLBACK cleanly revert? Did the =applied= note + button show?
+- Any rough edges in the transcript (out-of-order tokens, missing
+  status, etc.).
