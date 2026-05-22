@@ -55,12 +55,18 @@ class RollbackResult:
     version: ConfigVersion | None = None  # new HEAD after the revert
 
 
-def _render(body: str) -> str:
+def render(body: str) -> str:
+    """The canonical agent.el file content for BODY: header (carrying the
+    `lexical-binding: t` cookie) + body + `(provide 'agent)` footer.  This
+    is the SINGLE source of the file the phone loads AND the file git
+    commits — apply writes `render(body)` to the phone, git stores
+    `render(body)`, so the two never diverge and the phone always loads
+    with lexical-binding (closures behave as in the committed file)."""
     return _HEADER + body.strip("\n") + _FOOTER
 
 
 def _extract_body(full: str) -> str:
-    """Inverse of `_render`: pull the agent body back out of agent.el."""
+    """Inverse of `render`: pull the agent body back out of agent.el."""
     s = full
     if s.startswith(_HEADER):
         s = s[len(_HEADER):]
@@ -135,7 +141,7 @@ class ConfigRepo:
     def _scaffold(self) -> None:
         """Write the empty-config scaffold file and commit it."""
         with open(self.agent_path, "w") as f:
-            f.write(_render(""))
+            f.write(render(""))
         self._git("add", AGENT_FILE)
         self._git(*_GIT_IDENTITY, "commit", "-q", "-m", "scaffold: empty agent config")
 
@@ -143,11 +149,18 @@ class ConfigRepo:
         """Replace agent.el's body, commit, return the commit sha."""
         self.ensure()
         with open(self.agent_path, "w") as f:
-            f.write(_render(body))
+            f.write(render(body))
         self._git("add", AGENT_FILE)
-        # Allow an empty diff to no-op gracefully (re-applying identical
-        # config shouldn't error); --allow-empty keeps a version marker.
-        self._git(*_GIT_IDENTITY, "commit", "-q", "--allow-empty", "-m", summary)
+        # If the staged tree is identical to HEAD, do NOT create an empty
+        # commit: an empty commit later breaks `git revert` ("revert is
+        # now empty" aborts).  Re-applying an identical config is a clean
+        # no-op — return the existing HEAD sha.
+        no_diff = subprocess.run(
+            ["git", "-C", self.repo_dir, "diff", "--cached", "--quiet"],
+            capture_output=True,
+        ).returncode == 0
+        if not no_diff:
+            self._git(*_GIT_IDENTITY, "commit", "-q", "-m", summary)
         return self._git("rev-parse", "HEAD").stdout.strip()
 
     def current(self) -> ConfigVersion:

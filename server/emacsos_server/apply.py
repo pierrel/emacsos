@@ -57,32 +57,38 @@ def _elisp_string(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _build_apply_expr(body: str) -> str:
-    """Elisp that atomically writes BODY to the phone's agent file and
-    loads it, returning `"ok: loaded"` or `"load-error: <...>"`."""
-    body_lit = _elisp_string(body)
+def _build_apply_expr(content: str) -> str:
+    """Elisp that atomically writes the agent.el CONTENT to the phone's
+    agent file and loads it, returning `"ok: loaded"` or
+    `"load-error: <...>"`.  CONTENT is the FULL file (header carrying the
+    `lexical-binding` cookie + body + provide), exactly what git stores —
+    `config_repo.render` is the single source, so the phone's file and
+    git never diverge and the load honors lexical-binding."""
+    content_lit = _elisp_string(content)
     return f"""(condition-case err
     (let ((f (expand-file-name (or (bound-and-true-p emacos-agent-file)
                                    {_elisp_string(DEFAULT_PHONE_AGENT_FILE)})))
-          (body {body_lit}))
+          (content {content_lit}))
       (make-directory (file-name-directory f) t)
       (let ((tmp (make-temp-file (concat (file-name-directory f) "agent-") nil ".el")))
-        (with-temp-file tmp (insert body))
+        (with-temp-file tmp (insert content))
         (rename-file tmp f t))
       (load-file f)
       "ok: loaded")
   (error (format "load-error: %S" err)))"""
 
 
-def apply_to_phone(ctx: PhoneContext, body: str) -> ApplyResult:
-    """Write+load BODY on the phone, classify the outcome honestly."""
-    n_bytes = len(body.encode("utf-8"))
+def apply_to_phone(ctx: PhoneContext, content: str) -> ApplyResult:
+    """Write+load the agent.el CONTENT on the phone, classify honestly.
+    CONTENT is the rendered file (see `config_repo.render`), not the bare
+    body — the caller renders so the phone matches what git commits."""
+    n_bytes = len(content.encode("utf-8"))
     if n_bytes > MAX_BODY_BYTES:
         return ApplyResult(
             status="too_large",
             detail=f"config is {n_bytes} bytes; max {MAX_BODY_BYTES}",
         )
-    expr = _build_apply_expr(body)
+    expr = _build_apply_expr(content)
     try:
         ok, output = phone_mod.call_emacs(
             ctx.auth_contents,

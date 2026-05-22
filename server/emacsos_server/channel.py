@@ -30,7 +30,7 @@ from langchain_core.tools import tool
 from . import apply as apply_mod
 from . import phone as phone_mod
 from .config import Config
-from .config_repo import ConfigRepo
+from .config_repo import ConfigRepo, render
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +189,12 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     # config the phone never saw).  A load_error still counts as
     # "received" — the phone wrote the file then errored loading it, so
     # it IS the phone's current config and belongs in history.
-    ar = apply_mod.apply_to_phone(ctx, elisp)
+    #
+    # Apply the RENDERED file (the same content git commits, via
+    # config_repo.render) — NOT the bare elisp — so the phone's agent.el
+    # carries the lexical-binding cookie + provide and matches git byte
+    # for byte.  write_and_commit renders the same body identically.
+    ar = apply_mod.apply_to_phone(ctx, render(elisp))
     if ar.status == "too_large":
         return f"error: config too large: {ar.detail}"
     if ar.status == "unreachable":

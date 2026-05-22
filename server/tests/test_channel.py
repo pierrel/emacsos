@@ -180,6 +180,22 @@ def test_apply_config_applied_commits_and_reports_version(tmp_path):
     assert repo.current().body == "(setq x 1)"
 
 
+def test_apply_config_sends_rendered_file_to_phone(tmp_path):
+    """The phone must receive the SAME rendered file git commits — with
+    the lexical-binding cookie — not the bare body."""
+    from emacsos_server.config_repo import render
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")) as m, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        apply_config.invoke({"elisp": "(setq x 1)", "summary": "s"}, config=cfg)
+    sent = m.call_args.args[1]
+    assert "lexical-binding: t" in sent
+    assert sent == render("(setq x 1)")  # byte-identical to what git stores
+
+
 def test_apply_config_load_error_is_applied_but_broken_and_commits(tmp_path):
     out, repo = _apply(
         "(foo)", "call foo", tmp_path,

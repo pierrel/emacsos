@@ -430,7 +430,7 @@ def test_rollback_endpoint_returns_do_rollback_result(client):
 def test_do_rollback_reverts_and_applies(tmp_path):
     from emacsos_server.app import _do_rollback
     from emacsos_server.channel import PhoneContext
-    from emacsos_server.config_repo import ConfigRepo
+    from emacsos_server.config_repo import ConfigRepo, render
     from emacsos_server.apply import ApplyResult
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.write_and_commit("(setq x 1)", "v1")
@@ -440,9 +440,9 @@ def test_do_rollback_reverts_and_applies(tmp_path):
                return_value=ApplyResult("applied", "ok: loaded")) as m:
         out = _do_rollback(PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.5"))
     assert out["status"] == "applied"
-    # Reverted to v1's body, and that's what got applied to the phone.
+    # Reverted to v1's body, and the RENDERED v1 file got applied to the phone.
     assert repo.current().body == "(setq x 1)"
-    assert m.call_args.args[1] == "(setq x 1)"
+    assert m.call_args.args[1] == render("(setq x 1)")
 
 
 def test_do_rollback_returns_structured_error_on_exception(tmp_path):

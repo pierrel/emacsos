@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
 from .config import Config
-from .config_repo import ConfigRepo
+from .config_repo import ConfigRepo, render
 from . import apply as apply_mod
 from . import stream as ndjson
 
@@ -339,9 +339,11 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
         if not result.ok:
             return {"status": "noop", "detail": result.detail}
         # Load the reverted config (the new HEAD) on the phone so the live
-        # state matches the repo again.  apply_to_phone classifies honestly.
-        # `result.version` is non-None when `ok` (ConfigRepo.rollback).
-        ar = apply_mod.apply_to_phone(phone_ctx, result.version.body)
+        # state matches the repo again.  Apply the RENDERED file (same
+        # content git holds) so the phone's agent.el stays byte-identical
+        # to the repo, with the lexical-binding cookie.  apply_to_phone
+        # classifies honestly.  `result.version` is non-None when `ok`.
+        ar = apply_mod.apply_to_phone(phone_ctx, render(result.version.body))
         return {"status": ar.status, "detail": ar.detail}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500
         log.exception("rollback failed")

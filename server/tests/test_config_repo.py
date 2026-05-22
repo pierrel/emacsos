@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from emacsos_server.config_repo import ConfigRepo, _extract_body, _render
+from emacsos_server.config_repo import ConfigRepo, _extract_body, render
 
 
 def _repo(tmp_path):
@@ -84,7 +84,7 @@ def test_ensure_recovers_from_interrupted_staging(tmp_path):
     r.write_and_commit("(setq foo 1)", "v1")
     # Simulate an interrupted commit: stage a change but don't commit.
     with open(r.agent_path, "w") as f:
-        f.write(_render("(setq bar 99)"))
+        f.write(render("(setq bar 99)"))
     subprocess.run(["git", "-C", r.repo_dir, "add", "agent.el"],
                    capture_output=True, text=True)
     # ensure() resets staging so the next op starts clean.
@@ -105,9 +105,36 @@ def test_ensure_recreates_missing_agent_file(tmp_path):
     assert r.current().body == "(setq foo 1)"
 
 
+def test_reapplying_identical_config_creates_no_empty_commit(tmp_path):
+    r = _repo(tmp_path)
+    sha1 = r.write_and_commit("(setq foo 1)", "set foo")
+    count1 = int(subprocess.run(
+        ["git", "-C", r.repo_dir, "rev-list", "--count", "HEAD"],
+        capture_output=True, text=True).stdout.strip())
+    sha2 = r.write_and_commit("(setq foo 1)", "set foo again")
+    count2 = int(subprocess.run(
+        ["git", "-C", r.repo_dir, "rev-list", "--count", "HEAD"],
+        capture_output=True, text=True).stdout.strip())
+    # No new commit, same HEAD — no empty commit to break a later revert.
+    assert sha2 == sha1
+    assert count2 == count1
+
+
+def test_rollback_after_identical_reapply_does_not_error(tmp_path):
+    """Regression: an empty commit would make `git revert` abort. With
+    the no-diff guard, a second identical apply makes no commit, so
+    rollback still cleanly reverts the one real change."""
+    r = _repo(tmp_path)
+    r.write_and_commit("(setq foo 1)", "v1")
+    r.write_and_commit("(setq foo 1)", "v1 again")  # no-op, no commit
+    res = r.rollback()
+    assert res.ok
+    assert r.current().body == ""  # reverted the only real apply → scaffold
+
+
 def test_render_extract_body_round_trip():
-    assert _extract_body(_render("(message \"hi\")")) == "(message \"hi\")"
-    assert _extract_body(_render("")) == ""
+    assert _extract_body(render("(message \"hi\")")) == "(message \"hi\")"
+    assert _extract_body(render("")) == ""
 
 
 def test_history_newest_first(tmp_path):
