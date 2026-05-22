@@ -709,34 +709,38 @@ transcript by `emacos--chat-rollback-callback'."
 
 (defun emacos--chat-rollback-callback (status &rest _)
   "Parse the /rollback JSON response and report it in the transcript.
-Runs in the url-retrieve response buffer."
-  (let ((result
-         (condition-case err
-             (if (plist-get status :error)
-                 (list :status "error"
-                       :detail (format "%S" (plist-get status :error)))
-               ;; Skip past the HTTP headers to the JSON body.  Search
-               ;; the blank-line boundary (handles \r\n\r\n real
-               ;; responses and \n\n test fixtures) rather than relying
-               ;; on url-http-end-of-headers, which is a buffer-local
-               ;; marker that's awkward to reproduce off the wire.
-               (goto-char (point-min))
-               (re-search-forward "\r?\n\r?\n" nil t)
-               (json-parse-buffer :object-type 'plist
-                                  :null-object nil
-                                  :array-type 'list))
-           (error (list :status "error"
-                        :detail (error-message-string err))))))
-    (let ((st (or (plist-get result :status) "error"))
-          (detail (or (plist-get result :detail) "")))
-      (emacos--chat-note (format "[rollback %s: %s]" st detail))
-      ;; A reached rollback (applied / load_error) consumes the undo;
-      ;; hide ROLLBACK until the next apply.  noop/unreachable/error keep
-      ;; it available to retry.
-      (when (member st '("applied" "load_error"))
-        (setq emacos--chat-can-rollback nil))
-      (when (fboundp 'emacos--render-page)
-        (emacos--render-page)))))
+Runs in the url-retrieve response buffer, which we kill when done so
+repeated rollbacks don't leak ` *http*` buffers."
+  (let* ((resp (current-buffer))
+         (result
+          (condition-case err
+              (if (plist-get status :error)
+                  (list :status "error"
+                        :detail (format "%S" (plist-get status :error)))
+                ;; Skip past the HTTP headers to the JSON body.  Search
+                ;; the blank-line boundary (handles \r\n\r\n real
+                ;; responses and \n\n test fixtures) rather than relying
+                ;; on url-http-end-of-headers, which is a buffer-local
+                ;; marker that's awkward to reproduce off the wire.
+                (goto-char (point-min))
+                (re-search-forward "\r?\n\r?\n" nil t)
+                (json-parse-buffer :object-type 'plist
+                                   :null-object nil
+                                   :array-type 'list))
+            (error (list :status "error"
+                         :detail (error-message-string err))))))
+    (unwind-protect
+        (let ((st (or (plist-get result :status) "error"))
+              (detail (or (plist-get result :detail) "")))
+          (emacos--chat-note (format "[rollback %s: %s]" st detail))
+          ;; A reached rollback (applied / load_error) consumes the undo;
+          ;; hide ROLLBACK until the next apply.  noop/unreachable/error
+          ;; keep it available to retry.
+          (when (member st '("applied" "load_error"))
+            (setq emacos--chat-can-rollback nil))
+          (when (fboundp 'emacos--render-page)
+            (emacos--render-page)))
+      (when (buffer-live-p resp) (kill-buffer resp)))))
 
 (defun emacos--chat-show-top-buffer ()
   "Display *chat* in the editor (target) window.  Idempotent.

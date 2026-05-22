@@ -383,5 +383,16 @@ the LAST entry (rarely used)."
     (emacos--chat-rollback-callback nil))
   (should emacos--chat-can-rollback))
 
+(ert-deftest chat-test-rollback-callback-kills-response-buffer ()
+  "The url-retrieve response buffer must be killed so repeated rollbacks
+don't leak ` *http*' buffers."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (let ((resp (generate-new-buffer " *rollback-resp*")))
+    (with-current-buffer resp
+      (insert "HTTP/1.1 200 OK\n\n{\"status\":\"applied\",\"detail\":\"ok\"}")
+      (emacos--chat-rollback-callback nil))
+    (should-not (buffer-live-p resp))))
+
 (provide 'test-chat)
 ;;; test-chat.el ends here

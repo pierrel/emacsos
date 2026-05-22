@@ -95,6 +95,36 @@ def test_ensure_recovers_from_interrupted_staging(tmp_path):
     assert staged == ""
 
 
+def test_ensure_scaffolds_committless_repo(tmp_path):
+    """`.git` exists but no commits (manual init / partial) → ensure()
+    scaffolds a first commit so current()/rollback() have a HEAD."""
+    repo_dir = str(tmp_path / "config-repo")
+    os.makedirs(repo_dir)
+    subprocess.run(["git", "-C", repo_dir, "init", "-q"], check=True)
+    r = ConfigRepo(repo_dir)
+    r.ensure()
+    cur = r.current()  # would raise (no HEAD) without the scaffold
+    assert "scaffold" in cur.summary
+    assert cur.body == ""
+
+
+def test_ensure_restores_dirty_working_tree(tmp_path):
+    """A prior interrupted write leaves agent.el dirty; without a hard
+    reset, `git revert` would fail with 'local changes would be
+    overwritten'.  ensure() restores the tree to HEAD so rollback works."""
+    r = _repo(tmp_path)
+    r.write_and_commit("(setq foo 1)", "v1")
+    r.write_and_commit("(setq foo 2)", "v2")
+    # Simulate a crashed write: dirty agent.el, uncommitted.
+    with open(r.agent_path, "w") as f:
+        f.write(render("(setq garbage 99)"))
+    r.ensure()
+    # Tree restored to HEAD (v2), and rollback (a revert) succeeds.
+    assert r.current().body == "(setq foo 2)"
+    assert r.rollback().ok
+    assert r.current().body == "(setq foo 1)"
+
+
 def test_ensure_recreates_missing_agent_file(tmp_path):
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")

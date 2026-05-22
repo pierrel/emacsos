@@ -109,33 +109,34 @@ class ConfigRepo:
     # --- lifecycle ---
 
     def ensure(self) -> None:
-        """Idempotent: create the repo + scaffold commit if absent.
-        Also resets any leftover staging so a prior interrupted commit
-        doesn't poison the next one, and self-heals a missing agent file
-        (deleted out of band) so `current()`/`rollback()` can't hit a
-        FileNotFoundError."""
+        """Idempotent: bring the repo to a clean, usable state.
+        - No `.git`: init + scaffold the first commit.
+        - `.git` but zero commits (manual `git init` / partial init):
+          scaffold so `current()`/`rollback()` have a HEAD.
+        - Otherwise: hard-reset index + working tree to HEAD.  This drops
+          any staged or dirty state from a prior interrupted write — which
+          would otherwise make `git revert` fail with "local changes would
+          be overwritten" — and restores `agent.el` if it was deleted out
+          of band.  The repo is server-owned; there's no legitimate
+          uncommitted work between operations to lose."""
         if not os.path.isdir(os.path.join(self.repo_dir, ".git")):
             os.makedirs(self.repo_dir, exist_ok=True)
             self._git("init", "-q")
             self._scaffold()
             log.info("Initialized config repo at %s", self.repo_dir)
+        elif self._commit_count() == 0:
+            self._scaffold()
+            log.warning("Scaffolded commit-less repo at %s", self.repo_dir)
         else:
-            # Idempotent recovery: drop any staged-but-uncommitted state
-            # so a later commit starts clean.
             subprocess.run(
-                ["git", "-C", self.repo_dir, "reset", "-q"],
+                ["git", "-C", self.repo_dir, "reset", "--hard", "-q", "HEAD"],
                 capture_output=True, text=True,
             )
-            # Self-heal a missing working-tree agent file.  Restore it
-            # from HEAD (recovers the real last config); scaffold only if
-            # HEAD has none (truly fresh/corrupt repo).
+            # Defensive: a hard reset restores tracked files, so agent.el
+            # is back unless HEAD genuinely lacks it (shouldn't happen
+            # post-scaffold) — scaffold if so.
             if not os.path.isfile(self.agent_path):
-                r = subprocess.run(
-                    ["git", "-C", self.repo_dir, "checkout", "HEAD", "--", AGENT_FILE],
-                    capture_output=True, text=True,
-                )
-                if r.returncode != 0 or not os.path.isfile(self.agent_path):
-                    self._scaffold()
+                self._scaffold()
                 log.warning("Recovered missing agent file in %s", self.repo_dir)
 
     def _scaffold(self) -> None:
