@@ -59,9 +59,9 @@ the budget and can tap ABORT to cancel.  See design doc §6."
 
 (defvar emacos--chat-can-rollback nil
   "Non-nil when the last turn applied a config (an `applied' event
-arrived), so the chat page should offer a ROLLBACK button.  Cleared on
-a successful rollback (v1 is one-level undo — apply again to get a new
-rollback point).")
+arrived), so the chat command list offers a ROLLBACK entry (at the
+bottom).  Cleared on a successful rollback (v1 is one-level undo —
+apply again to get a new rollback point).")
 
 (defvar emacos--chat-process nil
   "The url-retrieve process backing the in-flight stream, or nil.

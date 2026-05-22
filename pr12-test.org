@@ -7,17 +7,15 @@ loaded on the phone), you see it, and you ROLL it back.
 
 * 0. Heads-up before you start
 
-PR #12 is *not what's currently running.*  The phone + server are on the
-keyboard branch (=ergonomics-tab-and-dynamic-kbd=); the =applied= event
-handling and the ROLLBACK button only exist on =config-apply-rollback=.
-Those two branches *conflict in =chat.el=*, so deploying PR #12 to test
-it *temporarily reverts the keyboard* to the pre-#11 surface
-(KBD/CMD/MODE/CHAT page bar).  That's fine — the keyboard isn't what
-you're testing here.  Restore the keyboard afterward (§6).
+PR #11 (keyboard) is merged to main, and this branch
+(=config-apply-rollback=) has been *rebased onto it* — so it has the v2
+keyboard AND the apply/rollback feature.  Deploying it gives you both
+(no keyboard downgrade).  The =chat.el= conflict was resolved by putting
+ROLLBACK at the *bottom of the chat command list* (it appears, as the
+last entry, only after a config apply — it's rarely used).
 
-(Once you're happy with both, the clean end state is: merge #11 to main,
-rebase #12 onto it, resolve =chat.el= by moving the ROLLBACK button into
-the v2 command list — then one deploy has both.)
+You still have to *deploy this branch* (server + phone) to test #12 —
+it's not what's currently live on the phone (main is).  Setup is §1.
 
 * 1. Setup (deploy the config branch)
 
@@ -64,12 +62,14 @@ nudges the agent toward =apply_config= (persistent) rather than
 2. The cursor turns *blue* live.
 3. A =[applied: make cursor blue (v…) — loaded cleanly…]= note in the
    transcript.
-4. A *ROLLBACK* button appears in the chat controls (next to SEND/CLEAR).
+4. A *ROLLBACK* button appears at the BOTTOM of the chat command list
+   (below SEND / CLEAR — it's the last entry, since it's rarely used).
+   You may need to scroll the keyboard window down to see it.
 
 *Then tap ROLLBACK:*
 - The cursor reverts to the default.
 - A =[rollback applied: …]= note appears.
-- The ROLLBACK button disappears (v1 is one-level undo).
+- The ROLLBACK entry disappears from the command list (v1 = one-level undo).
 
 If all of that happens, the core loop works.
 
@@ -116,12 +116,12 @@ config and rebooted, boot should NOT hang/brick — it logs
 =emacsos: agent.el failed to load: …= and continues on the
 last-known-good base.
 
-* 6. Cleanup — restore the keyboard
+* 6. When you're done
 
-#+begin_src sh
-git checkout ergonomics-tab-and-dynamic-kbd
-make local-deploy
-#+end_src
+No keyboard to restore — this branch already has the v2 keyboard.  If
+you want the phone back on plain main (no in-progress rollback code)
+while you decide, =git checkout main && make local-deploy=.  Otherwise,
+once you're happy, merge #12 to main and main has everything.
 
 * 7. Confirm it server-side (optional)
 
