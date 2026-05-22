@@ -635,13 +635,46 @@ markers/lines after the UI has been cleaned up."
                   :reason (format "url-retrieve failed: %s"
                                   (error-message-string err))))))))))
 
-(defun emacos--chat-clear ()
-  "Reset the transcript to an empty prompt.  Refuses while in flight
-\(tap ABORT first if you want to stop a stream)."
+(defun emacos--chat-new-chat ()
+  "Start a new chat: clear the local transcript AND tell the server to
+forget the conversation (POST /clear), so the agent no longer remembers
+earlier turns.  Refuses while in flight (tap ABORT first if you want to
+stop a stream).
+
+The server reset is fire-and-forget: the local transcript clears
+regardless of whether /clear succeeds, matching CLEAR's old can't-fail
+feel.  This is the ONLY thing that makes the agent forget — the
+conversation otherwise persists across turns and restarts."
   (interactive)
   (if emacos--chat-in-flight
       (message "chat: stream in flight; tap ABORT to cancel")
+    (emacos--chat-forget-server)
     (emacos--chat-init-buffer (emacos--chat-buffer))))
+
+(defun emacos--chat-forget-server ()
+  "POST /clear so the server forgets the persistent conversation.
+Argument-free: /clear deletes server-side checkpoint state only and
+never calls back into this emacs (unlike /rollback), so it needs no
+phone context.  Fire-and-forget — a failure is logged via `message',
+never blocking the local transcript reset."
+  (let ((url-request-method "POST")
+        (url-request-extra-headers
+         '(("Content-Type" . "application/json; charset=utf-8")))
+        (url-request-data ""))
+    (condition-case err
+        (url-retrieve (emacos--chat-endpoint "/clear")
+                      #'emacos--chat-forget-callback nil t t)
+      (error
+       (message "chat: /clear failed: %s" (error-message-string err))))))
+
+(defun emacos--chat-forget-callback (status &rest _)
+  "Kill the /clear response buffer so repeated New-chat taps don't leak
+` *http*' buffers; report a transport error via `message' if one
+occurred.  Runs after the local reset, so it only reports."
+  (let ((resp (current-buffer)))
+    (when (plist-get status :error)
+      (message "chat: /clear error: %S" (plist-get status :error)))
+    (when (buffer-live-p resp) (kill-buffer resp))))
 
 (defun emacos--chat-terminate-stream (reason)
   "Kill the in-flight stream's URL process (if any) and render
@@ -668,8 +701,8 @@ url-http state machine, so any sentinel-driven cleanup is unreliable."
 ;;; Command-list integration
 
 (defun emacos--chat-command-set ()
-  "Command-list entries for the *chat* buffer: SEND, then CLEAR (idle) /
-ABORT (in flight), and — only after a config apply — ROLLBACK at the
+  "Command-list entries for the *chat* buffer: SEND, then New chat (idle)
+/ ABORT (in flight), and — only after a config apply — ROLLBACK at the
 very bottom (rarely used).  Plain (LABEL . CMD) conses like every other
 command entry (uniform-height buttons).  Dynamic — re-derived on every
 `emacos--render-page', so the second button flips as
@@ -679,7 +712,7 @@ command entry (uniform-height buttons).  Dynamic — re-derived on every
    (list (cons "SEND" #'emacos--chat-send)
          (if emacos--chat-in-flight
              (cons "ABORT" #'emacos--chat-abort)
-           (cons "CLEAR" #'emacos--chat-clear)))
+           (cons "New chat" #'emacos--chat-new-chat)))
    ;; ROLLBACK last — rarely used, and only available after an apply.
    (when emacos--chat-can-rollback
      (list (cons "ROLLBACK" #'emacos--chat-rollback)))))

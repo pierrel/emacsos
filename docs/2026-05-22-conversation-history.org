@@ -1,0 +1,112 @@
+#+title: Persistent Conversation History
+#+date: 2026-05-22
+
+The first half of the "agent remembers" lifecycle: =emacsos-server='s =/chat= turn now persists the
+conversation across requests, so follow-ups work — "now make it bigger", and especially "make that
+permanent" (the agent recalls the elisp it just ran live via =eval_elisp= and ships it with
+=apply_config=).  Before this, every =/chat= built a brand-new =assist.Thread= ("fresh per stream"),
+so the agent had zero memory between turns.  Builds directly on the emacs-modifying channel
+([[file:2026-05-18-emacs-modifying-channel.org][2026-05-18-emacs-modifying-channel.org]]) and the
+config apply/rollback layer
+([[file:2026-05-21-config-apply-rollback.org][2026-05-21-config-apply-rollback.org]]).
+
+This is the first of a two-part sequence the user scoped:
+1. *Conversation history* (this doc).
+2. *Flexible config change management* (revert any past change via chat) — the next experiment; see
+   the roadmap.  Deliberately NOT in scope here.  This change does NOT add conversational revert; the
+   one-level phone ROLLBACK button is untouched.
+
+* The change (entirely emacsos-server + one phone-side elisp tweak)
+
+No =assist= change.  =assist.Thread= already accepts =checkpointer== and =thread_id== and replays
+prior state from the checkpointer (=Thread.stream_message= sends only the latest human message); we
+just consume that existing API.
+
+- =config.py=: new =state_dir= (env =EMACSOS_STATE_DIR=, default =~/.local/state/emacsos=, computed
+  from =$HOME= at runtime — no literal operator path in source).
+- =app.py=: one process-wide persistent =SqliteSaver= on =<state_dir>/threads.db= (built lazily); a
+  FIXED =CONVERSATION_THREAD_ID= ("emacsos-phone"); one stable per-conversation working dir.
+  =_build_thread= now passes =checkpointer== + =thread_id== and reuses the stable working dir
+  instead of =tempfile.mkdtemp= per turn.  New argument-free =POST /clear= behind =_STREAM_LOCK= →
+  =checkpointer.delete_thread=.
+- =chat.el=: the second chat command relabels CLEAR → *New chat*; it clears the local transcript AND
+  fire-and-forgets =POST /clear= so the server forgets in lockstep.
+
+* Resolved design decisions
+
+** Context windowing is delegated, not built
+
+deepagents 0.6.1's =SummarizationMiddleware= (auto-installed by =create_deep_agent=, keyed by
+=thread_id=) handles growth: at 0.85× the model's =max_input_tokens= it summarizes older turns,
+offloads them into the checkpoint (=conversation_history/{thread_id}.md= via =StateBackend=, NOT the
+working-dir filesystem), and feeds the model summary+recent.  =select_chat_model= sets
+=profile = {"max_input_tokens": n_ctx}= (the probed llama.cpp =n_ctx=), so the fraction trigger
+fires against the real window.  =_build_thread= logs the resolved =max_input_tokens= so a windowing
+misconfig is visible rather than silently degrading to the 170k-token fallback.
+
+** Single fixed thread id (one phone)
+
+The conversation key must survive a phone reboot.  Rejected: =request.client.host= (flips
+LAN↔WireGuard) and a hash of the emacs auth secret (Emacs regenerates it on every daemon restart, so
+a reboot would fork the conversation).  Chosen: a single FIXED id — this server serves one personal
+phone, so one rolling conversation, surviving server restart AND phone reboot.  Only *New chat*
+forgets it.
+
+** Low-level Thread + SqliteSaver, not ThreadManager
+
+=assist.ThreadManager= owns a near-identical "persistent checkpointer + working dir + delete by id"
+surface, but it mints *random* ids (=new()=), raises if the dir is missing (=get()=), and pulls
+container-sandbox cleanup into deletion (=hard_delete()=) — none fit a single fixed-id, sandbox-less
+phone conversation.  We consume the lower-level =Thread= + =SqliteSaver= API it's built on.
+
+** New chat = one button (CLEAR relabel)
+
+Now that memory persists, a local-only "tidy the screen" CLEAR that leaves the agent secretly
+remembering is inconsistent.  Decision (user-confirmed): one button — relabel CLEAR → *New chat*,
+which resets transcript AND server memory together.  The label makes it clearly a fresh start, not a
+screen-tidy.  =/clear= is argument-free (it never calls back into the phone, unlike =/rollback=) and
+fire-and-forget on the elisp side (local reset can't fail).
+
+* Design-review revisions (2026-05-22)
+
+Four-lens design-review team (simplicity, agentic best practices, user guidance, clean interfaces).
+Folded in:
+
+1. *No new =threadstore.py= module* (simplicity + clean interfaces).  The ~15 lines live next to
+   =_build_thread= in =app.py=; a dedicated module/"store" name oversold a single-fixed-thread
+   surface.
+2. *=/clear= is argument-free* (simplicity + clean interfaces).  With a fixed key it needs no phone
+   identity; the elisp posts an empty body and skips the auth read — no reuse of the rollback
+   encoder.
+3. *Corrected the persistence rationale* (agentic).  The =conversation_history= offload rides the
+   *checkpointer* via =StateBackend=, not the working-dir filesystem — so removing the per-turn
+   =rmtree= is correct but immaterial to durability (it just fixes the tempdir leak).  Conversation
+   state, the summary offload, and the private =_summarization_event= all live in the checkpoint, so
+   =delete_thread= is a complete reset with no orphans.
+4. =_STREAM_LOCK= now documented as load-bearing for =/clear='s *quiescence* (not just DB-level
+   safety): it keeps a CLEAR from deleting the thread mid-turn.
+5. =CONVERSATION_THREAD_ID= is a constant, not a config knob; =state_dir= is one field with a
+   computed default.  Removed the now-unused =shutil=/=tempfile= imports.  Updated the stale "fresh
+   per stream" lifecycle comments.
+
+* Known limitations
+
+- *Mid-tool-call crash → resume BadRequest.*  Persisting state newly exposes a generic langgraph
+  edge: if the server dies after an =AIMessage= with =tool_calls= is checkpointed but before the
+  =ToolMessage= lands, the next turn resumes with a dangling tool call, which some providers reject
+  (BadRequest).  =Thread.stream_message= (the path emacsos-server uses) has no =invoke_with_rollback=
+  wrapper, so it won't auto-recover.  Per the fail-fast preference, the v1 remedy is *New chat*.
+  Routing the streaming path through a rollback-aware wrapper is a future change.
+- *threads.db grows unbounded.*  =SummarizationMiddleware= is non-mutating — it keeps the full raw
+  log in the checkpoint while only the model context stays bounded.  For one phone / one rolling
+  conversation this is negligible text accumulation; *New chat* (=delete_thread=) is the release
+  valve.  No retention sweep is built.
+- *Secret/identity is not multi-phone.*  A second phone hitting this server would share the one
+  conversation.  Not the deployment; deferred with the WireGuard/away-phone work.
+
+* Out of scope / next layers
+
+- Conversational revert ("revert the change about X") — the next experiment (flexible change
+  management).  The one-level phone ROLLBACK button stays as the fast path.
+- Per-phone keying / multi-phone sessions.
+- Retention/trim policy and the streaming-path rollback wrapper (see Known limitations).

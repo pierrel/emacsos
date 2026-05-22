@@ -28,6 +28,18 @@ def test_custom_config_dir(monkeypatch):
     assert Config.from_env().config_dir == "/tmp/my-config-repo"
 
 
+def test_default_state_dir_under_home(monkeypatch):
+    monkeypatch.delenv("EMACSOS_STATE_DIR", raising=False)
+    sd = Config.from_env().state_dir
+    # Default is computed from $HOME (XDG state), never a literal path.
+    assert sd.endswith("/.local/state/emacsos")
+
+
+def test_custom_state_dir(monkeypatch):
+    monkeypatch.setenv("EMACSOS_STATE_DIR", "/tmp/my-state")
+    assert Config.from_env().state_dir == "/tmp/my-state"
+
+
 def test_non_numeric_port_raises_with_clear_message(monkeypatch):
     monkeypatch.setenv("EMACSOS_SERVER_PORT", "not-a-number")
     with pytest.raises(ConfigError) as ex:

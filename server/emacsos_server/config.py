@@ -18,6 +18,7 @@ class Config:
     port: int
     emacsclient: str
     config_dir: str
+    state_dir: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -38,8 +39,15 @@ class Config:
         default_config_dir = os.path.join(
             os.path.expanduser("~"), ".config", "emacsos", "config-repo"
         )
+        # Persistent conversation state (the threads.db checkpointer + the
+        # per-conversation working dir).  XDG state dir by default, computed
+        # at runtime from $HOME so no literal operator path lands in source.
+        default_state_dir = os.path.join(
+            os.path.expanduser("~"), ".local", "state", "emacsos"
+        )
         return cls(
             port=port,
             emacsclient=os.environ.get("EMACSOS_EMACSCLIENT", "emacsclient"),
             config_dir=os.environ.get("EMACSOS_CONFIG_DIR", default_config_dir),
+            state_dir=os.environ.get("EMACSOS_STATE_DIR", default_state_dir),
         )

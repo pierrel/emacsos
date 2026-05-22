@@ -70,7 +70,7 @@ def test_streams_start_token_end_for_simple_response(client):
         ("messages", (_FakeAIMessageChunk(content="Hello!"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
 
@@ -90,7 +90,7 @@ def test_streams_multiple_tokens_concatenate_into_end_text(client):
         ("messages", (_FakeAIMessageChunk(content="is 42."), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -108,7 +108,7 @@ def test_empty_content_chunks_dont_produce_token_events(client):
         ("messages", (_FakeAIMessageChunk(content=""), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -131,7 +131,7 @@ def test_tool_call_emits_calling_status(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -154,7 +154,7 @@ def test_repeated_tool_call_chunks_dont_repeat_status(client):
         )),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -169,7 +169,7 @@ def test_update_to_status_surfaces_named_node(client):
         ("updates", {"research-agent": {}}),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -197,7 +197,7 @@ def test_mid_stream_exception_yields_error_event_with_partial(client):
         yield ("messages", (_FakeAIMessageChunk(content="partial"), {}))
         raise ValueError("model died mid-stream")
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(gen(), None)):
+               return_value=gen()):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
 
@@ -227,7 +227,7 @@ def test_missing_phone_yields_error_event(client):
 def test_content_type_is_ndjson(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             assert r.headers["content-type"].startswith("application/x-ndjson")
 
@@ -235,7 +235,7 @@ def test_content_type_is_ndjson(client):
 def test_start_event_carries_stream_id_and_ts(client):
     scripted = [("messages", (_FakeAIMessageChunk(content="x"), {}))]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
             events = _collect_events(r)
     start = events[0]
@@ -258,13 +258,10 @@ def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
 
     def fake_build(phone_ctx):
         captured["ctx"] = phone_ctx
-        # Return a (thread, working_dir) tuple matching the real
-        # `_build_thread`'s shape (added in Copilot round 2 fix for
-        # the per-/chat tempdir leak).
         class _T:
             def stream_message(self, _msg):
                 return iter([])
-        return _T(), None
+        return _T()
 
     with patch.object(app_mod, "_build_thread", side_effect=fake_build):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
@@ -277,62 +274,63 @@ def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
     assert ctx.phone_host == "testclient"
 
 
-def test_working_dir_is_cleaned_up_after_stream(client, tmp_path):
-    """Per-/chat working_dir must be rmtree'd in `_stream_turn`'s
-    finally — otherwise /tmp/emacsos-thread-* leaks one entry per
-    request (Copilot round 2 caught this)."""
-    import emacsos_server.app as app_mod
+# --- persistent conversation: fixed thread id + shared checkpointer ---------
 
-    wd = tmp_path / "emacsos-thread-xyz"
-    wd.mkdir()
-    assert wd.exists()
-
-    def fake_build(_phone_ctx):
-        class _T:
-            def stream_message(self, _msg):
-                return iter([])
-        return _T(), str(wd)
-
-    with patch.object(app_mod, "_build_thread", side_effect=fake_build):
-        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
-            _collect_events(r)
-
-    assert not wd.exists(), f"working_dir leaked: {wd}"
+def _tmp_config(tmp_path):
+    """A Config pointing state/config dirs at a tmp_path so a test never
+    touches ~/.local/state or ~/.config."""
+    from emacsos_server.config import Config
+    return Config(
+        port=8765,
+        emacsclient="emacsclient",
+        config_dir=str(tmp_path / "cfg"),
+        state_dir=str(tmp_path / "state"),
+    )
 
 
-def test_build_thread_cleans_working_dir_on_construction_failure(tmp_path, monkeypatch):
-    """If `Thread(...)` raises (eg. ASSIST_MODEL_URL misconfig), the
-    working_dir is leaked because the caller never gets a handle to
-    rmtree it.  `_build_thread` must rmtree on failure before
-    re-raising (Copilot round 3 caught this)."""
+def test_build_thread_binds_fixed_id_and_persistent_checkpointer(tmp_path, monkeypatch):
+    """`_build_thread` must construct the Thread with the FIXED
+    conversation thread id and the process-wide persistent checkpointer —
+    that's what makes the agent remember prior turns.  Captures the
+    Thread(...) kwargs at the assist boundary."""
     import emacsos_server.app as app_mod
     from emacsos_server.channel import PhoneContext
 
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
+    monkeypatch.setattr(app_mod, "_CHECKPOINTER", None)  # rebuild under tmp state
+
     captured = {}
 
-    def fake_mkdtemp(prefix):
-        path = tmp_path / f"{prefix}xyz"
-        path.mkdir()
-        captured["path"] = path
-        return str(path)
+    class _FakeThread:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.thread_id = kw.get("thread_id")
+            self.model = None  # exercises the max_input_tokens log fallback
 
-    monkeypatch.setattr(app_mod.tempfile, "mkdtemp", fake_mkdtemp)
+        def stream_message(self, _msg):
+            return iter([])
 
-    class _BoomThread:
-        def __init__(self, **_kw):
-            raise RuntimeError("ASSIST_MODEL_URL not set")
-
-    # Patch Thread import in app_mod by replacing assist.thread.Thread.
     import assist.thread as assist_thread_mod
-    monkeypatch.setattr(assist_thread_mod, "Thread", _BoomThread)
+    monkeypatch.setattr(assist_thread_mod, "Thread", _FakeThread)
 
     ctx = PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.1")
-    import pytest as _pytest
-    with _pytest.raises(RuntimeError, match="ASSIST_MODEL_URL"):
-        app_mod._build_thread(ctx)
+    app_mod._build_thread(ctx)
 
-    assert not captured["path"].exists(), \
-        f"working_dir leaked on Thread construction failure: {captured['path']}"
+    assert captured["thread_id"] == app_mod.CONVERSATION_THREAD_ID
+    # Same persistent checkpointer instance the rest of the server uses.
+    assert captured["checkpointer"] is app_mod._checkpointer()
+    # Phone toolset + context still wired through unchanged.
+    assert captured["extra_tools"] is app_mod.EMACS_TOOLS
+    assert captured["extra_config"]["configurable"]["phone_context"] is ctx
+
+
+def test_checkpointer_is_singleton(tmp_path, monkeypatch):
+    """The checkpointer is built once and reused — two turns share it, so
+    the conversation accumulates in one threads.db."""
+    import emacsos_server.app as app_mod
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
+    monkeypatch.setattr(app_mod, "_CHECKPOINTER", None)
+    assert app_mod._checkpointer() is app_mod._checkpointer()
 
 
 # --- applied event (derived from apply_config's tool result) ----------------
@@ -344,7 +342,7 @@ def test_apply_config_result_emits_applied_event(client):
             content="applied: blue cursor (vabc123) — loaded cleanly"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
     applied = [e for e in events if e["type"] == "applied"]
@@ -360,7 +358,7 @@ def test_apply_config_load_error_sets_broken_flag(client):
             content="applied-but-broken: x (vabc123) — errored while loading"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
     applied = [e for e in events if e["type"] == "applied"]
@@ -377,7 +375,7 @@ def test_applied_event_deduped_across_stream_modes(client):
         ("updates", {"tools": {"messages": [tm]}}),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
     assert len([e for e in events if e["type"] == "applied"]) == 1
@@ -388,7 +386,7 @@ def test_non_apply_config_tool_result_emits_no_applied(client):
         ("messages", (_FakeToolMessage(name="eval_elisp", content="applied: nope"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
     assert not [e for e in events if e["type"] == "applied"]
@@ -403,7 +401,7 @@ def test_applied_but_unrecorded_emits_no_applied_event(client):
             content="applied-but-unrecorded: live but not in git"), {})),
     ]
     with patch("emacsos_server.app._start_stream_iter",
-               return_value=(iter(scripted), None)):
+               return_value=iter(scripted)):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
     assert not [e for e in events if e["type"] == "applied"]
@@ -466,3 +464,46 @@ def test_do_rollback_noop_when_nothing_to_roll_back(tmp_path):
     assert out["status"] == "noop"
     assert "nothing to roll back" in out["detail"]
     m.assert_not_called()
+
+
+# --- /clear (new chat) ------------------------------------------------------
+
+def test_clear_endpoint_returns_cleared(client):
+    """POST /clear returns the _clear_conversation result.  No phone body
+    needed — /clear never touches the phone."""
+    with patch("emacsos_server.app._clear_conversation",
+               return_value={"status": "cleared"}):
+        r = client.post("/clear")
+    assert r.status_code == 200
+    assert r.json() == {"status": "cleared"}
+
+
+def test_clear_conversation_deletes_the_fixed_thread(monkeypatch):
+    """_clear_conversation deletes exactly the fixed conversation thread
+    from the checkpointer, so the next /chat starts fresh."""
+    import emacsos_server.app as app_mod
+
+    deleted = {}
+
+    class _FakeCP:
+        def delete_thread(self, tid):
+            deleted["tid"] = tid
+
+    monkeypatch.setattr(app_mod, "_checkpointer", lambda: _FakeCP())
+    out = app_mod._clear_conversation()
+    assert out == {"status": "cleared"}
+    assert deleted["tid"] == app_mod.CONVERSATION_THREAD_ID
+
+
+def test_clear_conversation_returns_structured_error_on_exception(monkeypatch):
+    """A checkpointer failure comes back as {status: error}, not a 500."""
+    import emacsos_server.app as app_mod
+
+    class _BoomCP:
+        def delete_thread(self, _tid):
+            raise RuntimeError("db boom")
+
+    monkeypatch.setattr(app_mod, "_checkpointer", lambda: _BoomCP())
+    out = app_mod._clear_conversation()
+    assert out["status"] == "error"
+    assert "db boom" in out["detail"]

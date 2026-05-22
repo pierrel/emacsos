@@ -123,6 +123,37 @@ threads.db growth concerns from the assist side — pick a retention
 policy.  Was deliberately deferred in the channel PR ("fresh per
 stream") to match the pre-channel behavior; now it's the gap.
 
+** TODO Flexible config change management (revert any past change via chat)
+
+The next experiment *immediately after* conversation history — we go
+straight here, deliberately skipping any intermediate "N-level only"
+chat-revert step.
+
+Today config undo is strictly one-level: the phone ROLLBACK button calls
+=config_repo.rollback()= → =git revert --no-edit HEAD=, undoing only the
+most recent =apply_config=.  *That one-level button stays as-is* — it's
+the quick "undo the thing I just did" fast path, and it's all the button
+needs to be.
+
+The full system is conversational and *targeted*: "revert the change
+about X, where X is any past apply" — e.g. "undo the cursor color change
+but keep the font change", or "revert the last two things".  Driven from
+*chat* (it needs the conversation context that conversation history
+unlocks), the agent:
+- surfaces the apply history to itself — each =apply_config= already
+  commits with its SUMMARY as the git message, so =git log= IS the
+  change list; no new persistence needed;
+- maps a natural-language reference ("the cursor change") to a commit;
+- reverts just that commit (=git revert --no-edit <sha>=), or a chosen
+  set/range, history-preserving so roll-forward stays possible;
+- handles conflicts honestly (=git revert --abort= + a "can't cleanly
+  revert that — a later change touched the same thing" result) when a
+  targeted/range revert doesn't invert cleanly.
+
+So this single item subsumes what was once "chat-revert" + "N-level" +
+"targeted": the one-level phone button is the fast path; this is the
+rich, conversational path, and it's where we head next.
+
 ** TODO Phone tempdir leak
 
 `emacsos-server` now constructs a fresh `tempfile.mkdtemp(prefix=

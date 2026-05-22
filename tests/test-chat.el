@@ -283,13 +283,13 @@ bot line if a stream was open (start handler had run)."
 ;;; Command-list integration
 
 (ert-deftest chat-test-command-set-shows-abort-when-in-flight ()
-  "The chat command set's second button is CLEAR when idle and ABORT
-while a stream is in flight (re-derived on every render)."
+  "The chat command set's second button is \"New chat\" when idle and
+ABORT while a stream is in flight (re-derived on every render)."
   (chat-test--reset)
   (require 'os)
   (let ((emacos--chat-in-flight nil))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("SEND" "CLEAR"))))
+                   '("SEND" "New chat"))))
   (let ((emacos--chat-in-flight t))
     (should (equal (mapcar #'car (emacos--chat-command-set))
                    '("SEND" "ABORT"))))
@@ -383,14 +383,54 @@ the LAST entry (rarely used)."
     (emacos--chat-rollback-callback nil))
   (should emacos--chat-can-rollback))
 
-(ert-deftest chat-test-clear-resets-rollback-flag ()
-  "CLEAR (via init-buffer) hides ROLLBACK: a fresh/cleared transcript
-shouldn't dangle the button without context."
+(ert-deftest chat-test-new-chat-resets-rollback-flag ()
+  "New chat (via init-buffer) hides ROLLBACK: a fresh/cleared transcript
+shouldn't dangle the button without context.  The server-forget POST is
+stubbed so this stays a local-only unit test."
   (chat-test--reset)
   (emacos--chat-buffer)
   (setq emacos--chat-can-rollback t)
-  (emacos--chat-clear)
+  (cl-letf (((symbol-function 'emacos--chat-forget-server) #'ignore))
+    (emacos--chat-new-chat))
   (should-not emacos--chat-can-rollback))
+
+(ert-deftest chat-test-new-chat-posts-to-clear-endpoint ()
+  "New chat fires a POST to the server's /clear endpoint (so the agent
+forgets the conversation), and clears the transcript regardless."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (let ((emacos-chat-server-url "http://10.0.0.5:8765/chat")
+        (posted '()))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (url &rest _)
+                 (push (cons url url-request-method) posted)
+                 ;; Return a throwaway buffer; the real callback would
+                 ;; kill it, but we don't invoke it here.
+                 (generate-new-buffer " *clear-resp*"))))
+      (emacos--chat-new-chat))
+    (should (equal (caar posted) "http://10.0.0.5:8765/clear"))
+    (should (equal (cdar posted) "POST"))))
+
+(ert-deftest chat-test-new-chat-refuses-in-flight ()
+  "New chat is a no-op while a stream is in flight: it must not POST
+/clear nor wipe the transcript out from under a running turn."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (let ((emacos--chat-in-flight t)
+        (called nil))
+    (cl-letf (((symbol-function 'emacos--chat-forget-server)
+               (lambda () (setq called t))))
+      (emacos--chat-new-chat))
+    (should-not called)))
+
+(ert-deftest chat-test-forget-callback-kills-response-buffer ()
+  "The /clear response buffer must be killed so repeated New-chat taps
+don't leak ` *http*' buffers."
+  (chat-test--reset)
+  (let ((resp (generate-new-buffer " *clear-resp*")))
+    (with-current-buffer resp
+      (emacos--chat-forget-callback nil))
+    (should-not (buffer-live-p resp))))
 
 (ert-deftest chat-test-rollback-callback-kills-response-buffer ()
   "The url-retrieve response buffer must be killed so repeated rollbacks

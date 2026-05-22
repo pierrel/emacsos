@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
-import tempfile
+import os
+import sqlite3
 import time
 import uuid
 from typing import AsyncIterator, Optional
@@ -71,13 +71,20 @@ def _phone_ctx(phone_auth: Optional[str], request: Request) -> Optional[PhoneCon
 # `start` event is emitted *before* the lock acquire so the client
 # still gets immediate ack of receipt even when queued.
 #
-# Thread lifecycle is "fresh per stream": each /chat constructs a new
-# `assist.Thread` (in `_start_stream_iter`, bound to that request's
-# phone context via `extra_config`).  Construction is cheap — no
-# model probe — so we don't bother with a cross-request singleton.
-# This also means conversation continuity across turns is NOT
-# preserved in v1; that's accepted (matches the pre-channel
-# behavior, where the singleton was reset in finally anyway).
+# The lock is also load-bearing for conversation persistence: /chat,
+# /rollback, AND /clear all acquire it, so the shared checkpointer
+# (below) is only ever touched by one operation at a time.  In
+# particular it keeps /clear quiescent w.r.t. an in-flight turn — a
+# CLEAR can't delete the thread out from under an agent loop that's
+# mid-checkpoint, which would orphan a half-written turn.
+#
+# Each /chat rebuilds a fresh `assist.Thread` (in `_start_stream_iter`)
+# but now binds it to the persistent checkpointer + a FIXED thread id
+# (see CONVERSATION_THREAD_ID below), so the prior conversation is
+# replayed from the checkpointer and the agent remembers earlier turns.
+# Rebuilding the Thread object each turn is cheap and the right
+# langgraph idiom — all conversational state lives in the checkpoint,
+# not the compiled graph.
 _STREAM_LOCK = asyncio.Lock()
 
 # Heartbeat: emit a `heartbeat` event every N seconds of silence so
@@ -94,56 +101,103 @@ HEARTBEAT_SECONDS = 10.0
 # to a full heartbeat cycle.
 DISCONNECT_POLL_SECONDS = 1.0
 
-# Runaway backstop: reset the singleton after this many seconds
-# of the same stream so a truly-stuck agent doesn't pin the server
-# until process restart.  Far longer than any legitimate research
-# prompt; the user can always ABORT sooner.
+# Runaway backstop: abort a stream after this many seconds so a
+# truly-stuck agent doesn't pin the server until process restart.
+# Far longer than any legitimate research prompt; the user can always
+# ABORT sooner.
 RUNAWAY_SECONDS = 30 * 60.0
+
+# --- Persistent conversation ------------------------------------------------
+# One rolling conversation for the single phone this server serves.  A
+# fixed thread id (not the phone IP, which changes LAN<->WireGuard, nor
+# the emacs auth secret, which rotates on daemon restart) so the
+# conversation survives both a server restart and a phone reboot — only
+# "New chat" (POST /clear) forgets it.
+#
+# We use assist's low-level `Thread(checkpointer=, thread_id=)` + a
+# `SqliteSaver` directly rather than `assist.ThreadManager`: that class
+# mints *random* thread ids (`new()`), raises if the thread dir is
+# missing (`get()`), and pulls container-sandbox cleanup into deletion
+# (`hard_delete()`) — none of which fit a single fixed-id, sandbox-less
+# phone conversation.  The low-level API is exactly what ThreadManager
+# is built on, minus the multi-thread machinery we don't want.
+#
+# Context-window growth is handled upstream by deepagents'
+# SummarizationMiddleware (auto-installed by create_deep_agent, keyed by
+# this thread id); it offloads older turns into the checkpoint and feeds
+# the model summary+recent, so the raw log accumulates in threads.db but
+# the model context stays bounded.
+CONVERSATION_THREAD_ID = "emacsos-phone"
+
+# Lazily built so importing this module (e.g. in tests) doesn't create
+# threads.db until a turn actually runs.
+_CHECKPOINTER = None
+
+
+def _conversation_working_dir() -> str:
+    """Stable per-conversation working dir (the agent's default
+    FilesystemBackend root).  Reused across turns — no per-/chat tempdir
+    to leak.  Conversation state itself lives in the checkpointer, not
+    here."""
+    return os.path.join(config.state_dir, "threads", CONVERSATION_THREAD_ID)
+
+
+def _checkpointer():
+    """The process-wide persistent conversation checkpointer (one
+    SqliteSaver on `<state_dir>/threads.db`).  Built once, lazily.
+
+    `check_same_thread=False` because turns run on `run_in_executor`
+    worker threads; SqliteSaver serializes all DB access behind its own
+    internal lock, and `_STREAM_LOCK` keeps operations from overlapping
+    semantically.  Mirrors `assist.thread.ThreadManager`'s setup."""
+    global _CHECKPOINTER
+    if _CHECKPOINTER is None:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        os.makedirs(config.state_dir, exist_ok=True)
+        db_path = os.path.join(config.state_dir, "threads.db")
+        _CHECKPOINTER = SqliteSaver(
+            sqlite3.connect(db_path, check_same_thread=False))
+    return _CHECKPOINTER
 
 
 def _build_thread(phone_ctx: PhoneContext):
-    """Construct a fresh `assist.Thread` for one /chat turn, with the
-    phone-control toolset bound and the per-request phone context
-    threaded into the langgraph RunnableConfig.  Returns
-    `(thread, working_dir)` — caller is responsible for `rmtree`'ing
-    `working_dir` when the stream is done so we don't leak one
-    `/tmp/emacsos-thread-*` directory per /chat.  Raises whatever
-    assist raises during construction (eg. model probe failure)."""
+    """Construct an `assist.Thread` for one /chat turn, bound to the
+    persistent checkpointer + the fixed conversation thread id, so prior
+    turns are replayed from the checkpoint.  The phone-control toolset is
+    bound and the per-request phone context threaded into the langgraph
+    RunnableConfig.  Returns the Thread.  Raises whatever assist raises
+    during construction (eg. model probe failure)."""
     # Import inside so module import doesn't trigger assist's
     # transitive imports during server startup.
     from assist.thread import Thread
 
-    working_dir = tempfile.mkdtemp(prefix="emacsos-thread-")
+    working_dir = _conversation_working_dir()
+    os.makedirs(working_dir, exist_ok=True)
     # sandbox_backend=None: emacsos runs the agent without a
     # container sandbox.  model=None lets Thread call
     # `select_chat_model` itself, which reads ASSIST_MODEL_URL.
-    log.info("Constructing assist.Thread (working_dir=%s) for %s",
-             working_dir, phone_ctx.phone_host)
-    try:
-        t = Thread(
-            working_dir=working_dir,
-            sandbox_backend=None,
-            extra_tools=EMACS_TOOLS,
-            extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
-        )
-    except BaseException:
-        # If Thread construction raises (eg. ASSIST_MODEL_URL misconfig
-        # or model probe failure), the caller never gets the
-        # working_dir to clean up — so rmtree it here before re-raising.
-        # Without this, every failing /chat would leak a tempdir.
-        shutil.rmtree(working_dir, ignore_errors=True)
-        raise
-    log.info("assist.Thread ready (thread_id=%s)", t.thread_id)
-    return t, working_dir
+    t = Thread(
+        working_dir=working_dir,
+        thread_id=CONVERSATION_THREAD_ID,
+        checkpointer=_checkpointer(),
+        sandbox_backend=None,
+        extra_tools=EMACS_TOOLS,
+        extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
+    )
+    # Surface the resolved context window: summarization's 0.85 trigger
+    # only fires if the model profile exposes max_input_tokens, so log it
+    # to make a windowing misconfig visible rather than silently degraded.
+    max_in = (getattr(t.model, "profile", None) or {}).get("max_input_tokens")
+    log.info("assist.Thread ready (thread_id=%s, max_input_tokens=%s)",
+             t.thread_id, max_in)
+    return t
 
 
 def _start_stream_iter(message: str, phone_ctx: PhoneContext):
-    """Sync helper invoked via run_in_executor: build a fresh Thread
-    for this /chat turn and start the stream_message iterator.
-    Returns `(iterator, working_dir)` — caller stores the working_dir
-    for cleanup in `_stream_turn`'s finally."""
-    t, working_dir = _build_thread(phone_ctx)
-    return iter(t.stream_message(message)), working_dir
+    """Sync helper invoked via run_in_executor: build the Thread for this
+    /chat turn and start its `stream_message` iterator."""
+    t = _build_thread(phone_ctx)
+    return iter(t.stream_message(message))
 
 
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
@@ -158,7 +212,6 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     seen_tool_ids: set[str] = set()
     seen_applied: set[str] = set()
     it = None
-    working_dir: Optional[str] = None
     # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
     # otherwise a long wait behind the lock would burn the budget
     # before we'd even started this stream's actual work.
@@ -197,7 +250,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # Move Thread construction onto the executor so the async
         # handler isn't blocked by it.  This is also the only place an
         # ASSIST_MODEL_URL misconfig can raise.
-        it, working_dir = await loop.run_in_executor(
+        it = await loop.run_in_executor(
             None, _start_stream_iter, message, phone_ctx)
         pending = None
         last_heartbeat = time.monotonic()
@@ -284,8 +337,9 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # Load-bearing: runs on natural exit, on disconnect-return,
         # on runaway-return, AND on exception.  Drops the iterator
         # so GC closes it (releasing THREAD_QUEUE via __exit__).
-        # No singleton to reset — `_start_stream_iter` built a fresh
-        # Thread per stream and it'll GC with the iterator.
+        # The Thread's conversational state lives in the persistent
+        # checkpointer; the working_dir is stable and reused, so there's
+        # nothing per-turn to clean up here anymore.
         if it is not None and hasattr(it, "close"):
             # Generators expose close(); plain list_iterators (used by
             # the test stub) do not, hence the hasattr guard -- avoids
@@ -299,14 +353,6 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
                 pass
             except Exception:
                 log.exception("error closing inner iterator")
-        # Remove the per-stream working_dir so /tmp/emacsos-thread-*
-        # doesn't accumulate one entry per /chat.  Best-effort —
-        # cleanup failures get logged but don't break the stream.
-        if working_dir is not None:
-            try:
-                shutil.rmtree(working_dir, ignore_errors=False)
-            except Exception:
-                log.exception("error removing working_dir %s", working_dir)
         # Release the single-flight lock so the next queued /chat can
         # proceed.  Always paired with the acquire above this try block.
         _STREAM_LOCK.release()
@@ -368,6 +414,34 @@ async def rollback(req: RollbackRequest, request: Request):
     await _STREAM_LOCK.acquire()
     try:
         return await loop.run_in_executor(None, _do_rollback, phone_ctx)
+    finally:
+        _STREAM_LOCK.release()
+
+
+def _clear_conversation() -> dict:
+    """Forget the persistent conversation: delete its checkpoint state so
+    the next /chat starts fresh.  Backs the phone's "New chat".  Any
+    failure comes back as a structured error, never a bare 500."""
+    try:
+        _checkpointer().delete_thread(CONVERSATION_THREAD_ID)
+        return {"status": "cleared"}
+    except Exception as e:  # noqa: BLE001 — structured error, never a 500
+        log.exception("clear failed")
+        return {"status": "error", "detail": f"{type(e).__name__}: {e}"}
+
+
+@app.post("/clear")
+async def clear(request: Request):
+    """New chat: forget the persistent conversation by deleting its
+    checkpoint state.  Argument-free — unlike /rollback it never touches
+    the phone (no emacsclient callback), so it needs no phone context or
+    body.  Serialized behind the same `_STREAM_LOCK` as /chat so it can't
+    wipe the thread out from under an in-flight turn."""
+    log.info("POST /clear")
+    loop = asyncio.get_running_loop()
+    await _STREAM_LOCK.acquire()
+    try:
+        return await loop.run_in_executor(None, _clear_conversation)
     finally:
         _STREAM_LOCK.release()
 

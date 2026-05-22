@@ -77,7 +77,7 @@ never an empty list — so a plain text buffer keeps them one tap away."
                   ((symbol-function 'window-buffer) (lambda (_) chat-buf)))
           (let ((emacos--chat-in-flight nil))
             (should (equal (mapcar #'car (emacos--top-commands))
-                           '("SEND" "CLEAR"))))
+                           '("SEND" "New chat"))))
           ;; In flight, the abort path must surface via top-commands.
           (let ((emacos--chat-in-flight t))
             (should (equal (mapcar #'car (emacos--top-commands))
@@ -105,16 +105,16 @@ compares against the full set)."
                                        emacos--max-commands))
                      10)))))))
 
-;;; emacos--chat-command-set (dynamic: CLEAR idle / ABORT in flight)
+;;; emacos--chat-command-set (dynamic: New chat idle / ABORT in flight)
 
 (ert-deftest test-os-chat-command-set-idle ()
   (let ((emacos--chat-in-flight nil))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("SEND" "CLEAR")))))
+                   '("SEND" "New chat")))))
 
 (ert-deftest test-os-chat-command-set-in-flight-shows-abort ()
   "The abort path must survive mid-stream: in flight, the second button
-is ABORT, not CLEAR."
+is ABORT, not New chat."
   (let ((emacos--chat-in-flight t))
     (should (equal (mapcar #'car (emacos--chat-command-set))
                    '("SEND" "ABORT")))))
