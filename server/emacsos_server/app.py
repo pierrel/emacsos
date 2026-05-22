@@ -72,11 +72,16 @@ def _phone_ctx(phone_auth: Optional[str], request: Request) -> Optional[PhoneCon
 # still gets immediate ack of receipt even when queued.
 #
 # The lock is also load-bearing for conversation persistence: /chat,
-# /rollback, AND /clear all acquire it, so the shared checkpointer
-# (below) is only ever touched by one operation at a time.  In
-# particular it keeps /clear quiescent w.r.t. an in-flight turn — a
-# CLEAR can't delete the thread out from under an agent loop that's
-# mid-checkpoint, which would orphan a half-written turn.
+# /rollback, AND /clear all acquire it, so on the NORMAL path the shared
+# checkpointer (below) is only ever touched by one operation at a time —
+# /clear can't delete the thread out from under a turn that's
+# mid-checkpoint.  Caveat: an ABORT/runaway during agent execution
+# leaves the worker thread running after the lock is released (see the
+# `_stream_turn` finally), so a /clear queued right then CAN overlap that
+# orphaned worker's last checkpoint write.  That overlap is bounded by
+# SqliteSaver's own per-connection lock — worst case a torn/partial
+# conversation, never DB corruption — and matches the design's existing
+# acceptance of orphaned workers on the abort path.
 #
 # Each /chat rebuilds a fresh `assist.Thread` (in `_start_stream_iter`)
 # but now binds it to the persistent checkpointer + a FIXED thread id
@@ -149,7 +154,13 @@ def _checkpointer():
     `check_same_thread=False` because turns run on `run_in_executor`
     worker threads; SqliteSaver serializes all DB access behind its own
     internal lock, and `_STREAM_LOCK` keeps operations from overlapping
-    semantically.  Mirrors `assist.thread.ThreadManager`'s setup."""
+    semantically.  Follows `assist.thread.ThreadManager`'s setup (we skip
+    its upfront DB-file touch — `sqlite3.connect` creates the file).
+
+    First-init has no construction lock of its own: it's safe because
+    every caller (`_build_thread` via /chat, `_clear_conversation` via
+    /clear) reaches it on a `run_in_executor` thread while holding
+    `_STREAM_LOCK`, so the build is serialized."""
     global _CHECKPOINTER
     if _CHECKPOINTER is None:
         from langgraph.checkpoint.sqlite import SqliteSaver
@@ -161,12 +172,13 @@ def _checkpointer():
 
 
 def _build_thread(phone_ctx: PhoneContext):
-    """Construct an `assist.Thread` for one /chat turn, bound to the
-    persistent checkpointer + the fixed conversation thread id, so prior
-    turns are replayed from the checkpoint.  The phone-control toolset is
-    bound and the per-request phone context threaded into the langgraph
-    RunnableConfig.  Returns the Thread.  Raises whatever assist raises
-    during construction (eg. model probe failure)."""
+    """Build this /chat turn's `assist.Thread` over the SHARED persistent
+    backing: the process-wide checkpointer + the fixed conversation thread
+    id, so prior turns are replayed from the checkpoint (the Thread object
+    is rebuilt per turn, but its state persists).  The phone-control
+    toolset is bound and the per-request phone context threaded into the
+    langgraph RunnableConfig.  Returns the Thread.  Raises whatever assist
+    raises during construction (eg. model probe failure)."""
     # Import inside so module import doesn't trigger assist's
     # transitive imports during server startup.
     from assist.thread import Thread
@@ -193,6 +205,11 @@ def _build_thread(phone_ctx: PhoneContext):
     return t
 
 
+# Known limitation (see docs/2026-05-22-conversation-history.org): now
+# that state persists, a crash mid-tool-call can leave a dangling tool
+# call that the next turn resumes into, which some providers reject
+# (BadRequest).  `Thread.stream_message` has no invoke_with_rollback
+# wrapper, so this path won't auto-recover; the v1 remedy is "New chat".
 def _start_stream_iter(message: str, phone_ctx: PhoneContext):
     """Sync helper invoked via run_in_executor: build the Thread for this
     /chat turn and start its `stream_message` iterator."""

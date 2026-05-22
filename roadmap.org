@@ -110,18 +110,19 @@ Other dimensions worth iterating once the basic args preview lands:
 
 * Other / cross-cutting
 
-** TODO Conversation persistence across /chat requests
+** DONE Conversation persistence across /chat requests
 
-Today `_build_thread` (app.py) constructs a FRESH `assist.Thread` per
-/chat request, so there is NO conversation history — every turn starts
-from scratch (the agent can't remember the previous exchange).  The
-phone is a chat-first device; multi-turn continuity is table stakes.
-Reuse a Thread / checkpointer across requests, keyed by the phone
-(session), so follow-ups ("now make it bigger", "undo that") see the
-prior turns.  Interacts with the per-turn tempdir (above) and the
-threads.db growth concerns from the assist side — pick a retention
-policy.  Was deliberately deferred in the channel PR ("fresh per
-stream") to match the pre-channel behavior; now it's the gap.
+Shipped: =_build_thread= now reuses ONE persistent =assist.Thread= per
+phone (a fixed thread id + a =SqliteSaver= on =<state_dir>/threads.db=)
+instead of a fresh one per request, so the agent remembers prior turns
+("now make it bigger", "make that permanent").  Reset is an explicit
+"New chat" (=POST /clear= → =delete_thread=).  Context-window growth is
+delegated to deepagents' =SummarizationMiddleware= (no custom windowing);
+the raw log accumulates in threads.db but the model context stays
+bounded, and New chat is the release valve.  See
+[[file:docs/2026-05-22-conversation-history.org][docs/2026-05-22-conversation-history.org]].
+Keyed by a single fixed id (one personal phone) — per-phone keying is
+deferred with the WireGuard/away-phone work.
 
 ** TODO Flexible config change management (revert any past change via chat)
 
@@ -154,15 +155,12 @@ So this single item subsumes what was once "chat-revert" + "N-level" +
 "targeted": the one-level phone button is the fast path; this is the
 rich, conversational path, and it's where we head next.
 
-** TODO Phone tempdir leak
+** DONE Phone tempdir leak
 
-`emacsos-server` now constructs a fresh `tempfile.mkdtemp(prefix=
-"emacsos-thread-")` per /chat (channel PR dropped the Thread
-singleton).  Was once-per-server-rebuild before; now once-per-
-turn.  Over a day of moderate use, `/tmp/emacsos-thread-*` will
-accumulate hundreds of directories.  systemd's PrivateTmp or
-tmpwatch will eventually deal with it, but cleanup on stream end
-(or short TTL) is cleaner.
+Fixed as a consequence of conversation persistence (above): the
+per-/chat `tempfile.mkdtemp` is gone — the persistent conversation now
+uses ONE stable working dir under `<state_dir>/threads/`, reused across
+turns, so there's no per-turn directory to accumulate.
 
 ** TODO call_emacs return tuple → typed kind
 
