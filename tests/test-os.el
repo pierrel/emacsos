@@ -1,12 +1,12 @@
 ;;; test-os.el --- Tests for os.el command strip + utility row -*- lexical-binding: t -*-
 
-;; Covers the pure pieces of the single keyboard + commands combo:
-;; `emacos--top-commands' (the strip's command set for the top buffer),
-;; `emacos--mode-commands-for' parent-walking, the pure layout helpers
-;; (`emacos--command-spec', `emacos--commands-fitting'), the follower's
-;; change-detection guard, the chat command set, and `emacos--tap-tab'
-;; dispatch.  Hook firing and real window geometry are validated by
-;; smoke + a live phone pass, not here.
+;; Covers the pure pieces of the keyboard: `emacos--top-commands' (the
+;; command set for the top buffer), `emacos--mode-commands-for'
+;; parent-walking, the pure width helper (`emacos--unit-width'), the
+;; follower's change-detection guard, the chat command set,
+;; `emacos--tap-tab' / `emacos--tap-quit' dispatch, and the utility row.
+;; Hook firing and real window geometry are validated by a live phone
+;; pass, not here.
 
 (require 'ert)
 (require 'cl-lib)
@@ -78,12 +78,32 @@ never an empty strip — so a plain text buffer keeps them one tap away."
           (let ((emacos--chat-in-flight nil))
             (should (equal (mapcar #'car (emacos--top-commands))
                            '("SEND" "CLEAR"))))
-          ;; In flight, the strip's abort path must surface via top-commands.
+          ;; In flight, the abort path must surface via top-commands.
           (let ((emacos--chat-in-flight t))
             (should (equal (mapcar #'car (emacos--top-commands))
                            '("SEND" "ABORT")))))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer chat-buf)))))
+
+(ert-deftest test-os-top-commands-capped-at-max ()
+  "The command list shows at most `emacos--max-commands' (the renderer
+caps it); a mode with more entries than that is truncated by the
+renderer, but `emacos--top-commands' returns the full set (the follower
+compares against the full set)."
+  (let ((emacos-mode-commands
+         (list (cons 'fundamental-mode
+                     (cl-loop for i from 1 to 15
+                              collect (cons (format "C%d" i) #'ignore))))))
+    (with-temp-buffer
+      (fundamental-mode)
+      (let ((buf (current-buffer)))
+        (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
+                  ((symbol-function 'emacos--target) (lambda () 'w))
+                  ((symbol-function 'window-buffer) (lambda (_) buf)))
+          (should (= (length (emacos--top-commands)) 15))
+          (should (= (length (seq-take (emacos--top-commands)
+                                       emacos--max-commands))
+                     10)))))))
 
 ;;; emacos--chat-command-set (dynamic: CLEAR idle / ABORT in flight)
 
@@ -99,45 +119,30 @@ is ABORT, not CLEAR."
     (should (equal (mapcar #'car (emacos--chat-command-set))
                    '("SEND" "ABORT")))))
 
-(ert-deftest test-os-chat-send-carries-prominent-height ()
-  "SEND (the device's hot path) carries a height so the strip renders it
-larger than the uniform command buttons."
-  (let ((emacos--chat-in-flight nil))
-    (should (equal (emacos--command-spec (car (emacos--chat-command-set)))
-                   '("SEND" emacos--chat-send 1.5)))))
+;;; emacos--unit-width (pure per-unit width math)
 
-;;; emacos--command-spec (normalize both entry shapes)
+(ert-deftest test-os-unit-width-full-width-single-button ()
+  "1 unit, 0 gaps → floor(win-w / scale).  At scale 1.75, win-w 35 → 20."
+  (should (= (emacos--unit-width 35 1.5 1 0)
+             (floor (/ 35 emacos--btn-scale)))))
 
-(ert-deftest test-os-command-spec-cons-shape ()
-  (should (equal (emacos--command-spec '("X" . foo)) '("X" foo nil))))
+(ert-deftest test-os-unit-width-accounts-for-gaps ()
+  "N units with G gaps subtract G*gap before dividing by N*scale."
+  (should (= (emacos--unit-width 36 1.5 4 3)
+             (max 1 (floor (/ (- 36 (* 3 1.5)) (* 4 emacos--btn-scale)))))))
 
-(ert-deftest test-os-command-spec-list-shape-with-height ()
-  (should (equal (emacos--command-spec '("Y" bar 1.5)) '("Y" bar 1.5))))
+(ert-deftest test-os-unit-width-min-1 ()
+  "A pathologically narrow window can't drive a width <= 0."
+  (should (= (emacos--unit-width 1 1.5 4 3) 1)))
 
-;;; emacos--commands-fitting (one row, order = priority, width-accurate)
-
-(ert-deftest test-os-commands-fitting-keeps-order-preserving-prefix ()
-  "Stops at the first button that would overflow; keeps the prefix.
-Each button costs (length label) + 3 (\" LABEL \" padding + gap), so
-\"AAA\"=6, \"BBB\"=6: width 13 fits two (12), the third (18) overflows."
-  (should (equal (emacos--commands-fitting
-                  '(("AAA" . a) ("BBB" . b) ("CCC" . c)) 13)
-                 '(("AAA" . a) ("BBB" . b)))))
-
-(ert-deftest test-os-commands-fitting-all-fit-when-wide ()
-  (should (equal (emacos--commands-fitting
-                  '(("AAA" . a) ("BBB" . b)) 100)
-                 '(("AAA" . a) ("BBB" . b)))))
-
-(ert-deftest test-os-commands-fitting-width-accounts-for-label-length ()
-  "Width counts the displayed label, not a fixed slot: a long first
-label can crowd out a short second one."
-  (should (equal (emacos--commands-fitting
-                  '(("Heading" . h) ("X" . x)) 10)  ; "Heading"=10, fits; "X"=4 overflows
-                 '(("Heading" . h)))))
-
-(ert-deftest test-os-commands-fitting-empty-when-nothing-fits ()
-  (should-not (emacos--commands-fitting '(("AAA" . a)) 2)))
+(ert-deftest test-os-action-row-width-ordering ()
+  "Spec prominence: SPC (full width) > RET (2 units) > DEL (1 unit)."
+  (let* ((win-w 36) (gap 1.5)
+         (spc  (emacos--unit-width win-w gap 1 0))   ; full-width SPC
+         (unit (emacos--unit-width win-w gap 4 2)))  ; DEL/TAB = 1u, RET = 2u
+    (should (> spc (* 2 unit)))    ; SPC beats double-wide RET
+    (should (> (* 2 unit) unit))   ; RET (2u) beats DEL (1u)
+    (should (> unit 0))))
 
 ;;; Follower: re-render only when the command set changed
 
@@ -170,15 +175,92 @@ is already in progress, even if the command set differs."
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
 
-;;; Utility row: caps + M-x + Chat are always present
+;;; Utility row: QUIT + M-x + Chat + CAPS are always present
 
-(ert-deftest test-os-utility-row-always-has-caps-mx-chat ()
+(ert-deftest test-os-utility-row-has-quit-mx-chat-caps ()
   (with-temp-buffer
     (emacos--render-utility-row)
     (let ((s (buffer-string)))
-      (should (string-match-p "caps" s))
+      (should (string-match-p "QUIT" s))
       (should (string-match-p "M-x" s))
-      (should (string-match-p "Chat" s)))))
+      (should (string-match-p "Chat" s))
+      (should (string-match-p "caps" s)))))
+
+;;; emacos--tap-quit (smart escape)
+
+(ert-deftest test-os-tap-quit-aborts-active-minibuffer ()
+  "With a minibuffer active, QUIT aborts it and does NOT touch windows."
+  (let ((aborted nil) (quit-win nil) (del-others nil))
+    (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+              ((symbol-function 'active-minibuffer-window) (lambda () 'mb))
+              ((symbol-function 'abort-recursive-edit)
+               (lambda () (setq aborted t)))
+              ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
+              ((symbol-function 'delete-other-windows)
+               (lambda (&rest _) (setq del-others t))))
+      (emacos--tap-quit)
+      (should aborted)
+      (should-not quit-win)
+      (should-not del-others))))
+
+(ert-deftest test-os-tap-quit-quits-special-mode-and-clears-windows ()
+  "No minibuffer + a special-mode (help-like) top buffer: quit-window
+the popup AND delete-other-windows (keyboard survives via its window
+parameter on a real frame)."
+  (let ((quit-win nil) (del-others nil))
+    (with-temp-buffer
+      (special-mode)
+      (let ((buf (current-buffer)))
+        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+                  ((symbol-function 'active-minibuffer-window) (lambda () nil))
+                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'window-buffer) (lambda (&rest _) buf))
+                  ((symbol-function 'emacos--render-page) (lambda () nil))
+                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
+                  ((symbol-function 'delete-other-windows)
+                   (lambda (&rest _) (setq del-others t))))
+          (emacos--tap-quit)
+          (should quit-win)
+          (should del-others))))))
+
+(ert-deftest test-os-tap-quit-completion-list-is-quit ()
+  "*Completions* is completion-list-mode (parent nil in Emacs 30), so
+the predicate must catch it explicitly — quit-window must fire."
+  (let ((quit-win nil))
+    (with-temp-buffer
+      (setq-local major-mode 'completion-list-mode)
+      (let ((buf (current-buffer)))
+        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+                  ((symbol-function 'active-minibuffer-window) (lambda () nil))
+                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'window-buffer) (lambda (&rest _) buf))
+                  ((symbol-function 'emacos--render-page) (lambda () nil))
+                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
+                  ((symbol-function 'delete-other-windows) (lambda (&rest _) nil)))
+          (emacos--tap-quit)
+          (should quit-win))))))
+
+(ert-deftest test-os-tap-quit-ordinary-buffer-no-quit-window ()
+  "An ordinary (non-special) top buffer: don't quit-window it, but still
+collapse popup windows (harmless no-op when there are none)."
+  (let ((quit-win nil) (del-others nil))
+    (with-temp-buffer
+      (fundamental-mode)
+      (let ((buf (current-buffer)))
+        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+                  ((symbol-function 'active-minibuffer-window) (lambda () nil))
+                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'window-buffer) (lambda (&rest _) buf))
+                  ((symbol-function 'emacos--render-page) (lambda () nil))
+                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
+                  ((symbol-function 'delete-other-windows)
+                   (lambda (&rest _) (setq del-others t))))
+          (emacos--tap-quit)
+          (should-not quit-win)
+          (should del-others))))))
 
 ;;; emacos--tap-tab dispatch
 

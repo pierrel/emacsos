@@ -604,20 +604,17 @@ url-http state machine, so any sentinel-driven cleanup is unreliable."
   (interactive)
   (emacos--chat-terminate-stream "aborted"))
 
-;;; Command-strip integration
+;;; Command-list integration
 
 (defun emacos--chat-command-set ()
-  "Command-strip entries for the *chat* buffer: SEND (the device's hot
-path, rendered prominent via the optional height field) plus CLEAR
-when idle / ABORT while a stream is in flight.  Dynamic — re-derived on
-every `emacos--render-page', so the second button flips as
-`emacos--chat-in-flight' changes (the abort path stays reachable
+  "Command-list entries for the *chat* buffer: SEND plus CLEAR when idle
+/ ABORT while a stream is in flight.  Plain (LABEL . CMD) conses like
+every other command entry (buttons are uniform height).  Dynamic —
+re-derived on every `emacos--render-page', so the second button flips
+as `emacos--chat-in-flight' changes (the abort path stays reachable
 mid-stream)."
   (list
-   ;; (LABEL CMD HEIGHT): SEND carries a height so the strip renders it
-   ;; larger than the uniform command buttons.  Below the old chat-page's
-   ;; 1.75 because the keyboard now coexists with it (vertical budget).
-   (list "SEND" #'emacos--chat-send 1.5)
+   (cons "SEND" #'emacos--chat-send)
    (if emacos--chat-in-flight
        (cons "ABORT" #'emacos--chat-abort)
      (cons "CLEAR" #'emacos--chat-clear))))

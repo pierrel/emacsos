@@ -20,12 +20,14 @@ Shipped as the *single keyboard + commands combo*
 earlier swap-page design (the bottom window showed ONE of
 KBD/CMD/MODE/CHAT at a time, auto/pinned) was *rejected on review* —
 it hid the keyboard.  As built: the T9 keyboard is ALWAYS visible; a
-one-row *command strip* under it shows the top buffer's mode commands
+*command list* under it shows up to 10 of the top buffer's mode commands
 (=*chat*= → SEND + CLEAR/ABORT; a mode in =emacos-mode-commands= → its
 set; everything else → =emacos-global-commands=); a persistent utility
-row =[caps] [M-x] [Chat]= keeps manual command entry and the chat app
-one tap away.  The strip follows the top buffer via
-=window-buffer-change-functions=.
+row =[QUIT] [M-x] [Chat] [CAPS]= keeps escape, manual command entry, the
+chat app, and caps one tap away.  The list follows the top buffer via
+=window-buffer-change-functions=.  (Layout v2: uniform button height,
+scrollable; SPC full-width; DEL/TAB/RET with double-wide RET; QUIT =
+smart escape that clears popup/minibuffer clutter off the top.)
 
 Remaining follow-ups (the combo makes these safe to grow incrementally
 — the global-commands fallback means an un-enriched mode still works):
@@ -33,13 +35,13 @@ Remaining follow-ups (the combo makes these safe to grow incrementally
 *** TODO Enrich =emacos-mode-commands= for more modes
 
 Today: org, emacs-lisp, dired.  Add magit, prog-mode/text-mode
-defaults, etc.  Order each list by priority — the strip is one row and
-truncates to what fits (overflow → M-x).  React on the phone to decide
-which commands earn a slot.
+defaults, etc.  Order each list by priority — the command list shows up
+to =emacos--max-commands= (10), one per row (overflow → M-x).  React on
+the phone to decide which commands earn a slot.
 
 *** TODO Transient-buffer derivation ignore-list
 
-The strip re-derives on =window-buffer-change=; transient popups
+The command list re-derives on =window-buffer-change=; transient popups
 (=*Completions*=, =*Help*=) briefly on top can flip it.  The
 unchanged-set no-op absorbs most, but a popup whose mode has a command
 set would flicker.  Add an ignore-list (or special-mode skip) if it's

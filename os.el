@@ -45,10 +45,10 @@ hazard, and on a phone an infinite re-render bricks the device — so the
 guard is kept even though nothing can trip it now.")
 
 (defvar emacos--last-commands 'unset
-  "The command set `emacos--render-command-strip' last rendered.
+  "The command set `emacos--render-commands' last rendered.
 The follower re-renders only when the top buffer's derived command set
 actually changes, so transient buffers (*Completions*, *Help*) don't
-flicker the strip — the keyboard itself never moves.")
+flicker the command list — the keyboard itself never moves.")
 
 (defun emacos--target ()
   "Return the editing window (not the keyboard).
@@ -157,7 +157,58 @@ context (region, `this-command', `tab-always-indent', etc.)."
         (with-selected-window w (call-interactively #'indent-for-tab-command))
         (emacos--refocus)))))
 
+(defun emacos--tap-quit ()
+  "Smart escape: clear whatever is cluttering the TOP area in one tap —
+a stuck minibuffer, a *Help*/*Completions*/special-mode popup, extra
+split windows — WITHOUT touching the keyboard.
+
+- Active minibuffer → `abort-recursive-edit'.  This throws back to the
+  minibuffer's recursive edit (which restores focus itself), so the
+  code below is intentionally unreachable on that branch — do NOT move
+  a re-render above the `if'.  We use it rather than `keyboard-quit'
+  precisely because the latter signals `quit' out of this button
+  callback and would skip the rest of the handler.
+- Otherwise, in the editing window: a help-like buffer that took OVER
+  the window is dismissed with `quit-window' (its `q' action), then
+  `delete-other-windows' collapses any popup SPLITS.  The keyboard
+  window survives because `emacos--init' gives it the
+  `no-delete-other-windows' parameter.  `delete-other-windows' is the
+  workhorse (handles popups-in-splits regardless of mode); `quit-window'
+  only matters when the clutter took over the target window itself.
+  *Completions* is `completion-list-mode', whose parent is nil in Emacs
+  30, so it's checked explicitly alongside `special-mode'.
+
+NOTE: window/popup-focused (the actual overload).  Does NOT cancel a
+non-recursive pending state (isearch, an active region, a prefix arg) —
+out of scope for v1."
+  (emacos--commit)
+  (if (active-minibuffer-window)
+      (abort-recursive-edit)
+    (let* ((w (emacos--target))
+           (buf (and w (window-buffer w)))
+           ;; Decide BEFORE selecting the window so the mode check reads
+           ;; the top buffer explicitly (and stays unit-testable).
+           (clutter (and buf
+                         (with-current-buffer buf
+                           (or (derived-mode-p 'special-mode)
+                               (eq major-mode 'completion-list-mode))))))
+      (when w
+        (with-selected-window w
+          (when clutter (quit-window))
+          (delete-other-windows))
+        (emacos--render-page)
+        (emacos--refocus)))))
+
 ;;; Rendering helpers
+
+(defconst emacos--btn-scale 1.75
+  "Uniform :height face value for every keyboard button.
+One source of truth so the per-row width math (`emacos--unit-width')
+and the button height can't drift apart.  The keyboard window scrolls,
+so we don't shrink to fit — every button is this tall.")
+
+(defconst emacos--btn-gap 1.5
+  "Visual width (in character cells) of the gap between buttons in a row.")
 
 (defun emacos--center (text width)
   "Center TEXT in a field of WIDTH characters."
@@ -166,6 +217,15 @@ context (region, `this-command', `tab-always-indent', etc.)."
          (l (/ pad 2))
          (r (- pad l)))
     (concat (make-string l ?\s) text (make-string r ?\s))))
+
+(defun emacos--unit-width (win-w gap-w units gaps)
+  "Character width of ONE layout unit for a row spanning UNITS unit-widths
+\(scaled by `emacos--btn-scale') and GAPS inter-button gaps across WIN-W
+columns.  A button may span more than one unit (e.g. a double-wide RET is
+2 units), so UNITS and the button count can differ.  Floored, min 1 so a
+pathologically narrow window can't drive a width <= 0 (which would crash
+the letter-key `substring').  Pure — testable off the device."
+  (max 1 (floor (/ (- win-w (* gaps gap-w)) (* units emacos--btn-scale)))))
 
 (defun emacos--key-display (kg)
   "Format key group KG for display."
@@ -196,7 +256,7 @@ plumbing."
   "Run CMD interactively in the target (editing) window, then refresh.
 The keyboard surface is always shown, so unlike the old swap model
 there is no page to force/restore.  Re-render only when CMD actually
-changed the strip's command set: an in-place `M-x <mode>' won't fire
+changed the command set: an in-place `M-x <mode>' won't fire
 `window-buffer-change-functions', so the follower can't catch it — but
 a CMD that swaps the top buffer DOES fire the hook, so rendering here
 unconditionally would render twice (and flicker).  Comparing against
@@ -233,20 +293,21 @@ find-file path, a user-error, an aborted kill-buffer query)."
   "Alist mapping major modes to lists of (LABEL . COMMAND) pairs.
 Command-centric modes (where the user invokes commands more than they
 type) belong here.  A mode absent from this alist falls back to
-`emacos-global-commands' in the strip (see `emacos--top-commands').
-Order each list by PRIORITY: the command strip is one row and shows
-only as many commands as fit (earlier = kept); the rest are reachable
-via M-x.  Grow this incrementally.")
+`emacos-global-commands' in the command list (see `emacos--top-commands').
+Order each list by PRIORITY: the command list shows up to
+`emacos--max-commands' (earlier = kept), one per row; the rest are
+reachable via M-x.  Grow this incrementally.")
 
 (defvar emacos-global-commands
   '(("Save"          . save-buffer)
     ("Undo"          . undo)
     ("Find File"     . find-file)
     ("Switch Buffer" . switch-to-buffer))
-  "Command-strip fallback for buffers whose major mode has no entry in
+  "Command-list fallback for buffers whose major mode has no entry in
 `emacos-mode-commands'.  Keeps the universal actions (save, undo, open,
 switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
-~20 multi-taps.  Ordered by priority (the strip truncates to one row).")
+~20 multi-taps.  Ordered by priority (the list shows up to
+`emacos--max-commands').")
 
 (defun emacos--mode-commands-for (mode)
   "Return the command list for MODE, walking up parent modes."
@@ -256,7 +317,7 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
       (setq m (get m 'derived-mode-parent)))
     result))
 
-;;; Top-buffer command set (feeds the command strip)
+;;; Top-buffer command set (feeds the command list)
 
 ;; Defined in chat.el (required at the bottom of this file).  Forward-
 ;; declared so the byte-compiler doesn't warn about the free variable /
@@ -268,8 +329,8 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
-buffer — the contents of the command strip.  One `cond':
-an active minibuffer → nil (you're typing into a prompt; the strip
+buffer — the contents of the command list band.  One `cond':
+an active minibuffer → nil (you're typing into a prompt; the list
 stays empty); the *chat* buffer (by identity) →
 `emacos--chat-command-set'; a major mode with a command set →
 `emacos--mode-commands-for'; everything else → `emacos-global-commands'
@@ -289,37 +350,30 @@ rather than only M-x."
        (t emacos-global-commands))))))
 
 (defun emacos--on-window-buffer-change (_frame)
-  "Re-render when the top buffer changes the strip's command set.
+  "Re-render when the top buffer changes the command set.
 Registered on `window-buffer-change-functions'.  No-ops while a render
 is in progress (the `emacos--in-render' re-entry guard) and when the
 derived command set is unchanged — so transient buffers (*Completions*,
-*Help*) don't flicker the strip.  The keyboard itself never moves; only
-the bottom strip row could change."
+*Help*) don't flicker the command list.  The keyboard itself never
+moves; only the command-list band could change."
   (unless (or emacos--in-render
               (equal (emacos--top-commands) emacos--last-commands))
     (emacos--render-page)))
 
-;;; Surface renderers (the three bands of the composite)
+;;; Surface renderers (the four bands of the composite)
+;;
+;; All buttons render at the uniform `emacos--btn-scale' height; the
+;; keyboard window scrolls, so bands stack as tall as they need.
 
 (defun emacos--render-keyboard ()
-  "Render the Optimal-T9 letter rows + the SPC/RET/DEL/TAB action row,
-sized to fit the keyboard window.  The caps toggle lives in the
-utility row (`emacos--render-utility-row'), not here."
-  (let* ((win      (get-buffer-window (current-buffer)))
-         (win-w    (if win (window-body-width win) 20))
-         ;; gap-w: visual width of the gap between buttons, in character widths.
-         ;; Can be fractional; btn-w shrinks to compensate.
-         (gap-w  1.5)
-         ;; Letter buttons are scale times taller (and wider) than default.
-         ;; btn-w shrinks so 3 scaled buttons + 2 gaps still fill the window.
-         (scale  1.75)
-         ;; max 1 so a pathologically narrow window can't drive widths
-         ;; <=0 (which would crash the letter-key `substring' below).
-         (btn-w  (max 1 (floor (/ (- win-w (* 2 gap-w)) (* 3 scale)))))
-         ;; Action row (SPC/RET/DEL/TAB) is 4-up with its OWN width so
-         ;; adding TAB doesn't shrink the letter keys (the hot path).
-         (action-w (max 1 (floor (/ (- win-w (* 3 gap-w)) (* 4 scale))))))
-    ;; Letter rows — :height scale makes each row ~1.75x taller automatically
+  "Render the Optimal-T9 letter rows (3 rows of key groups) sized to fit
+the keyboard window.  The action keys, utility row, and command list are
+separate bands — see `emacos--render-page'."
+  (let* ((win   (get-buffer-window (current-buffer)))
+         (win-w (if win (window-body-width win) 20))
+         (gap-w emacos--btn-gap)
+         ;; 3 key groups per row, 2 gaps between them.
+         (btn-w (emacos--unit-width win-w gap-w 3 2)))
     (dolist (row emacos-t9-layout)
       (let ((i 0))
         (dolist (kg row)
@@ -329,103 +383,99 @@ utility row (`emacos--render-utility-row'), not here."
                                'display `(space :width ,gap-w)))
           (let* ((s (emacos--key-display kg))
                  (s (substring s 0 (min (length s) btn-w))))
-            (emacos--btn (emacos--center s btn-w) #'emacos--tap-key kg scale))
+            (emacos--btn (emacos--center s btn-w) #'emacos--tap-key kg
+                         emacos--btn-scale))
           (setq i (1+ i))))
-      (insert "\n"))
-    ;; Action row: Space, Return, Backspace, Tab — 4-up at action-w
-    (emacos--btn (emacos--center "SPC" action-w) #'emacos--tap-space nil scale)
+      (insert "\n"))))
+
+(defun emacos--render-action-row ()
+  "Render the editing keys: SPC on its own FULL-WIDTH row (the spec makes
+SPACE the most prominent key), then DEL / TAB / RET with RET DOUBLE-WIDE."
+  (let* ((win   (get-buffer-window (current-buffer)))
+         (win-w (if win (window-body-width win) 20))
+         (gap-w emacos--btn-gap)
+         (spc-w (emacos--unit-width win-w gap-w 1 0))
+         ;; DEL(1) + TAB(1) + RET(2) = 4 units, with 2 gaps between the
+         ;; three buttons.
+         (unit  (emacos--unit-width win-w gap-w 4 2)))
+    ;; Row 4: SPC, full width.
+    (emacos--btn (emacos--center "SPC" spc-w) #'emacos--tap-space nil
+                 emacos--btn-scale)
+    (insert "\n")
+    ;; Row 5: DEL, TAB, RET (RET double-wide).
+    (emacos--btn (emacos--center "DEL" unit) #'emacos--tap-backspace nil
+                 emacos--btn-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "RET" action-w) #'emacos--tap-return nil scale)
+    (emacos--btn (emacos--center "TAB" unit) #'emacos--tap-tab nil
+                 emacos--btn-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "DEL" action-w) #'emacos--tap-backspace nil scale)
-    (insert " ")
-    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "TAB" action-w) #'emacos--tap-tab nil scale)
+    (emacos--btn (emacos--center "RET" (* 2 unit)) #'emacos--tap-return nil
+                 emacos--btn-scale)
     (insert "\n")))
 
 (defun emacos--render-utility-row ()
-  "Render the persistent utility row: caps, M-x, and Chat.
-The non-letter affordances always within reach — `caps' is a keyboard
-modifier (toggles + re-renders); `M-x' runs `execute-extended-command'
-\(the manual command-entry escape hatch); `Chat' shows the *chat*
-buffer (the phone's home app, so it carries the accent face).  All
-three are 3-up at `util-w'."
+  "Render the persistent utility row: QUIT, M-x, Chat, CAPS (4-up).
+`QUIT' (`emacos--tap-quit') clears popup/minibuffer clutter off the top;
+`M-x' runs `execute-extended-command' (manual command entry); `Chat'
+shows the *chat* buffer (the phone's home app — accent face); `CAPS'
+toggles caps lock."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))
-         (util-w (floor (/ (- win-w 2) 3))))
-    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
-                 #'emacos--tap-caps)
+         (gap-w emacos--btn-gap)
+         (util-w (emacos--unit-width win-w gap-w 4 3)))
+    (emacos--btn (emacos--center "QUIT" util-w) #'emacos--tap-quit nil
+                 emacos--btn-scale)
     (insert " ")
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "M-x" util-w)
-                 #'emacos--run-command #'execute-extended-command)
+                 #'emacos--run-command #'execute-extended-command
+                 emacos--btn-scale)
     (insert " ")
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "Chat" util-w)
                  #'emacos--run-command #'emacos--chat-show-top-buffer
-                 nil "dodger blue")
+                 emacos--btn-scale "dodger blue")
+    (insert " ")
+    (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
+    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") util-w)
+                 #'emacos--tap-caps nil emacos--btn-scale)
     (insert "\n")))
 
-(defun emacos--command-spec (entry)
-  "Normalize a command-strip ENTRY to (LABEL CMD HEIGHT).
-ENTRY is either (LABEL . CMD) — the common shape, HEIGHT nil — or
-(LABEL CMD HEIGHT) when a command wants a non-default button height
-\(only chat's SEND does today; see `emacos--chat-command-set').
-Discriminated by `(consp (cdr entry))': the cons shape's cdr is the
-command symbol (an atom), the list shape's cdr is (CMD HEIGHT)."
-  (if (consp (cdr entry))
-      (list (car entry) (cadr entry) (caddr entry))
-    (list (car entry) (cdr entry) nil)))
+;; Cap on the command list.  No mode currently has this many; it's a
+;; bound so a future over-long set can't run the (scrollable but finite)
+;; keyboard off the bottom.
+(defconst emacos--max-commands 10)
 
-(defun emacos--commands-fitting (commands width)
-  "Return the prefix of COMMANDS whose buttons fit one row of WIDTH cols.
-Each button renders as \" LABEL \" (label + 2 padding) plus a one-space
-inter-button gap, so the Nth button costs (length label) + 3.  Order is
-priority: earlier entries survive, the rest fall to M-x.  Pure — WIDTH
-is passed in, so it's testable off the device.  The cost counts a
-trailing gap after the last button, so it under-fills by one space —
-safe on a narrow screen; don't \"optimize\" that into an overflow."
-  (let ((used 0) (kept '()))
-    (catch 'done
-      (dolist (entry commands)
-        (let ((cost (+ (length (car entry)) 3)))
-          (if (<= (+ used cost) width)
-              (setq used (+ used cost)
-                    kept (cons entry kept))
-            (throw 'done nil)))))
-    (nreverse kept)))
-
-(defun emacos--render-command-strip ()
-  "Render one row of the top buffer's commands (the \"top commands under
-the keyboard\"), truncated to a single row; overflow is reachable via
-M-x.  Caches the derived set in `emacos--last-commands' so the follower
-can no-op when nothing changed."
-  (let* ((win   (get-buffer-window (current-buffer)))
-         (win-w (if win (window-body-width win) 20))
-         (commands (emacos--top-commands)))
+(defun emacos--render-commands ()
+  "Render up to `emacos--max-commands' of the top buffer's commands, ONE
+PER ROW as same-height buttons (the keyboard window scrolls, so this can
+run past the fold).  Caches the FULL derived set in `emacos--last-commands'
+so the follower can no-op when the set is unchanged."
+  (let ((commands (emacos--top-commands)))
     (setq emacos--last-commands commands)
-    (dolist (entry (emacos--commands-fitting commands win-w))
-      (let ((spec (emacos--command-spec entry)))
-        (emacos--btn (concat " " (nth 0 spec) " ")
-                     #'emacos--run-command (nth 1 spec) (nth 2 spec))
-        (insert " ")))
-    (insert "\n")))
+    (dolist (entry (seq-take commands emacos--max-commands))
+      (emacos--btn (concat " " (car entry) " ") #'emacos--run-command
+                   (cdr entry) emacos--btn-scale)
+      (insert "\n"))))
 
 ;;; Render dispatch
 
 (defun emacos--render-page ()
   "Render the *keyboard* window: the always-on composite of the T9
-keyboard, the utility row, and the top-buffer command strip.  Binds
-`emacos--in-render' for the duration so the window-buffer-change
-follower can't recurse into an in-progress render."
+keyboard, the action row, the utility row, and the top-buffer command
+list.  Binds `emacos--in-render' for the duration so the
+window-buffer-change follower can't recurse into an in-progress render."
   (let ((buf (get-buffer-create "*keyboard*"))
         (emacos--in-render t))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
         (emacos--render-keyboard)
+        (emacos--render-action-row)
         (emacos--render-utility-row)
-        (emacos--render-command-strip))
+        (emacos--render-commands))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
@@ -459,7 +509,7 @@ follower can't recurse into an in-progress render."
     (set-window-parameter kw 'no-delete-other-windows t)
     (setq emacos--target-window (selected-window)))
   ;; Render after the window is visible so dimensions are known.  The
-  ;; command strip derives from the top buffer at render time, and the
+  ;; command list derives from the top buffer at render time, and the
   ;; follower hook (registered at load time, below) keeps it in sync.
   (emacos--render-page))
 
