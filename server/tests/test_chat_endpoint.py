@@ -334,6 +334,34 @@ def test_checkpointer_is_singleton(tmp_path, monkeypatch):
     assert app_mod._checkpointer() is app_mod._checkpointer()
 
 
+def test_private_makedirs_is_user_only(tmp_path):
+    """Conversation state (threads.db transcripts, AGENTS.md memory) must
+    live under a user-only (0700) dir so other local users can't read chat
+    history.  Also tightens a pre-existing loose dir."""
+    import stat
+    import emacsos_server.app as app_mod
+
+    d = str(tmp_path / "sub" / "leaf")
+    app_mod._private_makedirs(d)
+    assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+    # Idempotent + tightens an already-existing world-readable dir.
+    os.chmod(d, 0o755)
+    app_mod._private_makedirs(d)
+    assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+def test_checkpointer_creates_private_state_dir(tmp_path, monkeypatch):
+    """Building the checkpointer creates state_dir as 0700 (gates
+    threads.db from other local users)."""
+    import stat
+    import emacsos_server.app as app_mod
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
+    monkeypatch.setattr(app_mod, "_CHECKPOINTER", None)
+    app_mod._checkpointer()
+    assert stat.S_IMODE(os.stat(app_mod.config.state_dir).st_mode) == 0o700
+
+
 # --- applied event (derived from apply_config's tool result) ----------------
 
 def test_apply_config_result_emits_applied_event(client):

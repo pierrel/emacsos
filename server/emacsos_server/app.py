@@ -140,6 +140,18 @@ CONVERSATION_THREAD_ID = "emacsos-phone"
 _CHECKPOINTER = None
 
 
+def _private_makedirs(path: str) -> None:
+    """`makedirs` + enforce user-only (0700) perms, even on an existing dir.
+    The conversation state under `state_dir` — `threads.db` (full chat
+    transcripts) and the working dir (the agent's `AGENTS.md` memory,
+    derived from user prompts) — is personal data; a 0700 dir keeps it out
+    of reach of other local users regardless of umask.  `chmod` (not just
+    `makedirs(mode=...)`, which is umask-masked and a no-op on an existing
+    dir) so a pre-existing loose dir is tightened too."""
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
 def _conversation_working_dir() -> str:
     """Stable per-conversation working dir (the agent's default
     FilesystemBackend root).  Reused across turns — no per-/chat tempdir
@@ -165,7 +177,10 @@ def _checkpointer():
     global _CHECKPOINTER
     if _CHECKPOINTER is None:
         from langgraph.checkpoint.sqlite import SqliteSaver
-        os.makedirs(config.state_dir, exist_ok=True)
+        # 0700 state_dir: gates threads.db (chat transcripts) from other
+        # local users even though SqliteSaver creates the db with default
+        # perms — they can't traverse a user-only parent.
+        _private_makedirs(config.state_dir)
         db_path = os.path.join(config.state_dir, "threads.db")
         _CHECKPOINTER = SqliteSaver(
             sqlite3.connect(db_path, check_same_thread=False))
@@ -185,7 +200,7 @@ def _build_thread(phone_ctx: PhoneContext):
     from assist.thread import Thread
 
     working_dir = _conversation_working_dir()
-    os.makedirs(working_dir, exist_ok=True)
+    _private_makedirs(working_dir)
     # sandbox_backend=None: emacsos runs the agent without a
     # container sandbox.  model=None lets Thread call
     # `select_chat_model` itself, which reads ASSIST_MODEL_URL.
@@ -470,7 +485,7 @@ def _clear_conversation() -> dict:
         # becomes the structured error below rather than a false "cleared".
         if os.path.isdir(wd):
             shutil.rmtree(wd)
-        os.makedirs(wd, exist_ok=True)
+        _private_makedirs(wd)
         return {"status": "cleared"}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500
         log.exception("clear failed")
