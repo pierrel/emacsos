@@ -22,3 +22,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["emacsos_server*"]
+
+# Ship the skill files (SKILL.md under emacsos_server/skills/) in a
+# wheel/sdist, not just under an editable install — the config-apply skill
+# backend reads them at runtime.
+[tool.setuptools.package-data]
+emacsos_server = ["skills/**/*.md"]

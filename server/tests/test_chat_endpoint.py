@@ -327,8 +327,12 @@ def test_build_thread_binds_fixed_id_and_persistent_checkpointer(tmp_path, monke
     # agent's emacs exploration isn't terminated prematurely.
     assert captured["loop_exploration_tools"] == frozenset({"eval_elisp"})
     # The config-apply skill is wired in so the agent learns the
-    # verify->apply_config workflow instead of wandering.
-    assert captured["extra_skill_sources"] is app_mod._skill_sources()
+    # verify->apply_config workflow instead of wandering.  Assert on
+    # contents (route -> backend), not identity, so the test isn't coupled
+    # to _skill_sources()'s caching.
+    skill_sources = captured["extra_skill_sources"]
+    assert app_mod.EMACSOS_SKILLS_ROUTE in skill_sources
+    assert skill_sources[app_mod.EMACSOS_SKILLS_ROUTE] is not None
 
 
 def test_skill_sources_has_config_apply_route_and_file():
