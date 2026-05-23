@@ -136,7 +136,7 @@ RUNAWAY_SECONDS = 30 * 60.0
 CONVERSATION_THREAD_ID = "emacsos-phone"
 
 # Lazily built so importing this module (e.g. in tests) doesn't create
-# threads.db until a turn actually runs.
+# threads.db until a request needs it (a /chat turn or a /clear).
 _CHECKPOINTER = None
 
 
@@ -145,10 +145,11 @@ def _private_makedirs(path: str) -> None:
     The conversation state under `state_dir` — `threads.db` (full chat
     transcripts) and the working dir (the agent's `AGENTS.md` memory,
     derived from user prompts) — is personal data; a 0700 dir keeps it out
-    of reach of other local users regardless of umask.  `chmod` (not just
-    `makedirs(mode=...)`, which is umask-masked and a no-op on an existing
-    dir) so a pre-existing loose dir is tightened too."""
-    os.makedirs(path, exist_ok=True)
+    of reach of other local users regardless of umask.  `mode=0o700` on
+    `makedirs` creates it restricted from the start (no group/world window
+    before the `chmod` — matters under a shared parent); the `chmod` then
+    tightens a pre-existing dir, where `makedirs` is a no-op."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
     os.chmod(path, 0o700)
 
 

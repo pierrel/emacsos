@@ -401,10 +401,12 @@ forgets the conversation), and clears the transcript regardless."
   (emacos--chat-buffer)
   (let ((emacos-chat-server-url "http://10.0.0.5:8765/chat")
         (posted '())
-        (resp nil))
+        (resp nil)
+        (body nil))
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (url &rest _)
                  (push (cons url url-request-method) posted)
+                 (setq body url-request-data)
                  ;; Return a buffer like the real url-retrieve; track it so
                  ;; we can kill it (we don't invoke the callback, which
                  ;; would otherwise do the killing) — no leaked ` *http*'
@@ -413,7 +415,9 @@ forgets the conversation), and clears the transcript regardless."
       (emacos--chat-new-chat))
     (when (buffer-live-p resp) (kill-buffer resp))
     (should (equal (caar posted) "http://10.0.0.5:8765/clear"))
-    (should (equal (cdar posted) "POST"))))
+    (should (equal (cdar posted) "POST"))
+    ;; Empty-but-valid JSON body, matching the declared Content-Type.
+    (should (equal body "{}"))))
 
 (ert-deftest chat-test-new-chat-refuses-in-flight ()
   "New chat is a no-op while a stream is in flight: it must not POST

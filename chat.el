@@ -661,7 +661,9 @@ blocking the local transcript reset."
   (let ((url-request-method "POST")
         (url-request-extra-headers
          '(("Content-Type" . "application/json; charset=utf-8")))
-        (url-request-data ""))
+        ;; Empty but valid JSON to match the declared Content-Type; the
+        ;; server ignores the body (/clear is argument-free).
+        (url-request-data "{}"))
     (condition-case err
         (url-retrieve (emacos--chat-endpoint "/clear")
                       #'emacos--chat-forget-callback nil t t)
