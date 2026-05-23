@@ -13,6 +13,7 @@ Every test sends a `phone.auth_file` in the request body so
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -478,10 +479,15 @@ def test_clear_endpoint_returns_cleared(client):
     assert r.json() == {"status": "cleared"}
 
 
-def test_clear_conversation_deletes_the_fixed_thread(monkeypatch):
-    """_clear_conversation deletes exactly the fixed conversation thread
-    from the checkpointer, so the next /chat starts fresh."""
+def test_clear_conversation_resets_thread_and_working_dir(tmp_path, monkeypatch):
+    """_clear_conversation deletes the fixed thread's checkpoint AND wipes
+    the conversation working dir (where the agent's `AGENTS.md` memory
+    lives), so "New chat" fully forgets — not just the transcript.  The
+    working-dir wipe was added after a live smoke showed the agent still
+    recalling a saved fact after a checkpoint-only clear."""
     import emacsos_server.app as app_mod
+
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
 
     deleted = {}
 
@@ -490,9 +496,20 @@ def test_clear_conversation_deletes_the_fixed_thread(monkeypatch):
             deleted["tid"] = tid
 
     monkeypatch.setattr(app_mod, "_checkpointer", lambda: _FakeCP())
+
+    # Seed the working dir with an agent memory file that must NOT survive.
+    wd = app_mod._conversation_working_dir()
+    os.makedirs(wd, exist_ok=True)
+    memory = os.path.join(wd, "AGENTS.md")
+    with open(memory, "w") as f:
+        f.write("codeword: ZEPHYR-9\n")
+
     out = app_mod._clear_conversation()
+
     assert out == {"status": "cleared"}
     assert deleted["tid"] == app_mod.CONVERSATION_THREAD_ID
+    assert not os.path.exists(memory), "agent memory survived New chat"
+    assert os.path.isdir(wd), "working dir should be recreated empty"
 
 
 def test_clear_conversation_returns_structured_error_on_exception(monkeypatch):

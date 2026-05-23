@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -436,11 +437,26 @@ async def rollback(req: RollbackRequest, request: Request):
 
 
 def _clear_conversation() -> dict:
-    """Forget the persistent conversation: delete its checkpoint state so
-    the next /chat starts fresh.  Backs the phone's "New chat".  Any
-    failure comes back as a structured error, never a bare 500."""
+    """Forget the persistent conversation so the next /chat starts fresh.
+    Backs the phone's "New chat".  Two parts, because conversation state
+    lives in TWO places:
+
+    1. the checkpointer (messages + summarization offload) → `delete_thread`;
+    2. the working dir, where the agent's memory middleware persists facts
+       to `AGENTS.md` (and may scratch other files).  This dir is now
+       STABLE/reused across turns, so `delete_thread` alone would leave the
+       agent still recalling saved facts after a "New chat" — contrary to
+       the forget-everything intent (found in the live smoke).  So we wipe
+       and recreate it.  Safe: it holds only agent scratch/memory; the
+       persistent config lives in the SEPARATE git config repo.  Quiescent
+       under `_STREAM_LOCK`, so no in-flight turn is using it.
+
+    Any failure comes back as a structured error, never a bare 500."""
     try:
         _checkpointer().delete_thread(CONVERSATION_THREAD_ID)
+        wd = _conversation_working_dir()
+        shutil.rmtree(wd, ignore_errors=True)
+        os.makedirs(wd, exist_ok=True)
         return {"status": "cleared"}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500
         log.exception("clear failed")

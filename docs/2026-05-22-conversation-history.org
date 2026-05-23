@@ -67,6 +67,10 @@ which resets transcript AND server memory together.  The label makes it clearly 
 screen-tidy.  =/clear= is argument-free (it never calls back into the phone, unlike =/rollback=) and
 fire-and-forget on the elisp side (local reset can't fail).
 
+=/clear= resets BOTH places conversation state lives: =delete_thread= for the checkpoint (messages +
+summarization offload) AND a wipe of the working dir, because the agent persists facts to
+=<working_dir>/AGENTS.md= (deepagents' memory middleware) — see the live-smoke finding below.
+
 * Design-review revisions (2026-05-22)
 
 Four-lens design-review team (simplicity, agentic best practices, user guidance, clean interfaces).
@@ -80,14 +84,32 @@ Folded in:
    encoder.
 3. *Corrected the persistence rationale* (agentic).  The =conversation_history= offload rides the
    *checkpointer* via =StateBackend=, not the working-dir filesystem — so removing the per-turn
-   =rmtree= is correct but immaterial to durability (it just fixes the tempdir leak).  Conversation
-   state, the summary offload, and the private =_summarization_event= all live in the checkpoint, so
-   =delete_thread= is a complete reset with no orphans.
+   =rmtree= is correct but immaterial to durability (it just fixes the tempdir leak).  Messages, the
+   summary offload, and the private =_summarization_event= all live in the checkpoint.  (Note: the
+   review concluded =delete_thread= alone was "a complete reset"; the live smoke later proved it is
+   NOT — the agent's =AGENTS.md= memory lives in the working dir, outside the checkpoint.  See the
+   live-smoke finding below.)
 4. =_STREAM_LOCK= now documented as load-bearing for =/clear='s *quiescence* (not just DB-level
    safety): it keeps a CLEAR from deleting the thread mid-turn.
 5. =CONVERSATION_THREAD_ID= is a constant, not a config knob; =state_dir= is one field with a
-   computed default.  Removed the now-unused =shutil=/=tempfile= imports.  Updated the stale "fresh
-   per stream" lifecycle comments.
+   computed default.  Updated the stale "fresh per stream" lifecycle comments.
+
+* Live-smoke findings (2026-05-22)
+
+A live multi-turn smoke against the real Qwen3.6-27B (not the mocked unit tests) confirmed the core
+mechanism AND caught one real gap:
+
+- *Continuity* ✅ and *restart-survival* ✅ — turn 2 recalled a fact from turn 1, and a fresh
+  checkpointer connection over the same db + thread id still recalled it.
+- *=delete_thread= clears the checkpoint* ✅ — deterministically, raw message count went 6 → 0.
+- *BUT "New chat" did not make the agent forget* ❌ — after =delete_thread=, the model still recalled
+  a non-default codeword.  Root cause: deepagents' memory middleware persists facts the agent saves
+  to =<working_dir>/AGENTS.md=, which lives in the working dir, NOT the checkpoint.  Because this
+  change made the working dir STABLE (it was a fresh tempdir per turn before, so the memory file was
+  silently wiped every turn and never persisted), =delete_thread= alone no longer fully resets.
+  *Fix:* =_clear_conversation= now also =rmtree=s and recreates the working dir (re-introducing the
+  =shutil= import the design-review round had removed — the requirement reversed).  Safe: the working
+  dir holds only agent scratch/memory; the persistent config is in the separate git config repo.
 
 * Known limitations
 
