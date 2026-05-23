@@ -448,8 +448,14 @@ def _clear_conversation() -> dict:
        agent still recalling saved facts after a "New chat" — contrary to
        the forget-everything intent (found in the live smoke).  So we wipe
        and recreate it.  Safe: it holds only agent scratch/memory; the
-       persistent config lives in the SEPARATE git config repo.  Quiescent
-       under `_STREAM_LOCK`, so no in-flight turn is using it.
+       persistent config lives in the SEPARATE git config repo.
+
+    On the normal path `_STREAM_LOCK` keeps this quiescent — no in-flight
+    turn is using the dir.  Caveat (same as the lock comment above): an
+    ABORT/runaway can leave an orphaned worker briefly running after the
+    lock releases; it could race the wipe, which `rmtree(ignore_errors=
+    True)` tolerates — any file the worker re-creates is just stale scratch
+    the next turn / next New chat re-wipes.
 
     Any failure comes back as a structured error, never a bare 500."""
     try:
@@ -465,11 +471,12 @@ def _clear_conversation() -> dict:
 
 @app.post("/clear")
 async def clear(request: Request):
-    """New chat: forget the persistent conversation by deleting its
-    checkpoint state.  Argument-free — unlike /rollback it never touches
-    the phone (no emacsclient callback), so it needs no phone context or
-    body.  Serialized behind the same `_STREAM_LOCK` as /chat so it can't
-    wipe the thread out from under an in-flight turn."""
+    """New chat: forget the persistent conversation — both its checkpoint
+    state AND the working dir (the agent's `AGENTS.md` memory); see
+    `_clear_conversation`.  Argument-free — unlike /rollback it never
+    touches the phone (no emacsclient callback), so it needs no phone
+    context or body.  Serialized behind the same `_STREAM_LOCK` as /chat so
+    it can't wipe state out from under an in-flight turn."""
     log.info("POST /clear")
     loop = asyncio.get_running_loop()
     await _STREAM_LOCK.acquire()

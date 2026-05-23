@@ -653,10 +653,11 @@ conversation otherwise persists across turns and restarts."
 
 (defun emacos--chat-forget-server ()
   "POST /clear so the server forgets the persistent conversation.
-Argument-free: /clear deletes server-side checkpoint state only and
-never calls back into this emacs (unlike /rollback), so it needs no
-phone context.  Fire-and-forget — a failure is logged via `message',
-never blocking the local transcript reset."
+Argument-free: /clear resets server-side conversation state — the
+checkpoint AND the agent's working-dir memory (=AGENTS.md=) — and never
+calls back into this emacs (unlike /rollback), so it needs no phone
+context.  Fire-and-forget — a failure is logged via `message', never
+blocking the local transcript reset."
   (let ((url-request-method "POST")
         (url-request-extra-headers
          '(("Content-Type" . "application/json; charset=utf-8")))
