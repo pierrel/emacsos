@@ -112,9 +112,11 @@ Other dimensions worth iterating once the basic args preview lands:
 
 ** DONE Conversation persistence across /chat requests
 
-Shipped: =_build_thread= now reuses ONE persistent =assist.Thread= per
-phone (a fixed thread id + a =SqliteSaver= on =<state_dir>/threads.db=)
-instead of a fresh one per request, so the agent remembers prior turns
+Shipped: =_build_thread= now persists the conversation across /chat turns
+via a fixed thread id + a =SqliteSaver= checkpointer on
+=<state_dir>/threads.db= — the Thread OBJECT is rebuilt each request, but
+its state lives in the checkpointer (replayed by thread id), instead of
+the old fresh-state-per-request — so the agent remembers prior turns
 ("now make it bigger", "make that permanent").  Reset is an explicit
 "New chat" (=POST /clear= → =delete_thread=).  Context-window growth is
 delegated to deepagents' =SummarizationMiddleware= (no custom windowing);
