@@ -28,7 +28,8 @@ just consume that existing API.
   FIXED =CONVERSATION_THREAD_ID= ("emacsos-phone"); one stable per-conversation working dir.
   =_build_thread= now passes =checkpointer== + =thread_id== and reuses the stable working dir
   instead of =tempfile.mkdtemp= per turn.  New argument-free =POST /clear= behind =_STREAM_LOCK= →
-  =checkpointer.delete_thread=.
+  =delete_thread= AND a wipe/recreate of the working dir (the agent's =AGENTS.md= memory lives
+  there, outside the checkpoint — see live-smoke findings).
 - =chat.el=: the second chat command relabels CLEAR → *New chat*; it clears the local transcript AND
   fire-and-forgets =POST /clear= so the server forgets in lockstep.
 

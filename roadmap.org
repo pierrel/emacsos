@@ -118,7 +118,8 @@ via a fixed thread id + a =SqliteSaver= checkpointer on
 its state lives in the checkpointer (replayed by thread id), instead of
 the old fresh-state-per-request — so the agent remembers prior turns
 ("now make it bigger", "make that permanent").  Reset is an explicit
-"New chat" (=POST /clear= → =delete_thread=).  Context-window growth is
+"New chat" (=POST /clear= → =delete_thread= + a wipe of the conversation
+working dir, which clears the agent's =AGENTS.md= memory too).  Context-window growth is
 delegated to deepagents' =SummarizationMiddleware= (no custom windowing);
 the raw log accumulates in threads.db but the model context stays
 bounded, and New chat is the release valve.  See
