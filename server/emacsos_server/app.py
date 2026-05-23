@@ -451,17 +451,25 @@ def _clear_conversation() -> dict:
        persistent config lives in the SEPARATE git config repo.
 
     On the normal path `_STREAM_LOCK` keeps this quiescent — no in-flight
-    turn is using the dir.  Caveat (same as the lock comment above): an
+    turn is using the dir.  We do NOT pass `ignore_errors=True`: a genuine
+    wipe failure (permission/IO) must surface as a structured error, not a
+    false "cleared" that silently leaves `AGENTS.md` behind.  The
+    missing-dir case (clear before any /chat) is handled by the `isdir`
+    guard, not by swallowing.  Caveat (same as the lock comment above): an
     ABORT/runaway can leave an orphaned worker briefly running after the
-    lock releases; it could race the wipe, which `rmtree(ignore_errors=
-    True)` tolerates — any file the worker re-creates is just stale scratch
-    the next turn / next New chat re-wipes.
+    lock releases; on Linux `rmtree` still unlinks its open files, and a
+    file the worker re-creates AFTER the wipe is stale scratch the next New
+    chat re-wipes — worst case that rare race surfaces as a retry-able
+    error.
 
     Any failure comes back as a structured error, never a bare 500."""
     try:
         _checkpointer().delete_thread(CONVERSATION_THREAD_ID)
         wd = _conversation_working_dir()
-        shutil.rmtree(wd, ignore_errors=True)
+        # Default ignore_errors=False: a real wipe failure raises and
+        # becomes the structured error below rather than a false "cleared".
+        if os.path.isdir(wd):
+            shutil.rmtree(wd)
         os.makedirs(wd, exist_ok=True)
         return {"status": "cleared"}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500

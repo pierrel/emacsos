@@ -524,3 +524,28 @@ def test_clear_conversation_returns_structured_error_on_exception(monkeypatch):
     out = app_mod._clear_conversation()
     assert out["status"] == "error"
     assert "db boom" in out["detail"]
+
+
+def test_clear_conversation_surfaces_wipe_failure(tmp_path, monkeypatch):
+    """A genuine working-dir wipe failure must be reported as a structured
+    error, NOT a false 'cleared' (which would leave AGENTS.md behind).
+    Regression guard against re-introducing rmtree(ignore_errors=True)."""
+    import emacsos_server.app as app_mod
+
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
+
+    class _FakeCP:
+        def delete_thread(self, _tid):
+            pass
+
+    monkeypatch.setattr(app_mod, "_checkpointer", lambda: _FakeCP())
+    # Dir must exist so the wipe is attempted; then make rmtree fail hard.
+    os.makedirs(app_mod._conversation_working_dir(), exist_ok=True)
+
+    def boom(*_a, **_k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(app_mod.shutil, "rmtree", boom)
+    out = app_mod._clear_conversation()
+    assert out["status"] == "error"
+    assert "PermissionError" in out["detail"] or "denied" in out["detail"]
