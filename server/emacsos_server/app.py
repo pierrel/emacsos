@@ -41,6 +41,30 @@ log = logging.getLogger("emacsos_server")
 app = FastAPI(title="emacsos-server", version="0.2.0")
 config = Config.from_env()
 
+# Embedder skill route: a virtual-path backend holding our SKILL.md files,
+# passed to the agent via create_agent's extra_skill_sources (ADDS to the
+# built-in assist skills — distinct key from assist's SKILLS_ROUTE).  The
+# config-apply skill teaches the verify->apply_config workflow so the small
+# model doesn't wander on persistent-config requests.
+EMACSOS_SKILLS_ROUTE = "/emacsos-skills/"
+_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
+_SKILL_SOURCES = None
+
+
+def _skill_sources() -> dict:
+    """Route -> backend mapping for `create_agent(extra_skill_sources=...)`.
+    Built lazily so the `FilesystemBackend` import defers deepagents'
+    transitive imports off module load — same reason `_build_thread`
+    imports `assist.thread.Thread` lazily."""
+    global _SKILL_SOURCES
+    if _SKILL_SOURCES is None:
+        from deepagents.backends import FilesystemBackend
+        _SKILL_SOURCES = {
+            EMACSOS_SKILLS_ROUTE: FilesystemBackend(root_dir=_SKILLS_DIR,
+                                                    virtual_mode=True)
+        }
+    return _SKILL_SOURCES
+
 
 class PhoneAuth(BaseModel):
     auth_file: str
@@ -212,6 +236,7 @@ def _build_thread(phone_ctx: PhoneContext):
         sandbox_backend=None,
         extra_tools=EMACS_TOOLS,
         loop_exploration_tools=LOOP_EXPLORATION_TOOLS,
+        extra_skill_sources=_skill_sources(),
         extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
     )
     # Surface the resolved context window: summarization's 0.85 trigger

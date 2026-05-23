@@ -326,6 +326,19 @@ def test_build_thread_binds_fixed_id_and_persistent_checkpointer(tmp_path, monke
     # eval_elisp opts into the relaxed LoopDetection threshold so the
     # agent's emacs exploration isn't terminated prematurely.
     assert captured["loop_exploration_tools"] == frozenset({"eval_elisp"})
+    # The config-apply skill is wired in so the agent learns the
+    # verify->apply_config workflow instead of wandering.
+    assert captured["extra_skill_sources"] is app_mod._skill_sources()
+
+
+def test_skill_sources_has_config_apply_route_and_file():
+    """The embedder skill route is built and the config-apply SKILL.md
+    is present (loader sanity — guards a missing/renamed skill file)."""
+    import emacsos_server.app as app_mod
+    sources = app_mod._skill_sources()
+    assert app_mod.EMACSOS_SKILLS_ROUTE in sources
+    assert os.path.exists(
+        os.path.join(app_mod._SKILLS_DIR, "config-apply", "SKILL.md"))
 
 
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):
