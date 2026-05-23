@@ -400,14 +400,18 @@ forgets the conversation), and clears the transcript regardless."
   (chat-test--reset)
   (emacos--chat-buffer)
   (let ((emacos-chat-server-url "http://10.0.0.5:8765/chat")
-        (posted '()))
+        (posted '())
+        (resp nil))
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (url &rest _)
                  (push (cons url url-request-method) posted)
-                 ;; Return a throwaway buffer; the real callback would
-                 ;; kill it, but we don't invoke it here.
-                 (generate-new-buffer " *clear-resp*"))))
+                 ;; Return a buffer like the real url-retrieve; track it so
+                 ;; we can kill it (we don't invoke the callback, which
+                 ;; would otherwise do the killing) — no leaked ` *http*'
+                 ;; buffers across the ERT run.
+                 (setq resp (generate-new-buffer " *clear-resp*")))))
       (emacos--chat-new-chat))
+    (when (buffer-live-p resp) (kill-buffer resp))
     (should (equal (caar posted) "http://10.0.0.5:8765/clear"))
     (should (equal (cdar posted) "POST"))))
 
