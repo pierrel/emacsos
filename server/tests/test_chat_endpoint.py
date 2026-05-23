@@ -323,6 +323,9 @@ def test_build_thread_binds_fixed_id_and_persistent_checkpointer(tmp_path, monke
     # Phone toolset + context still wired through unchanged.
     assert captured["extra_tools"] is app_mod.EMACS_TOOLS
     assert captured["extra_config"]["configurable"]["phone_context"] is ctx
+    # eval_elisp opts into the relaxed LoopDetection threshold so the
+    # agent's emacs exploration isn't terminated prematurely.
+    assert captured["loop_exploration_tools"] == frozenset({"eval_elisp"})
 
 
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):

@@ -29,7 +29,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
+from .channel import EMACS_TOOLS, LOOP_EXPLORATION_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
 from .config import Config
 from .config_repo import ConfigRepo, render
 from . import apply as apply_mod
@@ -211,6 +211,7 @@ def _build_thread(phone_ctx: PhoneContext):
         checkpointer=_checkpointer(),
         sandbox_backend=None,
         extra_tools=EMACS_TOOLS,
+        loop_exploration_tools=LOOP_EXPLORATION_TOOLS,
         extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
     )
     # Surface the resolved context window: summarization's 0.85 trigger

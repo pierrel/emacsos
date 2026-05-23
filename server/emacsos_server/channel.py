@@ -232,3 +232,14 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
 # a sub-agent and the result stops surfacing — the event silently never
 # fires and the ROLLBACK button never appears.
 EMACS_TOOLS = [eval_elisp, apply_config]
+
+# Tools whose distinct-args *breadth* is normal exploration, not a loop —
+# they get a relaxed LoopDetection Pattern-C threshold (see assist's
+# LoopDetectionMiddleware `exploration_tools`).  Only `eval_elisp`: it's
+# the agent's primary inspection tool (probe a live emacs), and the small
+# model fires many distinct probes (some erroring as it fumbles the API)
+# before settling — which used to trip the thrash detector and terminate
+# the run before it reached `apply_config`.  `apply_config` is deliberately
+# NOT here: it's a committing mutation that should stay fully loop-protected
+# (it still gets caught by Patterns A/B and the default Pattern-C threshold).
+LOOP_EXPLORATION_TOOLS = frozenset({"eval_elisp"})
