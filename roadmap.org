@@ -158,6 +158,33 @@ So this single item subsumes what was once "chat-revert" + "N-level" +
 "targeted": the one-level phone button is the fast path; this is the
 rich, conversational path, and it's where we head next.
 
+*** TODO Agent can't read current config after =/clear= (prerequisite)
+
+Surfaced 2026-05-23 by a live "set the cursor blue" turn right after a
+=/clear= ("New chat").  =apply_config= replaces the whole config file, so
+the config-apply skill tells the agent to *read the current config first*
+and restate it.  But with conversation memory wiped by =/clear=, the agent
+has no way to *find* the config: it tried =(user-init-file)=,
+=(load-file)=, =(getenv "EMACS_CONFIG")= — none reach
+=~/.emacs.d/emacsos/agent.el= (a server-side path it can't know) — and
+LoopDetection then caught the distinct-args thrash and terminated the
+turn.  Nothing was applied (the failure was *safe*), but the user's most
+likely action after a reset — "now change X" — currently can't persist.
+
+Root cause: the agent relies on conversation *memory* as the source of
+truth for current config.  That memory is double-edged — with it the
+agent can restate config (but resurrects stale settings, e.g. the
+line-numbers bug that =/clear= was meant to cure); without it
+(post-=/clear=) it can't apply at all.
+
+Fix direction: stop relying on memory — give the agent a reliable read
+path (a =get_config= / =read_config= tool, or inject the current
+=agent.el= body into the skill/system context).  Then =/clear= is safe
+(memory gone, config still readable) AND there's no resurrection (the
+committed file is the source of truth, not memory).  A prerequisite for
+the flexible config management above — that work also needs the agent to
+navigate config state, so fold it in or land it first.
+
 ** DONE Phone tempdir leak
 
 Fixed as a consequence of conversation persistence (above): the
