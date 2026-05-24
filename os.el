@@ -203,18 +203,33 @@ out of scope for v1."
 
 ;;; Rendering helpers
 
-(defconst emacos--btn-scale 1.75
-  "Uniform :height face value for every keyboard button.
-One source of truth so the per-row width math (`emacos--unit-width')
-and the button height can't drift apart.  The keyboard window scrolls,
-so we don't shrink to fit — every button is this tall.
+(defconst emacos--btn-label-scale 0.8
+  "Font :height for a keyboard button's LABEL (not its tap-target size).
+Drives two things that must agree: the glyph size of the label, and the
+per-row width budget (`emacos--unit-width' divides by this).  Kept below
+1.0 so the longest T9 group (\"ertyui\", 6 chars) fits in a group's cell
+budget instead of truncating to \"ert\" — at 0.8 the budget is ~7 cells
+wide at the phone's ~20-col keyboard.
 
-NOTE: button SIZE is coupled to this — a text button is only as big as
-its (scaled) glyphs, so lowering this to fit longer T9 labels also
-shrinks the tap target.  At this scale the longest group (\"ertyui\")
-truncates to its first letters; fixing that without shrinking the
-buttons needs decoupled sizing (vertical box/line-spacing padding
-independent of font height) — a deliberate follow-up, not a knob tweak.")
+Decoupled from button HEIGHT on purpose: a text button is otherwise only
+as tall as its glyphs, so a label small enough to fit would also shrink
+the tap target.  `emacos--btn-vpad' adds the height back via box padding,
+so the label can be small AND the button big.")
+
+(defconst emacos--btn-vpad 8
+  "Vertical box padding (pixels) added top+bottom to every keyboard button.
+This is the button-HEIGHT knob, decoupled from `emacos--btn-label-scale'
+\(the font size): it pads the tap target taller without enlarging the
+glyphs.  Maps to the HWIDTH (top/bottom) element of the face `:box'
+`:line-width' — vertical only, so it never widens a button and can't push
+a row past the window edge (which would wrap the keyboard).")
+
+(defconst emacos--btn-hpad 1
+  "Horizontal box padding (pixels) on a keyboard button's left+right edges.
+Kept small: unlike `emacos--btn-vpad', horizontal padding adds width the
+per-row cell math (`emacos--unit-width') doesn't account for, so a large
+value would overflow the ~20-col row and wrap the keyboard.  Maps to the
+VWIDTH (left/right) element of the face `:box' `:line-width'.")
 
 (defconst emacos--btn-gap 1.5
   "Visual width (in character cells) of the gap between buttons in a row.")
@@ -229,12 +244,12 @@ independent of font height) — a deliberate follow-up, not a knob tweak.")
 
 (defun emacos--unit-width (win-w gap-w units gaps)
   "Character width of ONE layout unit for a row spanning UNITS unit-widths
-\(scaled by `emacos--btn-scale') and GAPS inter-button gaps across WIN-W
+\(scaled by `emacos--btn-label-scale') and GAPS inter-button gaps across WIN-W
 columns.  A button may span more than one unit (e.g. a double-wide RET is
 2 units), so UNITS and the button count can differ.  Floored, min 1 so a
 pathologically narrow window can't drive a width <= 0 (which would crash
 the letter-key `substring').  Pure — testable off the device."
-  (max 1 (floor (/ (- win-w (* gaps gap-w)) (* units emacos--btn-scale)))))
+  (max 1 (floor (/ (- win-w (* gaps gap-w)) (* units emacos--btn-label-scale)))))
 
 (defun emacos--key-display (kg)
   "Format key group KG for display."
@@ -243,20 +258,24 @@ the letter-key `substring').  Pure — testable off the device."
 
 (defun emacos--btn (label action &optional arg height bg)
   "Insert a clickable button showing LABEL that calls ACTION (with ARG).
-HEIGHT, if given, is a face :height float (e.g. 1.75 = 75%% taller).
-BG, if given, overrides the default gray background — used to accent a
-high-priority affordance (the Chat button) so it reads as the app, not
-plumbing."
+HEIGHT, if given, is a face :height float for the LABEL font (callers
+pass `emacos--btn-label-scale').  The button's tap-target HEIGHT is
+separate: it comes from the `:box' vertical padding (`emacos--btn-vpad'),
+so a small label still gets a big button.  BG, if given, overrides the
+default gray background — used to accent a high-priority affordance (the
+Chat button) so it reads as the app, not plumbing."
   (insert-text-button
    label
    'action (if arg
               (lambda (_) (funcall action arg))
             (lambda (_) (funcall action)))
    'follow-link t
-   'face `(:box (:line-width (1 . 1) :style released-button)
+   'face `(:box (:line-width (,emacos--btn-hpad . ,emacos--btn-vpad)
+                 :style released-button)
            :background ,(or bg "gray25") :foreground "white"
            ,@(when height `(:height ,height)))
-   'mouse-face '(:box (:line-width (1 . 1) :style pressed-button)
+   'mouse-face `(:box (:line-width (,emacos--btn-hpad . ,emacos--btn-vpad)
+                       :style pressed-button)
                  :background "gray45" :foreground "white")))
 
 ;;; Command execution
@@ -402,7 +421,8 @@ moves; only the command-list band could change."
 
 ;;; Surface renderers (the four bands of the composite)
 ;;
-;; All buttons render at the uniform `emacos--btn-scale' height; the
+;; All buttons share the same label font (`emacos--btn-label-scale') and
+;; the same tap-target height (`emacos--btn-vpad' box padding); the
 ;; keyboard window scrolls, so bands stack as tall as they need.
 
 (defun emacos--render-keyboard ()
@@ -424,7 +444,7 @@ separate bands — see `emacos--render-page'."
           (let* ((s (emacos--key-display kg))
                  (s (substring s 0 (min (length s) btn-w))))
             (emacos--btn (emacos--center s btn-w) #'emacos--tap-key kg
-                         emacos--btn-scale))
+                         emacos--btn-label-scale))
           (setq i (1+ i))))
       (insert "\n"))))
 
@@ -441,23 +461,23 @@ separate bands — see `emacos--render-page'."
          (unit  (emacos--unit-width win-w gap-w 4 2)))
     ;; Row: DEL (left, 1/3), SPC (right, 2/3).
     (emacos--btn (emacos--center "DEL" third) #'emacos--tap-backspace nil
-                 emacos--btn-scale)
+                 emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "SPC" (* 2 third)) #'emacos--tap-space nil
-                 emacos--btn-scale)
+                 emacos--btn-label-scale)
     (insert "\n")
     ;; Row: CAPS, TAB, RET (RET double-wide).  CAPS sits where DEL was.
     (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") unit)
-                 #'emacos--tap-caps nil emacos--btn-scale)
+                 #'emacos--tap-caps nil emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "TAB" unit) #'emacos--tap-tab nil
-                 emacos--btn-scale)
+                 emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "RET" (* 2 unit)) #'emacos--tap-return nil
-                 emacos--btn-scale)
+                 emacos--btn-label-scale)
     (insert "\n")))
 
 (defun emacos--render-utility-row ()
@@ -473,17 +493,17 @@ between \"Chat\" and \"SEND\" accordingly.  CAPS lives on the action row
          (gap-w emacos--btn-gap)
          (util-w (emacos--unit-width win-w gap-w 3 2)))
     (emacos--btn (emacos--center "QUIT" util-w) #'emacos--tap-quit nil
-                 emacos--btn-scale)
+                 emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "M-x" util-w)
                  #'emacos--run-command #'execute-extended-command
-                 emacos--btn-scale)
+                 emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center (emacos--chat-button-label) util-w)
                  #'emacos--run-command #'emacos--chat-button
-                 emacos--btn-scale "dodger blue")
+                 emacos--btn-label-scale "dodger blue")
     (insert "\n")))
 
 ;; Cap on the command list.  No mode currently has this many; it's a
@@ -500,7 +520,7 @@ so the follower can no-op when the set is unchanged."
     (setq emacos--last-commands commands)
     (dolist (entry (seq-take commands emacos--max-commands))
       (emacos--btn (concat " " (car entry) " ") #'emacos--run-command
-                   (cdr entry) emacos--btn-scale)
+                   (cdr entry) emacos--btn-label-scale)
       (insert "\n"))))
 
 ;;; Render dispatch

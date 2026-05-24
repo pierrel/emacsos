@@ -147,18 +147,47 @@ is ABORT, not New chat."
 
 ;;; emacos--unit-width (pure per-unit width math)
 
+;; These pin the MATH, so they bind `emacos--btn-label-scale' to a fixed
+;; value rather than reading the production default — tuning the default
+;; (the keyboard label font) must not break the width-math assertions.
 (ert-deftest test-os-unit-width-full-width-single-button ()
   "1 unit, 0 gaps → floor(win-w / scale).  At scale 1.75, win-w 35 → 20."
-  (should (= (emacos--unit-width 35 1.5 1 0) 20)))
+  (let ((emacos--btn-label-scale 1.75))
+    (should (= (emacos--unit-width 35 1.5 1 0) 20))))
 
 (ert-deftest test-os-unit-width-accounts-for-gaps ()
   "N units with G gaps subtract G*gap before dividing by N*scale:
 floor((36 - 3*1.5) / (4*1.75)) = floor(31.5/7.0) = 4."
-  (should (= (emacos--unit-width 36 1.5 4 3) 4)))
+  (let ((emacos--btn-label-scale 1.75))
+    (should (= (emacos--unit-width 36 1.5 4 3) 4))))
 
 (ert-deftest test-os-unit-width-min-1 ()
   "A pathologically narrow window can't drive a width <= 0."
-  (should (= (emacos--unit-width 1 1.5 4 3) 1)))
+  (let ((emacos--btn-label-scale 1.75))
+    (should (= (emacos--unit-width 1 1.5 4 3) 1))))
+
+(ert-deftest test-os-label-scale-fits-longest-t9-group ()
+  "Regression: the production `emacos--btn-label-scale' must leave enough
+per-group cells that the longest T9 group renders in full — decoupling the
+font from button height is what lets it be small enough to (the \"ert…\"
+truncation bug).  3 groups, 2 gaps; the render `substring's each label to
+the budget.  Pinned at win-w 20 (the phone's keyboard width); re-derives
+the longest group from `emacos-t9-layout' so it tracks layout edits."
+  (let* ((longest (apply #'max (mapcar #'length
+                                       (apply #'append emacos-t9-layout))))
+         (budget (emacos--unit-width 20 emacos--btn-gap 3 2)))
+    (should (>= budget longest))))
+
+(ert-deftest test-os-btn-applies-vertical-box-padding ()
+  "A button's tap-target height comes from `emacos--btn-vpad' via the face
+box `:line-width' (HWIDTH = top/bottom), decoupled from the label font —
+so a small label still yields a big button.  `emacos--btn-hpad' is the
+VWIDTH (left/right); both land in the (VWIDTH . HWIDTH) cons."
+  (with-temp-buffer
+    (emacos--btn "x" #'ignore)
+    (let* ((face (get-text-property (point-min) 'face))
+           (line-width (plist-get (plist-get face :box) :line-width)))
+      (should (equal line-width (cons emacos--btn-hpad emacos--btn-vpad))))))
 
 (ert-deftest test-os-action-row-widths ()
   "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: CAPS/TAB 1 unit,
