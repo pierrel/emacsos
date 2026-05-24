@@ -283,17 +283,51 @@ bot line if a stream was open (start handler had run)."
 ;;; Command-list integration
 
 (ert-deftest chat-test-command-set-shows-abort-when-in-flight ()
-  "The chat command set's second button is \"New chat\" when idle and
-ABORT while a stream is in flight (re-derived on every render)."
+  "The chat command set's first button is \"New chat\" when idle and ABORT
+while a stream is in flight (re-derived on every render).  SEND is no
+longer in this list — it moved to the utility-row Chat/SEND button."
   (chat-test--reset)
   (require 'os)
   (let ((emacos--chat-in-flight nil))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("SEND" "New chat"))))
+                   '("New chat"))))
   (let ((emacos--chat-in-flight t))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("SEND" "ABORT"))))
+                   '("ABORT"))))
   (setq emacos--chat-in-flight nil))
+
+;;; Chat/SEND utility button (emacos--chat-button)
+
+(ert-deftest chat-test-button-sends-when-chat-on-top ()
+  "The utility Chat/SEND button SENDs when *chat* is the top buffer."
+  (chat-test--reset)
+  (let ((fired nil))
+    (cl-letf (((symbol-function 'emacos--chat-on-top-p) (lambda () t))
+              ((symbol-function 'emacos--chat-send)
+               (lambda () (setq fired 'send)))
+              ((symbol-function 'emacos--chat-show-top-buffer)
+               (lambda () (setq fired 'open))))
+      (emacos--chat-button))
+    (should (eq fired 'send))))
+
+(ert-deftest chat-test-button-opens-chat-when-elsewhere ()
+  "The utility Chat/SEND button OPENS chat when *chat* isn't on top."
+  (chat-test--reset)
+  (let ((fired nil))
+    (cl-letf (((symbol-function 'emacos--chat-on-top-p) (lambda () nil))
+              ((symbol-function 'emacos--chat-send)
+               (lambda () (setq fired 'send)))
+              ((symbol-function 'emacos--chat-show-top-buffer)
+               (lambda () (setq fired 'open))))
+      (emacos--chat-button))
+    (should (eq fired 'open))))
+
+(ert-deftest chat-test-button-label-flips-with-chat-on-top ()
+  "Label is SEND when *chat* is on top (button sends), Chat otherwise."
+  (cl-letf (((symbol-function 'emacos--chat-on-top-p) (lambda () t)))
+    (should (equal (emacos--chat-button-label) "SEND")))
+  (cl-letf (((symbol-function 'emacos--chat-on-top-p) (lambda () nil)))
+    (should (equal (emacos--chat-button-label) "Chat"))))
 
 (ert-deftest chat-test-switch-shows-top-buffer ()
   (chat-test--reset)
@@ -390,7 +424,8 @@ stubbed so this stays a local-only unit test."
   (chat-test--reset)
   (emacos--chat-buffer)
   (setq emacos--chat-can-rollback t)
-  (cl-letf (((symbol-function 'emacos--chat-forget-server) #'ignore))
+  (cl-letf (((symbol-function 'emacos--chat-forget-server) #'ignore)
+            ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
     (emacos--chat-new-chat))
   (should-not emacos--chat-can-rollback))
 
@@ -403,7 +438,8 @@ forgets the conversation), and clears the transcript regardless."
         (posted '())
         (resp nil)
         (body nil))
-    (cl-letf (((symbol-function 'url-retrieve)
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+              ((symbol-function 'url-retrieve)
                (lambda (url &rest _)
                  (push (cons url url-request-method) posted)
                  (setq body url-request-data)
@@ -421,15 +457,36 @@ forgets the conversation), and clears the transcript regardless."
 
 (ert-deftest chat-test-new-chat-refuses-in-flight ()
   "New chat is a no-op while a stream is in flight: it must not POST
-/clear nor wipe the transcript out from under a running turn."
+/clear nor wipe the transcript out from under a running turn — and it
+must NOT even prompt (the refusal comes before the confirm)."
   (chat-test--reset)
   (emacos--chat-buffer)
   (let ((emacos--chat-in-flight t)
-        (called nil))
+        (called nil)
+        (prompted nil))
     (cl-letf (((symbol-function 'emacos--chat-forget-server)
-               (lambda () (setq called t))))
+               (lambda () (setq called t)))
+              ((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (setq prompted t) t)))
       (emacos--chat-new-chat))
-    (should-not called)))
+    (should-not called)
+    (should-not prompted)))
+
+(ert-deftest chat-test-new-chat-aborts-when-declined ()
+  "Declining the confirm prompt leaves the conversation intact: no
+/clear POST, and the transcript-clearing init is not run."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (let ((forgot nil)
+        (reinit nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil))
+              ((symbol-function 'emacos--chat-forget-server)
+               (lambda () (setq forgot t)))
+              ((symbol-function 'emacos--chat-init-buffer)
+               (lambda (&rest _) (setq reinit t))))
+      (emacos--chat-new-chat))
+    (should-not forgot)
+    (should-not reinit)))
 
 (ert-deftest chat-test-forget-callback-kills-response-buffer ()
   "The /clear response buffer must be killed so repeated New-chat taps

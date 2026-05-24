@@ -30,6 +30,32 @@ though only the parent is in the alist."
 (ert-deftest test-os-mode-commands-unknown-is-nil ()
   (should-not (emacos--mode-commands-for 'fundamental-mode)))
 
+(ert-deftest test-os-mode-commands-prog-mode-walk ()
+  "A code buffer with no own entry walks up to the prog-mode set."
+  (define-derived-mode test-os--child-prog prog-mode "ChildProg")
+  (unwind-protect
+      (should (equal (emacos--mode-commands-for 'test-os--child-prog)
+                     (cdr (assq 'prog-mode emacos-mode-commands))))
+    (put 'test-os--child-prog 'derived-mode-parent nil)))
+
+(ert-deftest test-os-mode-commands-text-mode-walk ()
+  "A text buffer with no own entry walks up to the text-mode set."
+  (define-derived-mode test-os--child-text text-mode "ChildText")
+  (unwind-protect
+      (should (equal (emacos--mode-commands-for 'test-os--child-text)
+                     (cdr (assq 'text-mode emacos-mode-commands))))
+    (put 'test-os--child-text 'derived-mode-parent nil)))
+
+(ert-deftest test-os-mode-commands-magit-is-data-only ()
+  "magit-status-mode resolves to its command set WITHOUT magit loaded —
+the alist is data; entries only ever fire when the user is in that mode
+(so the package is already loaded).  Regression guard: don't add a
+`require' to the alist definition."
+  (let ((set (emacos--mode-commands-for 'magit-status-mode)))
+    (should set)
+    (should (equal (caar set) "Stage"))
+    (should (<= (length set) emacos--max-commands))))
+
 ;;; emacos--top-commands (the command set for the top buffer)
 
 (ert-deftest test-os-top-commands-minibuffer-is-empty ()
@@ -77,11 +103,11 @@ never an empty list — so a plain text buffer keeps them one tap away."
                   ((symbol-function 'window-buffer) (lambda (_) chat-buf)))
           (let ((emacos--chat-in-flight nil))
             (should (equal (mapcar #'car (emacos--top-commands))
-                           '("SEND" "New chat"))))
+                           '("New chat"))))
           ;; In flight, the abort path must surface via top-commands.
           (let ((emacos--chat-in-flight t))
             (should (equal (mapcar #'car (emacos--top-commands))
-                           '("SEND" "ABORT")))))
+                           '("ABORT")))))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer chat-buf)))))
 
@@ -110,29 +136,48 @@ compares against the full set)."
 (ert-deftest test-os-chat-command-set-idle ()
   (let ((emacos--chat-in-flight nil))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("SEND" "New chat")))))
+                   '("New chat")))))
 
 (ert-deftest test-os-chat-command-set-in-flight-shows-abort ()
   "The abort path must survive mid-stream: in flight, the second button
 is ABORT, not New chat."
   (let ((emacos--chat-in-flight t))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("SEND" "ABORT")))))
+                   '("ABORT")))))
 
 ;;; emacos--unit-width (pure per-unit width math)
 
+;; These pin the MATH, so they bind `emacos--btn-scale' to a fixed value
+;; rather than reading the production default — that way tuning the
+;; default (e.g. shrinking the keyboard font) doesn't break the math test.
 (ert-deftest test-os-unit-width-full-width-single-button ()
   "1 unit, 0 gaps → floor(win-w / scale).  At scale 1.75, win-w 35 → 20."
-  (should (= (emacos--unit-width 35 1.5 1 0) 20)))
+  (let ((emacos--btn-scale 1.75))
+    (should (= (emacos--unit-width 35 1.5 1 0) 20))))
 
 (ert-deftest test-os-unit-width-accounts-for-gaps ()
   "N units with G gaps subtract G*gap before dividing by N*scale:
 floor((36 - 3*1.5) / (4*1.75)) = floor(31.5/7.0) = 4."
-  (should (= (emacos--unit-width 36 1.5 4 3) 4)))
+  (let ((emacos--btn-scale 1.75))
+    (should (= (emacos--unit-width 36 1.5 4 3) 4))))
 
 (ert-deftest test-os-unit-width-min-1 ()
   "A pathologically narrow window can't drive a width <= 0."
-  (should (= (emacos--unit-width 1 1.5 4 3) 1)))
+  (let ((emacos--btn-scale 1.75))
+    (should (= (emacos--unit-width 1 1.5 4 3) 1))))
+
+(ert-deftest test-os-btn-scale-fits-longest-t9-group ()
+  "Regression: the production `emacos--btn-scale' default must leave
+enough per-group cells that the longest T9 letter group renders in full.
+The keyboard splits its width into 3 groups with 2 gaps; the render then
+`substring's each label to that cell budget, so a budget below the
+longest group truncates it (the \"ert…\" bug).  Pinned at win-w 20 — the
+phone's measured keyboard width — and re-derives the longest group from
+the layout so it tracks edits to `emacos-t9-layout'."
+  (let* ((longest (apply #'max (mapcar #'length
+                                       (apply #'append emacos-t9-layout))))
+         (budget (emacos--unit-width 20 emacos--btn-gap 3 2)))
+    (should (>= budget longest))))
 
 (ert-deftest test-os-action-row-widths ()
   "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: CAPS/TAB 1 unit,

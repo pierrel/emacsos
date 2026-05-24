@@ -13,6 +13,69 @@
 
 (require 'os)
 
+;; Faces tuned for the 320x240 screen.
+;;
+;; `default' (the keyboard + code buffers) stays MONOSPACE — os.el's
+;; per-unit button-width math assumes a fixed char cell, and code wants
+;; alignment.  DejaVu Sans Mono reads better at small px than the
+;; fontconfig default (clearer l/I/1, taller x-height).
+;;
+;; Non-code text should NOT be monospaced, so prose buffers use the
+;; proportional `variable-pitch' face instead (more legible for reading).
+;; We point `variable-pitch' at a proportional family here; chat.el turns
+;; on `variable-pitch-mode' in *chat*, and the text-mode hook below covers
+;; text buffers.
+;;
+;; Both families are find-font-guarded with fallback chains so a missing
+;; font can't leave the screen illegible.  Set BEFORE agent.el loads, so
+;; agent-applied config can still override these.
+(let ((mono (catch 'found
+              (dolist (f '("DejaVu Sans Mono" "Noto Sans Mono"
+                           "Liberation Mono"))
+                (when (find-font (font-spec :family f))
+                  (throw 'found f)))))
+      (prop (catch 'found
+              (dolist (f '("DejaVu Sans" "Cantarell" "Nunito Sans"
+                           "Liberation Sans"))
+                (when (find-font (font-spec :family f))
+                  (throw 'found f))))))
+  (when mono
+    (set-face-attribute 'default nil :family mono :height 120)
+    ;; `fixed-pitch' is the mono face prose buffers fall back to for the
+    ;; bits that MUST stay monospace — org src blocks, code, tables.
+    (set-face-attribute 'fixed-pitch nil :family mono :height 120)
+    ;; Mode line is just the " EmacsOS" label — shrink it to give the
+    ;; transcript/editor more of the screen's ~16 rows.
+    (set-face-attribute 'mode-line nil :height 100)
+    (set-face-attribute 'mode-line-inactive nil :height 100))
+  (when prop
+    (set-face-attribute 'variable-pitch nil :family prop :height 120)))
+
+;; Non-code text is proportional, not monospaced (uses `variable-pitch').
+(add-hook 'text-mode-hook #'variable-pitch-mode)
+
+;; org-mode: prose proportional, but src blocks / code / tables / metadata
+;; stay monospace (alignment matters there).  Adapted from the user's
+;; ~/beautify-org.el (zzamboni) — just the pitch split, dropping the
+;; org-bullets package and the aggressive headline scaling (no room on a
+;; 320x240 screen).  The org faces inherit `fixed-pitch' (set above) so
+;; they track the mono family.
+(add-hook 'org-mode-hook #'variable-pitch-mode)
+(with-eval-after-load 'org
+  (dolist (spec '((org-block                 . fixed-pitch)
+                  (org-code                  . (shadow fixed-pitch))
+                  (org-verbatim              . (shadow fixed-pitch))
+                  (org-table                 . fixed-pitch)
+                  (org-meta-line             . (font-lock-comment-face fixed-pitch))
+                  (org-special-keyword       . (font-lock-comment-face fixed-pitch))
+                  (org-property-value        . fixed-pitch)
+                  (org-document-info-keyword . (shadow fixed-pitch))
+                  (org-indent                . (org-hide fixed-pitch))))
+    ;; `facep' guard: some (e.g. org-indent) only exist once their
+    ;; sub-feature loads — skip rather than error.
+    (when (facep (car spec))
+      (set-face-attribute (car spec) nil :inherit (cdr spec)))))
+
 ;; Where the agent-applied config lives.  THE PHONE OWNS THIS PATH:
 ;; `apply_config` (server) reads this defvar over the wire and writes
 ;; here, falling back to the same literal if it's somehow unbound — so

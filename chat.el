@@ -136,6 +136,10 @@ Also clears `emacos--chat-can-rollback' so a fresh / CLEARed transcript
 doesn't dangle a ROLLBACK button with no surrounding context."
   (setq emacos--chat-can-rollback nil)
   (with-current-buffer buf
+    ;; Chat is prose, not code — render the transcript + input in the
+    ;; proportional `variable-pitch' face (the keyboard stays monospace
+    ;; in its own buffer).  The face family is set in the init snippet.
+    (variable-pitch-mode 1)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (emacos--chat-write-prompt))
@@ -641,15 +645,25 @@ forget the conversation (POST /clear), so the agent no longer remembers
 earlier turns.  Refuses while in flight (tap ABORT first if you want to
 stop a stream).
 
+Guarded by a confirmation prompt: the button lives on the always-present
+command surface, is an easy mis-tap, and the clear is irreversible (it
+wipes the conversation AND the agent's working-dir memory).  The button
+is tapped, so on the graphical phone `y-or-n-p' pops a clickable Yes/No
+dialog (`use-dialog-box') rather than a keyboard-only minibuffer prompt.
+The in-flight refusal comes BEFORE the prompt — no sense asking the user
+to confirm an action we're going to decline anyway.
+
 The server reset is fire-and-forget: the local transcript clears
 regardless of whether /clear succeeds, matching CLEAR's old can't-fail
 feel.  This is the ONLY thing that makes the agent forget — the
 conversation otherwise persists across turns and restarts."
   (interactive)
-  (if emacos--chat-in-flight
-      (message "chat: stream in flight; tap ABORT to cancel")
+  (cond
+   (emacos--chat-in-flight
+    (message "chat: stream in flight; tap ABORT to cancel"))
+   ((y-or-n-p "Start a new chat?  This clears the conversation. ")
     (emacos--chat-forget-server)
-    (emacos--chat-init-buffer (emacos--chat-buffer))))
+    (emacos--chat-init-buffer (emacos--chat-buffer)))))
 
 (defun emacos--chat-forget-server ()
   "POST /clear so the server forgets the persistent conversation.
@@ -704,16 +718,16 @@ url-http state machine, so any sentinel-driven cleanup is unreliable."
 ;;; Command-list integration
 
 (defun emacos--chat-command-set ()
-  "Command-list entries for the *chat* buffer: SEND, then New chat (idle)
-/ ABORT (in flight), and — only after a config apply — ROLLBACK at the
-very bottom (rarely used).  Plain (LABEL . CMD) conses like every other
-command entry (uniform-height buttons).  Dynamic — re-derived on every
-`emacos--render-page', so the second button flips as
-`emacos--chat-in-flight' changes and ROLLBACK appears/disappears with
+  "Command-list entries for the *chat* buffer: New chat (idle) / ABORT (in
+flight), and — only after a config apply — ROLLBACK at the very bottom
+(rarely used).  SEND is no longer here — it moved to the always-present
+utility row's Chat/SEND button (`emacos--chat-button'), so the most-used
+action is one tap away on every screen.  Plain (LABEL . CMD) conses;
+dynamic — re-derived on every `emacos--render-page', so the first button
+flips with `emacos--chat-in-flight' and ROLLBACK appears/disappears with
 `emacos--chat-can-rollback'."
   (append
-   (list (cons "SEND" #'emacos--chat-send)
-         (if emacos--chat-in-flight
+   (list (if emacos--chat-in-flight
              (cons "ABORT" #'emacos--chat-abort)
            (cons "New chat" #'emacos--chat-new-chat)))
    ;; ROLLBACK last — rarely used, and only available after an apply.
@@ -783,13 +797,37 @@ repeated rollbacks don't leak ` *http*` buffers."
 
 (defun emacos--chat-show-top-buffer ()
   "Display *chat* in the editor (target) window.  Idempotent.
-Interactive so the Chat utility button (and M-x) can reach it — it's
-how the user returns to the phone's home app from any other buffer."
+Interactive so M-x can reach it; the Chat utility button reaches it via
+`emacos--chat-button' when *chat* isn't already on top."
   (interactive)
   (let ((buf (emacos--chat-buffer))
         (w (emacos--target)))
     (when (and w (not (eq (window-buffer w) buf)))
       (set-window-buffer w buf))))
+
+(defun emacos--chat-on-top-p ()
+  "Non-nil when *chat* is the buffer in the target (editor) window.
+Uses `emacos--target' — the authority on \"what's on top\" — not
+`current-buffer' (renders/callbacks run with *keyboard* current), so it
+agrees with `emacos--top-commands'."
+  (let ((w (emacos--target)))
+    (and w (eq (window-buffer w) (get-buffer emacos--chat-buffer-name)))))
+
+(defun emacos--chat-button ()
+  "Utility-row Chat/SEND button: SEND when *chat* is already on top, else
+open *chat*.  The always-present third utility button doubles as the
+home-app affordance (open chat) and — once you're in chat — the
+most-used action (send).  While a stream is in flight, `emacos--chat-send'
+refuses with a hint and the command list shows ABORT."
+  (interactive)
+  (if (emacos--chat-on-top-p)
+      (emacos--chat-send)
+    (emacos--chat-show-top-buffer)))
+
+(defun emacos--chat-button-label ()
+  "Label for the utility-row Chat/SEND button: \"SEND\" when *chat* is on
+top (the button sends), else \"Chat\" (it opens chat)."
+  (if (emacos--chat-on-top-p) "SEND" "Chat"))
 
 (provide 'chat)
 ;;; chat.el ends here

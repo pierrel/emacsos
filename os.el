@@ -203,11 +203,19 @@ out of scope for v1."
 
 ;;; Rendering helpers
 
-(defconst emacos--btn-scale 1.75
+(defconst emacos--btn-scale 0.8
   "Uniform :height face value for every keyboard button.
 One source of truth so the per-row width math (`emacos--unit-width')
 and the button height can't drift apart.  The keyboard window scrolls,
-so we don't shrink to fit — every button is this tall.")
+so we don't shrink to fit — every button is this tall.
+
+Sub-1.0 (i.e. smaller than `default') on purpose: the screen is only
+~20 cols wide, and `emacos--unit-width' = floor((win-w - gaps) /
+(units * scale)).  A larger scale floors the per-group cell budget so
+low it truncates the longest T9 group (\"ertyui\", 6 chars) down to its
+first few letters.  At 0.8 the budget is ~7 cells per group, so every
+group renders in full with a little centering pad, and stays >= 6 even
+if the window narrows to 18 cols.")
 
 (defconst emacos--btn-gap 1.5
   "Visual width (in character cells) of the gap between buttons in a row.")
@@ -291,7 +299,36 @@ find-file path, a user-error, an aborted kill-buffer query)."
      ("Rename" . dired-do-rename)
      ("Copy"   . dired-do-copy)
      ("Delete" . dired-do-delete)
-     ("Refresh" . revert-buffer)))
+     ("Refresh" . revert-buffer))
+    (magit-status-mode
+     ("Stage"   . magit-stage)
+     ("Unstage" . magit-unstage)
+     ("Commit"  . magit-commit-create)
+     ("Push"    . magit-push)
+     ("Pull"    . magit-pull)
+     ("Fetch"   . magit-fetch)
+     ("Branch"  . magit-branch)
+     ("Log"     . magit-log)
+     ("Diff"    . magit-diff)
+     ("Refresh" . magit-refresh))
+    ;; prog-mode is a common ancestor: code buffers without their own
+    ;; entry walk up to here.  Indent is intentionally omitted — the
+    ;; keyboard's TAB button already runs `indent-for-tab-command'.
+    (prog-mode
+     ("Save"       . save-buffer)
+     ("Comment"    . comment-line)
+     ("Goto Line"  . goto-line)
+     ("Search"     . isearch-forward)
+     ("Replace"    . query-replace)
+     ("Next Error" . next-error)
+     ("Xref Def"   . xref-find-definitions))
+    (text-mode
+     ("Save"      . save-buffer)
+     ("Search"    . isearch-forward)
+     ("Replace"   . query-replace)
+     ("Spell"     . ispell-buffer)
+     ("Fill"      . fill-paragraph)
+     ("Goto Line" . goto-line)))
   "Alist mapping major modes to lists of (LABEL . COMMAND) pairs.
 Command-centric modes (where the user invokes commands more than they
 type) belong here.  A mode absent from this alist falls back to
@@ -328,6 +365,8 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (defvar emacos--chat-buffer-name)
 (declare-function emacos--chat-command-set "chat")
 (declare-function emacos--chat-show-top-buffer "chat")
+(declare-function emacos--chat-button "chat")
+(declare-function emacos--chat-button-label "chat")
 
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
@@ -423,11 +462,13 @@ separate bands — see `emacos--render-page'."
     (insert "\n")))
 
 (defun emacos--render-utility-row ()
-  "Render the persistent utility row: QUIT, M-x, Chat (3-up).
+  "Render the persistent utility row: QUIT, M-x, Chat/SEND (3-up).
 `QUIT' (`emacos--tap-quit') clears popup/minibuffer clutter off the top;
-`M-x' runs `execute-extended-command' (manual command entry); `Chat'
-shows the *chat* buffer (the phone's home app — accent face).  CAPS
-lives on the action row (`emacos--render-action-row')."
+`M-x' runs `execute-extended-command' (manual command entry); the third
+button (`emacos--chat-button', accent face) opens the *chat* home app
+when chat isn't on top and SENDS the input when it is — its label flips
+between \"Chat\" and \"SEND\" accordingly.  CAPS lives on the action row
+(`emacos--render-action-row')."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))
          (gap-w emacos--btn-gap)
@@ -441,8 +482,8 @@ lives on the action row (`emacos--render-action-row')."
                  emacos--btn-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "Chat" util-w)
-                 #'emacos--run-command #'emacos--chat-show-top-buffer
+    (emacos--btn (emacos--center (emacos--chat-button-label) util-w)
+                 #'emacos--run-command #'emacos--chat-button
                  emacos--btn-scale "dodger blue")
     (insert "\n")))
 
