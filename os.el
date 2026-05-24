@@ -203,19 +203,18 @@ out of scope for v1."
 
 ;;; Rendering helpers
 
-(defconst emacos--btn-scale 0.8
+(defconst emacos--btn-scale 1.75
   "Uniform :height face value for every keyboard button.
 One source of truth so the per-row width math (`emacos--unit-width')
 and the button height can't drift apart.  The keyboard window scrolls,
 so we don't shrink to fit — every button is this tall.
 
-Sub-1.0 (i.e. smaller than `default') on purpose: the screen is only
-~20 cols wide, and `emacos--unit-width' = floor((win-w - gaps) /
-(units * scale)).  A larger scale floors the per-group cell budget so
-low it truncates the longest T9 group (\"ertyui\", 6 chars) down to its
-first few letters.  At 0.8 the budget is ~7 cells per group, so every
-group renders in full with a little centering pad, and stays >= 6 even
-if the window narrows to 18 cols.")
+NOTE: button SIZE is coupled to this — a text button is only as big as
+its (scaled) glyphs, so lowering this to fit longer T9 labels also
+shrinks the tap target.  At this scale the longest group (\"ertyui\")
+truncates to its first letters; fixing that without shrinking the
+buttons needs decoupled sizing (vertical box/line-spacing padding
+independent of font height) — a deliberate follow-up, not a knob tweak.")
 
 (defconst emacos--btn-gap 1.5
   "Visual width (in character cells) of the gap between buttons in a row.")

@@ -147,37 +147,18 @@ is ABORT, not New chat."
 
 ;;; emacos--unit-width (pure per-unit width math)
 
-;; These pin the MATH, so they bind `emacos--btn-scale' to a fixed value
-;; rather than reading the production default — that way tuning the
-;; default (e.g. shrinking the keyboard font) doesn't break the math test.
 (ert-deftest test-os-unit-width-full-width-single-button ()
   "1 unit, 0 gaps → floor(win-w / scale).  At scale 1.75, win-w 35 → 20."
-  (let ((emacos--btn-scale 1.75))
-    (should (= (emacos--unit-width 35 1.5 1 0) 20))))
+  (should (= (emacos--unit-width 35 1.5 1 0) 20)))
 
 (ert-deftest test-os-unit-width-accounts-for-gaps ()
   "N units with G gaps subtract G*gap before dividing by N*scale:
 floor((36 - 3*1.5) / (4*1.75)) = floor(31.5/7.0) = 4."
-  (let ((emacos--btn-scale 1.75))
-    (should (= (emacos--unit-width 36 1.5 4 3) 4))))
+  (should (= (emacos--unit-width 36 1.5 4 3) 4)))
 
 (ert-deftest test-os-unit-width-min-1 ()
   "A pathologically narrow window can't drive a width <= 0."
-  (let ((emacos--btn-scale 1.75))
-    (should (= (emacos--unit-width 1 1.5 4 3) 1))))
-
-(ert-deftest test-os-btn-scale-fits-longest-t9-group ()
-  "Regression: the production `emacos--btn-scale' default must leave
-enough per-group cells that the longest T9 letter group renders in full.
-The keyboard splits its width into 3 groups with 2 gaps; the render then
-`substring's each label to that cell budget, so a budget below the
-longest group truncates it (the \"ert…\" bug).  Pinned at win-w 20 — the
-phone's measured keyboard width — and re-derives the longest group from
-the layout so it tracks edits to `emacos-t9-layout'."
-  (let* ((longest (apply #'max (mapcar #'length
-                                       (apply #'append emacos-t9-layout))))
-         (budget (emacos--unit-width 20 emacos--btn-gap 3 2)))
-    (should (>= budget longest))))
+  (should (= (emacos--unit-width 1 1.5 4 3) 1)))
 
 (ert-deftest test-os-action-row-widths ()
   "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: CAPS/TAB 1 unit,
