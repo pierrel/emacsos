@@ -192,52 +192,54 @@ per-/chat `tempfile.mkdtemp` is gone — the persistent conversation now
 uses ONE stable working dir under `<state_dir>/threads/`, reused across
 turns, so there's no per-turn directory to accumulate.
 
-** TODO Sub-agent turns wedge the server (nested subgraph + shared checkpointer)
+** DONE Sub-agent turns wedge the server (langgraph 1.2 streamed-path bugs)
 
-Any /chat turn that spawns a SUB-AGENT (the =task= tool → =research-agent=,
-=context-agent=) hangs the moment the sub-agent finishes: the sub-agent's
-last model call completes, then the MAIN agent never resumes — no next
-model call, no error, just silence — and the orphaned worker thread then
-wedges EVERY later turn (they build their Thread, reach the checkpointer,
-and block) until the uvicorn worker is restarted.
+Any /chat turn that spawned a SUB-AGENT (=task= → =research-agent=,
+=context-agent=) wedged the moment the sub-agent ran: no next model call,
+no error, just silence; then the orphaned worker wedged EVERY later turn
+until the uvicorn worker was restarted.
 
-*Pinpoint.*  Introduced by =5f0dd90= "Persist conversation history across
-/chat turns" (2026-05-22), which added the process-wide persistent
-=SqliteSaver= checkpointer (one connection on =threads.db=) bound to every
-Thread.  Before that commit the server built a FRESH, checkpointer-less
-=assist.Thread= per /chat, so sub-agents had no shared checkpointer to
-contend on and these turns completed.
+*Real root cause* — a py-spy dump (2026-05-25) DISPROVED the original
+shared-=SqliteSaver=-contention theory (kept at the bottom for the record).
+Three distinct bugs, all from the langgraph 1.2.0 upgrade, layered:
 
-*Mechanism* (high confidence it's sub-agent + checkpointer; the exact
-internal stall is a strong hypothesis — nailing it to the line needs a
-py-spy stack, which needs sudo, or a controlled repro).  deepagents runs
-each sub-agent as a NESTED SUBGRAPH via =subagent.invoke(state, config)=
-(=middleware/subagents.py=), and =_build_subagent_config= forwards the
-parent's =configurable= (incl. =thread_id=).  The =assist.Thread= is
-compiled with the single =SqliteSaver=, so the nested sub-agent drives the
-SAME sqlite connection that the parent graph is concurrently being
-=.stream()=-ed over (consumed via =next()= on a =run_in_executor= worker
-thread).  Returning from the nested invoke stalls on that shared,
-mid-stream connection.
+1. *Deadlock.*  langgraph 1.2 defaults =durability="async"=, which submits
+   every checkpoint =put= to a =BackgroundExecutor= chained via futures
+   (=pregel/_loop.py:_checkpointer_put_after_previous=).  Under deep
+   streamed sub-agent nesting the thread pool exhausts and the puts
+   deadlock waiting on each other — backend-independent (NOT the sqlite
+   connection).  The dump showed ThreadPoolExecutor workers all parked in
+   =_checkpointer_put_after_previous=.  Fixed by passing =durability="sync"=
+   to =agent.stream()= in =assist.Thread.stream_message=.
 
-*Evidence.*  Log: every plain turn completes; the only turns that hung
-were the two that used a sub-agent (=research-agent= 2026-05-24 19:54,
-=context-agent= 20:35 → RUNAWAY-aborted at 21:05 after 1800s).  *Ruled
-out:* the Qwen3.6 model swap (the stall is between graph nodes with NO
-model call attempted — framework, not the model) and SummarizationMiddleware
-(context was ~6k tokens, far below its ~111k trigger).  NOTE: client
-disconnect is NOT required — an earlier report blamed disconnect, but the
-real trigger is the sub-agent invoke itself; disconnect was a red herring.
+2. *Bug A — Overwrite parsing.*  Once turns completed, a node overwriting
+   the =messages= channel delivered a =langgraph.types.Overwrite= wrapper
+   (not a list); =stream.py:_tool_messages= crashed with =TypeError:
+   'Overwrite' object is not iterable=.  Fixed via the shared
+   =assist.stream_chunks.unwrap_messages=.
 
-*Fix direction.*  Sub-agents are ephemeral — they don't need persistence.
-Hand them an ISOLATED checkpointer (in-memory, or none) instead of the
-shared persistent one, so a nested invoke can't contend with the parent's
-streamed connection; or give the persistent checkpointer a per-call /
-pooled connection so nested + streamed access don't share one cursor.
-This is an =assist.Thread= checkpointer-wiring change.  Until fixed, a
-wedged server is recovered by restarting the uvicorn worker — and note a
-bare kill won't auto-respawn (=--reload= only restarts the worker on a
-FILE change; =touch= a watched =.py=).
+3. *Bug B — cross-thread generator.*  =_stream_turn= advanced the
+   thread-affine stream generator (it holds =THREAD_QUEUE.acquire='s
+   Condition + a ContextVar) across the default thread pool and closed it
+   on the event-loop thread → the lock was released by a non-owning thread
+   → =RuntimeError: cannot release un-acquired lock= → worker crash.  Fixed
+   by pinning build/next/close to a dedicated =max_workers=1= pump so the
+   whole generator lifecycle stays on one thread + context (mirrors the
+   assist CLI, immune because it drives the generator on one thread).
+
+*Resolution.*  assist branch =fix-streamed-subagent-deadlock= (durability +
+=unwrap_messages= + CLI fix); emacsos branch =fix-streamed-chat-langgraph-1.2=
+(=stream.py= routing + the single-thread pump).  Verified e2e 2026-05-25:
+research turn completes start→end, sub-agent turn runs without crashing,
+=_STREAM_LOCK= releases between turns, web blocking path unaffected.
+
+*Original (WRONG) theory, kept for the record:* blamed =5f0dd90= "Persist
+conversation history" for adding a process-wide =SqliteSaver= that
+sub-agents supposedly contended on via a shared sqlite cursor.  The py-spy
+dump showed the stall is langgraph's checkpoint-put pool, not the
+connection — isolating the sub-agent checkpointer (the
+=isolate-subagent-checkpointer= branch) did NOT fix it, confirming the
+theory was wrong.  Client disconnect was likewise a red herring.
 
 ** TODO call_emacs return tuple → typed kind
 
