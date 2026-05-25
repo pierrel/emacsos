@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, Request
@@ -260,6 +261,27 @@ def _start_stream_iter(message: str, phone_ctx: PhoneContext):
     return iter(t.stream_message(message))
 
 
+def _close_iter(it) -> None:
+    """Close the stream iterator, releasing assist's THREAD_QUEUE via the
+    generator's `with` __exit__.  Run on the SAME pump thread that entered it
+    (see `_stream_turn`).
+
+    MUST NOT let an exception escape: this is submitted fire-and-forget, and
+    an un-retrieved executor-future exception emits a noisy "Future exception
+    was never retrieved" warning.  The `hasattr` guard tolerates the test
+    stub's plain list-iterator (no `.close()`)."""
+    if not hasattr(it, "close"):
+        return
+    try:
+        it.close()
+    except ValueError:
+        # "generator already executing" — the agent's worker is still
+        # mid-call; the close queued behind it runs once it returns.
+        pass
+    except Exception:
+        log.exception("error closing inner iterator")
+
+
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
     """The async generator that drives one chat turn.  Bridges
     assist's sync iterator via run_in_executor and polls
@@ -272,6 +294,16 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     seen_tool_ids: set[str] = set()
     seen_applied: set[str] = set()
     it = None
+    # Single-worker executor: assist's stream generator holds a thread-affine
+    # lock + ContextVar (THREAD_QUEUE.acquire), so it MUST be built, advanced,
+    # and closed on ONE OS thread.  A dedicated max_workers=1 pool pins every
+    # run_in_executor(pump, ...) below to the same worker (and contextvar
+    # context) — mirroring the CLI, which is immune because it drives the
+    # generator synchronously on one thread.  Using the default pool (None)
+    # spreads next()/close() across threads and crashes the worker with
+    # "cannot release un-acquired lock".  Initialized to None so the finally
+    # can guard cleanly if we fail before constructing it.
+    pump: Optional[ThreadPoolExecutor] = None
     # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
     # otherwise a long wait behind the lock would burn the budget
     # before we'd even started this stream's actual work.
@@ -307,11 +339,13 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # we've even started.  Inside the try so the finally is the
         # exclusive release path.
         runaway_at = time.monotonic() + RUNAWAY_SECONDS
-        # Move Thread construction onto the executor so the async
-        # handler isn't blocked by it.  This is also the only place an
-        # ASSIST_MODEL_URL misconfig can raise.
+        pump = ThreadPoolExecutor(max_workers=1)
+        # Move Thread construction onto the pump so the async handler isn't
+        # blocked by it AND so __enter__ of THREAD_QUEUE.acquire (which the
+        # generator runs on its first next()) lands on the pump thread.  This
+        # is also the only place an ASSIST_MODEL_URL misconfig can raise.
         it = await loop.run_in_executor(
-            None, _start_stream_iter, message, phone_ctx)
+            pump, _start_stream_iter, message, phone_ctx)
         pending = None
         last_heartbeat = time.monotonic()
         while True:
@@ -330,7 +364,10 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             if pending is None:
                 # run_in_executor returns an asyncio.Future already, so
                 # we don't need ensure_future to make asyncio.wait happy.
-                pending = loop.run_in_executor(None, next, it, SENTINEL)
+                # `pump` (max_workers=1) keeps every next() on the same worker
+                # thread as __enter__, so the generator's THREAD_QUEUE lock is
+                # released by its owning thread when it exits.
+                pending = loop.run_in_executor(pump, next, it, SENTINEL)
             # Wait on the inner-iter future for DISCONNECT_POLL_SECONDS;
             # this caps client-disconnect latency at ~1s independently of
             # the heartbeat cadence.  If the wait times out and a full
@@ -395,24 +432,24 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         )
     finally:
         # Load-bearing: runs on natural exit, on disconnect-return,
-        # on runaway-return, AND on exception.  Drops the iterator
-        # so GC closes it (releasing THREAD_QUEUE via __exit__).
-        # The Thread's conversational state lives in the persistent
-        # checkpointer; the working_dir is stable and reused, so there's
-        # nothing per-turn to clean up here anymore.
-        if it is not None and hasattr(it, "close"):
-            # Generators expose close(); plain list_iterators (used by
-            # the test stub) do not, hence the hasattr guard -- avoids
-            # a noisy AttributeError-as-Exception log on every test.
-            try:
-                it.close()
-            except ValueError:
-                # "generator already executing" — agent thread is
-                # still active on its worker.  GC will close once
-                # the agent yields/returns; nothing else to do.
-                pass
-            except Exception:
-                log.exception("error closing inner iterator")
+        # on runaway-return, AND on exception.
+        #
+        # Close the iterator ON THE PUMP THREAD (never the event-loop
+        # thread): the generator's __exit__ releases THREAD_QUEUE's lock,
+        # which must happen on the thread that acquired it.  On natural exit
+        # the generator already exited its `with` block during the final
+        # next() (so this close is a no-op); on abort, an in-flight next()
+        # may still hold the worker, and the queued close runs once it
+        # returns.  Fire-and-forget — we do NOT await it, so a wedged model
+        # call can't block the lock release below (orphaned-worker on a truly
+        # stuck next() is the accepted fail-fast behavior).  `_close_iter`
+        # swallows its own exceptions so the un-awaited future is clean.
+        #
+        # Submit BEFORE shutdown: scheduling on a shut-down pool raises.
+        if pump is not None:
+            if it is not None:
+                loop.run_in_executor(pump, _close_iter, it)
+            pump.shutdown(wait=False)
         # Release the single-flight lock so the next queued /chat can
         # proceed.  Always paired with the acquire above this try block.
         _STREAM_LOCK.release()

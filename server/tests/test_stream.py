@@ -135,6 +135,20 @@ def test_extract_tool_results_from_updates_mode():
     ]
 
 
+def test_extract_tool_results_from_updates_mode_overwrite():
+    """langgraph 1.2 regression: a node that OVERWRITES the messages channel
+    delivers an `Overwrite` wrapper, not a bare list.  This is the exact shape
+    that crashed a phone turn with `TypeError: 'Overwrite' object is not
+    iterable` before unwrap_messages was wired into _tool_messages."""
+    from langgraph.types import Overwrite
+    chunk = {"tools": {"messages": Overwrite(value=[
+        _FakeToolMsg(name="apply_config", content="applied: ok", tool_call_id="tc-ow"),
+    ])}}
+    assert list(ndjson.extract_tool_results(chunk)) == [
+        ("tc-ow", "apply_config", "applied: ok"),
+    ]
+
+
 def test_extract_tool_results_skips_non_tool_messages():
     # An AIMessage chunk (type != "tool") yields nothing.
     chunk = (_FakeMsg(content="hi"), {})

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -597,3 +599,75 @@ def test_clear_conversation_surfaces_wipe_failure(tmp_path, monkeypatch):
     out = app_mod._clear_conversation()
     assert out["status"] == "error"
     assert "PermissionError" in out["detail"] or "denied" in out["detail"]
+
+
+# --- Bug B regression: thread-affinity of the stream generator -------------
+# assist's stream generator holds a thread-affine lock + ContextVar
+# (THREAD_QUEUE.acquire), so it MUST be built, advanced, and closed on one OS
+# thread.  `_stream_turn` pins all of that to a dedicated max_workers=1 pump.
+# Before the fix it advanced the generator across the default thread pool and
+# closed it on the event-loop thread, crashing the worker with "cannot release
+# un-acquired lock".
+
+def test_stream_generator_runs_on_single_thread(client):
+    """Build (`_start_stream_iter`), every `next()`, and the generator's
+    close/finally must all land on the SAME OS thread (the pump worker)."""
+    idents = {"build": None, "nexts": [], "close": None}
+
+    def gen():
+        try:
+            for i in range(3):
+                idents["nexts"].append(threading.get_ident())
+                yield ("messages", (_FakeAIMessageChunk(content=f"t{i}"), {}))
+        finally:
+            idents["close"] = threading.get_ident()
+
+    def fake_start(message, phone_ctx):
+        idents["build"] = threading.get_ident()
+        return gen()
+
+    with patch("emacsos_server.app._start_stream_iter", side_effect=fake_start):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+
+    assert [e["type"] for e in events][-1] == "end"
+    all_idents = [idents["build"], *idents["nexts"], idents["close"]]
+    assert all(i is not None for i in all_idents), idents
+    # The crux: one thread for the whole generator lifecycle.
+    assert len(set(all_idents)) == 1, all_idents
+
+
+def test_disconnect_mid_stream_closes_generator_cleanly(client):
+    """A client disconnect aborts an in-progress (here, unbounded) stream
+    without an error event, and the generator's finally runs — i.e. the close
+    (THREAD_QUEUE release) happens on the pump thread, not the event loop."""
+    closed = {"flag": False, "thread": None}
+
+    def gen():
+        try:
+            i = 0
+            while True:
+                yield ("messages", (_FakeAIMessageChunk(content=f"t{i}"), {}))
+                i += 1
+        finally:
+            closed["flag"] = True
+            closed["thread"] = threading.get_ident()
+
+    async def fake_is_disconnected(self):
+        fake_is_disconnected.n += 1
+        return fake_is_disconnected.n > 2
+    fake_is_disconnected.n = 0
+
+    with patch("emacsos_server.app._start_stream_iter",
+               side_effect=lambda m, p: gen()), \
+         patch("starlette.requests.Request.is_disconnected", fake_is_disconnected):
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+
+    # The close is submitted fire-and-forget on the pump, so wait briefly.
+    deadline = time.monotonic() + 2.0
+    while not closed["flag"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert closed["flag"] is True, "generator finally never ran (leak)"
+    assert "error" not in [e["type"] for e in events]

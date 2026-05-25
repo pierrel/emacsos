@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
+from assist.stream_chunks import unwrap_messages
+
 
 def event(event_type: str, **fields: Any) -> bytes:
     """Encode a single NDJSON event.  Always ends with `\\n`."""
@@ -87,7 +89,10 @@ def _tool_messages(chunk_payload: Any) -> Iterable[Any]:
     if isinstance(chunk_payload, dict):
         for node_out in chunk_payload.values():
             if isinstance(node_out, dict):
-                for m in node_out.get("messages", []) or []:
+                # langgraph 1.2 may wrap `messages` in an `Overwrite` (a node
+                # replacing the channel); unwrap_messages normalizes that and
+                # the bare-list case, and never raises on an odd shape.
+                for m in unwrap_messages(node_out.get("messages")):
                     yield m
 
 
