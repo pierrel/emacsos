@@ -192,31 +192,52 @@ per-/chat `tempfile.mkdtemp` is gone — the persistent conversation now
 uses ONE stable working dir under `<state_dir>/threads/`, reused across
 turns, so there's no per-turn directory to accumulate.
 
-** TODO Orphaned worker thread on client disconnect wedges the server
+** TODO Sub-agent turns wedge the server (nested subgraph + shared checkpointer)
 
-Observed 2026-05-24: a ~4-minute "who is adam wiggins" research turn ran
-long, the user navigated away (phone stopped reading the stream), and the
-NEXT request ("what were we talking about" after New chat) hung with no
-response — as did everything after it.  Force-restarting the uvicorn
-worker was the only recovery.
+Any /chat turn that spawns a SUB-AGENT (the =task= tool → =research-agent=,
+=context-agent=) hangs the moment the sub-agent finishes: the sub-agent's
+last model call completes, then the MAIN agent never resumes — no next
+model call, no error, just silence — and the orphaned worker thread then
+wedges EVERY later turn (they build their Thread, reach the checkpointer,
+and block) until the uvicorn worker is restarted.
 
-Mechanism: =app.py= serializes chats with a single-flight =asyncio.Lock=
-\(=_STREAM_LOCK=) and runs each turn's sync agent iterator on a
-=run_in_executor= worker thread, polling =request.is_disconnected()=
-between yields.  On disconnect the async handler returns and RELEASES the
-lock — but the worker THREAD keeps running the agent (the code comments
-already call this out: "leaves the worker thread running after the lock is
-released").  That orphaned thread then blocks on the shared =SqliteSaver=
-checkpointer lock (or writing into an abandoned queue), so the next turn
-builds its Thread, reaches the checkpointer, and hangs behind the zombie —
-no model call, no error, just silence on the phone.
+*Pinpoint.*  Introduced by =5f0dd90= "Persist conversation history across
+/chat turns" (2026-05-22), which added the process-wide persistent
+=SqliteSaver= checkpointer (one connection on =threads.db=) bound to every
+Thread.  Before that commit the server built a FRESH, checkpointer-less
+=assist.Thread= per /chat, so sub-agents had no shared checkpointer to
+contend on and these turns completed.
 
-Fix direction: a disconnected turn must TERMINATE, not orphan — cancel /
-join the worker thread (or make the agent iteration cooperatively
-cancellable) when =is_disconnected()= fires, so the checkpointer lock is
-released and the next turn proceeds.  Aligns with the project rule that
-threads should die on infrastructure failure rather than linger.  Until
-then, a stuck server is recovered by restarting the uvicorn worker.
+*Mechanism* (high confidence it's sub-agent + checkpointer; the exact
+internal stall is a strong hypothesis — nailing it to the line needs a
+py-spy stack, which needs sudo, or a controlled repro).  deepagents runs
+each sub-agent as a NESTED SUBGRAPH via =subagent.invoke(state, config)=
+(=middleware/subagents.py=), and =_build_subagent_config= forwards the
+parent's =configurable= (incl. =thread_id=).  The =assist.Thread= is
+compiled with the single =SqliteSaver=, so the nested sub-agent drives the
+SAME sqlite connection that the parent graph is concurrently being
+=.stream()=-ed over (consumed via =next()= on a =run_in_executor= worker
+thread).  Returning from the nested invoke stalls on that shared,
+mid-stream connection.
+
+*Evidence.*  Log: every plain turn completes; the only turns that hung
+were the two that used a sub-agent (=research-agent= 2026-05-24 19:54,
+=context-agent= 20:35 → RUNAWAY-aborted at 21:05 after 1800s).  *Ruled
+out:* the Qwen3.6 model swap (the stall is between graph nodes with NO
+model call attempted — framework, not the model) and SummarizationMiddleware
+(context was ~6k tokens, far below its ~111k trigger).  NOTE: client
+disconnect is NOT required — an earlier report blamed disconnect, but the
+real trigger is the sub-agent invoke itself; disconnect was a red herring.
+
+*Fix direction.*  Sub-agents are ephemeral — they don't need persistence.
+Hand them an ISOLATED checkpointer (in-memory, or none) instead of the
+shared persistent one, so a nested invoke can't contend with the parent's
+streamed connection; or give the persistent checkpointer a per-call /
+pooled connection so nested + streamed access don't share one cursor.
+This is an =assist.Thread= checkpointer-wiring change.  Until fixed, a
+wedged server is recovered by restarting the uvicorn worker — and note a
+bare kill won't auto-respawn (=--reload= only restarts the worker on a
+FILE change; =touch= a watched =.py=).
 
 ** TODO call_emacs return tuple → typed kind
 
