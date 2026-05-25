@@ -13,6 +13,7 @@
       (kill-buffer emacos--chat-buffer-name)))
   (setq emacos--chat-in-flight nil
         emacos--chat-can-rollback nil
+        emacos--chat-confirm-pending nil
         emacos--chat-process nil
         emacos--chat-stream-insert-marker nil
         emacos--chat-status-start nil
@@ -417,29 +418,61 @@ the LAST entry (rarely used)."
     (emacos--chat-rollback-callback nil))
   (should emacos--chat-can-rollback))
 
-(ert-deftest chat-test-new-chat-resets-rollback-flag ()
-  "New chat (via init-buffer) hides ROLLBACK: a fresh/cleared transcript
-shouldn't dangle the button without context.  The server-forget POST is
-stubbed so this stays a local-only unit test."
+(ert-deftest chat-test-new-chat-first-tap-arms ()
+  "First tap only ARMS the two-tap confirm (relabels to Confirm clear?):
+it must NOT clear or POST anything yet."
   (chat-test--reset)
   (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t)
-  (cl-letf (((symbol-function 'emacos--chat-forget-server) #'ignore)
-            ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+  (let ((forgot nil)
+        (reinit nil))
+    (cl-letf (((symbol-function 'emacos--chat-forget-server)
+               (lambda () (setq forgot t)))
+              ((symbol-function 'emacos--chat-init-buffer)
+               (lambda (&rest _) (setq reinit t))))
+      (emacos--chat-new-chat))
+    (should emacos--chat-confirm-pending)
+    (should-not forgot)
+    (should-not reinit)))
+
+(ert-deftest chat-test-new-chat-second-tap-confirms ()
+  "Armed, a second tap clears for real (forget + reset transcript) and
+disarms."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-confirm-pending t)
+  (let ((forgot nil)
+        (reinit nil))
+    (cl-letf (((symbol-function 'emacos--chat-forget-server)
+               (lambda () (setq forgot t)))
+              ((symbol-function 'emacos--chat-init-buffer)
+               (lambda (&rest _) (setq reinit t))))
+      (emacos--chat-new-chat))
+    (should-not emacos--chat-confirm-pending)
+    (should forgot)
+    (should reinit)))
+
+(ert-deftest chat-test-new-chat-resets-rollback-flag ()
+  "Confirming New chat (via init-buffer) hides ROLLBACK: a fresh/cleared
+transcript shouldn't dangle the button without context."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t
+        emacos--chat-confirm-pending t)   ; armed → this tap confirms
+  (cl-letf (((symbol-function 'emacos--chat-forget-server) #'ignore))
     (emacos--chat-new-chat))
   (should-not emacos--chat-can-rollback))
 
 (ert-deftest chat-test-new-chat-posts-to-clear-endpoint ()
-  "New chat fires a POST to the server's /clear endpoint (so the agent
-forgets the conversation), and clears the transcript regardless."
+  "The confirming tap fires a POST to the server's /clear endpoint (so the
+agent forgets the conversation), and clears the transcript regardless."
   (chat-test--reset)
   (emacos--chat-buffer)
+  (setq emacos--chat-confirm-pending t)   ; armed → this tap confirms
   (let ((emacos-chat-server-url "http://10.0.0.5:8765/chat")
         (posted '())
         (resp nil)
         (body nil))
-    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
-              ((symbol-function 'url-retrieve)
+    (cl-letf (((symbol-function 'url-retrieve)
                (lambda (url &rest _)
                  (push (cons url url-request-method) posted)
                  (setq body url-request-data)
@@ -457,36 +490,26 @@ forgets the conversation), and clears the transcript regardless."
 
 (ert-deftest chat-test-new-chat-refuses-in-flight ()
   "New chat is a no-op while a stream is in flight: it must not POST
-/clear nor wipe the transcript out from under a running turn — and it
-must NOT even prompt (the refusal comes before the confirm)."
+/clear, wipe the transcript, NOR arm the confirm (tap ABORT first)."
   (chat-test--reset)
   (emacos--chat-buffer)
   (let ((emacos--chat-in-flight t)
-        (called nil)
-        (prompted nil))
+        (called nil))
     (cl-letf (((symbol-function 'emacos--chat-forget-server)
-               (lambda () (setq called t)))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq prompted t) t)))
+               (lambda () (setq called t))))
       (emacos--chat-new-chat))
     (should-not called)
-    (should-not prompted)))
+    (should-not emacos--chat-confirm-pending)))
 
-(ert-deftest chat-test-new-chat-aborts-when-declined ()
-  "Declining the confirm prompt leaves the conversation intact: no
-/clear POST, and the transcript-clearing init is not run."
+(ert-deftest chat-test-command-set-armed-shows-confirm ()
+  "Armed, the first command-list button relabels to Confirm clear?;
+unarmed (and not in flight) it's New chat."
   (chat-test--reset)
-  (emacos--chat-buffer)
-  (let ((forgot nil)
-        (reinit nil))
-    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil))
-              ((symbol-function 'emacos--chat-forget-server)
-               (lambda () (setq forgot t)))
-              ((symbol-function 'emacos--chat-init-buffer)
-               (lambda (&rest _) (setq reinit t))))
-      (emacos--chat-new-chat))
-    (should-not forgot)
-    (should-not reinit)))
+  (let ((emacos--chat-in-flight nil))
+    (setq emacos--chat-confirm-pending t)
+    (should (equal (caar (emacos--chat-command-set)) "Confirm clear?"))
+    (setq emacos--chat-confirm-pending nil)
+    (should (equal (caar (emacos--chat-command-set)) "New chat"))))
 
 (ert-deftest chat-test-forget-callback-kills-response-buffer ()
   "The /clear response buffer must be killed so repeated New-chat taps

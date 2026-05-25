@@ -36,6 +36,18 @@
 (defvar emacos--commit-timer nil)
 (defvar emacos--caps nil)
 
+;; Double-tap-space → ". " state
+(defvar emacos--last-space-time nil
+  "`float-time' of the most recent SPC tap, or nil.
+Drives the double-tap-space gesture (`emacos--double-space-p'): a second
+SPC within `emacos--double-space-threshold' turns the just-typed space
+into a period + space.")
+
+(defconst emacos--double-space-threshold 0.5
+  "Max seconds between two SPC taps for the double-space → \". \" gesture.
+Past this they're treated as two ordinary spaces, matching the \"tap
+twice rapidly\" feel.")
+
 ;; Render state
 (defvar emacos--in-render nil
   "Non-nil while `emacos--render-page' is running.
@@ -111,12 +123,38 @@ Prefer the minibuffer when it is active."
             (run-with-timer 1.0 nil #'emacos--commit))
       (emacos--refocus))))
 
+(defun emacos--double-space-p (now)
+  "Non-nil if a SPC tap at time NOW (a `float-time') should become \". \".
+True when the previous SPC tap was within `emacos--double-space-threshold'
+AND the char before the just-inserted space is alphanumeric — so the
+mobile period gesture fires after a word, never after punctuation, after
+another space, or at line start (which would double-period or misplace a
+period).  Reads point in the current buffer; pure given that + NOW."
+  (and emacos--last-space-time
+       (<= (- now emacos--last-space-time) emacos--double-space-threshold)
+       (> (point) (1+ (point-min)))
+       (eq (char-before) ?\s)
+       (let ((c (char-before (1- (point)))))
+         (and c (string-match-p "[[:alnum:]]" (string c))))))
+
 (defun emacos--tap-space ()
-  "Insert a space."
+  "Insert a space.  Two SPC taps in quick succession after a word turn the
+just-typed space into \". \" — the familiar mobile period shortcut (see
+`emacos--double-space-p' for exactly when it fires)."
   (emacos--commit)
-  (let ((w (emacos--target)))
+  (let ((w (emacos--target))
+        (now (float-time)))
     (when w
-      (with-selected-window w (insert " "))
+      (with-selected-window w
+        (if (emacos--double-space-p now)
+            (progn
+              (delete-char -1)
+              (insert ". ")
+              ;; Consume the gesture so a third rapid tap doesn't re-fire
+              ;; off the period+space we just wrote.
+              (setq emacos--last-space-time nil))
+          (insert " ")
+          (setq emacos--last-space-time now)))
       (emacos--refocus))))
 
 (defun emacos--tap-return ()
@@ -256,6 +294,20 @@ the letter-key `substring').  Pure — testable off the device."
   (let ((s (if emacos--caps (upcase kg) kg)))
     s))
 
+(defun emacos--maybe-cancel-confirm (action arg)
+  "Cancel a pending New-chat confirmation when ANY button other than the
+New-chat command itself is tapped, so the armed \"Confirm clear?\" state
+can't linger (the two-tap design in `emacos--chat-new-chat').  Command-list
+buttons run their command through `emacos--run-command' (the command is
+ARG), so the New-chat command is the (`emacos--run-command' . `emacos--chat-new-chat')
+pair; every other tap disarms and re-renders.  No-op when nothing is
+armed, which is the common case."
+  (when (and (bound-and-true-p emacos--chat-confirm-pending)
+             (not (and (eq action #'emacos--run-command)
+                       (eq arg #'emacos--chat-new-chat))))
+    (setq emacos--chat-confirm-pending nil)
+    (emacos--render-page)))
+
 (defun emacos--btn (label action &optional arg height bg)
   "Insert a clickable button showing LABEL that calls ACTION (with ARG).
 HEIGHT, if given, is a face :height float for the LABEL font (callers
@@ -266,9 +318,11 @@ default gray background — used to accent a high-priority affordance (the
 Chat button) so it reads as the app, not plumbing."
   (insert-text-button
    label
-   'action (if arg
-              (lambda (_) (funcall action arg))
-            (lambda (_) (funcall action)))
+   ;; Every tap first cancels any pending two-tap confirm (unless it IS the
+   ;; armed command) — see `emacos--maybe-cancel-confirm' — then runs ACTION.
+   'action (lambda (_)
+             (emacos--maybe-cancel-confirm action arg)
+             (if arg (funcall action arg) (funcall action)))
    'follow-link t
    'face `(:box (:line-width (,emacos--btn-hpad . ,emacos--btn-vpad)
                  :style released-button)
@@ -449,22 +503,26 @@ separate bands — see `emacos--render-page'."
       (insert "\n"))))
 
 (defun emacos--render-action-row ()
-  "Render the editing keys across two rows: DEL (1/3, like a letter key)
-+ SPC (2/3) on one row, then CAPS / TAB / RET with RET DOUBLE-WIDE."
+  "Render the editing keys across two rows: DEL (one letter-key width) +
+SPC (the rest of the row) on one row, then CAPS / TAB / RET with RET
+DOUBLE-WIDE."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))
          (gap-w emacos--btn-gap)
-         ;; DEL(1) + SPC(2) = 3 units, 1 gap.  DEL is ~1/3, like a letter
-         ;; key; SPC takes the remaining 2/3.
+         ;; DEL is one letter-key width (1/3, matching the keyboard groups).
          (third (emacos--unit-width win-w gap-w 3 1))
+         ;; SPC fills the REST of the row: total button-cell budget (1 gap)
+         ;; minus DEL — so the spacebar reads as the wide primary key and no
+         ;; slack is left at the right edge.
+         (spc   (- (emacos--unit-width win-w gap-w 1 1) third))
          ;; CAPS(1) + TAB(1) + RET(2) = 4 units, 2 gaps.
          (unit  (emacos--unit-width win-w gap-w 4 2)))
-    ;; Row: DEL (left, 1/3), SPC (right, 2/3).
+    ;; Row: DEL (left, letter-key width), SPC (right, fills the rest).
     (emacos--btn (emacos--center "DEL" third) #'emacos--tap-backspace nil
                  emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center "SPC" (* 2 third)) #'emacos--tap-space nil
+    (emacos--btn (emacos--center "SPC" spc) #'emacos--tap-space nil
                  emacos--btn-label-scale)
     (insert "\n")
     ;; Row: CAPS, TAB, RET (RET double-wide).  CAPS sits where DEL was.

@@ -210,6 +210,118 @@ RET 2 units (double-wide).  All positive; the wide ones beat the narrow."
       (should (string-match-p "TAB" s))
       (should (string-match-p "RET" s)))))
 
+;;; Double-tap-space → ". " gesture
+
+(ert-deftest test-os-double-space-fires-after-word ()
+  "Rapid second SPC after a word: trailing space, alnum before it, within
+the threshold → convert."
+  (with-temp-buffer
+    (insert "word ")
+    (let ((emacos--last-space-time (- 100.0 0.1)))
+      (should (emacos--double-space-p 100.0)))))
+
+(ert-deftest test-os-double-space-not-when-slow ()
+  "Past the threshold the two taps are just two ordinary spaces."
+  (with-temp-buffer
+    (insert "word ")
+    (let ((emacos--last-space-time
+           (- 100.0 (* 2 emacos--double-space-threshold))))
+      (should-not (emacos--double-space-p 100.0)))))
+
+(ert-deftest test-os-double-space-not-after-punctuation ()
+  "Char before the space isn't alphanumeric (already \". \") → no fire, so
+the gesture can't double-period."
+  (with-temp-buffer
+    (insert "word. ")
+    (let ((emacos--last-space-time (- 100.0 0.1)))
+      (should-not (emacos--double-space-p 100.0)))))
+
+(ert-deftest test-os-double-space-not-without-prior-space ()
+  "No prior SPC tap recorded → never fires (a lone first space)."
+  (with-temp-buffer
+    (insert "word ")
+    (let ((emacos--last-space-time nil))
+      (should-not (emacos--double-space-p 100.0)))))
+
+(ert-deftest test-os-double-space-not-mid-word ()
+  "Point not preceded by a space → no fire (you're inside a word)."
+  (with-temp-buffer
+    (insert "word")
+    (let ((emacos--last-space-time (- 100.0 0.1)))
+      (should-not (emacos--double-space-p 100.0)))))
+
+(ert-deftest test-os-tap-space-double-writes-period-space ()
+  "Integration: a rapid second SPC rewrites the trailing space to \". \"
+and consumes the gesture (`emacos--last-space-time' back to nil)."
+  (let ((buf (get-buffer-create " *dst-test*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacos--commit) #'ignore)
+                  ((symbol-function 'emacos--refocus) #'ignore)
+                  ((symbol-function 'emacos--target) (lambda () (selected-window))))
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (with-current-buffer buf
+              (erase-buffer) (insert "word ") (goto-char (point-max)))
+            (setq emacos--last-space-time (- (float-time) 0.05))
+            (emacos--tap-space)
+            (should (equal (with-current-buffer buf (buffer-string)) "word. "))
+            (should-not emacos--last-space-time)))
+      (let ((kill-buffer-query-functions nil)) (kill-buffer buf)))))
+
+(ert-deftest test-os-tap-space-single-inserts-space ()
+  "A first SPC (no recent prior) inserts a plain space and records the time
+so a follow-up tap can complete the gesture."
+  (let ((buf (get-buffer-create " *dst-test2*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacos--commit) #'ignore)
+                  ((symbol-function 'emacos--refocus) #'ignore)
+                  ((symbol-function 'emacos--target) (lambda () (selected-window))))
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (with-current-buffer buf
+              (erase-buffer) (insert "word") (goto-char (point-max)))
+            (setq emacos--last-space-time nil)
+            (emacos--tap-space)
+            (should (equal (with-current-buffer buf (buffer-string)) "word "))
+            (should emacos--last-space-time)))
+      (let ((kill-buffer-query-functions nil)) (kill-buffer buf)))))
+
+;;; Two-tap New-chat confirm: disarm-on-other-tap (emacos--maybe-cancel-confirm)
+
+(ert-deftest test-os-maybe-cancel-confirm-disarms-on-other-command ()
+  "Tapping a DIFFERENT command-list entry (run-command + other cmd) while
+armed cancels the confirm and re-renders."
+  (let ((emacos--chat-confirm-pending t) (rendered nil))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
+      (emacos--maybe-cancel-confirm #'emacos--run-command #'save-buffer))
+    (should-not emacos--chat-confirm-pending)
+    (should rendered)))
+
+(ert-deftest test-os-maybe-cancel-confirm-disarms-on-keyboard-tap ()
+  "Tapping any keyboard key (a direct action, not run-command) while armed
+cancels the confirm."
+  (let ((emacos--chat-confirm-pending t) (rendered nil))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
+      (emacos--maybe-cancel-confirm #'emacos--tap-key "abc"))
+    (should-not emacos--chat-confirm-pending)))
+
+(ert-deftest test-os-maybe-cancel-confirm-keeps-armed-on-newchat-tap ()
+  "Re-tapping the New-chat command itself (run-command + emacos--chat-new-chat)
+must NOT disarm — that tap is the confirming second tap."
+  (let ((emacos--chat-confirm-pending t) (rendered nil))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
+      (emacos--maybe-cancel-confirm #'emacos--run-command #'emacos--chat-new-chat))
+    (should emacos--chat-confirm-pending)
+    (should-not rendered)))
+
+(ert-deftest test-os-maybe-cancel-confirm-noop-when-unarmed ()
+  "Nothing armed → no-op, no spurious re-render (the common path on every
+tap)."
+  (let ((emacos--chat-confirm-pending nil) (rendered nil))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
+      (emacos--maybe-cancel-confirm #'emacos--tap-key "abc"))
+    (should-not rendered)))
+
 ;;; Follower: re-render only when the command set changed
 
 (ert-deftest test-os-follower-rerenders-on-command-set-change ()
