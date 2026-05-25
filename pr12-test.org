@@ -77,7 +77,7 @@ If all of that happens, the core loop works.
 
 This is the deferred-to-live check: the apply model REPLACES the whole
 config file each time, so a *second* apply only preserves the first if
-the small model (Qwen3-Coder-30B) restates the COMPLETE config.
+the small model (Qwen3.6-27B) restates the COMPLETE config.
 
 After Test A's apply (cursor is blue), send:
 

@@ -192,6 +192,32 @@ per-/chat `tempfile.mkdtemp` is gone — the persistent conversation now
 uses ONE stable working dir under `<state_dir>/threads/`, reused across
 turns, so there's no per-turn directory to accumulate.
 
+** TODO Orphaned worker thread on client disconnect wedges the server
+
+Observed 2026-05-24: a ~4-minute "who is adam wiggins" research turn ran
+long, the user navigated away (phone stopped reading the stream), and the
+NEXT request ("what were we talking about" after New chat) hung with no
+response — as did everything after it.  Force-restarting the uvicorn
+worker was the only recovery.
+
+Mechanism: =app.py= serializes chats with a single-flight =asyncio.Lock=
+\(=_STREAM_LOCK=) and runs each turn's sync agent iterator on a
+=run_in_executor= worker thread, polling =request.is_disconnected()=
+between yields.  On disconnect the async handler returns and RELEASES the
+lock — but the worker THREAD keeps running the agent (the code comments
+already call this out: "leaves the worker thread running after the lock is
+released").  That orphaned thread then blocks on the shared =SqliteSaver=
+checkpointer lock (or writing into an abandoned queue), so the next turn
+builds its Thread, reaches the checkpointer, and hangs behind the zombie —
+no model call, no error, just silence on the phone.
+
+Fix direction: a disconnected turn must TERMINATE, not orphan — cancel /
+join the worker thread (or make the agent iteration cooperatively
+cancellable) when =is_disconnected()= fires, so the checkpointer lock is
+released and the next turn proceeds.  Aligns with the project rule that
+threads should die on infrastructure failure rather than linger.  Until
+then, a stuck server is recovered by restarting the uvicorn worker.
+
 ** TODO call_emacs return tuple → typed kind
 
 `channel.eval_elisp`'s `is_unreachable` classifier reverse-engineers
