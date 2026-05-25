@@ -275,11 +275,20 @@ def _close_iter(it) -> None:
     try:
         it.close()
     except ValueError:
-        # "generator already executing" — the agent's worker is still
-        # mid-call; the close queued behind it runs once it returns.
+        # "generator already executing" — kept defensively; under the
+        # single-worker pump this close is always queued behind the in-flight
+        # next() (never concurrent with it), so it shouldn't actually fire.
         pass
     except Exception:
         log.exception("error closing inner iterator")
+
+
+def _defuse_future(fut) -> None:
+    """Retrieve a future's exception so an abandoned `next()` future (left
+    in flight when a turn aborts) doesn't log "Future exception was never
+    retrieved".  Used as a done-callback; the result/exception is discarded."""
+    if not fut.cancelled():
+        fut.exception()
 
 
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
@@ -294,6 +303,9 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     seen_tool_ids: set[str] = set()
     seen_applied: set[str] = set()
     it = None
+    # The outstanding `next()` future.  Declared here (not just inside the try)
+    # so the finally can defuse it on an abort-return while it's still in flight.
+    pending = None
     # Single-worker executor: assist's stream generator holds a thread-affine
     # lock + ContextVar (THREAD_QUEUE.acquire), so it MUST be built, advanced,
     # and closed on ONE OS thread.  A dedicated max_workers=1 pool pins every
@@ -346,7 +358,6 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # is also the only place an ASSIST_MODEL_URL misconfig can raise.
         it = await loop.run_in_executor(
             pump, _start_stream_iter, message, phone_ctx)
-        pending = None
         last_heartbeat = time.monotonic()
         while True:
             if await request.is_disconnected():
@@ -441,10 +452,18 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # next() (so this close is a no-op); on abort, an in-flight next()
         # may still hold the worker, and the queued close runs once it
         # returns.  Fire-and-forget — we do NOT await it, so a wedged model
-        # call can't block the lock release below (orphaned-worker on a truly
-        # stuck next() is the accepted fail-fast behavior).  `_close_iter`
-        # swallows its own exceptions so the un-awaited future is clean.
+        # call can't block the lock release below (a truly stuck next()
+        # orphans the worker AND leaks that thread-id's THREAD_QUEUE slot
+        # until the call returns; this is the accepted fail-fast behavior).
+        # `_close_iter` swallows its own exceptions so the un-awaited future
+        # is clean.
         #
+        # If we aborted (disconnect/runaway) with a next() still in flight,
+        # that future is abandoned; retrieve its eventual exception via a
+        # callback so a failing next() doesn't log "Future exception was
+        # never retrieved".
+        if pending is not None and not pending.done():
+            pending.add_done_callback(_defuse_future)
         # Submit BEFORE shutdown: scheduling on a shut-down pool raises.
         if pump is not None:
             if it is not None:

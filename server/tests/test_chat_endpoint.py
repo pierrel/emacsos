@@ -639,9 +639,10 @@ def test_stream_generator_runs_on_single_thread(client):
 
 def test_disconnect_mid_stream_closes_generator_cleanly(client):
     """A client disconnect aborts an in-progress (here, unbounded) stream
-    without an error event, and the generator's finally runs — i.e. the close
-    (THREAD_QUEUE release) happens on the pump thread, not the event loop."""
-    closed = {"flag": False, "thread": None}
+    without an error event, and the generator's finally runs (no leaked
+    THREAD_QUEUE slot).  The pump-thread identity of the close is pinned
+    separately by test_stream_generator_runs_on_single_thread."""
+    closed = {"flag": False}
 
     def gen():
         try:
@@ -651,7 +652,6 @@ def test_disconnect_mid_stream_closes_generator_cleanly(client):
                 i += 1
         finally:
             closed["flag"] = True
-            closed["thread"] = threading.get_ident()
 
     async def fake_is_disconnected(self):
         fake_is_disconnected.n += 1
