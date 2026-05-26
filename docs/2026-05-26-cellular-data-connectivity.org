@@ -243,18 +243,21 @@ None of =make test-elisp= / =make test-server= / =make smoke= can exercise
 a modem; the happy path is real-phone-only.  Before touching the software,
 clear these — a failure here is *not* a software bug:
 
-1. *Power (the #1 risk — CONFIRMED on hardware 2026-05-26).*  On first
-   attaching the HAT, *the phone resets* — the textbook brown-out signature:
-   the SIM7600 draws ~150 mA idle but spikes to ~2 A on TX/power-on inrush,
-   and drawing that through the Zero W's rail collapses it.  *Fix:* set the
-   HAT's power jumper to *external* and feed it from a dedicated ≥2.5–3 A
-   supply (separate from the Pi, or one ≥3 A supply with thick/short
-   cabling).  *Diagnose:* after it comes up with the HAT attached,
-   =vcgencmd get_throttled= (non-zero = under-voltage) and =dmesg | grep -i
-   volt=.  *Accept when:* the phone stays up with the HAT attached; the NET
-   LED reaches steady/slow-blink and stays there under a =ping= flood; and
-   =watch -n1 lsusb -t= shows the modem *stable*, not popping in and out.
-   Nothing in software can fix an under-fed HAT — clear this gate first.
+1. *Power (the #1 risk — CONFIRMED on hardware 2026-05-26).*  The phone
+   *resets the instant the modem's USB is plugged into the Pi* — the textbook
+   brown-out signature: the modem's power-on inrush (and ~2 A TX spikes later)
+   collapses the rail if it's drawing through the Pi.  Notably =vcgencmd
+   get_throttled= reads =0x0= at idle (no sustained under-voltage) — so the
+   problem is the *inrush at connect*, i.e. the modem being *bus-powered off
+   the Pi* rather than externally.  *Fix:* power the modem/HAT from its *own*
+   supply (≥2.5–3 A), so the USB link to the Pi carries data, not the modem's
+   main current; keep the Pi on its own =PWR IN= feed with thick/short
+   cabling.  *Diagnose:* =vcgencmd get_throttled= (bit 0 = under-voltage now,
+   bit 16 = since boot), =journalctl --list-boots= / =last -x= (count the
+   resets), =dmesg | grep -i volt=.  *Accept when:* plugging the modem in
+   does NOT reset the Pi; =watch -n1 lsusb -t= shows the modem *stable*, not
+   popping in and out.  Nothing in software can fix an under-fed modem —
+   clear this gate first.
 2. *Pogo-pin USB routing on THIS board.*  On a Pi Zero W the HAT is meant
    to reach the Pi's USB via spring "thimble" pins on the Zero's USB test
    pads — no cable, leaving the micro-USB OTG port free for the keyboard.
@@ -267,6 +270,36 @@ clear these — a failure here is *not* a software bug:
 4. *Carrier band / LTE.*  Confirm the SIM's plan has LTE data and the
    SIM7600G-H supports the carrier's bands (it is a global LTE Cat-4
    module).  *Accept when:* =mmcli -m <idx>= shows registered on LTE.
+
+* Wiring the modem's USB to the Pi (Zero 2 W — measured 2026-05-26)
+
+The build is a Pi *Zero 2 W* (kernel =6.12…-rpi-v8=, 64-bit quad-core), not the
+original Zero W.  The modem (a 4G/5G HAT) has its own *micro-USB device port*
+*and* several *USB-A host outlets*.  Getting the USB direction right is what
+makes it enumerate — an empty =lsusb= means this is wrong, and that (not the
+SIM) was the real "no service" cause on first bring-up.
+
+Rule of thumb: *USB-A = host* (downstream; you plug devices INTO it).  The modem
+presents itself as a *USB device* through its *micro-USB* port.  So the link is
+always *host → modem's-micro-USB*, never USB-A → USB-A.
+
+- *Pi 3 (known-good):* modem micro-USB (device) → Pi 3 USB-A (host).
+- *Zero 2 W:* the only USB *host* port is the *inner* micro-USB jack (silk
+  =USB=), which the boot config already forces to host mode
+  (=dtoverlay=dwc2,dr_mode=host= + =otg_mode=1= in =/boot/firmware/config.txt=;
+  confirmed present).  The *outer* jack (silk =PWR IN=) is power-only.  Do NOT
+  wire the HAT's *USB-A outlets* to the Pi — those are host/downstream ports,
+  not the modem's device interface (this was the first-attempt mistake).
+  Replicate the Pi-3 path: put a *micro-USB OTG adapter* (micro-USB male →
+  USB-A female, data-capable) in the Pi's =USB= jack to get a USB-A host
+  socket, then use the same modem-micro-USB → USB-A cable as on the Pi 3.  A
+  data-capable micro-USB↔micro-USB cable straight into the =USB= jack also
+  works (host mode is forced).  Keep Pi power on the =PWR IN= jack.
+- *Power:* the modem must be *externally powered*, not bus-powered off the Pi —
+  plugging it into the Pi caused an immediate brown-out reset (see the gate).
+
+Verify from the dev box: =ssh phone lsusb= shows the modem; =mmcli -L= lists it;
+=qmi_wwan= binds automatically.
 
 * Bring-up runbook (real phone)
 
