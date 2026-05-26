@@ -23,7 +23,7 @@
 ;; Defined in os.el (which `require's this file).  Resolved at call time.
 (declare-function emacos--btn "os")
 (declare-function emacos--target "os")
-(declare-function emacos--render-page "os")
+(defvar emacos--btn-scale)  ; uniform keyboard/page button height, owned by os.el
 
 (defcustom emacos-net-refresh-interval 30
   "Seconds between background network-status refreshes.
@@ -80,6 +80,12 @@ nmcli escapes a literal colon in a value as \"\\:\" and a backslash as
     (push cur fields)
     (nreverse fields)))
 
+(defun emacos-net--split-terse-kv (line)
+  "Split an mmcli `--output-keyvalue' LINE \"key : value\" into (KEY . VALUE).
+Returns nil for a line without the \" : \" separator."
+  (when (string-match "\\`\\(.*?\\) *: *\\(.*\\)\\'" line)
+    (cons (match-string 1 line) (match-string 2 line))))
+
 (defun emacos-net--section (blob name)
   "Return the lines of section NAME from BLOB, a string the reader builds
 with \"@@<NAME>\" marker lines between each command's output."
@@ -133,7 +139,8 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
               (cond
                ((string-match-p "\\.state$" (car f)) (setq cell-state (cdr f)))
                ((string-match-p "signal-quality\\.value$" (car f))
-                (setq cell-signal (string-to-number (cdr f))))))))
+                (unless (string-empty-p (cdr f))
+                  (setq cell-signal (string-to-number (cdr f)))))))))
         (make-emacos-net-state
          :wifi-on wifi-on
          :active-iface active-iface
@@ -146,12 +153,6 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
          :cell-state (or cell-state "")
          :stamp (float-time))))))
 
-(defun emacos-net--split-terse-kv (line)
-  "Split an mmcli `--output-keyvalue' LINE \"key : value\" into (KEY . VALUE).
-Returns nil for a line without the \" : \" separator."
-  (when (string-match "\\`\\(.*?\\) *: *\\(.*\\)\\'" line)
-    (cons (match-string 1 line) (match-string 2 line))))
-
 ;;; Modeline segment (pure: state -> propertized string)
 
 (defun emacos-net--segment-text (st)
@@ -161,14 +162,19 @@ Returns nil for a line without the \" : \" separator."
     ('cell (format "lte %s%%"  (or (emacos-net-state-signal st) "?")))
     (_     "no net")))
 
+(defconst emacos-net--mode-line-keymap
+  (let ((m (make-sparse-keymap)))
+    (define-key m [mode-line mouse-1] #'emacos-net-show)
+    m)
+  "Keymap for the tappable modeline segment.  Built once (the segment's
+`:eval' runs on every redisplay, so it must not allocate).")
+
 (defun emacos-net-mode-line-string ()
   "Modeline segment: a tappable cell/wifi status string.
 Wrapped so a redisplay-time error can never brick the modeline."
   (condition-case nil
       (propertize (emacos-net--segment-text emacos-net--state)
-                  'local-map (let ((m (make-sparse-keymap)))
-                               (define-key m [mode-line mouse-1] #'emacos-net-show)
-                               m)
+                  'local-map emacos-net--mode-line-keymap
                   'mouse-face 'mode-line-highlight
                   'help-echo "Network — tap for controls")
     (error "net?")))
@@ -200,6 +206,7 @@ mmcli is queried only if a modem is present, to avoid waking it needlessly."
 
 (defun emacos-net--refresh ()
   "Kick off a background status read (no-op if one is already running)."
+  (interactive)
   (when (or (null emacos-net--proc) (not (process-live-p emacos-net--proc)))
     (let ((buf (generate-new-buffer " *emacos-net-read*")))
       (condition-case err
@@ -248,6 +255,7 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
 
 (defun emacos-net-toggle-wifi ()
   "Toggle the wifi radio."
+  (interactive)
   (emacos-net--action
    (list "radio" "wifi"
          (if (eq (emacos-net-state-wifi-on emacos-net--state) t) "off" "on"))))
@@ -255,6 +263,7 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
 (defun emacos-net-toggle-cell ()
   "Bring the cellular connection up or down.
 Only meaningful once `make cellular-bringup' has created the connection."
+  (interactive)
   (if (emacos-net-state-cell-provisioned emacos-net--state)
       (emacos-net--action
        (list "con" (if (eq (emacos-net-state-active-iface emacos-net--state) 'cell)
@@ -293,7 +302,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
                           ('nil "off")
                           (_ "?"))))
         (emacos--btn (if (eq (emacos-net-state-wifi-on st) t) " Wifi off " " Wifi on ")
-                     #'emacos-net-toggle-wifi nil 1.75)
+                     #'emacos-net-toggle-wifi nil emacos--btn-scale)
         (insert "\n\n")
         ;; Cell
         (if (emacos-net-state-cell-provisioned st)
@@ -304,7 +313,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
                                 (if (string-empty-p s) "" (format " (%s)" s)))))
               (emacos--btn (if (eq (emacos-net-state-active-iface st) 'cell)
                                " Cell off " " Cell on ")
-                           #'emacos-net-toggle-cell nil 1.75))
+                           #'emacos-net-toggle-cell nil emacos--btn-scale))
           (insert "Cell: not set up (run cellular bring-up)"))
         (insert "\n\n")
         ;; Wifi networks
@@ -319,7 +328,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
                                ((eq kind 'needs-password) "[lock] ")
                                (t "")))
                    (label (format " %s%s  %s%% " mark ssid (or sig "?"))))
-              (emacos--btn label #'emacos-net-connect ssid 1.75)
+              (emacos--btn label #'emacos-net-connect ssid emacos--btn-scale)
               (insert "\n"))))
         (when (seq-some (lambda (n) (eq (emacos-net--connect-kind n) 'needs-password))
                         (emacos-net-state-wifi-list st))

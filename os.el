@@ -15,6 +15,18 @@
 (menu-bar-mode -1)
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
+;; Global, minimal modeline: the EmacsOS label + a tappable cell/wifi
+;; status segment (`emacos-net-mode-line-string', network.el), shown on
+;; every top (editing) buffer.  Replaces the stock clutter (buffer
+;; position, minor modes, encoding); the *keyboard* buffer overrides this
+;; to nil on each render (`emacos--render-page').  time/date/battery are
+;; left for the "Modeline status bar" roadmap item to append here.  Set at
+;; load time (not in `emacos--init') so a hot-reload re-applies it.  The
+;; `:eval' resolves the network function at redisplay, after the
+;; `(require 'network)' at the bottom of this file.
+(setq-default mode-line-format
+              '(" EmacsOS  " (:eval (emacos-net-mode-line-string))))
+
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;
 ;;  [ q w  ] [e r t y u i] [ o p  ]
@@ -668,6 +680,8 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos-net--command-set "network")
 (declare-function emacos-net-mode-line-string "network")
 (declare-function emacos-net-show "network")
+(declare-function emacos-net--ensure-timer "network")
+(declare-function emacos-net--refresh "network")
 
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
@@ -937,14 +951,6 @@ window-buffer-change follower can't recurse into an in-progress render."
   (set-frame-name "EmacsOS")
   ;; Main editing buffer
   (switch-to-buffer (get-buffer-create "*scratch*"))
-  ;; Global, minimal modeline: the EmacsOS label + a tappable cell/wifi
-  ;; status segment, shown on every top (editing) buffer.  Replaces the
-  ;; stock clutter (buffer position, minor modes, encoding).  The
-  ;; *keyboard* buffer overrides this to nil on each render
-  ;; (`emacos--render-page'); time/date/battery are left for the
-  ;; "Modeline status bar" roadmap item to add to this same list.
-  (setq-default mode-line-format
-                '(" EmacsOS  " (:eval (emacos-net-mode-line-string))))
   ;; Split: top = editor, bottom = keyboard
   (let* ((total (window-total-height))
          (kbd-height (/ (* total 3) 4))
@@ -957,7 +963,11 @@ window-buffer-change follower can't recurse into an in-progress render."
   ;; Render after the window is visible so dimensions are known.  The
   ;; command list derives from the top buffer at render time, and the
   ;; follower hook (registered at load time, below) keeps it in sync.
-  (emacos--render-page))
+  (emacos--render-page)
+  ;; Prime the network poller so the modeline status segment is live from
+  ;; boot, not only after the first *network* visit.
+  (emacos-net--ensure-timer)
+  (emacos-net--refresh))
 
 ;; Defer init until the window system is ready
 (add-hook 'window-setup-hook #'emacos--init)

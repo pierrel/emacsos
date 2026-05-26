@@ -138,6 +138,12 @@
     (should (assoc "Wifi on" (emacos-net--command-set)))
     (should (assoc "Cell on" (emacos-net--command-set)))))
 
+(ert-deftest test-net-command-set-entries-are-interactive ()
+  "Command-band entries run via `emacos--run-command' -> `call-interactively',
+so each must be `commandp' or the keyboard band errors on tap."
+  (dolist (entry (emacos-net--command-set))
+    (should (commandp (cdr entry)))))
+
 ;;; Page render
 
 (ert-deftest test-net-render-shows-toggles-list-and-note ()

@@ -39,7 +39,9 @@ note() { echo "cellular-bringup: $*"; }
 
 # --- read KEY=VALUE params from stdin -------------------------------------
 APN=""; APN_USER=""; APN_PASS=""
-while IFS='=' read -r key val; do
+# `|| [ -n "$key" ]` so a final line with no trailing newline (e.g. an
+# APN_AUTH_FILE ending without one) is still processed, not silently dropped.
+while IFS='=' read -r key val || [ -n "$key" ]; do
   case "$key" in
     APN)      APN=$val ;;
     APN_USER) APN_USER=$val ;;
@@ -100,12 +102,17 @@ if [ -n "$APN_USER" ] || [ -n "$APN_PASS" ]; then
 fi
 
 # --- 4. prefer wifi at home (lower metric than cell) ----------------------
-while IFS=: read -r name ctype; do
+# TYPE first so the (colon-free) type is the reliably-split field and the
+# connection NAME is the remainder.  A wifi profile whose NAME contains a
+# literal colon (rare) keeps nmcli's `\:` escaping and won't match the
+# modify — it just keeps its default metric (non-fatal; the connectivity
+# check still drives failover).
+while IFS=: read -r ctype name; do
   [ "$ctype" = "802-11-wireless" ] || continue
   if nmcli con modify "$name" ipv4.route-metric "$WIFI_METRIC" 2>/dev/null; then
     note "wifi '$name' route-metric -> $WIFI_METRIC"
   fi
-done < <(nmcli -t -f NAME,TYPE con show)
+done < <(nmcli -t -f TYPE,NAME con show)
 
 # --- 5. connectivity check (drives failover both directions) --------------
 # Write-if-absent: a re-run is a no-op, and we never clobber an operator edit.
