@@ -458,11 +458,13 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # `_close_iter` swallows its own exceptions so the un-awaited future
         # is clean.
         #
-        # If we aborted (disconnect/runaway) with a next() still in flight,
-        # that future is abandoned; retrieve its eventual exception via a
-        # callback so a failing next() doesn't log "Future exception was
-        # never retrieved".
-        if pending is not None and not pending.done():
+        # If we aborted (disconnect/runaway) with a next() abandoned, retrieve
+        # its eventual exception so a failing next() doesn't log "Future
+        # exception was never retrieved".  Defuse unconditionally (not just when
+        # still pending): it may have completed-with-exception between the last
+        # asyncio.wait and the abort check; add_done_callback fires immediately
+        # if it's already done, retrieving the exception either way.
+        if pending is not None:
             pending.add_done_callback(_defuse_future)
         # Submit BEFORE shutdown: scheduling on a shut-down pool raises.
         if pump is not None:
