@@ -62,7 +62,7 @@ Shipped in PR #11: TAB is the 4th button on the SPC/RET/DEL action row
 (its own =action-w= so the letter keys don't shrink).  Context-aware —
 =minibuffer-complete= in the minibuffer, else =indent-for-tab-command=.
 
-** TODO Keyboard layout + sizing iterations
+** DONE Keyboard layout + sizing iterations
 
 The Optimal-T9 layout from the Qin et al. paper is the v1
 baseline.  Live use will surface things the paper doesn't capture
@@ -315,3 +315,137 @@ section of each landed experiment's design doc:
 - [[file:docs/2026-05-17-assist-import.org][2026-05-17-assist-import.org]] — skill discovery, honesty
   validation, agent-callable phone tools, streaming, persistent
   thread state, sandbox, dotfiles bootstrap, known-good marker
+
+
+* Usability
+
+These add EmacsOS's first device-side system-integration layer: today =os.el= is
+pure UI (keyboard, command list, =*chat*=) and shells out to nothing.  The EmacsOS
+way is elisp wrapping the system CLIs (=call-process= / =start-process=), surfaced
+as dedicated buffers/modes that plug into the always-visible keyboard +
+=emacos-mode-commands= list.  Dependency order isn't the list order below:
+*Numbers* unblocks Wifi (passwords) and Phone calling (dialing), and the three
+cellular items block on the "Actual phone build" hardware.  Text messaging is the
+cheapest cellular win (no audio), so it's the natural first proof the modem works.
+
+** TODO Wifi connection flow
+I need a mode for seeing and connecting to wifi.
+
+A =emacos-wifi-mode= buffer (=tabulated-list-mode=) that scans and lists SSIDs with
+signal + security, shows the current connection, and offers Connect / Disconnect /
+Forget as =emacos-mode-commands= entries; passphrase entry runs through the existing
+keyboard into a masked minibuffer prompt.  Back it with the image's network stack —
+confirm whether that's =nmcli= (NetworkManager) or =wpa_cli= (=wpa_supplicant=);
+prefer =nmcli= (far easier to script, and saved-network + auto-reconnect come free),
+installing it if absent.  This is the first =call-process=-to-system-tool binding,
+so it sets the pattern for the cellular work.  Depends on *Numbers* (passwords).
+Done when you can join a WPA2 network from cold, entirely on-device.
+
+** TODO Numbers + symbols on the keyboard
+I need to be able to input numbers.
+
+The T9 grid is letters-only, so there's no way to type a digit — which blocks wifi
+passwords, URLs, and phone numbers.  Add a =123/ABC= toggle on the utility row that
+swaps the 3x3 letter grid for a digit + common-punctuation layer (phone-keyboard
+style), keeping multi-tap so one key still reaches the rarer symbols.  Lives in
+=os.el= next to =emacos--tap-key= and the layout table.  Decide on the phone which
+symbols earn a slot (=. : / @ - _= are the high-frequency ones for passwords/URLs).
+Prerequisite for Wifi and Phone calling.  Done when you can type a WPA password and
+a phone number without leaving the keyboard.
+
+** TODO Speech to text
+T9 is terrible.
+
+Push-to-talk dictation as a faster input path.  The Pi Zero W is too weak for
+real-time on-device whisper (single-core ARM11, 512 MB), so do it server-side — the
+home assist server is already there: a command records via ALSA (=arecord=, needs
+the mic from the audio build) and POSTs the wav to a new STT endpoint on the server
+(=whisper.cpp= / faster-whisper on the GPU box), which returns text to insert at
+point.  Reuses the existing phone↔server channel shape.  Depends on the audio build
+(mic) and the server endpoint; big enough to want its own design doc.  Done when
+hold-speak-release drops accurate text into the current buffer.
+
+** TODO Phone calling
+Needs "3G antenna" and "Headphone jack".
+
+A command + call buffer: enter a number (needs *Numbers*), dial via the modem
+(=mmcli --voice= or =AT D=), and show call state (dialing / ringing / connected /
+ended) with a Hang-up command.  The blocker is voice support + in-call audio routing
+(see the modem and audio items) — if the modem is data-only, calling is off the
+table.  Depends on: Cellular modem (voice-capable), Audio I/O (speaker + mic),
+Numbers.  Done when you can dial a real number and hold a two-way call.
+
+** TODO Phone answering
+Needs "3G antenna".
+
+Surface incoming calls.  A background watcher on the modem's unsolicited events
+(=ModemManager= D-Bus signal, or an =AT= notification reader) bridges a RING into the
+emacs daemon via =emacsclient= eval — the same external-event→daemon pattern the chat
+back-channel already uses — popping an Answer / Decline buffer and routing audio on
+Answer.  Shares that watcher process with Text messaging (incoming SMS), so build the
+bridge once.  Depends on: Cellular modem, Audio I/O, the shared modem-watcher.  Done
+when the phone rings, you can answer, and audio works.
+
+** TODO Text messaging
+Needs "3G antenna".
+
+Send/receive SMS via the modem (=mmcli --messaging-*= over raw =AT+CMGS/+CMGR= PDU
+wrangling).  A per-contact conversation buffer, compose via the keyboard, receive
+through the shared modem-watcher (same bridge as Phone answering).  Persist threads
+as org under the agent's dir — greppable, and the agent can read/act on them.  No
+audio dependency, so this is the easiest cellular feature and the first end-to-end
+proof the modem stack works.  Depends on: Cellular modem, the shared modem-watcher.
+
+** TODO Modeline status bar (time / date / battery / signal)
+Display things like the date, time and battery percentage. Consider removing most of
+everything else from the modeline.
+
+Today the modeline is just the =" EmacsOS"= label (=os.el:544=; the init snippet
+shrinks its face, =deploy/emacsos-init.el.in=).  Replace it with a glanceable
+=mode-line-format=: time + date (=display-time-mode=), battery % (=display-battery-mode=
+/ the =battery= package, which reads =/sys/class/power_supply/=), and wifi / cell
+signal (fed from the Wifi and modem layers).  Strip the default clutter (buffer
+position, minor modes, encoding) — at ~16 rows on 320x240 every row counts.  Mostly a
+=mode-line-format= rewrite plus two built-in minor modes.  Caveat: the bare Zero W has
+no battery gauge, so battery % needs a power HAT (e.g. PiSugar) that publishes a
+=power_supply= node — confirm what the build has.
+
+** TODO 
+
+* Actual phone build
+There are things outside of software that need to be done to make this phone truly useable in the wild.
+
+These hardware items gate the cellular software above (calling / answering /
+texting) and STT.  Worth one design pass since the modem, the audio I/O, and the
+call-audio routing between them are interdependent — pick them together, not
+separately.
+
+** TODO Cellular modem ("3G antenna")
+I have an antenna, just need to connect it and ensure I can connect to a cell network (reliably, with some options around it).
+
+Connect the modem to the Zero W (USB-OTG or a UART/HAT), insert a SIM, and bring it
+up — prefer =ModemManager= + =mmcli= (registration, signal, APN/bearer, SMS and voice
+in one stack) over hand-rolled =AT= on =/dev/ttyUSB*=.  "Options around it" = APN
+config, a signal monitor, and an auto-reconnect watchdog.  Two things to settle first
+because either can sink the plan: (1) modem model + band vs. the local carrier — *3G
+is being sunset in many markets*, so verify the modem does LTE if 3G is gone there;
+(2) whether the modem supports *voice* at all (many data modems don't, or need a
+separate analog audio path) — this decides whether Phone calling is even possible.
+Prerequisite for calling, answering, and texting.  Done when the modem registers,
+reports signal, and does data + SMS + (if voice-capable) a test call.
+
+** TODO Audio I/O ("headphone jack")
+I need to purchase and connect a headphone jack onto the pi zero w.
+
+The Zero W has *no analog audio* — no 3.5mm jack and no analog out on the header
+(unlike full-size Pis) — so this is really "add audio I/O", output *and* a mic (calls
+and STT both need capture).  Options: an I2S DAC/codec HAT (e.g. MAX98357A out + an
+I2S or USB mic, or a combined codec like the WM8960), a USB audio dongle (needs an OTG
+hub — there's one micro-USB data port), or PWM-on-GPIO out (poor, and output-only —
+not enough for calls).  The hard part is *call-audio routing*: the modem's voice path
+has to reach speaker + mic — either the modem exposes digital audio (USB/PCM) ALSA can
+route, or its analog codec pins must be wired to the audio device.  Resolve this
+jointly with the modem choice.  Done when ALSA can play and record on-device and
+in-call audio works end to end.
+
+** TODO 
