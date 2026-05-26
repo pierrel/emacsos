@@ -110,10 +110,42 @@ ABORT on the CHAT page at any point during a stream.
 ** Running
 
 =ASSIST_MODEL_URL= must point at an OpenAI-compatible chat
-endpoint.  Start the server:
+endpoint, and it must be present in the server *process's*
+environment.  If it's missing the server still starts, but every
+=/chat= fails the instant it builds the agent (=RuntimeError:
+ASSIST_MODEL_URL is required=) — which the phone surfaces as
+="error: connection closed"=.  Set it on the launch command:
 
 #+begin_src sh
 ASSIST_MODEL_URL=http://localhost:8000/v1 make server
+#+end_src
+
+The model URL (and the deploy vars) usually live in the sibling
+=assist= checkout's =.dev.env=.  Source that so you don't have to
+remember the value:
+
+#+begin_src sh
+set -a; . ../assist/.dev.env; set +a   # exports ASSIST_MODEL_URL &c.
+make server
+#+end_src
+
+=make server= runs uvicorn with =--reload= (auto-restarts on file
+edits), which is convenient while developing.  For a *stable single
+worker* — e.g. when tailing the log to catch a crash, where
+=--reload='s respawns would muddy it — launch uvicorn directly:
+
+#+begin_src sh
+set -a; . ../assist/.dev.env; set +a
+cd server && .venv/bin/python -m uvicorn emacsos_server.app:app \
+  --host 0.0.0.0 --port 8765
+#+end_src
+
+To restart, stop the running worker and let the port free before
+relaunching (a second uvicorn on =:8765= dies with "address already
+in use"):
+
+#+begin_src sh
+pkill -f 'uvicorn emacsos_server.app:app'
 #+end_src
 
 Each =/chat= invokes =assist.Thread.stream_message()= and pipes
