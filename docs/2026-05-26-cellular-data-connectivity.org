@@ -9,6 +9,15 @@ This is what lets you take the phone out of the house and keep a live
 internet connection — the foundation every later cellular feature (SMS,
 voice) and the away-phone WireGuard work build on.
 
+*Scope note (2026-05-26):* this PR also lands the on-device *network
+status + control* surface — a tappable cell/wifi modeline indicator and a
+=*network*= control page (toggle cell/wifi, pick a wifi network).  That was
+originally deferred to the *Modeline status bar* item (Decision 6), but
+pulled in at the user's request so the cellular work is *visible and
+controllable* on the phone, not invisible plumbing.  See Decision 6 for the
+design and the one piece still deferred (typing a *new* secured wifi
+password, which needs the Numbers keyboard item).
+
 The reference for "get this going" is the OURS project (a DIY Pi phone
 on the same SIM7600 module).  We borrow its *shape* — AT-command modem,
 NDIS-style data interface, an idempotent bring-up — but *not* its
@@ -54,14 +63,24 @@ working public-internet data."
 - A manual bring-up / validation runbook (this doc) covering the hardware
   acceptance gate, the happy-path command sequence, the failover checks,
   the =qmicli= break-glass fallback, and a debugging checklist.
+- *On-device network status + control* (=network.el=): a tappable cell/wifi
+  modeline segment (a global =mode-line-format=) and a =*network*= control
+  page — toggle the cellular connection, toggle the wifi radio, and connect
+  to a *saved* or *open* wifi network.  All reads/actions run asynchronously
+  (one =make-process= reader + a sentinel; never block the main loop).
 
 *Out (called out so they don't sneak in):*
-- *Any elisp / on-screen UI.*  Data connectivity needs none — =chat.el='s
-  =url-retrieve= rides whatever the kernel's default route is, with zero
-  awareness of the interface.  A cell-signal indicator belongs to the
-  *Modeline status bar* roadmap item, alongside the wifi indicator; building
-  a one-off here would pre-empt that item's UX.  See Decision 6 for the
-  zero-code field check in the meantime.
+- *Typing a NEW secured wifi password.*  Connecting to a saved/open network
+  works; a new WPA network needs digits on the T9 keyboard — the *Numbers +
+  symbols on the keyboard* roadmap item, not yet done.  =network.el= degrades
+  to a clear note (=emacos-net--connect-kind='s =needs-password= branch is
+  the single seam where the future masked-prompt lands).
+- *The full =emacos-wifi-mode=* (=tabulated-list-mode=, Forget, scan refresh
+  UX) — its own roadmap item.  The =*network*= page here is the lighter,
+  big-button subset that fits the 320x240 touch model.
+- *time / date / battery in the modeline* — the rest of the *Modeline status
+  bar* item; this PR adds only the network segment, leaving the
+  =mode-line-format= list extensible for those.
 - *Reaching the home assist server away from wifi* — the WireGuard item
   (Decision 1, Out-of-scope).
 - *SMS and voice* — separate roadmap items; they ride the same modem +
@@ -170,22 +189,38 @@ script — has the one-time raw =AT+CNMP=38= over =/dev/ttyUSB2=, *run with
 ModemManager stopped* so it isn't fighting MM for the AT port.  It is one
 lever or the other, mmcli-first, never both in a run.
 
-** 6. Provisioning-only, no elisp — defer the cell-status read, but document a zero-code field check
+** 6. On-device status + control (pulled in at the user's request)
 
-*Opinionated.*  v1 ships no elisp.  The risk is "invisible plumbing": out
-in the world you'd have no on-screen way to tell you're on cell.  We accept
-that for this milestone because (a) a persistent signal indicator is owned
-by the *Modeline status bar* item (which also owns the wifi indicator —
-building a one-off here splits that work), and (b) the phone *is* emacs, so
-the field check needs no new code: on the phone, =M-x shell-command= with
-=nmcli -t -f NAME,TYPE,DEVICE con show --active= (is =emacsos-cellular=
-active?) or =mmcli -m any --signal-get= (what's the signal?).  The runbook
-documents this.  When the modeline item lands, the persistent indicator
-reads the same =mmcli=/=nmcli= output.
+Originally this milestone shipped no elisp — the risk being "invisible
+plumbing" you can't see working without a terminal.  At the user's request
+we instead ship the on-device surface now, in =network.el=:
 
-*If you'd rather have a minimal on-device indicator in this PR, say so* —
-it's a small =call-process= read in =os.el='s modeline, but it commits the
-modeline item's first UX decision early.
+- *Tappable modeline segment.*  A global =setq-default mode-line-format= of
+  =(" EmacsOS  " (:eval (emacos-net-mode-line-string)))= shows =wifi NN%= /
+  =lte NN%= / =no net= on every top buffer (replacing the stock clutter; the
+  =*keyboard*= buffer keeps its local =nil=).  The segment is a propertized
+  string with =[mode-line mouse-1]= → =emacos-net-show=, and is wrapped in
+  =condition-case= so a redisplay-time error can never brick the modeline.
+  Because the modeline is a small (face-shrunk) tap target on 320x240, a big
+  =("Net" . emacos-net-show)= button is also added to =emacos-global-commands=
+  as the reliable entry; the modeline tap is the glance-and-go shortcut.
+- *=*network*= control page.*  Shown in the top window like =*chat*=;
+  rendered with the existing =emacos--btn= big buttons: a wifi on/off toggle,
+  a cell on/off toggle (=nmcli con up/down emacsos-cellular= — shown only once
+  the bring-up has created that connection; otherwise an honest "not set up"
+  line), and a list of nearby networks that tap-connect.
+- *Async + cheap.*  One =make-process= shell reader gathers all the
+  =nmcli=/=mmcli= output into a delimited blob; a sentinel parses it into a
+  cached =emacos-net-state= and calls =force-mode-line-update=.  A single
+  =defcustom emacos-net-refresh-interval= (30s) repeat timer (lazy, hot-reload
+  guarded) keeps it fresh; the timer only updates the var, redisplay does the
+  rest.  A single-flight guard (=emacos-net--proc=) means reads never stack on
+  the single-core Zero W.
+
+The one piece still deferred is *typing a new secured wifi password* — that
+needs the Numbers keyboard item; =emacos-net--connect-kind= is the seam, and
+new-secured networks degrade to a clear on-page note rather than a doomed
+=nmcli= connect that could hang on a secret-agent prompt.
 
 ** 7. Secrets flow over stdin; APN is a Make var, carrier auth is an untracked file
 
@@ -208,13 +243,18 @@ None of =make test-elisp= / =make test-server= / =make smoke= can exercise
 a modem; the happy path is real-phone-only.  Before touching the software,
 clear these — a failure here is *not* a software bug:
 
-1. *Power (the #1 risk).*  The SIM7600 draws ~150 mA idle but spikes to
-   ~2 A on TX bursts; under-feeding it causes brown-out reboots (exactly
-   OURS's failure).  Set the HAT's power jumper to *external* and feed it
-   from a dedicated ≥2.5–3 A supply.  *Accept when:* the NET LED reaches
-   steady/slow-blink (registered) and *stays there under load* (a =ping=
-   flood), and =watch -n1 lsusb -t= shows the modem *stable*, not popping
-   in and out.  If it pops, stop — it's power.
+1. *Power (the #1 risk — CONFIRMED on hardware 2026-05-26).*  On first
+   attaching the HAT, *the phone resets* — the textbook brown-out signature:
+   the SIM7600 draws ~150 mA idle but spikes to ~2 A on TX/power-on inrush,
+   and drawing that through the Zero W's rail collapses it.  *Fix:* set the
+   HAT's power jumper to *external* and feed it from a dedicated ≥2.5–3 A
+   supply (separate from the Pi, or one ≥3 A supply with thick/short
+   cabling).  *Diagnose:* after it comes up with the HAT attached,
+   =vcgencmd get_throttled= (non-zero = under-voltage) and =dmesg | grep -i
+   volt=.  *Accept when:* the phone stays up with the HAT attached; the NET
+   LED reaches steady/slow-blink and stays there under a =ping= flood; and
+   =watch -n1 lsusb -t= shows the modem *stable*, not popping in and out.
+   Nothing in software can fix an under-fed HAT — clear this gate first.
 2. *Pogo-pin USB routing on THIS board.*  On a Pi Zero W the HAT is meant
    to reach the Pi's USB via spring "thimble" pins on the Zero's USB test
    pads — no cable, leaving the micro-USB OTG port free for the keyboard.
@@ -280,9 +320,17 @@ unit-test seam here (the existing tracked script, =scripts/chat-from-phone.sh=,
 is itself only exercised by =make smoke='s docker round-trip).  Don't invent
 a harness the milestone doesn't need.  The realistic guards are a =bash -n
 deploy/cellular-bringup.sh= syntax check and =shellcheck=; everything else
-is the real-phone runbook above.  If the deferred elisp status read (Decision
-6) is ever pulled in, *that* parser is unit-testable with the =cl-letf=
-=call-process= stub used in =tests/test-chat.el= — and is a reason to want it.
+is the real-phone runbook above.
+
+The elisp (=network.el=) DOES have a unit-test seam, and =tests/test-network.el=
+(wired into =make test-elisp=) covers the pure core: the terse-line splitter
+(escaped colons/backslashes), the blob parser (-> =emacos-net-state= for
+wifi-active / cell-active / no-net / unprovisioned), the modeline formatter +
+its tap properties, the =emacos-net--connect-kind= seam, the dynamic command
+set, the page render, and the single-flight refresh guard (=cl-letf=-stubbing
+=make-process=, the =tests/test-chat.el= pattern).  *Real-phone-only:* the
+actual =nmcli=/=mmcli= execution, the radio toggles toggling, a real wifi
+connect, and the modeline *tap* on the panel.
 
 * Risks / edge cases
 
@@ -313,11 +361,15 @@ is the real-phone runbook above.  If the deferred elisp status read (Decision
 1. =deploy/cellular-bringup.sh= (this design) + =bash -n= + =shellcheck=.
 2. =make cellular-bringup= target (APN var, stdin secret passthrough,
    push-run-cleanup).
-3. This doc.
-4. =roadmap.org=: point the "Cellular modem" item at this doc and note the
-   WireGuard follow-up (a pointer, not a DONE flip — the work isn't shipped).
-5. PR.  No server or =assist= change.  Happy-path validation is real-phone,
-   noted as pending hardware in the PR.
+3. =network.el= (modeline segment + =*network*= page + async reader/parser/
+   actions) + =os.el= wiring (global =mode-line-format=, by-identity command
+   branch, ="Net"= global command, =require=) + =Makefile= (=network.el= to
+   the scp + hot-reload + =test-elisp=) + =tests/test-network.el=.
+4. This doc + =roadmap.org=: point the "Cellular modem" item at this doc and
+   note the WireGuard follow-up (a pointer, not a DONE flip — not shipped).
+5. =make test-elisp= green; PR.  No server or =assist= change.  Happy-path
+   (real modem + the radio actions + the tap) is real-phone, pending the
+   power fix and a service-bearing SIM — noted in the PR.
 
 * Open questions / to verify on hardware
 
@@ -344,8 +396,12 @@ Each its own design doc + branch.
    a shared modem-watcher bridge.
 3. *Voice (calling / answering)* — gated on a voice-capable modem path + the
    Audio I/O hardware build.
-4. *Modeline status bar* — the home for the cell-signal (and wifi) indicator
-   deferred in Decision 6; it reads the same =mmcli=/=nmcli= output.
+4. *Modeline status bar* — the cell/wifi *signal* segment ships here
+   (Decision 6); what remains for that item is *time / date / battery* and
+   stripping any residual clutter, appended to the same =mode-line-format=.
+5. *Numbers + symbols on the keyboard* — unblocks typing a new secured wifi
+   password (the =needs-password= seam in =network.el=) and the full
+   =emacos-wifi-mode=.
 
 * Companion docs
 

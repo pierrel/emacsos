@@ -634,7 +634,8 @@ reachable via M-x.  Grow this incrementally.")
   '(("Save"          . save-buffer)
     ("Undo"          . undo)
     ("Find File"     . find-file)
-    ("Switch Buffer" . switch-to-buffer))
+    ("Switch Buffer" . switch-to-buffer)
+    ("Net"           . emacos-net-show))
   "Command-list fallback for buffers whose major mode has no entry in
 `emacos-mode-commands'.  Keeps the universal actions (save, undo, open,
 switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
@@ -661,6 +662,12 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos--chat-button "chat")
 (declare-function emacos--chat-button-label "chat")
 (declare-function emacos-assist--command-set "emacos-assist")
+
+;; Defined in network.el (required at the bottom of this file).
+(defvar emacos-net--buffer-name)
+(declare-function emacos-net--command-set "network")
+(declare-function emacos-net-mode-line-string "network")
+(declare-function emacos-net-show "network")
 
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
@@ -691,6 +698,8 @@ rather than only M-x."
         ;; `current-buffer', so without this wrap the buffer-local read
         ;; sees nil and "Forget" never relabels — caught live 2026-05-30.
         (with-current-buffer buf (emacos-assist--command-set)))
+       ((and buf (eq buf (get-buffer emacos-net--buffer-name)))
+        (emacos-net--command-set))
        ((emacos--mode-commands-for mode))
        (t emacos-global-commands))))))
 
@@ -928,7 +937,14 @@ window-buffer-change follower can't recurse into an in-progress render."
   (set-frame-name "EmacsOS")
   ;; Main editing buffer
   (switch-to-buffer (get-buffer-create "*scratch*"))
-  (setq-local mode-line-format " EmacsOS")
+  ;; Global, minimal modeline: the EmacsOS label + a tappable cell/wifi
+  ;; status segment, shown on every top (editing) buffer.  Replaces the
+  ;; stock clutter (buffer position, minor modes, encoding).  The
+  ;; *keyboard* buffer overrides this to nil on each render
+  ;; (`emacos--render-page'); time/date/battery are left for the
+  ;; "Modeline status bar" roadmap item to add to this same list.
+  (setq-default mode-line-format
+                '(" EmacsOS  " (:eval (emacos-net-mode-line-string))))
   ;; Split: top = editor, bottom = keyboard
   (let* ((total (window-total-height))
          (kbd-height (/ (* total 3) 4))
@@ -958,6 +974,7 @@ window-buffer-change follower can't recurse into an in-progress render."
              (file-name-directory (or load-file-name buffer-file-name)))
 (require 'chat)
 (require 'emacos-assist)
+(require 'network)
 
 (provide 'os)
 ;;; os.el ends here
