@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install server setup-server test-server test-elisp smoke
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup server setup-server test-server test-elisp smoke
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -51,6 +51,26 @@ local-deploy:
 	# when chat.el is reloaded.  Conditional so a fresh phone (no
 	# phone-install yet) still gets a working code reload.
 	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
+
+# Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
+# docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific
+# and is NOT committed — pass it on the command line:
+#   make cellular-bringup APN=<your-carrier-apn>
+# If your carrier needs PAP/CHAP auth, put `APN_USER=...` and `APN_PASS=...`
+# (one KEY=VALUE per line) in an UNTRACKED file and point APN_AUTH_FILE at
+# it; the script reads all params on stdin, so credentials never touch the
+# process table or a tracked file:
+#   make cellular-bringup APN=<apn> APN_AUTH_FILE=~/.emacsos-apn-auth
+PHONE_DEPLOY_TMP ?= /tmp/cellular-bringup.sh
+APN ?=
+APN_AUTH_FILE ?=
+
+cellular-bringup:
+	@[ -n "$(APN)" ] || { echo "error: APN is required, e.g. make cellular-bringup APN=internet"; exit 1; }
+	scp deploy/cellular-bringup.sh phone:$(PHONE_DEPLOY_TMP)
+	@{ printf 'APN=%s\n' '$(APN)'; \
+	   if [ -n '$(APN_AUTH_FILE)' ]; then cat '$(APN_AUTH_FILE)'; fi; \
+	 } | ssh phone "sudo bash $(PHONE_DEPLOY_TMP); rc=\$$?; rm -f $(PHONE_DEPLOY_TMP); exit \$$rc"
 
 test-elisp:
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -f ert-run-tests-batch-and-exit

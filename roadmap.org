@@ -439,6 +439,13 @@ separately.
 ** TODO Cellular modem ("3G antenna")
 I have an antenna, just need to connect it and ensure I can connect to a cell network (reliably, with some options around it).
 
+*Data milestone in design* — [[file:docs/2026-05-26-cellular-data-connectivity.org][docs/2026-05-26-cellular-data-connectivity.org]]:
+SIM7600G-H via in-kernel =qmi_wwan= + a NetworkManager =gsm= connection
+(=ModemManager= owns the modem; NM owns route + wifi↔cell failover),
+provisioned by =make cellular-bringup APN=...=.  "Done when" stops at
+public-internet data; reaching the home server from away layers the
+WireGuard item on top (the server→phone back-channel needs it).
+
 Connect the modem to the Zero W (USB-OTG or a UART/HAT), insert a SIM, and bring it
 up — prefer =ModemManager= + =mmcli= (registration, signal, APN/bearer, SMS and voice
 in one stack) over hand-rolled =AT= on =/dev/ttyUSB*=.  "Options around it" = APN

@@ -1,0 +1,354 @@
+#+title: Cellular Data Connectivity: SIM7600G-H 4G HAT, NetworkManager, Wifi↔Cell Failover
+#+date: 2026-05-26
+
+The "Cellular modem" item under *Actual phone build* in [[file:../roadmap.org][roadmap.org]],
+scoped to the *data-connectivity* milestone: bring up a Waveshare
+SIM7600G-H 4G HAT so the phone has a working cellular IP + default
+route, and falls over automatically between home wifi and cellular.
+This is what lets you take the phone out of the house and keep a live
+internet connection — the foundation every later cellular feature (SMS,
+voice) and the away-phone WireGuard work build on.
+
+The reference for "get this going" is the OURS project (a DIY Pi phone
+on the same SIM7600 module).  We borrow its *shape* — AT-command modem,
+NDIS-style data interface, an idempotent bring-up — but *not* its
+mechanics: OURS ran a Pi 3B with a vendor =simcom_wwan.ko= replacing the
+in-kernel driver, raw =AT$QCRMCALL= + =udhcpc=, and an =@reboot= cron to
+re-establish it all.  On current Raspberry Pi OS that stack is obsolete;
+the in-kernel =qmi_wwan= driver + ModemManager + NetworkManager do the
+same job with autoconnect persistence and no cron.  We take the modern
+path and keep the OURS recipe only as a documented break-glass fallback.
+
+* Goal
+
+With the SIM inserted and the HAT powered, the phone:
+- registers on the carrier's LTE network and reports signal;
+- obtains a cellular IP + default route via a NetworkManager =gsm=
+  connection that comes up automatically on boot;
+- *prefers wifi at home* and *falls back to cellular when wifi dies*,
+  automatically and in both directions, without burning cellular data
+  while wifi is healthy.
+
+A successful run: with wifi switched off, =ping= and =curl= to a public
+host succeed over the =wwan= interface; switch wifi back on and the
+default route returns to wifi within the connectivity-check interval.
+
+*What this milestone does NOT prove* (see Decision 1): that the phone can
+reach the *home assist server* from out in the world.  That needs a
+network path home — the WireGuard experiment — because the home server is
+on a private LAN and, more fundamentally, the chat *back-channel* is
+server→phone (=emacsclient= to the phone's daemon), which can't traverse
+cellular CGNAT without the tunnel.  This doc stops at "the phone has
+working public-internet data."
+
+* Scope
+
+*In:*
+- A documented, idempotent provisioning script =deploy/cellular-bringup.sh=
+  run on the phone (qmi_wwan/MM sanity checks → an =emacsos-cellular= NM
+  =gsm= connection with =autoconnect= → route metrics + a connectivity-check
+  stanza for failover → one-time LTE preference → bring-up + report).
+- A =make cellular-bringup APN=<apn>= target that pushes the script to the
+  phone, runs it under =sudo=, and removes it.  APN (and optional carrier
+  auth) is operator-specific and never committed.
+- A manual bring-up / validation runbook (this doc) covering the hardware
+  acceptance gate, the happy-path command sequence, the failover checks,
+  the =qmicli= break-glass fallback, and a debugging checklist.
+
+*Out (called out so they don't sneak in):*
+- *Any elisp / on-screen UI.*  Data connectivity needs none — =chat.el='s
+  =url-retrieve= rides whatever the kernel's default route is, with zero
+  awareness of the interface.  A cell-signal indicator belongs to the
+  *Modeline status bar* roadmap item, alongside the wifi indicator; building
+  a one-off here would pre-empt that item's UX.  See Decision 6 for the
+  zero-code field check in the meantime.
+- *Reaching the home assist server away from wifi* — the WireGuard item
+  (Decision 1, Out-of-scope).
+- *SMS and voice* — separate roadmap items; they ride the same modem +
+  ModemManager but a shared modem-watcher bridge is their concern.
+- *A systemd unit for boot persistence* — the NM connection's =autoconnect=
+  is the persistence (Decision 3).  A unit is only sketched for the
+  *break-glass* =qmicli= path, which has no autoconnect.
+- *Wifi connection management* (=emacos-wifi-mode=) — its own roadmap item;
+  this script only nudges existing wifi connections' route metrics.
+
+* Decisions
+
+Numbered.  Push back on any.  Opinionated calls flagged inline.
+
+** 1. Bound "done when" at public-internet data; reaching the home server is the WireGuard follow-up
+
+*Opinionated.*  The user's milestone was phrased "reach the home assist
+server away from wifi."  We deliberately stop short of that here, for a
+reason worth stating precisely so the scope isn't mistaken for
+under-delivery: cellular gives the phone a *public* IP, but the home
+emacsos-server lives on a private LAN (the phone reaches it today at a
+LAN address baked into =DEV_BOX_URL=).  Two paths home would be needed —
+the *forward* path (phone→server =/chat=) and the *back-channel*
+(server→phone =emacsclient=, via =request.client.host= in
+=server/emacsos_server/phone.py=) — and the back-channel is the genuinely
+hard one: it requires the *server* to initiate a connection *to* the
+phone, which cellular CGNAT forbids without a VPN.  That is exactly what
+the *Remote connectivity: WireGuard for the away phone* roadmap item
+exists to solve.  So: this doc proves the phone has working data; the
+WireGuard doc turns that into a path home.  Splitting here keeps each
+diff about one thing, and means a failure in either is unambiguous.
+
+** 2. Stack: in-kernel qmi_wwan (QMI mode, not RNDIS) + a NetworkManager gsm connection, with ModemManager owning the modem
+
+The division of labour matters because the follow-on features depend on
+it, and because the roadmap explicitly says to "prefer =ModemManager= +
+=mmcli=":
+- *ModemManager owns the modem.*  Registration, signal, mode/capability,
+  the data bearer — and, later, SMS and voice — all go through MM
+  (=mmcli= / its D-Bus API).  This honours the roadmap's preference and
+  means SMS/voice won't require re-tooling.
+- *NetworkManager owns the connection + routing/failover policy* and
+  activates the bearer *through* MM.  An NM =gsm= connection is NM's
+  front-end to ModemManager — not hand-rolled AT.
+- *The kernel driver is in-tree =qmi_wwan=*, exposing =wwan0= +
+  =/dev/cdc-wdm0=.  Keep the modem in *QMI* mode, *not* RNDIS/=cdc_ether=
+  — RNDIS is documented to fight NetworkManager.  No vendor
+  =simcom_wwan.ko= (that was OURS's Pi-3B-era workaround and is obsolete).
+
+The NM =gsm= connection is created with =ifname '*'= — a =gsm= connection
+binds the *ModemManager modem* (control plane =/dev/cdc-wdm0=), and NM/MM
+choose the =wwan= data netdev themselves.  Do *not* pin =ifname wwan0=;
+that is a category error for a =gsm= connection.
+
+** 3. Boot persistence is the NM connection's autoconnect — no systemd unit
+
+The =emacsos-cellular= connection is created with
+=connection.autoconnect yes=.  NetworkManager brings it up at boot when MM
+reports the modem registered — asynchronously, so it never gates wifi-first
+boot.  This *is* the persistence; it replaces OURS's =@reboot= cron with
+zero moving parts.  We deliberately add *no* systemd unit on this path, and
+deliberately do *not* add the cell connection to any
+=NetworkManager-wait-online= dependency (a slowly-enumerating modem must
+not stall boot).
+
+*The one exception, documented not shipped:* if ModemManager never
+enumerates the modem (a known Bookworm risk — see Risks) you fall to the
+=qmicli= break-glass path, which has *no* autoconnect.  Only there does a
+systemd oneshot become necessary; the runbook sketches it.  We don't ship
+it because the supported path doesn't need it and an untested unit for an
+unhoped-for path is dead weight.
+
+** 4. Failover is driven by the connectivity check (+20000), not by the metric gap
+
+*Worth getting right — the naïve mental model is wrong.*  It is tempting
+to think "wifi metric 100 < cell metric 700, so wifi always wins until
+it's gone."  That only covers wifi *disconnect*.  The common real failure
+is wifi *associated but dead* (captive portal, dead gateway) — the metric
+gap does nothing there.  The actual failover lever is NetworkManager's
+*connectivity check*: NM periodically probes a check URI per interface and,
+when an interface fails, *adds +20000 to that interface's default-route
+metric*.  So when home wifi goes captive, its route jumps to
+=100 + 20000 = 20100=, the cellular route (700) wins, and when wifi
+recovers the penalty lifts and wifi (100) wins again.
+
+Therefore:
+- The =[connectivity]= stanza (=uri= + =interval=) is *essential*, not
+  decoration — it is what makes failover work at all.  (The =uri=/expected
+  response may need tuning per distro; noted in the script.)
+- The wifi-100 / cell-700 base metrics only decide the winner *when both
+  links have connectivity* — i.e. the "prefer wifi at home" tiebreak.
+- This +20000 is the *connectivity-check* mechanism and applies on QMI just
+  as on PPP; it is not the separate PPP base-metric quirk.  Staying on QMI
+  (=wwan=, not =ppp0=) avoids that *other* PPP penalty — a second reason to
+  keep QMI mode (Decision 2).  A post-up check that the bearer is =wwan=,
+  not =ppp0=, catches a mode regression.
+
+** 5. LTE preference set once via mmcli, with a raw-AT fallback in the runbook
+
+"Register on LTE" is part of the milestone (and 3G is being sunset in many
+markets).  The script sets it via =mmcli --set-current-modes='4g'= (falling
+back to =--set-current-capabilities='lte'=); this persists in the modem's
+NVRAM, so it is genuinely one-time even though the script is re-runnable.
+If neither =mmcli= form sticks on this firmware, the *runbook* — not the
+script — has the one-time raw =AT+CNMP=38= over =/dev/ttyUSB2=, *run with
+ModemManager stopped* so it isn't fighting MM for the AT port.  It is one
+lever or the other, mmcli-first, never both in a run.
+
+** 6. Provisioning-only, no elisp — defer the cell-status read, but document a zero-code field check
+
+*Opinionated.*  v1 ships no elisp.  The risk is "invisible plumbing": out
+in the world you'd have no on-screen way to tell you're on cell.  We accept
+that for this milestone because (a) a persistent signal indicator is owned
+by the *Modeline status bar* item (which also owns the wifi indicator —
+building a one-off here splits that work), and (b) the phone *is* emacs, so
+the field check needs no new code: on the phone, =M-x shell-command= with
+=nmcli -t -f NAME,TYPE,DEVICE con show --active= (is =emacsos-cellular=
+active?) or =mmcli -m any --signal-get= (what's the signal?).  The runbook
+documents this.  When the modeline item lands, the persistent indicator
+reads the same =mmcli=/=nmcli= output.
+
+*If you'd rather have a minimal on-device indicator in this PR, say so* —
+it's a small =call-process= read in =os.el='s modeline, but it commits the
+modeline item's first UX decision early.
+
+** 7. Secrets flow over stdin; APN is a Make var, carrier auth is an untracked file
+
+APN is a low-sensitivity carrier identifier, parameterised like
+=DEV_BOX_URL= — a required Make var with no committed default (=make
+cellular-bringup APN=<apn>=; empty = error).  Carrier *credentials*
+(=APN_USER= / =APN_PASS=, rarely needed) must never ride a command line or
+environment: =sudo= strips the environment by default, and anything on
+argv/env is visible in the process table.  So the script reads *all*
+parameters as =KEY=VALUE= lines on *stdin*, and the Make target pipes them
+in (the auth lines, if any, =cat='d from an untracked =APN_AUTH_FILE=).
+stdin crosses the =sudo= boundary untouched and never appears in any
+process's argv/environ.  The APN ultimately lives only in the phone's own
+untracked =/etc/NetworkManager/system-connections/emacsos-cellular.nmconnection=
+— correct, and nothing operator-specific lands in the repo.
+
+* Hardware acceptance gate (do this FIRST — it is not software)
+
+None of =make test-elisp= / =make test-server= / =make smoke= can exercise
+a modem; the happy path is real-phone-only.  Before touching the software,
+clear these — a failure here is *not* a software bug:
+
+1. *Power (the #1 risk).*  The SIM7600 draws ~150 mA idle but spikes to
+   ~2 A on TX bursts; under-feeding it causes brown-out reboots (exactly
+   OURS's failure).  Set the HAT's power jumper to *external* and feed it
+   from a dedicated ≥2.5–3 A supply.  *Accept when:* the NET LED reaches
+   steady/slow-blink (registered) and *stays there under load* (a =ping=
+   flood), and =watch -n1 lsusb -t= shows the modem *stable*, not popping
+   in and out.  If it pops, stop — it's power.
+2. *Pogo-pin USB routing on THIS board.*  On a Pi Zero W the HAT is meant
+   to reach the Pi's USB via spring "thimble" pins on the Zero's USB test
+   pads — no cable, leaving the micro-USB OTG port free for the keyboard.
+   *Accept when:* =lsusb= shows the SIM7600 with no USB cable, and the OTG
+   port still drives the keyboard.  (The M2 HAT variant routes USB
+   differently — verify the silkscreen.)
+3. *ModemManager enumeration on this OS image.*  *Accept when:* =mmcli -L=
+   lists the modem.  If not, you're on the =qmicli= break-glass path
+   (runbook) and the NM-based failover here does not apply.
+4. *Carrier band / LTE.*  Confirm the SIM's plan has LTE data and the
+   SIM7600G-H supports the carrier's bands (it is a global LTE Cat-4
+   module).  *Accept when:* =mmcli -m <idx>= shows registered on LTE.
+
+* Bring-up runbook (real phone)
+
+1. *Enumerate.*  =lsusb=; =lsmod | grep qmi_wwan=; =mmcli -L=;
+   =mmcli -m <idx>= (registration + signal).
+2. *Provision* from the dev box: =make cellular-bringup APN=<your-carrier-apn>=
+   (add =APN_AUTH_FILE=<untracked-file>= only if your carrier needs auth).
+   The script is idempotent — re-run it freely; it prints what it changed
+   vs. skipped, then the active connections + routes.
+3. *Done-when checks* (the two failover toggles — name them explicitly):
+   - =nmcli radio wifi off= → =nmcli -t -f NAME,DEVICE con show --active=
+     shows =emacsos-cellular=; =ip route= has a default via the =wwan=
+     interface; =ping -c3 1.1.1.1= and =curl -sS https://example.com=
+     succeed.
+   - =nmcli radio wifi on= → within the connectivity-check interval,
+     =ip route='s default reverts to the wifi interface (metric 100) and a
+     =ping= still works.  *Both directions must pass.*
+
+** Break-glass: ModemManager won't enumerate
+
+If =mmcli -L= stays empty, drive the bearer directly (the OURS recipe,
+modernised — note it has *no* autoconnect, so it needs the systemd oneshot
+sketched below to survive reboot):
+#+begin_src bash
+sudo systemctl stop ModemManager
+sudo ip link set wwan0 down
+echo Y | sudo tee /sys/class/net/wwan0/qmi/raw_ip     # raw-ip is required ONLY here
+sudo ip link set wwan0 up
+sudo qmicli -d /dev/cdc-wdm0 --device-open-proxy \
+     --wds-start-network="apn='<apn>',ip-type=4" --client-no-release-cid
+sudo udhcpc -i wwan0
+#+end_src
+A oneshot =systemd= unit running the above =ExecStart= (=After=/=Wants= the
+qmi device) would give it boot persistence — *only* needed on this path.
+
+** Debugging checklist (modernised from OURS)
+
+Power/brown-out first; NET LED state; =watch -n1 lsusb -t= stability;
+=qmi_wwan= present (and *not* an RNDIS/vendor module); =mmcli -m <idx>= for
+registration + signal; =nmcli con show --active= + =ip route= for the
+IP/route; =journalctl -u ModemManager -u NetworkManager= for the
+connection-attempt logs.  AT spot-checks (=AT+COPS?=, =AT+CSQ=, =AT+CNMP?=)
+over =/dev/ttyUSB2= are last-resort diagnostics — and contend with MM for
+the port, so stop MM first.
+
+* Tests / validation boundary
+
+State it plainly: there is no fake for a cell network in this repo, and the
+provisioning script — a bash front-end to =nmcli=/=mmcli=/=lsmod= — has no
+unit-test seam here (the existing tracked script, =scripts/chat-from-phone.sh=,
+is itself only exercised by =make smoke='s docker round-trip).  Don't invent
+a harness the milestone doesn't need.  The realistic guards are a =bash -n
+deploy/cellular-bringup.sh= syntax check and =shellcheck=; everything else
+is the real-phone runbook above.  If the deferred elisp status read (Decision
+6) is ever pulled in, *that* parser is unit-testable with the =cl-letf=
+=call-process= stub used in =tests/test-chat.el= — and is a reason to want it.
+
+* Risks / edge cases
+
+- *Power brown-out* — #1 risk; a hardware gate, not a software bug.
+- *ModemManager non-enumeration on Bookworm* — a documented interaction
+  (a SIM-hotswap / AT-port udev rule has crashed MM on this era).  Mitigation:
+  the =qmicli= break-glass path — which degrades failover to manual route
+  management and needs its own persistence (Decision 3).  Also: the raw-AT
+  LTE fallback must run with MM stopped, or it can be the very thing that
+  destabilises MM.
+- *LTE-lock not persisting via mmcli* — fall to one-time =AT+CNMP=38=;
+  re-verify across a reboot in case firmware resets capabilities on power
+  cycle.
+- *Failover thrash* — a flaky home wifi the connectivity check repeatedly
+  demotes/promotes could ping-pong the route and burn cell data.  The
+  =interval= and the metric gap are the tuning knobs.
+- *One USB controller on the Zero W* — host mode for keyboard + modem is
+  fine; USB-gadget networking on the same port is not available
+  simultaneously.  Don't let a future change assume otherwise.
+- *Idempotency re-run states* — "no modem" is treated as stop-and-retry,
+  never auto-fallback; =con add= is guarded by an exists-check so a re-run
+  modifies rather than errors; =con up= after a modify converges the running
+  state.
+
+* Implementation sequence
+
+0. Branch =cellular-data-bringup= off =main=.
+1. =deploy/cellular-bringup.sh= (this design) + =bash -n= + =shellcheck=.
+2. =make cellular-bringup= target (APN var, stdin secret passthrough,
+   push-run-cleanup).
+3. This doc.
+4. =roadmap.org=: point the "Cellular modem" item at this doc and note the
+   WireGuard follow-up (a pointer, not a DONE flip — the work isn't shipped).
+5. PR.  No server or =assist= change.  Happy-path validation is real-phone,
+   noted as pending hardware in the PR.
+
+* Open questions / to verify on hardware
+
+1. Does *this* HAT route USB to the Zero's pogo pads (vs. needing the
+   micro-USB cable that would consume the OTG port)?
+2. Does ModemManager reliably enumerate this module on the phone's actual
+   OS image, or do we live on the =qmicli= fallback?
+3. Does =mmcli= LTE-lock persist across a reboot, or is the one-time
+   =AT+CNMP=38= needed?
+4. Does the chosen =[connectivity]= =uri=/response report "full" on a
+   healthy link (a wrong URI can leave NM permanently "limited", pinning the
+   +20000 penalty)?
+
+* Out of scope, next experiments
+
+Each its own design doc + branch.
+
+1. *WireGuard for the away phone* — *the immediate follow-up*, and the reason
+   "done when" stops at the public internet.  Turns the cellular public IP
+   into a path home; the server→phone back-channel is the crux (Decision 1).
+   Note the latency caveat already flagged in the roadmap: =call_emacs='s 15s
+   =EVAL_TIMEOUT_SECONDS= may need raising over cellular.
+2. *SMS* — the cheapest cellular *feature*, no audio; rides the same modem +
+   a shared modem-watcher bridge.
+3. *Voice (calling / answering)* — gated on a voice-capable modem path + the
+   Audio I/O hardware build.
+4. *Modeline status bar* — the home for the cell-signal (and wifi) indicator
+   deferred in Decision 6; it reads the same =mmcli=/=nmcli= output.
+
+* Companion docs
+
+None.  No server or =assist= change.  When this ships, append an *Outcome*
+section here pointing at the merged PR and any deviations (especially what
+the real hardware forced — power, enumeration, LTE-lock).
