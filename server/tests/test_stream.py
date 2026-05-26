@@ -85,6 +85,18 @@ def test_extract_content_text_malformed_chunk_returns_empty():
     assert ndjson.extract_content_text(None) == ""
 
 
+def test_extract_content_text_skips_tool_message():
+    """A ToolMessage in a messages-mode chunk must NOT echo as a token.
+    `load_skill` returns the full skill body as its result; before this
+    filter that body streamed verbatim into the chat as bot text.  Tool
+    results surface via extract_tool_results / the `applied` event, not as
+    response prose, so content text here is the model's message only."""
+    chunk = (_FakeToolMsg(name="load_skill",
+                          content="# Config-apply: verify live, then persist ..."),
+             {})
+    assert ndjson.extract_content_text(chunk) == ""
+
+
 # --- extract_new_tool_calls() ----------------------------------------------
 
 def test_extract_tool_calls_yields_name_id_pairs():
