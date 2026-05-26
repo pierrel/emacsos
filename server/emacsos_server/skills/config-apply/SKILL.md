@@ -24,9 +24,12 @@ exploring unrelated emacs state.
 - Once it's verified, call `apply_config` with the COMPLETE configuration.
   `apply_config` REPLACES the whole config file — anything you leave out
   is gone after the next restart.
-- If the user already has config, restate ALL of it plus your change. If
-  you are not sure what the current config contains, read it first with
-  `eval_elisp`, then send the full replacement.
+- If the user already has config, you MUST read it first with `get_config`
+  before calling `apply_config`, then restate ALL of it plus your change.
+  `get_config` returns the committed config body — the source of truth.
+  Build on that, not on whatever was said earlier in the conversation (that
+  may be stale, or gone after a New chat). Fold your change into the body it
+  returns and send the full replacement.
 - Persist the DURABLE form, not a one-shot interactive call — usually via
   `default-frame-alist`, `custom-set-variables`, `setq`, or a mode hook.
 
@@ -56,3 +59,6 @@ config.
 - `apply_config` returns `applied-but-broken` or `applied-but-unrecorded` —
   follow the guidance in that result (suggest a rollback / a corrected
   config); do not blindly re-apply the same thing.
+- `get_config` returns `empty:` — there is no saved config yet; just send a
+  complete config with `apply_config`. It returns `error:` — the saved
+  config can't be read; tell the user rather than retrying.

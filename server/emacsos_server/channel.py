@@ -149,7 +149,9 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     Pass the COMPLETE config — this REPLACES the config file wholesale,
     it is NOT appended.  Whatever you leave out is GONE after the next
     restart, so include everything the config should contain, not only
-    the line you're changing.
+    the line you're changing.  If the user already has config, call
+    `get_config` first to read the saved body and build on it — don't
+    reconstruct it from memory.
 
     SUMMARY is a short imperative description of the change (e.g. "make
     the cursor blue").  It becomes the git commit message and is shown
@@ -221,17 +223,68 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
             "back or send a corrected config")
 
 
+@tool
+def get_config() -> str:
+    """Return the user's CURRENTLY SAVED emacs config — the elisp body that
+    is committed and loads on the next restart.
+
+    Call this BEFORE `apply_config` whenever you're changing a config the
+    user already has: `apply_config` REPLACES the whole file, so you must
+    restate everything that should stay.  This gives you the exact current
+    body to build on — do NOT reconstruct it from what was said earlier in
+    the conversation (that can be stale, or gone after a New chat).  Read
+    it, fold in your change, and pass the result straight back to
+    `apply_config`, which takes the same bare-body form this returns.
+
+    This is the SAVED config, not the live running state — to check what
+    emacs is actually doing right now, use `eval_elisp` instead.  The two
+    can differ (e.g. a config that was applied but errored while loading).
+    The saved config does not change within a turn unless you call
+    `apply_config`, so one read is enough.
+
+    Returns the bare elisp body; or `empty: ...` when nothing is saved yet;
+    or `error: ...` if the saved config can't be read (tell the user rather
+    than retrying).
+    """
+    # No RunnableConfig param: unlike eval_elisp/apply_config this never
+    # reaches the phone — it reads the server-side git repo, a single
+    # server-wide config_dir (not keyed per phone), so there is no phone
+    # identity to thread through.
+    try:
+        # current() is self-healing BY DESIGN: it calls ensure(), which
+        # scaffolds a fresh repo and hard-resets a dirty tree.  So this
+        # "read" can create the scaffold commit / reset stray working state
+        # — intentional (the repo is server-owned, no uncommitted work to
+        # lose).  Don't "fix" this into a non-mutating read or the
+        # fresh-repo path breaks.
+        body = ConfigRepo(_CONFIG.config_dir).current().body
+    except Exception as e:  # noqa: BLE001 — surface any failure as a tool-result string
+        log.exception("get_config: read failed")
+        return f"error: could not read current config: {type(e).__name__}: {e}"
+    if not body.strip():
+        # Empty both for a never-configured phone (scaffold body) and a
+        # config the user emptied — current() can't tell them apart, so the
+        # message states only what's true.  NOT `error:` (empty is a valid
+        # state, and an `error:` prefix would tell the agent "do not retry /
+        # surface to user", which is wrong here).
+        return "empty: no saved config to build on"
+    return body
+
+
 # The exported set of tools emacsos-server adds to every /chat agent
 # via `Thread(..., extra_tools=EMACS_TOOLS)`.  `eval_elisp` inspects /
-# experiments; `apply_config` ships a verified config to the phone with
-# a git-backed, rollback-able commit.
+# experiments on the live phone; `get_config` reads the saved config body
+# so the agent can restate-and-change without relying on conversation
+# memory (the committed file is the source of truth post-/clear);
+# `apply_config` ships a verified config to the phone with a git-backed,
+# rollback-able commit.
 #
-# These must stay TOP-LEVEL tools (not buried in a sub-agent's
-# toolset): app.py derives the `applied` event by watching the
+# `apply_config` in particular must stay a TOP-LEVEL tool (not buried in a
+# sub-agent's toolset): app.py derives the `applied` event by watching the
 # top-level message stream for apply_config's ToolMessage.  Move it into
 # a sub-agent and the result stops surfacing — the event silently never
 # fires and the ROLLBACK button never appears.
-EMACS_TOOLS = [eval_elisp, apply_config]
+EMACS_TOOLS = [eval_elisp, apply_config, get_config]
 
 # Tools whose distinct-args *breadth* is normal exploration, not a loop —
 # they get a relaxed LoopDetection Pattern-C threshold (see assist's
