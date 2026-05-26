@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -642,7 +641,7 @@ def test_disconnect_mid_stream_closes_generator_cleanly(client):
     without an error event, and the generator's finally runs (no leaked
     THREAD_QUEUE slot).  The pump-thread identity of the close is pinned
     separately by test_stream_generator_runs_on_single_thread."""
-    closed = {"flag": False}
+    closed = threading.Event()
 
     def gen():
         try:
@@ -651,7 +650,7 @@ def test_disconnect_mid_stream_closes_generator_cleanly(client):
                 yield ("messages", (_FakeAIMessageChunk(content=f"t{i}"), {}))
                 i += 1
         finally:
-            closed["flag"] = True
+            closed.set()
 
     async def fake_is_disconnected(self):
         fake_is_disconnected.n += 1
@@ -664,10 +663,7 @@ def test_disconnect_mid_stream_closes_generator_cleanly(client):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
 
-    # The close is submitted fire-and-forget on the pump, so wait briefly.
-    deadline = time.monotonic() + 2.0
-    while not closed["flag"] and time.monotonic() < deadline:
-        time.sleep(0.01)
-
-    assert closed["flag"] is True, "generator finally never ran (leak)"
+    # The close is submitted fire-and-forget on the pump; wait (bounded) on
+    # the Event the generator's finally sets — no tight sleep-polling.
+    assert closed.wait(2.0), "generator finally never ran (leak)"
     assert "error" not in [e["type"] for e in events]

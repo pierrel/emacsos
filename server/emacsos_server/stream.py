@@ -19,8 +19,6 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-from assist.stream_chunks import unwrap_messages
-
 
 def event(event_type: str, **fields: Any) -> bytes:
     """Encode a single NDJSON event.  Always ends with `\\n`."""
@@ -87,11 +85,15 @@ def _tool_messages(chunk_payload: Any) -> Iterable[Any]:
         yield chunk_payload[0]
         return
     if isinstance(chunk_payload, dict):
+        # Lazy import (matches app.py's deferred-assist convention): keep
+        # `assist` off this module's import path so emacsos_server stays
+        # importable/fast even when assist isn't available at startup.
+        # langgraph 1.2 may wrap `messages` in an `Overwrite` (a node
+        # replacing the channel); unwrap_messages normalizes that and the
+        # bare-list case, and never raises on an odd shape.
+        from assist.stream_chunks import unwrap_messages
         for node_out in chunk_payload.values():
             if isinstance(node_out, dict):
-                # langgraph 1.2 may wrap `messages` in an `Overwrite` (a node
-                # replacing the channel); unwrap_messages normalizes that and
-                # the bare-list case, and never raises on an odd shape.
                 for m in unwrap_messages(node_out.get("messages")):
                     yield m
 
