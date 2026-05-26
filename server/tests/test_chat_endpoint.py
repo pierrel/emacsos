@@ -179,6 +179,28 @@ def test_update_to_status_surfaces_named_node(client):
     assert statuses == ["running task", "running research-agent"]
 
 
+def test_tool_message_content_not_echoed_as_token(client):
+    """Regression: `load_skill` returns the full skill body as a ToolMessage,
+    and `eval_elisp`/`apply_config`/`get_config` return result strings.  None
+    of these are response prose — they must not stream into the chat as
+    tokens (the skill body once dumped verbatim into the response area).
+    Only the model's own AIMessage content becomes tokens."""
+    scripted = [
+        ("messages", (_FakeToolMessage(name="load_skill",
+                                       content="# Config-apply skill body — do not echo",
+                                       tool_call_id="tc-skill"), {})),
+        ("messages", (_FakeAIMessageChunk(content="Done — the cursor is blue."), {})),
+    ]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=iter(scripted)):
+        with client.stream("POST", "/chat", json=_chat_body("q")) as r:
+            events = _collect_events(r)
+
+    tokens = [e["text"] for e in events if e["type"] == "token"]
+    assert tokens == ["Done — the cursor is blue."]
+    assert not any("skill body" in t.lower() for t in tokens)
+
+
 # --- error path -------------------------------------------------------------
 
 def test_construction_error_yields_error_event(client):

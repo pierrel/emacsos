@@ -120,15 +120,26 @@ def extract_tool_results(chunk_payload: Any) -> Iterable[tuple[str, str, str]]:
 
 
 def extract_content_text(messages_chunk: Any) -> str:
-    """From a `messages` stream chunk, return the AIMessageChunk's
+    """From a `messages` stream chunk, return the assistant message's
     text content (may be empty).  Returns "" for any chunk we can't
-    parse — callers should test for truthiness before emitting a
-    token event."""
+    parse — callers should test for truthiness before emitting a token
+    event.
+
+    A messages-mode chunk can also carry a ToolMessage: `load_skill`
+    returns the full skill body as its result, and `eval_elisp` /
+    `apply_config` / `get_config` return their result strings.  Those are
+    NOT response text — emitting them as tokens echoes the whole tool
+    result (most glaringly the entire skill) into the chat.  Tool results
+    are surfaced separately (`extract_tool_results` → the `applied`
+    event), so skip any tool message here and keep only the model's prose.
+    The `type == "tool"` discriminator mirrors `extract_tool_results`."""
     try:
-        ai_chunk, _meta = messages_chunk
+        msg, _meta = messages_chunk
     except (TypeError, ValueError):
         return ""
-    content = getattr(ai_chunk, "content", "")
+    if getattr(msg, "type", None) == "tool":
+        return ""
+    content = getattr(msg, "content", "")
     return content if isinstance(content, str) else ""
 
 
