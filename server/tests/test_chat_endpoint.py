@@ -346,6 +346,18 @@ def test_skill_sources_has_config_apply_route_and_file():
         os.path.join(app_mod._SKILLS_DIR, "config-apply", "SKILL.md"))
 
 
+def test_config_apply_skill_directs_to_get_config_not_phone_probe():
+    """The skill must steer the agent to read the saved config with
+    `get_config` (the post-/clear fix), and must NOT carry the old "read it
+    first with eval_elisp" instruction that sent the agent probing the phone
+    for a server-side path it can't know."""
+    import emacsos_server.app as app_mod
+    text = open(
+        os.path.join(app_mod._SKILLS_DIR, "config-apply", "SKILL.md")).read()
+    assert "get_config" in text
+    assert "read it first with `eval_elisp`" not in text
+
+
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):
     """The checkpointer is built once and reused — two turns share it, so
     the conversation accumulates in one threads.db."""

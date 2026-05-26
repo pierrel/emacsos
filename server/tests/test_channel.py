@@ -14,8 +14,9 @@ from emacsos_server.channel import (
     _redact,
     apply_config,
     eval_elisp,
+    get_config,
 )
-from emacsos_server.config_repo import ConfigRepo
+from emacsos_server.config_repo import ConfigRepo, ConfigRepoError
 
 
 _CTX = PhoneContext(auth_contents="0.0.0.0:1234 555\nsecret\n",
@@ -249,6 +250,63 @@ def test_apply_config_missing_context_is_server_bug_error(tmp_path):
     assert out.startswith("error: phone context not set")
 
 
+# --- get_config --------------------------------------------------------------
+
+def _committed(tmp_path, body=None, summary="s"):
+    """A tmp ConfigRepo, optionally with one applied (committed) body."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    if body is not None:
+        repo.write_and_commit(body, summary)
+    return repo
+
+
+def _get_config(repo):
+    """Invoke get_config with ConfigRepo pointed at REPO.  No config / phone
+    context is passed — get_config must work without one (it reads the
+    server-side repo, not the phone)."""
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo):
+        return get_config.invoke({})
+
+
+def test_get_config_returns_committed_body(tmp_path):
+    repo = _committed(tmp_path, body="(setq x 1)")
+    assert _get_config(repo) == "(setq x 1)"
+
+
+def test_get_config_empty_repo_reports_empty_not_error(tmp_path):
+    """Fresh/scaffold repo: current().body == "".  The agent must be able to
+    tell "nothing saved" from a read failure, so it's `empty:` — and NOT
+    `error:` (which would wrongly mean "do not retry / surface to user")."""
+    repo = _committed(tmp_path)  # scaffold only, no apply
+    out = _get_config(repo)
+    assert out.startswith("empty:")
+    assert not out.startswith("error:")
+
+
+def test_get_config_read_failure_is_error_string(tmp_path):
+    """A git/fs failure surfaces as `error: ...` (mirrors the eval_elisp /
+    apply_config convention), not an uncaught exception that crashes the
+    stream."""
+    repo = _committed(tmp_path, body="(setq x 1)")
+    with patch.object(repo, "current", side_effect=ConfigRepoError("boom")):
+        out = _get_config(repo)
+    assert out.startswith("error: could not read current config")
+    assert "boom" in out
+
+
+def test_get_config_takes_no_args_and_needs_no_phone_context(tmp_path):
+    """Design asymmetry with its siblings: get_config reads the server-side
+    repo, so it exposes NO model-visible args and needs no PhoneContext.
+    Invoking with an empty payload + no config returns the real body, never
+    the `phone context not set` server-bug string."""
+    assert get_config.args == {}
+    repo = _committed(tmp_path, body="(setq x 1)")
+    out = _get_config(repo)
+    assert out == "(setq x 1)"
+    assert "phone context not set" not in out
+
+
 # --- EMACS_TOOLS exported list ---------------------------------------------
 
 def test_emacs_tools_includes_eval_elisp():
@@ -257,3 +315,7 @@ def test_emacs_tools_includes_eval_elisp():
 
 def test_emacs_tools_includes_apply_config():
     assert apply_config in EMACS_TOOLS
+
+
+def test_emacs_tools_includes_get_config():
+    assert get_config in EMACS_TOOLS
