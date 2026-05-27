@@ -220,6 +220,16 @@ class EmacsBackend(BaseSandbox):
                 if resp.exit_code != 0:
                     out.append(FileDownloadResponse(path=path, error="file_not_found"))
                     continue
+                if resp.truncated:
+                    # execute() caps output at MAX_OUTPUT_CHARS; a base64 stream
+                    # past that is cut mid-stream, so decoding it would corrupt
+                    # the file.  Fail loudly instead.  (A chunked transport is
+                    # out of scope for this "light edit" phone backend; large
+                    # binary pulls aren't a v1 use case.)
+                    out.append(FileDownloadResponse(
+                        path=path,
+                        error="file too large to download over the emacs transport"))
+                    continue
                 content = base64.b64decode(resp.output.strip())
                 out.append(FileDownloadResponse(path=path, content=content))
             except Exception as e:  # noqa: BLE001 — _resolve ValueError or decode/transport failure

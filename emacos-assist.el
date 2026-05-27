@@ -26,11 +26,15 @@ directory ON THE PHONE.  Buffer-local.")
 ;;; Header
 
 (defun emacos-assist--read-header ()
-  "Return the thread id from the buffer's first-line header, or nil."
+  "Return the thread id from the buffer's first-line header, or nil.
+The id must be the WHOLE header value (1-128 slug chars, mirroring the
+server's validator) up to optional trailing whitespace + end of line — a
+malformed header (e.g. an embedded `/') yields nil rather than a silently
+truncated prefix that would key a different server conversation."
   (save-excursion
     (goto-char (point-min))
     (when (looking-at (concat (regexp-quote emacos-assist--header-prefix)
-                              "\\([A-Za-z0-9_-]+\\)"))
+                              "\\([A-Za-z0-9_-]\\{1,128\\}\\)[ \t]*$"))
       (match-string-no-properties 1))))
 
 (defun emacos-assist--mint-id ()

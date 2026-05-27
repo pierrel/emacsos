@@ -22,6 +22,20 @@
     (insert "no header here\n")
     (should (null (emacos-assist--read-header)))))
 
+(ert-deftest test-assist-read-header-rejects-malformed-value ()
+  ;; The whole value must be a valid slug to end-of-line; a header with an
+  ;; embedded invalid char yields nil (mint fresh), not a truncated prefix
+  ;; that would key a different server conversation.
+  (with-temp-buffer
+    (insert "#+assist_thread: abc/def\n\nyou> hi\n")
+    (should (null (emacos-assist--read-header))))
+  (with-temp-buffer
+    (insert "#+assist_thread: " (make-string 200 ?a) "\n")   ; over 128
+    (should (null (emacos-assist--read-header))))
+  (with-temp-buffer                                          ; trailing ws ok
+    (insert "#+assist_thread: ok123  \n")
+    (should (equal (emacos-assist--read-header) "ok123"))))
+
 (ert-deftest test-assist-mint-id-is-a-slug ()
   (let ((id (emacos-assist--mint-id)))
     (should (string-match-p "\\`[A-Za-z0-9_-]+\\'" id))

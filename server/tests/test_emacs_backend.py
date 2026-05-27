@@ -94,6 +94,18 @@ def test_execute_eval_exception_is_caught():
     assert "emacsclient exploded" in r.output
 
 
+def test_download_files_fails_loudly_when_output_truncated():
+    # A file whose base64 exceeds execute()'s MAX_OUTPUT_CHARS is cut
+    # mid-stream; download must report an error, not decode the corrupted
+    # prefix.  Mock the phone returning "0\n<huge>" so execute() truncates.
+    from emacsos_server.emacs_backend import MAX_OUTPUT_CHARS
+    huge = "A" * (MAX_OUTPUT_CHARS + 10)
+    be = EmacsBackend("/w", _make_eval("0\n" + huge))
+    [resp] = be.download_files(["/big.bin"])
+    assert resp.content is None
+    assert "too large" in (resp.error or "")
+
+
 def test_decode_handles_unquoted_payload():
     be = EmacsBackend("/w", _make_eval())
     # Some transports may strip the quotes already.
