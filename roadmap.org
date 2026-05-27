@@ -13,6 +13,14 @@ in the phone UX that aren't load-bearing for any specific
 experiment but compound across all of them.  Worth a dedicated
 pass.
 
+** TODO Ctrl/Meta and shift
+There should be control and meta keys on the keyboard to issue keyboard-bound commands.
+
+Some thinking around this:
+- They should each probably be 1 button that toggles between C/M/C-M/open (no modifier) and the other shift/not-shift
+- The actual keys/characters on the keyboard should be filtered to just those that have a "completion" with those modifier keys (so no characters that don't complete the binding)
+- The control state should persist across keystrokes ("C" remains "on" until explicitly changed)
+
 ** DONE Dynamic keyboard surface based on top buffer
 
 Shipped as the *single keyboard + commands combo*
