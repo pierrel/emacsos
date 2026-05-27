@@ -336,10 +336,15 @@ safe surface for when the phone *does* hold sensitive data.
    phone's emacs.
 3. *Exact shape of the assist =backend== seam* (param name; bare backend
    assist wraps vs. prebuilt composite) — decided in the assist PR.
-4. *Does deepagents' =execute= tool dispatch cleanly through a
-   =CompositeBackend= whose =default= is a =SandboxBackendProtocol=* (vs.
-   expecting assist's =sandbox_backend=)?  Verify in step 0/2 — it's the
-   hinge that lets =execute= work without the docker machinery.
+4. *RESOLVED (spiked 2026-05-27).*  Yes: =supports_execution= returns true
+   for a =CompositeBackend= whose =default= is a =SandboxBackendProtocol=
+   (filesystem.py:489), the execute tool calls =composite.execute= which
+   forwards to =default.execute= (composite.py:537), and =create_deep_agent=
+   already accepts =backend==.  So the EmacsBackend subclasses
+   =SandboxBackendProtocol=, is wrapped in a =CompositeBackend=, and
+   =execute= works with assist's =sandbox_backend=None= (no docker
+   machinery).  The seam is just threading =backend== from assist's
+   =create_agent=/=Thread= into =create_deep_agent=.
 
 * Out of scope, next experiments
 
