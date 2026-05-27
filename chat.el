@@ -17,6 +17,10 @@
 (require 'url)
 (require 'url-http)
 
+;; Defined in os.el (which `require's this file); resolved at call time.
+(declare-function emacos--target "os")
+(declare-function emacos--render-page "os")
+
 ;;; Customization
 
 (defcustom emacos-chat-server-url "http://localhost:8765/chat"
@@ -128,6 +132,42 @@ rather than pushing it forward.")
 
 (defconst emacos--chat-bot-prefix "bot> ")
 
+;; The chat stream engine is buffer-agnostic: handlers render into the
+;; buffer that initiated the current stream, not the literal *chat*.  That
+;; buffer is the *chat* scratch OR a file-backed `emacos-assist-mode' buffer.
+;; The single server-wide stream lock means only one stream is ever in
+;; flight, so this global safely names its target for the duration.
+(defvar emacos--chat-stream-buffer nil
+  "Buffer the in-flight stream renders into; set at SEND.  See above.")
+
+;; Defined in emacos-assist.el (required by os.el alongside chat).  Resolved
+;; at call time — chat.el is the generic engine; the .assist surface plugs in.
+(declare-function emacos-assist--surface-context "emacos-assist")
+(declare-function emacos-assist--save "emacos-assist")
+
+(defun emacos--chat-render-buffer ()
+  "The buffer the stream handlers render into: the active stream buffer if
+set and live, else the *chat* buffer (creating it if needed)."
+  (or (and (buffer-live-p emacos--chat-stream-buffer) emacos--chat-stream-buffer)
+      (emacos--chat-buffer)))
+
+(defun emacos--chat-surface-context (buf)
+  "Request context plist (:thread-id :workdir) for chat-surface BUF.
+A `emacos-assist-mode' file buffer gets its per-file thread id (minted +
+written into the file's header on first send) and the file's directory; the
+plain *chat* buffer gets nil context (the legacy fixed conversation)."
+  (if (and (buffer-live-p buf)
+           (with-current-buffer buf (derived-mode-p 'emacos-assist-mode)))
+      (with-current-buffer buf (emacos-assist--surface-context))
+    nil))
+
+(defun emacos--chat-save-surface (buf)
+  "Persist BUF's transcript if it is a `emacos-assist-mode' file buffer
+\(no-op for the ephemeral *chat*)."
+  (when (and (buffer-live-p buf)
+             (with-current-buffer buf (derived-mode-p 'emacos-assist-mode)))
+    (with-current-buffer buf (emacos-assist--save))))
+
 ;;; Buffer + input region
 
 (defun emacos--chat-buffer ()
@@ -189,7 +229,7 @@ doesn't dangle a ROLLBACK button with no surrounding context."
   "Open a new bot line in the *chat* buffer.  Sets up the three
 markers (insert / status-start / status-end) used by subsequent
 event handlers."
-  (let ((buf (emacos--chat-buffer)))
+  (let ((buf (emacos--chat-render-buffer)))
     (with-current-buffer buf
       ;; Clear any stale per-stream first-token timer.
       (when (timerp emacos--chat-first-token-timer)
@@ -244,7 +284,7 @@ Caller must `inhibit-read-only`."
 (defun emacos--chat-handle-status (event)
   "Replace the status bracket with `[<event.text>] '."
   (let ((text (plist-get event :text))
-        (buf (get-buffer emacos--chat-buffer-name)))
+        (buf (emacos--chat-render-buffer)))
     (when (and text buf (buffer-live-p buf)
                (markerp emacos--chat-status-start))
       (with-current-buffer buf
@@ -263,7 +303,7 @@ Caller must `inhibit-read-only`."
 clears any lingering status bracket (the agent is now talking, not
 working silently)."
   (let ((text (plist-get event :text))
-        (buf (get-buffer emacos--chat-buffer-name)))
+        (buf (emacos--chat-render-buffer)))
     (when (and text buf (buffer-live-p buf)
                (markerp emacos--chat-stream-insert-marker))
       (with-current-buffer buf
@@ -286,7 +326,7 @@ working silently)."
 (defun emacos--chat-handle-end (_event)
   "Stream complete.  Clear status, release the in-flight lock,
 release markers, re-render the page so CLEAR returns."
-  (let ((buf (get-buffer emacos--chat-buffer-name)))
+  (let ((buf (emacos--chat-render-buffer)))
     (when (and buf (buffer-live-p buf))
       (with-current-buffer buf
         (let ((inhibit-read-only t))
@@ -299,7 +339,7 @@ If start has already run (markers present), insert at the marker.
 Otherwise (error before any server response), synthesize a fresh
 `\\nbot> [error: ...]' above the prompt so the user sees something."
   (let ((reason (or (plist-get event :reason) "unknown"))
-        (buf (get-buffer emacos--chat-buffer-name)))
+        (buf (emacos--chat-render-buffer)))
     (when (and buf (buffer-live-p buf))
       (with-current-buffer buf
         (let ((inhibit-read-only t))
@@ -332,7 +372,7 @@ Otherwise (error before any server response), synthesize a fresh
   "Insert TEXT as a read-only `bot> ' note line above the input prompt
 in *chat*.  Used for applied / rollback notices (system messages, not
 streamed bot output)."
-  (let ((buf (get-buffer emacos--chat-buffer-name)))
+  (let ((buf (emacos--chat-render-buffer)))
     (when (and buf (buffer-live-p buf))
       (with-current-buffer buf
         (let* ((inhibit-read-only t)
@@ -376,6 +416,10 @@ of the terminal handlers (end, error, abort, watchdog)."
     (let ((m (symbol-value sym)))
       (when (markerp m) (set-marker m nil)))
     (set sym nil))
+  ;; Persist a file-backed (.assist) surface's transcript on stream
+  ;; end/error/abort, then drop the stream-buffer reference.
+  (emacos--chat-save-surface emacos--chat-stream-buffer)
+  (setq emacos--chat-stream-buffer nil)
   (setq emacos--chat-tokens-seen 0
         emacos--chat-last-event-time nil
         emacos--chat-in-flight nil
@@ -446,14 +490,16 @@ hosts."
         (insert-file-contents-literally emacos-chat-auth-file))
       (buffer-string))))
 
-(defun emacos--chat-encode-request (msg auth)
+(defun emacos--chat-encode-request (msg auth &optional thread-id workdir)
   "Encode the request body as UTF-8 bytes.
-With AUTH non-nil, the payload is {message, phone:{auth_file}};
-otherwise the `phone' key is omitted entirely so the server can
-treat it as absent rather than null."
-  (let* ((payload (if auth
-                      (list :message msg :phone (list :auth_file auth))
-                    (list :message msg)))
+With AUTH non-nil, the payload includes phone:{auth_file}; the `phone' key
+is omitted when AUTH is nil so the server treats it as absent rather than
+null.  THREAD-ID + WORKDIR (file-backed chat) are included only when
+non-nil; absent => the server's legacy fixed conversation."
+  (let* ((payload (append (list :message msg)
+                          (when auth (list :phone (list :auth_file auth)))
+                          (when thread-id (list :thread_id thread-id))
+                          (when workdir (list :workdir workdir))))
          (json-encoding-pretty-print nil)
          (body (json-encode payload)))
     (encode-coding-string body 'utf-8)))
@@ -557,16 +603,21 @@ markers/lines after the UI has been cleaned up."
 
 ;;; SEND / CLEAR / ABORT
 
-(defun emacos--chat-send ()
-  "Open a streaming request to /chat with the current input."
+(defun emacos--chat-send (&optional surface)
+  "Open a streaming request to /chat with SURFACE's current input.
+SURFACE defaults to the *chat* buffer; a `emacos-assist-mode' file buffer
+sends its per-file thread id + the file's directory so the server keys a
+per-file conversation and operates on that directory."
   (interactive)
   (if emacos--chat-in-flight
       (message "chat: stream in flight; tap ABORT to cancel")
-    (let* ((buf (emacos--chat-buffer))
+    (let* ((buf (or surface (emacos--chat-buffer)))
+           (ctx (emacos--chat-surface-context buf))
            (msg (emacos--chat-current-input buf)))
       (when (and msg (not (string-empty-p msg)))
         (setq emacos--chat-in-flight t
-              emacos--chat-tokens-seen 0)
+              emacos--chat-tokens-seen 0
+              emacos--chat-stream-buffer buf)
         ;; Render the you> line + clear input region right away;
         ;; the bot line is created by the start handler.
         (let ((inhibit-read-only t))
@@ -582,6 +633,9 @@ markers/lines after the UI has been cleaned up."
                     (insert "\nyou> " msg)
                     (add-text-properties before (point)
                                          '(read-only t front-sticky t rear-nonsticky t))))))))
+        ;; Persist the you> turn before the request goes out (file-backed
+        ;; .assist surfaces only; no-op for the ephemeral *chat*).
+        (emacos--chat-save-surface buf)
         ;; First-token watchdog.  Fires once if no event lands
         ;; within the configured timeout AND we're still in flight.
         ;; Uses `emacos--chat-terminate-stream' so the URL process is
@@ -610,7 +664,10 @@ markers/lines after the UI has been cleaned up."
                    (url-request-method "POST")
                    (url-request-extra-headers
                     '(("Content-Type" . "application/json; charset=utf-8")))
-                   (url-request-data (emacos--chat-encode-request msg auth))
+                   (url-request-data (emacos--chat-encode-request
+                                      msg auth
+                                      (plist-get ctx :thread-id)
+                                      (plist-get ctx :workdir)))
                    ;; url-retrieve args: URL, CALLBACK, CBARGS, SILENT,
                    ;; INHIBIT-COOKIES.  (No TIMEOUT arg in Emacs >=24;
                    ;; we rely on `emacos--chat-first-token-timer' and
@@ -823,13 +880,22 @@ Interactive so M-x can reach it; the Chat utility button reaches it via
     (when (and w (not (eq (window-buffer w) buf)))
       (set-window-buffer w buf))))
 
+(defun emacos--chat-surface-on-top ()
+  "Return the chat-surface buffer in the target (editor) window — the *chat*
+scratch OR a file-backed `emacos-assist-mode' buffer — else nil.  Uses
+`emacos--target' (the authority on \"what's on top\"), not `current-buffer'
+\(renders/callbacks run with *keyboard* current), so it agrees with
+`emacos--top-commands'."
+  (let* ((w (emacos--target))
+         (b (and w (window-buffer w))))
+    (when (and b
+               (or (eq b (get-buffer emacos--chat-buffer-name))
+                   (with-current-buffer b (derived-mode-p 'emacos-assist-mode))))
+      b)))
+
 (defun emacos--chat-on-top-p ()
-  "Non-nil when *chat* is the buffer in the target (editor) window.
-Uses `emacos--target' — the authority on \"what's on top\" — not
-`current-buffer' (renders/callbacks run with *keyboard* current), so it
-agrees with `emacos--top-commands'."
-  (let ((w (emacos--target)))
-    (and w (eq (window-buffer w) (get-buffer emacos--chat-buffer-name)))))
+  "Non-nil when a chat surface (*chat* or a .assist buffer) is on top."
+  (and (emacos--chat-surface-on-top) t))
 
 (defun emacos--chat-button ()
   "Utility-row Chat/SEND button: SEND when *chat* is already on top, else
@@ -838,9 +904,10 @@ home-app affordance (open chat) and — once you're in chat — the
 most-used action (send).  While a stream is in flight, `emacos--chat-send'
 refuses with a hint and the command list shows ABORT."
   (interactive)
-  (if (emacos--chat-on-top-p)
-      (emacos--chat-send)
-    (emacos--chat-show-top-buffer)))
+  (let ((surface (emacos--chat-surface-on-top)))
+    (if surface
+        (emacos--chat-send surface)
+      (emacos--chat-show-top-buffer))))
 
 (defun emacos--chat-button-label ()
   "Label for the utility-row Chat/SEND button: \"SEND\" when *chat* is on

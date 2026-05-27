@@ -439,6 +439,7 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos--chat-show-top-buffer "chat")
 (declare-function emacos--chat-button "chat")
 (declare-function emacos--chat-button-label "chat")
+(declare-function emacos-assist--command-set "emacos-assist")
 
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
@@ -459,6 +460,9 @@ rather than only M-x."
       (cond
        ((and buf (eq buf (get-buffer emacos--chat-buffer-name)))
         (emacos--chat-command-set))
+       ((and buf (with-current-buffer buf
+                   (derived-mode-p 'emacos-assist-mode)))
+        (emacos-assist--command-set))
        ((emacos--mode-commands-for mode))
        (t emacos-global-commands))))))
 
@@ -648,6 +652,7 @@ window-buffer-change follower can't recurse into an in-progress render."
 (add-to-list 'load-path
              (file-name-directory (or load-file-name buffer-file-name)))
 (require 'chat)
+(require 'emacos-assist)
 
 (provide 'os)
 ;;; os.el ends here

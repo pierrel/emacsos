@@ -29,7 +29,7 @@ def _make_eval(result_text="0\n", record=None, ok=True):
 # --- execute() --------------------------------------------------------------
 
 def test_execute_parses_exit_and_output():
-    be = EmacsBackend("/home/pi/proj", _make_eval("0\nhello world"))
+    be = EmacsBackend("/data/proj", _make_eval("0\nhello world"))
     r = be.execute("echo hello world")
     assert r.exit_code == 0
     assert r.output == "hello world"
@@ -38,11 +38,11 @@ def test_execute_parses_exit_and_output():
 
 def test_execute_runs_in_workdir_via_elisp():
     rec = []
-    be = EmacsBackend("/home/pi/proj", _make_eval("0\n", rec))
+    be = EmacsBackend("/data/proj", _make_eval("0\n", rec))
     be.execute("ls -la")
     assert len(rec) == 1
     elisp = rec[0]
-    assert '"/home/pi/proj/"' in elisp          # default-directory
+    assert '"/data/proj/"' in elisp          # default-directory
     assert "call-process-shell-command" in elisp
     assert "timeout --kill-after" in elisp       # bounded
     assert "base64-encode-string" in elisp       # clean transport
@@ -87,10 +87,10 @@ def test_decode_handles_unquoted_payload():
 # --- guardrails (file tools only; execute is intentionally unconfined) ------
 
 def test_resolve_prefixes_workdir():
-    be = EmacsBackend("/home/pi/proj", _make_eval())
-    assert be._resolve("/a.txt") == "/home/pi/proj/a.txt"
-    assert be._resolve("a.txt") == "/home/pi/proj/a.txt"
-    assert be._resolve("/home/pi/proj/x") == "/home/pi/proj/x"
+    be = EmacsBackend("/data/proj", _make_eval())
+    assert be._resolve("/a.txt") == "/data/proj/a.txt"
+    assert be._resolve("a.txt") == "/data/proj/a.txt"
+    assert be._resolve("/data/proj/x") == "/data/proj/x"
 
 
 def test_resolve_blocks_dotdot():
@@ -124,7 +124,7 @@ def test_is_sandbox_backend_protocol_and_enables_execute():
 
 def test_file_tools_route_through_execute_with_resolved_path():
     rec = []
-    be = EmacsBackend("/home/pi/proj", _make_eval("0\n", rec))
+    be = EmacsBackend("/data/proj", _make_eval("0\n", rec))
     # ls inherits from BaseSandbox and runs a shell command via execute;
     # we only assert the wiring (resolved path reaches the phone), not the
     # parse of an empty listing.  BaseSandbox embeds the path base64-encoded
@@ -134,6 +134,6 @@ def test_file_tools_route_through_execute_with_resolved_path():
     except Exception:
         pass
     assert rec, "ls should route through execute -> eval"
-    resolved_b64 = base64.b64encode(b"/home/pi/proj/sub").decode("ascii")
+    resolved_b64 = base64.b64encode(b"/data/proj/sub").decode("ascii")
     assert any(resolved_b64 in e for e in rec), (
         "the resolved working-dir path should reach BaseSandbox's command")

@@ -387,13 +387,13 @@ def test_build_thread_file_chat_uses_emacs_backend_and_no_emacs_tools(tmp_path, 
     monkeypatch.setattr(assist_thread_mod, "Thread", _FakeThread)
 
     ctx = PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.1")
-    app_mod._build_thread(ctx, thread_id="abc-123", workdir="/home/pi/proj")
+    app_mod._build_thread(ctx, thread_id="abc-123", workdir="/data/proj")
 
     assert captured["thread_id"] == "abc-123"
     assert "extra_tools" not in captured            # no emacs-control tools
     be = captured["default_backend"]
     assert isinstance(be, EmacsBackend)
-    assert be.work_dir == "/home/pi/proj"
+    assert be.work_dir == "/data/proj"
     assert captured["extra_config"]["configurable"]["phone_context"] is ctx
 
 
