@@ -27,8 +27,9 @@ are called out inline where they bite.
 - A =.assist= file is a durable conversation: open it → chat mode;
   SEND streams exactly as today; the file auto-saves after each turn.
 - The agent can *edit the files in the =.assist='s directory* — on the
-  phone, in place, via elisp — confined to that directory, with *no
-  exfiltration path* (see Security).
+  phone, in place, via elisp — confined to that directory, with *no code
+  execution and a minimized tool surface* (see Security; v1 leaves the
+  research sub-agent's web search reachable as an accepted risk).
 - Many =.assist= buffers open at once, each its own thread; reopening a
   file the server still remembers resumes the conversation.
 - The legacy ephemeral =*chat*= stays exactly as-is — the zero-friction
@@ -55,9 +56,9 @@ are called out inline where they bite.
   phone's emacs daemon via =emacsclient=, confined (=virtual_mode=) to the
   =.assist='s working dir, *composed by assist into a =CompositeBackend=*
   with =StateBackend= routing for internal scratch (Decision 9, Security).
-- *Two small, generic seams in assist* (companion PR — see Decision 4):
-  (a) inject a custom backend; (b) suppress the default internet-capable
-  sub-agents.  Neither is emacs-specific.
+- *One small, generic seam in assist* (companion PR — see Decision 4):
+  inject a custom default backend (which assist composes with its
+  =StateBackend= routing).  Not emacs-specific.
 
 *Out (called out so they don't sneak in):*
 - *Sync-to-server + docker sandbox on the phone.*  Rejected: the Zero 2 W
@@ -128,32 +129,27 @@ the protocol breadth (the six new-named methods suffice; the deprecated
 be deferred-to-stub if the phone smoke shows they're slow — =read/write/
 edit/ls= cover the stated use case.
 
-** 4. Lives in =emacsos-server=, not assist — but it needs TWO generic assist seams
+** 4. Lives in =emacsos-server=, not assist — one generic assist seam
 
-*Opinionated, and corrected from the first draft.*  The EmacsBackend,
-backend selection, =.assist= handling, =/forget=, per-thread keying — all
-=emacsos-server= (+ emacsos elisp).  assist must not learn what emacs is.
-But unify-first needs assist to accept two things it can't today, and the
-review confirmed *both* against the source:
+*Opinionated.*  The EmacsBackend, backend selection, =.assist= handling,
+=/forget=, per-thread keying — all =emacsos-server= (+ emacsos elisp).
+assist must not learn what emacs is.  unify-first needs assist to accept
+ONE thing it can't today: *a custom default backend.*  =create_agent=
+builds the backend internally (=create_sandbox_composite_backend= when
+sandboxed, else =_create_standard_backend(working_dir)= — agent.py:193-198),
+always producing a =CompositeBackend=.  Add a way to supply the *default*
+backend (e.g. =backend== / =default_backend==) that assist still wraps
+with its =STATEFUL_PATHS= → =StateBackend= routing — NOT "used directly"
+(a raw backend would bypass that routing; Decision 9).  Generic, not
+emacs-specific; through assist's three-phase workflow; merges before the
+emacsos PR.
 
-1. *Backend injection.*  =create_agent= builds the backend internally
-   (=create_sandbox_composite_backend= when sandboxed, else
-   =_create_standard_backend(working_dir)= — agent.py:193-198), always
-   producing a =CompositeBackend=.  Add a way to supply the *default*
-   backend (e.g. =backend== / =default_backend==) that assist still wraps
-   with its =STATEFUL_PATHS= → =StateBackend= routing — NOT "used
-   directly" (a raw backend would bypass that routing; Decision 9).
-2. *Sub-agent suppression.*  =create_agent= hardcodes
-   =subagents=[context_sub, research_sub, critique_sub_agent]=
-   (agent.py:212-265); =research_sub= wires =search_internet=/=read_url=
-   (agent.py:467).  These are an *egress channel* and there is no
-   off-switch today.  The confined file-chat agent needs assist to expose
-   a suppression (e.g. =confined=True= or =subagents=None=).
-
-So the companion assist PR is *two small, general seams* (or a single
-=confined== flag that does both) — generic, not emacs-specific — through
-assist's three-phase workflow.  The first draft's "one small seam" was
-wrong; this is the honest scope.
+(The review identified a *second* potential seam — suppressing the
+hardcoded internet sub-agents (=research_sub= wires =search_internet=/
+=read_url=, agent.py:212-265/467) — since they're an egress channel.  But
+per the v1 decision in Decision 9, research stays *enabled* (accepted
+risk), so that seam is *deferred*.  v1's companion change is the single
+backend seam.)
 
 ** 5. Many buffers open ⇒ buffer-agnostic engine; one stream at a time
 
@@ -235,11 +231,15 @@ properties, each pinned to a concrete mechanism the review verified:
   the backend is not a =SandboxBackendProtocol= (filesystem.py:1694-1707).
   So the requirement is: *EmacsBackend extends =BackendProtocol=, never
   =SandboxBackendProtocol=/=BaseSandbox=.*  A pytest pins this.
-- *No internet sub-agents.*  The confined file-chat agent is built with
-  the sub-agent suppression seam (Decision 4) so =research_sub= (web
-  search) isn't reachable, and with *no =extra_tools== (no =eval_elisp=/
-  =apply_config=) so the auto-injected general-purpose sub-agent inherits
-  nothing network-capable.
+- *Network: a known, accepted v1 gap.*  We deliberately do NOT suppress
+  the research sub-agent for v1 (=search_internet=/=read_url= stay
+  reachable) — research is a core assist capability and the phone holds
+  nothing sensitive yet.  This IS a web-search egress channel (an injected
+  agent could encode confined-dir contents into a query), so the "no
+  egress" guarantee is *not* complete in v1 — an accepted risk, closed
+  separately (Out of scope).  We DO pass *no =extra_tools== (no
+  =eval_elisp=/=apply_config=), so the general-purpose sub-agent inherits
+  nothing extra.
 - *Internal scratch stays off the phone.*  The EmacsBackend is composed
   into a =CompositeBackend= with =STATEFUL_PATHS= → =StateBackend= routing
   (Decision 4), so summarization's =/conversation_history/…=, evicted
@@ -248,7 +248,9 @@ properties, each pinned to a concrete mechanism the review verified:
 
 The emacs-*control* capability (=eval_elisp=/=apply_config= = arbitrary
 code on your phone) is NOT part of this surface — it stays the existing,
-explicitly-trusted "change my phone" path, gated.
+explicitly-trusted "change my phone" path: *the legacy =*chat*= buffer +
+=EMACS_TOOLS=* (cursor/config changes, with ROLLBACK), unchanged.
+=.assist= file-chat is the separate, confined surface.
 
 ** 10. File format & save lifecycle
 
@@ -309,19 +311,23 @@ hand-waving "prune the tools":
    =BackendProtocol=, never =SandboxBackendProtocol=.*  Pinned by a pytest;
    if a future change makes it a sandbox to gain =execute=, this control
    silently dies, so the test is load-bearing.
-2. *No network / no internet sub-agents.*  Built with assist's sub-agent
-   suppression seam (no =research_sub= web search) and no =extra_tools=,
-   so nothing in the agent's reach can open a socket.
+2. *Network: accepted v1 gap.*  The research sub-agent (=search_internet=/
+   =read_url=) is intentionally NOT suppressed in v1 (core capability; the
+   phone holds nothing sensitive yet), so a web-search egress channel
+   exists — an accepted risk, closed separately (Out of scope).  No
+   =extra_tools= are passed, so nothing else network-capable is in reach.
 3. *Confined filesystem.*  =read/write/edit/ls/grep/glob= only, rooted and
    =..=-blocked at the working dir (=virtual_mode=), enforced server-side
    before any elisp is emitted; all =*.assist= excluded uniformly.
 4. *Internal scratch routed to state, not the phone* (the =CompositeBackend=
    + =STATEFUL_PATHS= routing of Decision 4/9).
 
-With no egress-capable tool and confined fs, the only outputs are files
-*inside the working dir* (your own phone) and the chat reply (back to
-you).  That's the equivalent of the sandbox's no-network guarantee,
-achieved by tool-surface minimization + a class invariant.
+So v1's exfiltration story is *partial by choice*: no code execution (the
+class invariant — the part that matters most on a device), confined fs,
+and no scratch leaking to the phone — but the research sub-agent's web
+search remains an open egress channel we've accepted for now.  The
+sandbox's full no-network guarantee is the target; closing the research
+egress for the confined surface is the deferred follow-up.
 
 *Residual risk (clear-eyed):* a prompt-injected agent can still write
 *bad changes to files in your own working dir* (corruption, or planting a
@@ -331,11 +337,10 @@ dir makes easy — not the backend.
 
 * Implementation sequence
 
-0. *(companion, assist)* The two generic seams: inject a default backend
-   (assist still wraps it with =STATEFUL_PATHS= routing) + suppress the
-   default sub-agents (a =confined== flag is the simplest single API for
-   both).  Small PR through assist's three-phase workflow; emacsos depends
-   on it merging first.
+0. *(companion, assist)* One generic seam: inject a default backend (assist
+   still wraps it with =STATEFUL_PATHS= routing).  Small PR through
+   assist's three-phase workflow; emacsos depends on it merging first.
+   (Sub-agent suppression is deferred — research stays enabled in v1.)
 1. *Server thread keying.*  =ChatRequest= gains =thread_id: Optional[str]=
    (absent ⇒ legacy =CONVERSATION_THREAD_ID=); checkpointer + working dir +
    =THREAD_QUEUE= key by it; =_STREAM_LOCK= stays the server-wide single-
@@ -372,8 +377,8 @@ dir makes easy — not the backend.
   *EmacsBackend confinement* (=virtual_mode= rejects =..=; all =*.assist=
   refused/filtered uniformly across read/write/edit/ls/glob/grep); the
   *class invariant* (EmacsBackend is not a =SandboxBackendProtocol= ⇒
-  =execute= absent); the confined agent has no internet sub-agent /
-  network tool; =STATEFUL_PATHS= route to =StateBackend=, not the phone.
+  =execute= absent); the confined agent passes no =extra_tools=;
+  =STATEFUL_PATHS= route to =StateBackend=, not the phone.
 - *smoke:* a round-trip =.assist= turn against the dockerized phone — file
   written with header + transcript, then a resume reads it back.
 - *Real phone:* actual file edits in a directory; multiple open buffers;
@@ -395,9 +400,9 @@ dir makes easy — not the backend.
    *every turn*; =SmallModelSkillsMiddleware= scans sources) plus
    =grep=/=glob= over a dir.  Measure on the phone; the batched-elisp
    contract (Decision 3) is the mitigation; consider deferring =grep=/=glob=.
-3. *Exact shape of the assist =confined== seam* — one flag vs. two params
-   (=backend== + =subagents==).  Decided in the assist PR's own design
-   phase; this doc only requires that both capabilities exist.
+3. *Exact shape of the assist =backend== seam* (param name; whether it
+   accepts a bare backend that assist wraps, vs. a prebuilt composite).
+   Decided in the assist PR's own design phase.
 4. *Multi-buffer + one global lock UX* — confirm the refuse-second-SEND
    message reads sensibly when the streaming buffer isn't on top.
 
@@ -410,17 +415,21 @@ dir makes easy — not the backend.
 3. *=#+assist_workdir:= override* — a header to point a chat at a different
    working dir (cut from v1).
 4. *Multiple simultaneous streams* (per-thread, beyond the global lock).
-5. *Folding emacs-control into the file-chat surface* — kept separate for
+5. *Close the research-subagent egress for confined file-chat* — v1 leaves
+   web search reachable (accepted risk: nothing sensitive on the phone
+   yet, and research is core to assist); a confined surface should
+   eventually suppress it (the deferred second assist seam) or route
+   research with no data egress.
+6. *Folding emacs-control into the file-chat surface* — kept separate for
    safety; revisit only with a real containment story.
-6. *Migrating the legacy =emacsos-phone= conversation* into a =.assist=.
+7. *Migrating the legacy =emacsos-phone= conversation* into a =.assist=.
 
 * Companion docs / changes
 
-- *assist:* the *two* generic seams of Decision 4 (inject a default
-  backend that assist composes with =STATEFUL_PATHS= routing; suppress the
-  default sub-agents) — likely a single =confined== flag.  These are the
-  only assist changes; they go through assist's three-phase workflow and
-  merge before the emacsos PR.
+- *assist:* the one generic seam of Decision 4 — inject a default backend
+  that assist composes with =STATEFUL_PATHS= routing.  The only assist
+  change; through assist's three-phase workflow, merges before the emacsos
+  PR.  (A future sub-agent-egress seam is deferred — Out of scope.)
 - [[file:2026-05-22-conversation-history.org][2026-05-22-conversation-history.org]] — the checkpointer / persistent-
   conversation model this builds on (per-thread keying generalizes its
   single fixed id).
