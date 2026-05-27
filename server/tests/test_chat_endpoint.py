@@ -204,7 +204,7 @@ def test_tool_message_content_not_echoed_as_token(client):
 # --- error path -------------------------------------------------------------
 
 def test_construction_error_yields_error_event(client):
-    def boom(_msg, _ctx):
+    def boom(_msg, _ctx, *a):
         raise RuntimeError("ASSIST_MODEL_URL not set")
     with patch("emacsos_server.app._start_stream_iter", side_effect=boom):
         with client.stream("POST", "/chat", json=_chat_body("q")) as r:
@@ -280,7 +280,7 @@ def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
 
     captured = {}
 
-    def fake_build(phone_ctx):
+    def fake_build(phone_ctx, *a, **k):
         captured["ctx"] = phone_ctx
         class _T:
             def stream_message(self, _msg):
@@ -356,6 +356,83 @@ def test_build_thread_binds_fixed_id_and_persistent_checkpointer(tmp_path, monke
     skill_sources = captured["extra_skill_sources"]
     assert app_mod.EMACSOS_SKILLS_ROUTE in skill_sources
     assert skill_sources[app_mod.EMACSOS_SKILLS_ROUTE] is not None
+
+
+# --- file-backed chat: per-thread keying + EmacsBackend ---------------------
+
+def test_build_thread_file_chat_uses_emacs_backend_and_no_emacs_tools(tmp_path, monkeypatch):
+    """File-backed chat (thread_id + workdir) keys the Thread by the
+    client-minted id, injects an EmacsBackend rooted at the phone workdir as
+    the default backend, and binds NO EMACS_TOOLS — the backend's fs+execute
+    surface replaces the emacs-control toolset."""
+    import emacsos_server.app as app_mod
+    from emacsos_server.channel import PhoneContext
+    from emacsos_server.emacs_backend import EmacsBackend
+
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
+    monkeypatch.setattr(app_mod, "_CHECKPOINTER", None)
+
+    captured = {}
+
+    class _FakeThread:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.thread_id = kw.get("thread_id")
+            self.model = None
+
+        def stream_message(self, _msg):
+            return iter([])
+
+    import assist.thread as assist_thread_mod
+    monkeypatch.setattr(assist_thread_mod, "Thread", _FakeThread)
+
+    ctx = PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.1")
+    app_mod._build_thread(ctx, thread_id="abc-123", workdir="/home/pi/proj")
+
+    assert captured["thread_id"] == "abc-123"
+    assert "extra_tools" not in captured            # no emacs-control tools
+    be = captured["default_backend"]
+    assert isinstance(be, EmacsBackend)
+    assert be.work_dir == "/home/pi/proj"
+    assert captured["extra_config"]["configurable"]["phone_context"] is ctx
+
+
+def test_build_thread_file_chat_requires_workdir(tmp_path, monkeypatch):
+    import emacsos_server.app as app_mod
+    from emacsos_server.channel import PhoneContext
+
+    monkeypatch.setattr(app_mod, "config", _tmp_config(tmp_path))
+    monkeypatch.setattr(app_mod, "_CHECKPOINTER", None)
+    ctx = PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.1")
+    with pytest.raises(ValueError):
+        app_mod._build_thread(ctx, thread_id="abc-123", workdir=None)
+
+
+def test_validate_thread_id_accepts_slug_rejects_traversal():
+    import uuid as _uuid
+    import emacsos_server.app as app_mod
+    assert app_mod._validate_thread_id(_uuid.uuid4().hex)
+    assert app_mod._validate_thread_id("emacsos-phone")   # legacy fixed id
+    for bad in ("../etc/passwd", "a/b", "", "x" * 129):
+        with pytest.raises(ValueError):
+            app_mod._validate_thread_id(bad)
+
+
+def test_forget_endpoint_clears_the_named_thread(client, monkeypatch):
+    """POST /forget {thread_id} routes to _clear_conversation for THAT id
+    (the generalized sibling of the fixed-id /clear)."""
+    import emacsos_server.app as app_mod
+    seen = {}
+
+    def fake_clear(thread_id=app_mod.CONVERSATION_THREAD_ID):
+        seen["tid"] = thread_id
+        return {"status": "cleared"}
+
+    monkeypatch.setattr(app_mod, "_clear_conversation", fake_clear)
+    r = client.post("/forget", json={"thread_id": "abc-123"})
+    assert r.status_code == 200
+    assert r.json() == {"status": "cleared"}
+    assert seen["tid"] == "abc-123"
 
 
 def test_skill_sources_has_config_apply_route_and_file():
@@ -655,7 +732,7 @@ def test_stream_generator_runs_on_single_thread(client):
         finally:
             idents["close"] = threading.get_ident()
 
-    def fake_start(message, phone_ctx):
+    def fake_start(message, phone_ctx, *a):
         idents["build"] = threading.get_ident()
         return gen()
 
@@ -692,7 +769,7 @@ def test_disconnect_mid_stream_closes_generator_cleanly(client):
     fake_is_disconnected.n = 0
 
     with patch("emacsos_server.app._start_stream_iter",
-               side_effect=lambda m, p: gen()), \
+               side_effect=lambda m, p, *a: gen()), \
          patch("starlette.requests.Request.is_disconnected", fake_is_disconnected):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)

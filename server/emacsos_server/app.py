@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -74,10 +75,20 @@ class PhoneAuth(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     phone: Optional[PhoneAuth] = None
+    # File-backed chat (.assist): a client-minted thread id keys the
+    # conversation, and `workdir` is the file's directory ON THE PHONE that
+    # the EmacsBackend operates in.  Both absent => the legacy fixed *chat*
+    # conversation (CONVERSATION_THREAD_ID) with the EMACS_TOOLS surface.
+    thread_id: Optional[str] = None
+    workdir: Optional[str] = None
 
 
 class RollbackRequest(BaseModel):
     phone: Optional[PhoneAuth] = None
+
+
+class ForgetRequest(BaseModel):
+    thread_id: str
 
 
 def _phone_ctx(phone_auth: Optional[str], request: Request) -> Optional[PhoneContext]:
@@ -178,12 +189,32 @@ def _private_makedirs(path: str) -> None:
     os.chmod(path, 0o700)
 
 
+_THREAD_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
+
+
+def _validate_thread_id(thread_id: str) -> str:
+    """Reject a thread id that isn't a safe slug.  It's both a checkpoint
+    key AND a filesystem path component (`_thread_working_dir`), so a `/` or
+    `..` would be a path-traversal / key-injection foothold.  The client
+    mints a UUID; the legacy `emacsos-phone` also matches."""
+    if not _THREAD_ID_RE.match(thread_id or ""):
+        raise ValueError(f"invalid thread_id: {thread_id!r}")
+    return thread_id
+
+
+def _thread_working_dir(thread_id: str) -> str:
+    """Stable per-thread SERVER-side working dir (sub-agent scratch; for the
+    legacy path also the agent's `AGENTS.md`).  Reused across turns — no
+    per-/chat tempdir to leak.  For file-backed chat the agent's *files* live
+    on the phone (the EmacsBackend), so this dir holds only sub-agent scratch.
+    Conversation state itself lives in the checkpointer, not here."""
+    return os.path.join(config.state_dir, "threads",
+                        _validate_thread_id(thread_id))
+
+
 def _conversation_working_dir() -> str:
-    """Stable per-conversation working dir (the agent's default
-    FilesystemBackend root).  Reused across turns — no per-/chat tempdir
-    to leak.  Conversation state itself lives in the checkpointer, not
-    here."""
-    return os.path.join(config.state_dir, "threads", CONVERSATION_THREAD_ID)
+    """The legacy fixed *chat* working dir."""
+    return _thread_working_dir(CONVERSATION_THREAD_ID)
 
 
 def _checkpointer():
@@ -213,39 +244,67 @@ def _checkpointer():
     return _CHECKPOINTER
 
 
-def _build_thread(phone_ctx: PhoneContext):
+def _build_thread(phone_ctx: PhoneContext, thread_id=None, workdir=None):
     """Build this /chat turn's `assist.Thread` over the SHARED persistent
-    backing: the process-wide checkpointer + the fixed conversation thread
-    id, so prior turns are replayed from the checkpoint (the Thread object
-    is rebuilt per turn, but its state persists).  The phone-control
-    toolset is bound and the per-request phone context threaded into the
-    langgraph RunnableConfig.  Returns the Thread.  Raises whatever assist
-    raises during construction (eg. model probe failure)."""
+    backing (the process-wide checkpointer), keyed by `thread_id` so prior
+    turns replay from the checkpoint.  Two modes:
+
+    - FILE-BACKED CHAT (`thread_id` + `workdir` given): the main agent runs
+      against the phone via an `EmacsBackend` rooted at the phone `workdir`,
+      with NO `EMACS_TOOLS` — the backend's filesystem ops + `execute` ARE
+      the surface.  (See the file-backed-chat doc: this is full-trust,
+      unconfined on-device execution.)
+    - LEGACY *chat* (neither given): the emacs-control `EMACS_TOOLS`
+      (eval_elisp/apply_config) on the fixed `CONVERSATION_THREAD_ID`.
+
+    The per-request phone context is threaded into the RunnableConfig in
+    both modes.  Raises whatever assist raises during construction."""
     # Import inside so module import doesn't trigger assist's
     # transitive imports during server startup.
     from assist.thread import Thread
 
-    working_dir = _conversation_working_dir()
-    _private_makedirs(working_dir)
-    # sandbox_backend=None: emacsos runs the agent without a
-    # container sandbox.  model=None lets Thread call
-    # `select_chat_model` itself, which reads ASSIST_MODEL_URL.
-    t = Thread(
-        working_dir=working_dir,
-        thread_id=CONVERSATION_THREAD_ID,
+    tid = thread_id or CONVERSATION_THREAD_ID
+    # SERVER-side scratch dir (sub-agents + makedirs); NEVER the phone path.
+    server_dir = _thread_working_dir(tid)
+    _private_makedirs(server_dir)
+
+    # model=None lets Thread call `select_chat_model` itself (reads ASSIST_MODEL_URL).
+    kwargs = dict(
+        working_dir=server_dir,
+        thread_id=tid,
         checkpointer=_checkpointer(),
-        sandbox_backend=None,
-        extra_tools=EMACS_TOOLS,
         loop_exploration_tools=LOOP_EXPLORATION_TOOLS,
         extra_skill_sources=_skill_sources(),
         extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
     )
+    if thread_id is not None:
+        if not workdir:
+            raise ValueError("file-backed chat requires `workdir`")
+        # The phone's emacs daemon IS the backend.  eval transport must
+        # outwait the command's own coreutils `timeout` (EXEC_TIMEOUT_SECONDS)
+        # or the emacsclient round trip dies before the command finishes.
+        from .emacs_backend import EmacsBackend, EXEC_TIMEOUT_SECONDS
+        from . import phone as phone_mod
+
+        def _eval(expr: str):
+            return phone_mod.call_emacs(
+                phone_ctx.auth_contents, phone_ctx.phone_host, expr,
+                timeout=EXEC_TIMEOUT_SECONDS + 15)
+        # default_backend (mutually exclusive with sandbox_backend) — being a
+        # SandboxBackendProtocol, it auto-enables deepagents' `execute` tool.
+        kwargs["default_backend"] = EmacsBackend(workdir, _eval)
+    else:
+        # sandbox_backend=None (the default): no container; the emacs-control
+        # toolset is bound for the legacy fixed conversation.
+        kwargs["extra_tools"] = EMACS_TOOLS
+
+    t = Thread(**kwargs)
     # Surface the resolved context window: summarization's 0.85 trigger
     # only fires if the model profile exposes max_input_tokens, so log it
     # to make a windowing misconfig visible rather than silently degraded.
     max_in = (getattr(t.model, "profile", None) or {}).get("max_input_tokens")
-    log.info("assist.Thread ready (thread_id=%s, max_input_tokens=%s)",
-             t.thread_id, max_in)
+    log.info("assist.Thread ready (thread_id=%s, file_chat=%s, max_input_tokens=%s)",
+             t.thread_id, thread_id is not None, max_in)
     return t
 
 
@@ -254,10 +313,11 @@ def _build_thread(phone_ctx: PhoneContext):
 # call that the next turn resumes into, which some providers reject
 # (BadRequest).  `Thread.stream_message` has no invoke_with_rollback
 # wrapper, so this path won't auto-recover; the v1 remedy is "New chat".
-def _start_stream_iter(message: str, phone_ctx: PhoneContext):
+def _start_stream_iter(message: str, phone_ctx: PhoneContext,
+                       thread_id=None, workdir=None):
     """Sync helper invoked via run_in_executor: build the Thread for this
     /chat turn and start its `stream_message` iterator."""
-    t = _build_thread(phone_ctx)
+    t = _build_thread(phone_ctx, thread_id=thread_id, workdir=workdir)
     return iter(t.stream_message(message))
 
 
@@ -291,7 +351,9 @@ def _defuse_future(fut) -> None:
         fut.exception()
 
 
-async def _stream_turn(message: str, phone_auth: Optional[str], request: Request) -> AsyncIterator[bytes]:
+async def _stream_turn(message: str, phone_auth: Optional[str], request: Request,
+                       thread_id: Optional[str] = None,
+                       workdir: Optional[str] = None) -> AsyncIterator[bytes]:
     """The async generator that drives one chat turn.  Bridges
     assist's sync iterator via run_in_executor and polls
     is_disconnected() between yields so client ABORT fires the
@@ -339,6 +401,20 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         )
         return
 
+    # File-backed chat: validate the client-minted thread id + require a
+    # workdir BEFORE acquiring the lock (a request-shape problem, like the
+    # phone-context check above).
+    if thread_id is not None:
+        try:
+            _validate_thread_id(thread_id)
+        except ValueError as e:
+            yield ndjson.event("error", reason=str(e))
+            return
+        if not workdir:
+            yield ndjson.event("error",
+                               reason="file-backed chat requires `workdir`")
+            return
+
     # Single-flight: serialize the body of the stream so two /chat
     # coroutines don't run the model in parallel.  Acquire BEFORE the
     # try so the corresponding release in finally always pairs cleanly;
@@ -357,7 +433,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # generator runs on its first next()) lands on the pump thread.  This
         # is also the only place an ASSIST_MODEL_URL misconfig can raise.
         it = await loop.run_in_executor(
-            pump, _start_stream_iter, message, phone_ctx)
+            pump, _start_stream_iter, message, phone_ctx, thread_id, workdir)
         last_heartbeat = time.monotonic()
         while True:
             if await request.is_disconnected():
@@ -481,7 +557,7 @@ async def chat(req: ChatRequest, request: Request):
     log.info("POST /chat msg=%r", req.message)
     phone_auth = req.phone.auth_file if req.phone is not None else None
     return StreamingResponse(
-        _stream_turn(req.message, phone_auth, request),
+        _stream_turn(req.message, phone_auth, request, req.thread_id, req.workdir),
         # Explicit charset so emacs url-http (and any other client that
         # defaults differently) decodes our UTF-8-encoded NDJSON
         # correctly; non-ASCII tokens otherwise risk mojibake.
@@ -536,8 +612,12 @@ async def rollback(req: RollbackRequest, request: Request):
         _STREAM_LOCK.release()
 
 
-def _clear_conversation() -> dict:
-    """Forget the persistent conversation so the next /chat starts fresh.
+def _clear_conversation(thread_id: str = CONVERSATION_THREAD_ID) -> dict:
+    """Forget a persistent conversation so the next /chat starts fresh.
+    Defaults to the legacy fixed *chat* thread (backs /clear); /forget passes
+    a specific file-backed thread id.  For a file-backed thread the agent's
+    *memory* (AGENTS.md) lives on the phone, not in the server dir wiped here,
+    so the load-bearing effect there is the checkpoint deletion.
     Backs the phone's "New chat".  Two parts, because conversation state
     lives in TWO places:
 
@@ -564,8 +644,9 @@ def _clear_conversation() -> dict:
 
     Any failure comes back as a structured error, never a bare 500."""
     try:
-        _checkpointer().delete_thread(CONVERSATION_THREAD_ID)
-        wd = _conversation_working_dir()
+        tid = _validate_thread_id(thread_id)
+        _checkpointer().delete_thread(tid)
+        wd = _thread_working_dir(tid)
         # Default ignore_errors=False: a real wipe failure raises and
         # becomes the structured error below rather than a false "cleared".
         if os.path.isdir(wd):
@@ -590,6 +671,24 @@ async def clear(request: Request):
     await _STREAM_LOCK.acquire()
     try:
         return await loop.run_in_executor(None, _clear_conversation)
+    finally:
+        _STREAM_LOCK.release()
+
+
+@app.post("/forget")
+async def forget(req: ForgetRequest):
+    """Forget a specific file-backed conversation: delete its checkpoint +
+    server-side scratch dir, keyed by `thread_id`.  The generalized sibling
+    of /clear (which stays frozen to the legacy fixed *chat* thread).  Like
+    /clear it needs no phone callback; serialized behind the same
+    `_STREAM_LOCK` so it can't wipe state under an in-flight turn.  NOTE: a
+    file-backed thread's AGENTS.md lives on the phone, so this wipes the
+    conversation memory (the checkpoint) but not phone-side files."""
+    log.info("POST /forget thread_id=%s", req.thread_id)
+    loop = asyncio.get_running_loop()
+    await _STREAM_LOCK.acquire()
+    try:
+        return await loop.run_in_executor(None, _clear_conversation, req.thread_id)
     finally:
         _STREAM_LOCK.release()
 
