@@ -612,9 +612,13 @@ per-file conversation and operates on that directory."
   (if emacos--chat-in-flight
       (message "chat: stream in flight; tap ABORT to cancel")
     (let* ((buf (or surface (emacos--chat-buffer)))
-           (ctx (emacos--chat-surface-context buf))
-           (msg (emacos--chat-current-input buf)))
+           (msg (emacos--chat-current-input buf))
+           (ctx nil))
       (when (and msg (not (string-empty-p msg)))
+        ;; Derive context only now that we're committing to a turn: for a
+        ;; .assist surface this mints the thread id + writes the header, so an
+        ;; empty-input tap must not reach it (it would dirty a fresh file).
+        (setq ctx (emacos--chat-surface-context buf))
         (setq emacos--chat-in-flight t
               emacos--chat-tokens-seen 0
               emacos--chat-stream-buffer buf)

@@ -171,15 +171,25 @@ transcript is a human-readable *mirror*; the server checkpoint is the
 agent's real memory.  Hand-editing the transcript does NOT change what the
 agent remembers (file = display, checkpoint = truth).
 
-** 7. Resume: server-remembered → continue; server-forgotten → refuse
+** 7. Resume: server-remembered → continue; server-forgotten → start fresh under the same id
 
-Reopening a =.assist= whose thread the server still has → resumes.
-Reopening one the server has *forgotten* (wiped, =/forget='d, other
-machine) → v1 does NOT reconstruct from the transcript; SEND is *refused*
-with a clear note, and the file stays a readable transcript.  *Conscious
-consequence:* after =/forget=, that =.assist= becomes a read-only artifact
-that can't be continued until the roadmapped reconstruct lands; "new chat"
-means a new file.
+Reopening a =.assist= whose thread the server still has → resumes (the
+checkpoint carries the history).  Reopening one the server has *forgotten*
+(wiped, =/forget='d, opened on another machine) → v1 does NOT reconstruct
+the history from the transcript; the next SEND simply starts a *fresh*
+server conversation keyed to the same id, and the old transcript above
+stays as readable scrollback the agent does not see.
+
+*Design change from review (implemented as start-fresh, not refuse).* An
+earlier draft promised to *refuse* SEND on a forgotten thread.  That can't
+be done server-side without new protocol surface: a forgotten id and a
+brand-new client-minted id both present as "no checkpoint for this id," so
+a checkpoint-existence refusal would also break every new =.assist=.
+Distinguishing them needs the client to signal "this id came from a
+header," which is more machinery than the case warrants.  Start-fresh is
+also the friendlier behavior — a =/forget='d file becomes usable again
+instead of a dead artifact.  Both the *refusal* and transcript-based
+*reconstruct* are roadmap.
 
 ** 8. Working dir = the =.assist= file's directory; fs tools rooted there (a guardrail, not a boundary)
 
@@ -205,12 +215,14 @@ phone.  (This is independent of the execute decision and remains required.)
 ** 10. File format & save lifecycle
 
 Header (=#+assist_thread:=) at the top, then the =you>=/=bot>= transcript;
-the transient =[status]= bracket is gone by save time.  Save
-*transcript-only* (the trailing =\n> = prompt is reconstructed on open),
-*programmatically* (=write-region=/=save-buffer= under =inhibit-read-only=)
-on =you>=-commit (with the header, Decision 6) AND on end/error/abort.
-=emacos-assist-mode= disables =auto-save-mode= and blocks/aborts
-=revert-buffer= while a stream is in flight.
+the transient =[status]= bracket is gone by save time.  Save the *whole
+buffer* (=save-buffer=) — the trailing =\n> = prompt is part of the file
+and is simply *reused* on reopen (=emacos-assist--init-buffer= guards
+against appending a second one), which is simpler than slicing the prompt
+out and reconstructing it.  Saves fire on =you>=-commit (with the header,
+Decision 6) AND on end/error/abort.  =emacos-assist-mode= disables
+=auto-save-mode= and blocks/aborts =revert-buffer= while a stream is in
+flight.
 
 *Reopen does NOT re-parse turns* — the =you>=/=bot>= prefixes are not
 structural on reload (a =bot>= reply may contain a line starting =you>=).
@@ -224,7 +236,8 @@ The new branch keys on =(derived-mode-p 'emacos-assist-mode)=; the legacy
 =*chat*= branch stays identity-keyed (=*chat*= has no major mode), and the
 two coexist in one =emacos--top-commands= =cond=.  Distinct command names:
 *New file* (open a new =.assist=; does NOT forget the current thread) and
-*Forget this chat* (the =/forget= wipe).  *No ROLLBACK button in
+*Forget* (the =/forget= wipe; compact label for the 320×240 command row).
+*No ROLLBACK button in
 file-chat* — ROLLBACK is tied to =apply_config=, which is a *config-repo-
 specific* tool (git-committed config + one-level revert), not part of the
 EmacsBackend; a general working dir's undo is its own git history + your

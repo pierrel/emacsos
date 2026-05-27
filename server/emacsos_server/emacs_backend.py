@@ -86,7 +86,15 @@ class EmacsBackend(BaseSandbox):
         (newlines, quotes, non-UTF-8) survive ``emacsclient``'s result
         printing intact — we just strip the surrounding quotes and decode.
         """
-        t = timeout or self._timeout
+        # Cap every command at the backend max regardless of the agent's
+        # requested timeout (deepagents exposes one, up to 3600s).  The phone
+        # is weak + full-trust "light run", and — crucially — the emacsclient
+        # transport timeout is a fixed margin above EXEC_TIMEOUT_SECONDS, so a
+        # larger command timeout would let the command outlive the transport
+        # and orphan a process on the daemon.  None / <=0 (the tool's
+        # "no timeout") => the default cap, not unbounded.
+        t = (self._timeout if (timeout is None or timeout <= 0)
+             else min(timeout, self._timeout))
         bounded = (
             f"timeout --kill-after={EXEC_KILL_GRACE_SECONDS}s {t}s "
             f"sh -c {shlex.quote(command)} 2>&1"
@@ -158,7 +166,10 @@ class EmacsBackend(BaseSandbox):
             raise ValueError(
                 ".assist transcript files are managed by the chat UI; "
                 "the agent can't read or modify them")
-        if path.startswith(self.work_dir):
+        # Already rooted?  Require a separator boundary so a sibling whose name
+        # merely extends work_dir's (e.g. /data/projevil vs /data/proj) isn't
+        # mistaken for "already under" and returned unprefixed.
+        if path == self.work_dir or path.startswith(self.work_dir + "/"):
             return path
         return self.work_dir + (path if path.startswith("/") else "/" + path)
 
@@ -211,6 +222,6 @@ class EmacsBackend(BaseSandbox):
                     continue
                 content = base64.b64decode(resp.output.strip())
                 out.append(FileDownloadResponse(path=path, content=content))
-            except (ValueError, Exception) as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 — _resolve ValueError or decode/transport failure
                 out.append(FileDownloadResponse(path=path, error=str(e)))
         return out

@@ -48,6 +48,22 @@ def test_execute_runs_in_workdir_via_elisp():
     assert "base64-encode-string" in elisp       # clean transport
 
 
+def test_execute_caps_agent_timeout_at_backend_max():
+    # deepagents lets the model pass a timeout (up to 3600s); the phone caps
+    # it at the backend max so the command can't outlive the emacsclient
+    # transport and orphan a process.  None/<=0 also fall back to the cap.
+    rec = []
+    be = EmacsBackend("/w", _make_eval("0\n", rec), timeout=60)
+    be.execute("make", timeout=300)
+    assert "timeout --kill-after=5s 60s " in rec[0]
+    rec.clear()
+    be.execute("make", timeout=0)
+    assert "timeout --kill-after=5s 60s " in rec[0]
+    rec.clear()
+    be.execute("make", timeout=30)        # below the cap: honored
+    assert "timeout --kill-after=5s 30s " in rec[0]
+
+
 def test_execute_nonzero_exit():
     be = EmacsBackend("/w", _make_eval("2\noops"))
     r = be.execute("false")
@@ -91,6 +107,14 @@ def test_resolve_prefixes_workdir():
     assert be._resolve("/a.txt") == "/data/proj/a.txt"
     assert be._resolve("a.txt") == "/data/proj/a.txt"
     assert be._resolve("/data/proj/x") == "/data/proj/x"
+    assert be._resolve("/data/proj") == "/data/proj"
+
+
+def test_resolve_does_not_treat_name_extending_sibling_as_inside():
+    # /data/projevil merely extends /data/proj's basename; it must be
+    # re-rooted (-> /data/proj/data/projevil), not returned as-is.
+    be = EmacsBackend("/data/proj", _make_eval())
+    assert be._resolve("/data/projevil") == "/data/proj/data/projevil"
 
 
 def test_resolve_blocks_dotdot():
