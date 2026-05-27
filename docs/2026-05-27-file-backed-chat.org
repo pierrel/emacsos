@@ -1,4 +1,4 @@
-#+title: File-Backed Chat: .assist Files as Durable Conversations on an Emacs Backend
+#+title: File-Backed Chat: .assist Files as Durable Conversations on a Full-Power Emacs Backend
 #+date: 2026-05-27
 
 Today a chat is one ephemeral =*chat*= buffer backed by one fixed
@@ -10,26 +10,29 @@ checkpoint), and the buffer auto-saves after each turn.  Every
 conversation becomes a durable, greppable, version-controllable
 artifact, and you can have many.
 
-The reason this is more than "persist the transcript" is the unifying
-idea underneath it: *a conversation is a working directory plus a
-backend*, and emacs-control becomes just one backend among the set
-assist already supports.  v1 builds that unification up front (option B
-from the design discussion) — the phone's emacs becomes a real
-=deepagents= =BackendProtocol= implementation (the *EmacsBackend*), so
-"edit my files" runs through the same machinery assist's cli/web use.
+The unifying idea: *a conversation is a working directory plus a
+backend.*  assist's =Thread= already centers on that; emacsos has been
+running the degenerate case (fixed scratch dir, no real backend,
+=EMACS_TOOLS= bolted on).  v1 makes the phone's emacs a real, *full-power*
+=deepagents= backend (the *EmacsBackend*): it implements both the
+filesystem protocol AND command execution, so the agent can *read, edit,
+and run things in the =.assist='s directory on the phone* — the assist
+cli/web experience, in place.
 
-This revision incorporates the design-review team's findings (verified
-against the real assist/deepagents source); the load-bearing corrections
-are called out inline where they bite.
+*Important framing (decided after a design pass):* the EmacsBackend is
+*full-trust, not a sandbox.*  It runs commands on the phone with no
+isolation.  We accept that for v1 because the phone holds nothing
+sensitive yet and is single-user; real containment is a deferred
+follow-up (Security, Out of scope).  This revision reflects that choice
+and the design-review team's findings.
 
 * Goal
 
 - A =.assist= file is a durable conversation: open it → chat mode;
   SEND streams exactly as today; the file auto-saves after each turn.
-- The agent can *edit the files in the =.assist='s directory* — on the
-  phone, in place, via elisp — confined to that directory, with *no code
-  execution and a minimized tool surface* (see Security; v1 leaves the
-  research sub-agent's web search reachable as an accepted risk).
+- The agent can *read, edit, and run commands in the =.assist='s
+  directory* — on the phone, in place, via elisp — like assist's cli in
+  that directory.
 - Many =.assist= buffers open at once, each its own thread; reopening a
   file the server still remembers resumes the conversation.
 - The legacy ephemeral =*chat*= stays exactly as-is — the zero-friction
@@ -39,43 +42,40 @@ are called out inline where they bite.
 
 *In:*
 - A new major mode (=emacos-assist-mode=) for =.assist= files: the chat
-  surface (the *refactored* =chat.el= stream engine — see Decision 5),
-  with the target buffer no longer hard-coded and a command surface keyed
-  on the *mode*.
+  surface (the *refactored* buffer-agnostic =chat.el= stream engine — see
+  Decision 5), with a command surface keyed on the *mode*.
 - File format: a =#+assist_thread: <uuid>= header + the =you>=/=bot>=
-  transcript + applied/rollback notes.  Save transcript-only, on
-  =you>=-commit and on end/error/abort.  Reopen does NOT re-parse turns
-  (Decision 10).
+  transcript + any notes.  Save transcript-only, on =you>=-commit and on
+  end/error/abort.  Reopen does NOT re-parse turns (Decision 10).
 - Client mints a UUID per new file and sends =thread_id= on every =/chat=
-  (absent =thread_id= ⇒ the legacy fixed id, so =*chat*= is untouched).
+  (absent ⇒ the legacy fixed id, so =*chat*= is untouched).
 - Server: =/chat= keyed by =thread_id=; a new =/forget {thread_id}=
-  endpoint; per-thread checkpoint.  The fixed-id =/clear= is frozen as the
-  legacy alias.
+  endpoint; per-thread checkpoint.  Fixed-id =/clear= frozen as legacy.
 - The *EmacsBackend* (in =emacsos-server=): implements deepagents'
-  =BackendProtocol= (=read/write/edit/ls/grep/glob=) by driving the
-  phone's emacs daemon via =emacsclient=, confined (=virtual_mode=) to the
-  =.assist='s working dir, *composed by assist into a =CompositeBackend=*
-  with =StateBackend= routing for internal scratch (Decision 9, Security).
-- *One small, generic seam in assist* (companion PR — see Decision 4):
-  inject a custom default backend (which assist composes with its
-  =StateBackend= routing).  Not emacs-specific.
+  *=SandboxBackendProtocol=* — the filesystem protocol
+  (=read/write/edit/ls/grep/glob=) PLUS =execute(command)= — by driving
+  the phone's emacs daemon via =emacsclient=.  =execute= runs a shell
+  command on the phone with =default-directory= = the working dir.  assist
+  composes it into a =CompositeBackend= with =StateBackend= routing
+  (Decision 9).
+- *One small, generic seam in assist* (companion PR): inject a custom
+  default backend.
 
 *Out (called out so they don't sneak in):*
-- *Sync-to-server + docker sandbox on the phone.*  Rejected: the Zero 2 W
-  (512 MB) can't run docker or the agent, and in-place elisp is far
-  simpler.  The docker/local backend stays in the *model* for a future
-  desktop variant; the phone uses the EmacsBackend.
-- *=#+assist_workdir:= override* — cut from v1 (speculative; complicates
-  the confinement root).  Working dir = the file's directory, full stop.
-  Roadmap a header override if a real need appears.
-- *Replaying a thread from the file transcript* when the server has
-  forgotten it (Decision 7) — roadmap.
+- *A real sandbox on the phone.*  The Zero 2 W (512 MB) can't run docker
+  or the agent, so =execute= is *on the phone, uncontained.*  Real
+  containment (a docker sandbox, or a capable desktop host with the
+  working dir there) is the deferred path (Security, Out of scope).
+- *Sync-to-server.*  Rejected; in-place elisp is simpler.
+- *=#+assist_workdir:= override* — cut from v1; working dir = the file's
+  directory.
+- *Replaying a thread from the file transcript* when the server forgot it
+  (Decision 7) — roadmap.
 - *Multiple simultaneous streams.*  One at a time, server-wide, as today.
-- *Raw eval / emacs-control folded into the file-chat surface.*  Kept
-  separate and gated (Decision 9 + Security).
-- *Migrating the legacy =emacsos-phone= conversation / =*chat*=.*  As-is.
-- *A desktop/local-host variant* and *privacy/secrets* handling beyond a
-  per-repo =.gitignore= for =.assist=.
+- *Retiring =EMACS_TOOLS= / migrating the legacy =*chat*=.*  The legacy
+  =emacsos-phone= path stays as-is; folding =eval_elisp= into the
+  EmacsBackend's =execute= is a follow-up (Out of scope).
+- *Privacy/secrets* handling beyond a per-repo =.gitignore= for =.assist=.
 
 * Decisions
 
@@ -84,304 +84,239 @@ Numbered.  Push back on any.  Opinionated calls flagged inline.
 ** 1. A =.assist= file is a conversation; opening it enters =emacos-assist-mode=
 
 =.assist= goes in =auto-mode-alist=; visiting one initializes the chat
-surface over the file's content (read the header for the thread id,
-mark the existing content read-only, drop a fresh prompt at the end).
-Coexists with the ephemeral =*chat*= — that buffer and its code path are
-*unchanged*; =.assist= is the durable sibling.  *Naming* (review finding):
-the mode is =emacos-assist-mode= (the repo's elisp prefix is =emacos-=,
-single-o; bare =assist-mode= would also collide with the upstream =assist=
-package the server imports).  The =.assist= extension and =#+assist_=
-headers are filenames/in-file text, not Lisp symbols, so they keep the
-product name.
+surface over the file's content (read the header for the thread id, mark
+existing content read-only, drop a fresh prompt at the end).  Coexists
+with the unchanged ephemeral =*chat*=; =.assist= is the durable sibling.
+*Naming:* the mode is =emacos-assist-mode= (the repo's elisp prefix is
+=emacos-=, single-o; bare =assist-mode= would collide with the upstream
+=assist= package).  The =.assist= extension and =#+assist_= headers are
+filenames/in-file text, so they keep the product name.
 
-** 2. Unify on "conversation = working dir + backend"; emacs-control IS a backend
+** 2. One full-power EmacsBackend: filesystem + execute; the tiers collapse
 
-*Opinionated.*  assist's =Thread= already centers on a =working_dir= + a
-backend; emacsos runs the *degenerate* case (fixed scratch dir,
-=sandbox_backend=None=, =EMACS_TOOLS= bolted on).  We generalize: the
-phone's emacs becomes a real =BackendProtocol= implementation (the
-*EmacsBackend*).  Conceptually =eval_elisp= ≈ a backend's =execute= and
-=apply_config= ≈ write+reload — *but for v1 the EmacsBackend implements
-filesystem methods ONLY* (=read/write/edit/ls/grep/glob=); it does *not*
-implement =execute=, and (critically, Decision 9) it extends
-=BackendProtocol= and *never* a sandbox protocol.  The
-=eval_elisp=/=apply_config= emacs-*control* path stays separate (Decision
-9).  One mechanism (phone elisp); a capability policy per conversation.
+*Opinionated.*  assist's =Thread= centers on a =working_dir= + a backend;
+the phone's emacs becomes a real one.  The EmacsBackend implements
+deepagents' =SandboxBackendProtocol=: the fs methods (=read/write/edit/
+ls/grep/glob=) AND =execute(command)=.  Conceptually this *completes* the
+unification — =eval_elisp= is just the backend's =execute=, and an
+agent.el change is write+reload — so the old "confined file-chat vs.
+trusted emacs-control" *two-tier split disappears*: the file-chat surface
+is now *full-power*, the same trust level as the emacs-control path.  One
+backend, one trust model.  (We don't rip out the legacy =EMACS_TOOLS= in
+this experiment — see Out of scope — but they're now redundant with the
+EmacsBackend and can be retired later.)
 
-** 3. In-place via elisp on the phone — no sync, no docker
+** 3. In-place via elisp on the phone — no sync, no docker; execute runs on the phone
 
-*Opinionated.*  File ops run by driving the phone's emacs daemon over
-=emacsclient= (=insert-file-contents= / =write-region= /
-=directory-files= / etc.).  Files never leave the phone; changes are
-inherently local.  We rejected sync-to-server + docker because the Zero 2
-W can't host docker or the agent, and in-place is dramatically simpler.
+*Opinionated.*  Every backend method runs by driving the phone's emacs
+daemon over =emacsclient=: fs ops via =insert-file-contents= /
+=write-region= / =directory-files=; =execute(command)= via a shell on the
+phone (=process-file= / =shell-command-to-string= with =default-directory=
+= the working dir, capturing exit code + output into an =ExecuteResponse=).
+Each backend call is one batched =emacsclient= round-trip.
 
-*Accepted cost:* command *execution* on the phone is weak (512 MB), so
-v1's file-chat is file-*editing*, not build/run — there is no =execute=
-tool (which is also the security win, Decision 9).  Each =BackendProtocol=
-call is one =emacsclient= round-trip; the contract is *one batched elisp
-call per backend method* (one =directory-files= for =ls=, one elisp
-match-loop for =grep=) so method granularity doesn't leak into latency.
-The fiddly implementation hotspots are =edit='s exact-string-replace and
-=read='s line-numbered =cat -n= + offset/limit semantics over elisp — not
-the protocol breadth (the six new-named methods suffice; the deprecated
-=*_info= forms and async variants need no custom impl).  =grep=/=glob= may
-be deferred-to-stub if the phone smoke shows they're slow — =read/write/
-edit/ls= cover the stated use case.
+*Accepted realities:*
+- *Compute is the phone's.*  The Zero 2 W (512 MB, quad A53) runs simple
+  commands (git, a formatter, a small script) fine; heavy builds/tests are
+  slow.  This is "edit + light run," not a build farm.
+- *=execute= is uncontained* (Security): it's a real shell on the phone —
+  full network, full filesystem, any binary.  Implementation hotspots are
+  =edit='s exact-string-replace and =read='s =cat -n= + offset/limit over
+  elisp; =execute='s exit-code/stderr capture; =grep=/=glob= as one
+  batched elisp call each (deferrable to stub if slow on the phone).
 
 ** 4. Lives in =emacsos-server=, not assist — one generic assist seam
 
 *Opinionated.*  The EmacsBackend, backend selection, =.assist= handling,
 =/forget=, per-thread keying — all =emacsos-server= (+ emacsos elisp).
-assist must not learn what emacs is.  unify-first needs assist to accept
-ONE thing it can't today: *a custom default backend.*  =create_agent=
-builds the backend internally (=create_sandbox_composite_backend= when
-sandboxed, else =_create_standard_backend(working_dir)= — agent.py:193-198),
-always producing a =CompositeBackend=.  Add a way to supply the *default*
-backend (e.g. =backend== / =default_backend==) that assist still wraps
-with its =STATEFUL_PATHS= → =StateBackend= routing — NOT "used directly"
-(a raw backend would bypass that routing; Decision 9).  Generic, not
-emacs-specific; through assist's three-phase workflow; merges before the
-emacsos PR.
-
-(The review identified a *second* potential seam — suppressing the
-hardcoded internet sub-agents (=research_sub= wires =search_internet=/
-=read_url=, agent.py:212-265/467) — since they're an egress channel.  But
-per the v1 decision in Decision 9, research stays *enabled* (accepted
-risk), so that seam is *deferred*.  v1's companion change is the single
-backend seam.)
+assist must not learn what emacs is.  unify-first needs ONE thing assist
+can't do today: accept a *custom default backend.*  =create_agent= builds
+the backend internally (=create_sandbox_composite_backend= when sandboxed,
+else =_create_standard_backend(working_dir)= — agent.py:193-198), always a
+=CompositeBackend=.  Add a way to supply the *default* backend (e.g.
+=backend==) that assist still wraps with its =STATEFUL_PATHS= →
+=StateBackend= routing (Decision 9) — NOT used raw.  Because the injected
+default *is* a =SandboxBackendProtocol=, deepagents' =supports_execution=
+turns true and surfaces the =execute= tool automatically (filesystem.py
+checks =isinstance(backend.default, SandboxBackendProtocol)=).  We keep
+assist's =sandbox_backend= param =None=, so its *docker-specific* code
+(=container.exec_run= for research references, =hard_delete= container
+teardown) stays dormant — our =execute= dispatches through the composite
+default's method, no container.  Generic seam, through assist's
+three-phase workflow; merges before the emacsos PR.  Research stays
+enabled (a prior decision) — no sub-agent suppression seam.
 
 ** 5. Many buffers open ⇒ buffer-agnostic engine; one stream at a time
 
-=chat.el='s stream state is *global singletons* today (markers,
-=emacos--chat-in-flight=, the timers, the process), and the handlers
-hard-code =(get-buffer emacos--chat-buffer-name)=.  The minimal correct
-refactor (review finding — *not* full buffer-localization):
-- *De-hardcode the target buffer*: the stream engine inserts into "the
-  streaming buffer" (tracked in one variable set at SEND), not the
-  literal =*chat*=.  This is the load-bearing change and it's small.
-- Because concurrency is *one stream at a time server-wide* (the existing
-  global =_STREAM_LOCK=, matching assist's web UI), the *in-flight* state
-  (process, markers, timers) is genuinely single-tenant and can stay
-  global — markers carry their own buffer, so a global marker into buffer
-  B works regardless of =current-buffer=.  Only the *persistent* per-file
-  identity (=thread_id=, the file) needs to be buffer-local.
-- A second SEND while any stream is in flight is refused with a hint
-  (today's behavior, now phrased so it reads sensibly when the streaming
-  buffer isn't the one on top).
-
-This turns the existing =*chat*= into a degenerate one-buffer client of
-the same engine — a clean improvement, not a fork.  (Scope/step-3 say
-"refactor," not "port," deliberately.)
+=chat.el='s stream state is *global singletons* today and the handlers
+hard-code =(get-buffer emacos--chat-buffer-name)=.  Minimal correct
+refactor: *de-hardcode the target buffer* (the engine inserts into "the
+streaming buffer," a var set at SEND).  Because concurrency stays
+*one-stream-at-a-time server-wide* (the existing global =_STREAM_LOCK=,
+matching assist's web UI), the in-flight state (process, markers, timers)
+is genuinely single-tenant and can stay global; only the persistent
+per-file identity (=thread_id=, the file) needs to be buffer-local.  A
+second SEND while any stream is in flight is refused with a hint.  This
+turns =*chat*= into a degenerate one-buffer client of the same engine — a
+refactor, not a fork.
 
 ** 6. Thread identity: client-minted UUID in a =#+assist_thread:= header; file is a mirror
 
-On the first SEND in a new =.assist= (no header yet) the client mints a
-UUID, writes =#+assist_thread: <uuid>= at the top, and *saves the file
-before issuing the POST* (so a crash mid-stream can't leave a server
-checkpoint with no file pointer — this ties the header-write into the
-=you>=-commit save of Decision 10).  =thread_id= is sent on *every*
-=/chat=; *absent* =thread_id= ⇒ the legacy =CONVERSATION_THREAD_ID=, so
-=*chat*= needs no client change.
-
-*The transcript is a human-readable MIRROR; the server checkpoint is the
-agent's real memory.*  Hand-editing the transcript does NOT change what
-the agent remembers (file = display, checkpoint = truth); v1 does not
-reconcile a hand-edited file back into the checkpoint.
+On the first SEND in a new =.assist= the client mints a UUID, writes
+=#+assist_thread: <uuid>= at the top, and *saves the file before issuing
+the POST* (so a crash can't leave a checkpoint with no file pointer).
+=thread_id= is sent on *every* =/chat=; absent ⇒ the legacy
+=CONVERSATION_THREAD_ID= (so =*chat*= needs no client change).  The
+transcript is a human-readable *mirror*; the server checkpoint is the
+agent's real memory.  Hand-editing the transcript does NOT change what the
+agent remembers (file = display, checkpoint = truth).
 
 ** 7. Resume: server-remembered → continue; server-forgotten → refuse
 
-Reopening a =.assist= whose thread the server still has → resumes (the
-checkpoint replays).  Reopening one the server has *forgotten* (wiped,
-=/forget='d, different machine) → v1 does NOT reconstruct from the
-transcript; SEND is *refused* with a clear note ("server has no memory of
-this conversation — start a new chat to continue"), and the file stays a
-readable transcript.
+Reopening a =.assist= whose thread the server still has → resumes.
+Reopening one the server has *forgotten* (wiped, =/forget='d, other
+machine) → v1 does NOT reconstruct from the transcript; SEND is *refused*
+with a clear note, and the file stays a readable transcript.  *Conscious
+consequence:* after =/forget=, that =.assist= becomes a read-only artifact
+that can't be continued until the roadmapped reconstruct lands; "new chat"
+means a new file.
 
-*Consequence to be conscious of (review finding):* after an explicit
-=/forget=, the =.assist= file is left on disk as a transcript that can no
-longer be continued — it permanently refuses until the roadmapped
-reconstruct-from-transcript lands.  =/forget= turns a live file into a
-read-only artifact; "new chat" means a *new file*, not resuming the
-forgotten one.  This is the accepted v1 behavior, not a bug.
+** 8. Working dir = the =.assist= file's directory; fs tools rooted there (a guardrail, not a boundary)
 
-** 8. Working dir = the =.assist= file's directory, confined; all =.assist= excluded
+Working dir = the directory containing the =.assist= file (a phone path);
+no header override in v1.  The fs methods (=read/write/edit/ls/grep/glob=)
+are rooted at the working dir via =virtual_mode= (=..=-blocking), and all
+=*.assist= paths are excluded uniformly (filtered from listings, refused
+for read/write/edit) so the agent's *file tools* don't wander out or
+clobber a transcript.  *This is a usability/accident guardrail, NOT a
+security boundary* — =execute= (a shell) ignores it entirely (Security).
+Per-conversation memory (=AGENTS.md=) lives in the working dir.
 
-Working dir = the directory *containing* the =.assist= file (a phone
-path).  No header override in v1 (Scope-Out).  The EmacsBackend roots
-every fs op there with =virtual_mode= (=..=-blocking — the confinement
-assist's research backend relies on).  *Confinement is enforced
-server-side*: every path is validated/normalized against the
-=virtual_mode= root *before* any elisp is emitted; the phone side does no
-validation and trusts the server's confined absolute path.  Per-
-conversation memory (=AGENTS.md=) lives in the working dir → isolated per
-file.
+** 9. The backend is composed so internal scratch stays off the phone
 
-*=.assist= files are excluded uniformly* (review finding): the backend
-filters *all* =*.assist= paths (not just the file's own) out of =ls=/
-=glob=/=grep= results AND refuses =read=/=write=/=edit= on them — so the
-agent can neither list, search, read, nor clobber any transcript.
-
-** 9. File-chat tool surface is confined; raw eval stays separate + gated
-
-*Security-critical; see the Security section for the full model.*  Three
-properties, each pinned to a concrete mechanism the review verified:
-- *No =execute=.*  Guaranteed by a *class invariant*, not a prune:
-  deepagents always registers the =execute= tool but filters it out when
-  the backend is not a =SandboxBackendProtocol= (filesystem.py:1694-1707).
-  So the requirement is: *EmacsBackend extends =BackendProtocol=, never
-  =SandboxBackendProtocol=/=BaseSandbox=.*  A pytest pins this.
-- *Network: a known, accepted v1 gap.*  We deliberately do NOT suppress
-  the research sub-agent for v1 (=search_internet=/=read_url= stay
-  reachable) — research is a core assist capability and the phone holds
-  nothing sensitive yet.  This IS a web-search egress channel (an injected
-  agent could encode confined-dir contents into a query), so the "no
-  egress" guarantee is *not* complete in v1 — an accepted risk, closed
-  separately (Out of scope).  We DO pass *no =extra_tools== (no
-  =eval_elisp=/=apply_config=), so the general-purpose sub-agent inherits
-  nothing extra.
-- *Internal scratch stays off the phone.*  The EmacsBackend is composed
-  into a =CompositeBackend= with =STATEFUL_PATHS= → =StateBackend= routing
-  (Decision 4), so summarization's =/conversation_history/…=, evicted
-  =/large_tool_results/=, and =question.txt= scratch live in the
-  checkpoint (server-side), not written to the user's phone dir.
-
-The emacs-*control* capability (=eval_elisp=/=apply_config= = arbitrary
-code on your phone) is NOT part of this surface — it stays the existing,
-explicitly-trusted "change my phone" path: *the legacy =*chat*= buffer +
-=EMACS_TOOLS=* (cursor/config changes, with ROLLBACK), unchanged.
-=.assist= file-chat is the separate, confined surface.
+The injected EmacsBackend must be wrapped (by assist's seam, Decision 4)
+in a =CompositeBackend= that routes =STATEFUL_PATHS= to a =StateBackend=:
+summarization's =/conversation_history/{thread_id}.md=, evicted
+=/large_tool_results/=, and =question.txt= scratch then live in the
+checkpoint (server-side), NOT written to the user's phone dir over
+=emacsclient=.  Without this, every internal framework write would hit the
+phone.  (This is independent of the execute decision and remains required.)
 
 ** 10. File format & save lifecycle
 
-Header (=#+assist_thread:=) at the top, then the =you>=/=bot>= transcript
-with =[applied]=/=[rollback]= notes; the transient =[status]= bracket is
-gone by save time.  Save *transcript-only* — the trailing =\n> = prompt is
-reconstructed on open.  Saves are *programmatic* (=write-region=/
-=save-buffer= under =inhibit-read-only=) on two events: after =you>= is
-committed (with the header, Decision 6) AND after end/error/abort — never
-lose a turn.  A programmatic save while you're composing the next prompt
-below the marker is transparent (it doesn't touch the editable region).
-=emacos-assist-mode= *disables =auto-save-mode=* and *blocks/aborts
-=revert-buffer=* while a stream is in flight (a revert would invalidate
-the stream markers).
+Header (=#+assist_thread:=) at the top, then the =you>=/=bot>= transcript;
+the transient =[status]= bracket is gone by save time.  Save
+*transcript-only* (the trailing =\n> = prompt is reconstructed on open),
+*programmatically* (=write-region=/=save-buffer= under =inhibit-read-only=)
+on =you>=-commit (with the header, Decision 6) AND on end/error/abort.
+=emacos-assist-mode= disables =auto-save-mode= and blocks/aborts
+=revert-buffer= while a stream is in flight.
 
-*Reopen does NOT re-parse turns (review finding — dissolves the
-delimiter-collision hazard).*  The =you>=/=bot>= prefixes are NOT treated
-as structural on reload: a =bot>= reply may itself contain a line
-starting =you>= or =#+assist_=.  On open we (a) read =#+assist_thread:=
-from the *top* line only, (b) mark the entire prior content read-only as
-an opaque transcript, (c) append a fresh prompt.  No turn segmentation, so
-no in-band delimiter ambiguity.  (Streaming appends new turns at the end;
-it never needs to re-segment history.)
+*Reopen does NOT re-parse turns* — the =you>=/=bot>= prefixes are not
+structural on reload (a =bot>= reply may contain a line starting =you>=).
+On open: read =#+assist_thread:= from the top line only, mark all prior
+content read-only as an opaque transcript, append a fresh prompt.  No turn
+segmentation ⇒ no in-band delimiter ambiguity.
 
-** 11. Command surface keys on the mode, not the buffer name
+** 11. Command surface keys on the mode; no ROLLBACK in file-chat
 
 The new branch keys on =(derived-mode-p 'emacos-assist-mode)=; the legacy
-=*chat*= branch *stays identity-keyed* (=*chat*= has no major mode today),
-and the two coexist in the one =emacos--top-commands= =cond=.  Command
-names are distinct to avoid the "New chat" overload: in a =.assist= it's
+=*chat*= branch stays identity-keyed (=*chat*= has no major mode), and the
+two coexist in one =emacos--top-commands= =cond=.  Distinct command names:
 *New file* (open a new =.assist=; does NOT forget the current thread) and
-*Forget this chat* (the =/forget= wipe) — separate commands.  ROLLBACK
-only appears where an apply can happen (the emacs-control path); the
-confined file-chat surface has no =apply_config=, so *no ROLLBACK button*
-there — though =[applied]=/=[rollback]= *notes* still render if present in
-a transcript (this is the one place "keep rollback notes" and "no rollback
-action" coexist; called out so it's not a surprise).
+*Forget this chat* (the =/forget= wipe).  *No ROLLBACK button in
+file-chat* — ROLLBACK is tied to =apply_config=, which is a *config-repo-
+specific* tool (git-committed config + one-level revert), not part of the
+EmacsBackend; a general working dir's undo is its own git history + your
+review, not the config rollback.
 
 ** 12. Editing while streaming = the existing marker design, buffer-agnostic
 
-Tokens insert at a marker *above* the prompt; your draft input lives
-*below* it; =save-excursion= preserves your point — already how =*chat*=
-works.  With the engine de-hardcoded (Decision 5) this works in whichever
-=.assist= is streaming, while you compose your next prompt.  No new
-streaming model.
+Tokens insert at a marker above the prompt; your draft input lives below
+it; =save-excursion= preserves point — already how =*chat*= works, ported
+buffer-agnostic so you can compose your next prompt while bot text streams
+in.  A programmatic save mid-compose doesn't touch the editable region.
 
-* Security: blocking exfiltration without a sandbox
+* Security: full-trust on-device execution (not a sandbox)
 
-The docker sandbox blocks exfiltration by giving the container *no
-network*.  That method does NOT port: elisp on the phone is a full Lisp
-and cannot be network-isolated from inside its own process.  So we flip
-from *containment* to *capability minimization* — and the review pinned
-each guarantee to a concrete, framework-enforced mechanism rather than
-hand-waving "prune the tools":
+This is the consequential design choice, made deliberately.  Because
+=execute= runs a real shell on the phone, *the agent has unconfined,
+network-capable code execution on the device* the moment it's reading
+files that might carry prompt injection.  We are NOT pretending otherwise:
 
-1. *No code execution.*  =execute= is auto-filtered by deepagents whenever
-   the backend is not a sandbox.  *Invariant: the EmacsBackend extends
-   =BackendProtocol=, never =SandboxBackendProtocol=.*  Pinned by a pytest;
-   if a future change makes it a sandbox to gain =execute=, this control
-   silently dies, so the test is load-bearing.
-2. *Network: accepted v1 gap.*  The research sub-agent (=search_internet=/
-   =read_url=) is intentionally NOT suppressed in v1 (core capability; the
-   phone holds nothing sensitive yet), so a web-search egress channel
-   exists — an accepted risk, closed separately (Out of scope).  No
-   =extra_tools= are passed, so nothing else network-capable is in reach.
-3. *Confined filesystem.*  =read/write/edit/ls/grep/glob= only, rooted and
-   =..=-blocked at the working dir (=virtual_mode=), enforced server-side
-   before any elisp is emitted; all =*.assist= excluded uniformly.
-4. *Internal scratch routed to state, not the phone* (the =CompositeBackend=
-   + =STATEFUL_PATHS= routing of Decision 4/9).
+- *=execute= is not contained.*  =virtual_mode= and the =*.assist=
+  exclusion (Decision 8) constrain only the *fs tools*; a shell command
+  ignores them — it can read anything, write anywhere, reach the network,
+  and run destructive commands (=rm -rf=).  So the working-dir
+  "confinement" is a guardrail for the agent's file tools, *not* a
+  security boundary.
+- *No safe middle on the phone.*  A real sandbox = network/fs isolation =
+  docker = a capable host with the working dir there (the sync model we
+  rejected).  Allowlisting commands is leaky; elisp can't be
+  network-isolated in-process; a phone-egress firewall fights the phone
+  wanting internet.  So it's binary: full-trust on the phone, or no
+  =execute=.  We chose full-trust.
+- *Why this is acceptable for v1:* the phone holds nothing sensitive yet
+  and is single-user; you are the one driving the prompts; and research
+  (=search_internet=) is already an accepted egress channel.  This is the
+  same risk posture, extended.
+- *What integrity control remains:* for *file* changes via the fs tools,
+  "review the diffs" (the file-backed, git-friendly working dir).  But
+  =execute= side effects are NOT a reviewable diff — that protection is
+  weaker here.  Treat a =.assist= chat as you'd treat running an agent's
+  shell commands on your own box.
+- *Still required regardless:* the =CompositeBackend= =STATEFUL_PATHS=
+  routing (Decision 9), so internal scratch doesn't leak to the phone.
 
-So v1's exfiltration story is *partial by choice*: no code execution (the
-class invariant — the part that matters most on a device), confined fs,
-and no scratch leaking to the phone — but the research sub-agent's web
-search remains an open egress channel we've accepted for now.  The
-sandbox's full no-network guarantee is the target; closing the research
-egress for the confined surface is the deferred follow-up.
-
-*Residual risk (clear-eyed):* a prompt-injected agent can still write
-*bad changes to files in your own working dir* (corruption, or planting a
-file you later run yourself).  That's not exfiltration; the control is
-*you reviewing the diffs* — which the file-backed, git-friendly working
-dir makes easy — not the backend.
+*Deferred (Out of scope):* real containment for =execute= — a docker
+sandbox on a capable host (the desktop variant), at which point the
+working dir lives where the container is.  That's the path to a genuinely
+safe surface for when the phone *does* hold sensitive data.
 
 * Implementation sequence
 
-0. *(companion, assist)* One generic seam: inject a default backend (assist
-   still wraps it with =STATEFUL_PATHS= routing).  Small PR through
+0. *(companion, assist)* The generic =backend== seam: inject a default
+   backend assist wraps with =STATEFUL_PATHS= routing.  Small PR through
    assist's three-phase workflow; emacsos depends on it merging first.
-   (Sub-agent suppression is deferred — research stays enabled in v1.)
 1. *Server thread keying.*  =ChatRequest= gains =thread_id: Optional[str]=
-   (absent ⇒ legacy =CONVERSATION_THREAD_ID=); checkpointer + working dir +
-   =THREAD_QUEUE= key by it; =_STREAM_LOCK= stays the server-wide single-
-   stream gate (independent of thread id — note so a later refactor doesn't
-   drop it).  Add =/forget {thread_id}= (the generalized
-   =_clear_conversation=); freeze =/clear= as the legacy fixed-id alias.
+   (absent ⇒ legacy id); checkpointer + working dir + =THREAD_QUEUE= key by
+   it; =_STREAM_LOCK= stays the server-wide single-stream gate.  Add
+   =/forget {thread_id}=; freeze =/clear= as the legacy alias.
    =_build_thread= must NOT =makedirs= a phone path on the EmacsBackend
-   path (working-dir existence is the phone's concern).
-2. *EmacsBackend (=emacsos-server=).*  Implement the six =BackendProtocol=
-   methods over =emacsclient= (one batched elisp call each), =virtual_mode=
-   root + server-side path confinement, uniform =*.assist= exclusion,
-   =execute= unimplemented, =BackendProtocol= (not sandbox) base class.
-   =_build_thread= for a file-chat turn: inject this backend (assist
-   composes it), pass the confined flag, no =extra_tools=.
+   path.
+2. *EmacsBackend (=emacsos-server=).*  Implement the fs methods + =execute=
+   over =emacsclient= (one batched elisp call each; =execute= = shell with
+   =default-directory= = workdir, captured exit/output).  =virtual_mode=
+   root + uniform =*.assist= exclusion for the fs methods.  Implement
+   =SandboxBackendProtocol= (so =execute= surfaces) and verify it routes
+   through the composite default, not assist's docker =sandbox_backend=
+   path.  =_build_thread= for a file-chat turn injects this backend, no
+   =extra_tools=.
 3. *=emacos-assist-mode= (emacsos elisp).*  Refactor =chat.el='s engine
-   buffer-agnostic (de-hardcode the target buffer; persistent identity
-   buffer-local; in-flight state stays global under the lock); header
-   read/write; the save lifecycle + reopen-without-reparse (Decision 10);
-   command surface keyed on the mode (Decision 11); auto-save off +
-   revert-guard.
+   buffer-agnostic; header read/write; save lifecycle + reopen-without-
+   reparse; command surface keyed on the mode; auto-save off + revert-guard.
 4. *Forget command* (=Forget this chat=) + the step-1 endpoint.
 5. *Tests + smoke* (below).
-6. *PR(s).*  One emacsos PR; the assist seams as its companion (merges
-   first).
+6. *PR(s).*  One emacsos PR; the assist seam as its companion (merges first).
 
 * Tests / validation boundary
 
 - *ERT:* =emacos-assist-mode= buffer-agnostic engine (token routes to the
-  right buffer); header read/write round-trip; reopen-without-reparse
-  (a transcript containing a literal =you>= body line round-trips intact);
+  right buffer); header read/write round-trip; reopen-without-reparse (a
+  transcript with a literal =you>= body line round-trips intact);
   save-on-events; command-surface-keys-on-mode (both branches coexist);
   editing-while-streaming markers; revert-guard while in flight.
 - *pytest:* =/chat= =thread_id= keying (+ absent ⇒ legacy id); =/forget=;
-  *EmacsBackend confinement* (=virtual_mode= rejects =..=; all =*.assist=
-  refused/filtered uniformly across read/write/edit/ls/glob/grep); the
-  *class invariant* (EmacsBackend is not a =SandboxBackendProtocol= ⇒
-  =execute= absent); the confined agent passes no =extra_tools=;
-  =STATEFUL_PATHS= route to =StateBackend=, not the phone.
+  *EmacsBackend fs guardrails* (=virtual_mode= rejects =..= for fs tools;
+  all =*.assist= filtered/refused uniformly); =execute= runs with
+  =default-directory= = the working dir and returns exit/output;
+  =SandboxBackendProtocol= ⇒ =execute= tool surfaces; =STATEFUL_PATHS=
+  route to =StateBackend=, not the phone.  *Note:* there is intentionally
+  NO "execute is confined" test — it isn't (Security).
 - *smoke:* a round-trip =.assist= turn against the dockerized phone — file
-  written with header + transcript, then a resume reads it back.
-- *Real phone:* actual file edits in a directory; multiple open buffers;
+  written with header + transcript, a resume reads it back, and an
+  =execute= turn (e.g. =ls=) runs in the working dir.
+- *Real phone:* actual edit + run in a directory; multiple open buffers;
   streaming-while-editing.
 - emacsos has *no small-model eval harness* — validation is tests + smoke
   + live phone.
@@ -389,50 +324,45 @@ dir makes easy — not the backend.
 * Open questions
 
 1. *=working_dir= vs. =workspace_dir= vs. checkpoint.*  With
-   =sandbox_backend=None=, assist derives =workspace_dir = "/"= and thus
-   =memories_path = "/AGENTS.md"= (agent.py:186-191) — *not* from
+   =sandbox_backend=None=, assist derives =workspace_dir = "/"= →
+   =memories_path = "/AGENTS.md"= (agent.py:186-191), not from
    =working_dir=.  Confirm the EmacsBackend's =virtual_mode= root makes
-   =/AGENTS.md= resolve to the working dir on the phone (the intended
-   confinement anchor), and that the server-side =working_dir= param isn't
-   =makedirs='d as a local path.  Resolve in step 2.
-2. *=emacsclient= round-trip latency* for the per-turn backend reads
-   (=SmallModelMemoryMiddleware= reads =AGENTS.md= through the backend
-   *every turn*; =SmallModelSkillsMiddleware= scans sources) plus
-   =grep=/=glob= over a dir.  Measure on the phone; the batched-elisp
-   contract (Decision 3) is the mitigation; consider deferring =grep=/=glob=.
-3. *Exact shape of the assist =backend== seam* (param name; whether it
-   accepts a bare backend that assist wraps, vs. a prebuilt composite).
-   Decided in the assist PR's own design phase.
-4. *Multi-buffer + one global lock UX* — confirm the refuse-second-SEND
-   message reads sensibly when the streaming buffer isn't on top.
+   =/AGENTS.md= resolve to the working dir on the phone, and that the
+   server-side =working_dir= isn't =makedirs='d locally.  Resolve in step 2.
+2. *=emacsclient= round-trip latency* for per-turn backend reads
+   (=SmallModelMemoryMiddleware= reads =AGENTS.md= every turn) + =execute=
+   blocking the daemon while a command runs.  Measure on the phone; long
+   commands may need an async/timeout story so =execute= doesn't freeze the
+   phone's emacs.
+3. *Exact shape of the assist =backend== seam* (param name; bare backend
+   assist wraps vs. prebuilt composite) — decided in the assist PR.
+4. *Does deepagents' =execute= tool dispatch cleanly through a
+   =CompositeBackend= whose =default= is a =SandboxBackendProtocol=* (vs.
+   expecting assist's =sandbox_backend=)?  Verify in step 0/2 — it's the
+   hinge that lets =execute= work without the docker machinery.
 
 * Out of scope, next experiments
 
-1. *Replay/reconstruct a thread from the file transcript* — lifts Decision
-   7's refusal; lets a =.assist= resume even if the server forgot it.
-2. *Desktop/local-host variant* with the docker/local backend — the model
-   already accommodates it; the phone simply uses the EmacsBackend.
-3. *=#+assist_workdir:= override* — a header to point a chat at a different
-   working dir (cut from v1).
-4. *Multiple simultaneous streams* (per-thread, beyond the global lock).
-5. *Close the research-subagent egress for confined file-chat* — v1 leaves
-   web search reachable (accepted risk: nothing sensitive on the phone
-   yet, and research is core to assist); a confined surface should
-   eventually suppress it (the deferred second assist seam) or route
-   research with no data egress.
-6. *Folding emacs-control into the file-chat surface* — kept separate for
-   safety; revisit only with a real containment story.
-7. *Migrating the legacy =emacsos-phone= conversation* into a =.assist=.
+1. *Real containment for =execute=* — a docker sandbox on a capable host
+   (the desktop variant), working dir there.  The path to a provably-safe
+   surface for sensitive data.
+2. *Replay/reconstruct a thread from the file transcript* — lifts Decision
+   7's refusal.
+3. *Retire =EMACS_TOOLS=* — fold =eval_elisp= into the EmacsBackend's
+   =execute= and =apply_config= into write+reload (+ keep the config-repo
+   git/rollback as a thin tool), unifying the legacy =*chat*= onto the same
+   backend.
+4. *=#+assist_workdir:= override*; *multiple simultaneous streams*;
+   *migrating the legacy =emacsos-phone= conversation*.
 
 * Companion docs / changes
 
 - *assist:* the one generic seam of Decision 4 — inject a default backend
   that assist composes with =STATEFUL_PATHS= routing.  The only assist
   change; through assist's three-phase workflow, merges before the emacsos
-  PR.  (A future sub-agent-egress seam is deferred — Out of scope.)
+  PR.
 - [[file:2026-05-22-conversation-history.org][2026-05-22-conversation-history.org]] — the checkpointer / persistent-
-  conversation model this builds on (per-thread keying generalizes its
-  single fixed id).
+  conversation model this builds on.
 
 When this ships, append an *Outcome* section pointing at the merged
 PR(s) and any deviations the build forced.
