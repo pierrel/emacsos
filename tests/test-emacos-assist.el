@@ -76,12 +76,113 @@
 ;;; Command set
 
 (ert-deftest test-assist-command-set-flips-on-in-flight ()
-  (let ((emacos--chat-in-flight nil))
+  (let ((emacos--chat-in-flight nil)
+        (emacos-assist--forget-confirm-pending nil))
     (let ((cs (emacos-assist--command-set)))
       (should (assoc "New file" cs))
       (should (assoc "Forget" cs))))
   (let ((emacos--chat-in-flight t))
     (should (assoc "ABORT" (emacos-assist--command-set)))))
+
+;;; Forget two-tap confirm (phone has no modal y-or-n-p; see
+;;; memory/feedback_phone_no_modals.md).  Mirrors the New-chat
+;;; confirm tests in test-chat.el (chat-test-new-chat-*).
+
+(ert-deftest test-assist-forget-first-tap-arms ()
+  "First tap only ARMS the two-tap confirm (relabels the button to
+\"Confirm forget?\"); it must NOT POST /forget yet."
+  (with-temp-buffer
+    (setq emacos-assist--thread-id "abc"
+          emacos-assist--forget-confirm-pending nil)
+    (let ((posted nil))
+      (cl-letf (((symbol-function 'emacos-assist--post-forget)
+                 (lambda (_id) (setq posted t)))
+                ((symbol-function 'emacos--render-page) (lambda () nil)))
+        (let ((emacos--chat-in-flight nil))
+          (emacos-assist-forget))
+        (should emacos-assist--forget-confirm-pending)
+        (should-not posted)))))
+
+(ert-deftest test-assist-forget-second-tap-confirms ()
+  "Armed, a second tap POSTs /forget and disarms."
+  (with-temp-buffer
+    (setq emacos-assist--thread-id "abc"
+          emacos-assist--forget-confirm-pending t)
+    (let ((posted nil))
+      (cl-letf (((symbol-function 'emacos-assist--post-forget)
+                 (lambda (_id) (setq posted t)))
+                ((symbol-function 'emacos--render-page) (lambda () nil)))
+        (let ((emacos--chat-in-flight nil))
+          (emacos-assist-forget))
+        (should-not emacos-assist--forget-confirm-pending)
+        (should posted)))))
+
+(ert-deftest test-assist-forget-command-set-relabels-when-armed ()
+  "When `emacos-assist--forget-confirm-pending' is t, the command list
+shows \"Confirm forget?\" instead of \"Forget\" (same action, different
+label — the relabel is the only visual confirmation cue)."
+  (with-temp-buffer
+    (let ((emacos--chat-in-flight nil))
+      (setq emacos-assist--forget-confirm-pending nil)
+      (let ((cs (emacos-assist--command-set)))
+        (should (assoc "Forget" cs))
+        (should-not (assoc "Confirm forget?" cs)))
+      (setq emacos-assist--forget-confirm-pending t)
+      (let ((cs (emacos-assist--command-set)))
+        (should (assoc "Confirm forget?" cs))
+        (should-not (assoc "Forget" cs))))))
+
+(ert-deftest test-assist-forget-disarm-on-unrelated-tap ()
+  "When something other than the Forget command is tapped, the disarm
+hook clears `emacos-assist--forget-confirm-pending'.  Tapping the
+Forget command itself does NOT disarm (the second tap must reach
+the handler with the flag still t to confirm)."
+  (with-temp-buffer
+    (setq emacos-assist--thread-id "abc"
+          emacos-assist--forget-confirm-pending t)
+    (let ((buf (current-buffer)))
+      (cl-letf (((symbol-function 'emacos--target)
+                 (lambda () (selected-window)))
+                ((symbol-function 'window-buffer)
+                 (lambda (&optional _) buf))
+                ((symbol-function 'emacos--render-page) (lambda () nil)))
+        ;; Some unrelated command was tapped → disarm.
+        (emacos-assist--maybe-disarm-forget #'emacos--run-command
+                                            #'save-buffer)
+        (should-not emacos-assist--forget-confirm-pending))))
+  (with-temp-buffer
+    (setq emacos-assist--thread-id "abc"
+          emacos-assist--forget-confirm-pending t)
+    (let ((buf (current-buffer)))
+      (cl-letf (((symbol-function 'emacos--target)
+                 (lambda () (selected-window)))
+                ((symbol-function 'window-buffer)
+                 (lambda (&optional _) buf))
+                ((symbol-function 'emacos--render-page) (lambda () nil)))
+        ;; The Forget command itself was tapped → keep armed (the handler
+        ;; will see the flag and confirm).
+        (emacos-assist--maybe-disarm-forget #'emacos--run-command
+                                            #'emacos-assist-forget)
+        (should emacos-assist--forget-confirm-pending)))))
+
+(ert-deftest test-assist-forget-no-modal-y-or-n-p ()
+  "Regression guard: `emacos-assist-forget' must NOT call any modal
+confirm primitive — the phone touchscreen can't answer it.  Verified
+by stubbing y-or-n-p/yes-or-no-p to raise if called."
+  (with-temp-buffer
+    (setq emacos-assist--thread-id "abc"
+          emacos-assist--forget-confirm-pending nil)
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "y-or-n-p must not run on phone")))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (&rest _) (error "yes-or-no-p must not run on phone")))
+              ((symbol-function 'emacos--render-page) (lambda () nil)))
+      (let ((emacos--chat-in-flight nil))
+        (emacos-assist-forget))     ; first tap → arm, must not modal
+      (let ((emacos--chat-in-flight nil))
+        (cl-letf (((symbol-function 'emacos-assist--post-forget) #'ignore))
+          (emacos-assist-forget)))  ; second tap → confirm, must not modal
+      )))
 
 ;;; Mode open-time setup
 

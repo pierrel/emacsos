@@ -76,13 +76,26 @@ trailing empty prompt is harmless and reused).  No-op when unmodified."
           (save-silently t))
       (save-buffer))))
 
+(defvar-local emacos-assist--forget-confirm-pending nil
+  "Non-nil when Forget has been tapped once and awaits a confirming
+second tap — the button relabels to \"Confirm forget?\".  Cleared by
+the confirming tap (`emacos-assist-forget'), or by tapping anything
+else (`emacos-assist--maybe-disarm-forget' on
+`emacos--confirm-disarm-functions').  Buffer-local because each
+.assist file has its own pending state.
+
+This replaced a `y-or-n-p' modal that couldn't be tapped on the
+phone touchscreen — mirrors the same fix New-chat got in PR f0ae7f3.")
+
 (defun emacos-assist--command-set ()
   "Command-list entries for a .assist buffer: ABORT while streaming, else
-New file + Forget this chat."
+New file + Forget (relabeled to \"Confirm forget?\" when armed)."
   (if emacos--chat-in-flight
       (list (cons "ABORT" #'emacos--chat-abort))
     (list (cons "New file" #'emacos-assist-new-file)
-          (cons "Forget" #'emacos-assist-forget))))
+          (if emacos-assist--forget-confirm-pending
+              (cons "Confirm forget?" #'emacos-assist-forget)
+            (cons "Forget" #'emacos-assist-forget)))))
 
 ;;; Commands
 
@@ -95,17 +108,55 @@ New file + Forget this chat."
     (find-file name)))
 
 (defun emacos-assist-forget ()
-  "Forget this conversation on the server (delete its checkpoint).  The file
-stays on disk as a transcript.  Guarded by a confirmation."
+  "Forget this conversation on the server (delete its checkpoint) behind
+a TWO-TAP confirm.  The .assist file stays on disk as a transcript.
+
+The clear is irreversible (the server-side checkpoint is gone), so the
+FIRST tap only ARMS: the button relabels to \"Confirm forget?\"
+\(`emacos-assist--forget-confirm-pending').  A SECOND tap fires the
+/forget POST.  Tapping ANYTHING ELSE cancels the pending confirm via
+`emacos-assist--maybe-disarm-forget' on
+`emacos--confirm-disarm-functions'.  Tap-only — no minibuffer or GUI
+dialog, both of which fought the touchscreen
+\(see [[file:../memory/feedback_phone_no_modals.md][feedback_phone_no_modals]])."
   (interactive)
   (cond
    (emacos--chat-in-flight
     (message "chat: stream in flight; ABORT before forgetting"))
    ((not emacos-assist--thread-id)
     (message "no server conversation to forget yet"))
-   ((y-or-n-p "Forget this chat on the server? ")
+   (emacos-assist--forget-confirm-pending
+    ;; Second tap: confirmed — fire for real.
+    (setq emacos-assist--forget-confirm-pending nil)
     (emacos-assist--post-forget emacos-assist--thread-id)
-    (message "asked the server to forget this conversation"))))
+    (message "asked the server to forget this conversation")
+    (when (fboundp 'emacos--render-page) (emacos--render-page)))
+   (t
+    ;; First tap: arm, and re-render so the button relabels.
+    (setq emacos-assist--forget-confirm-pending t)
+    (when (fboundp 'emacos--render-page) (emacos--render-page)))))
+
+(defun emacos-assist--maybe-disarm-forget (action arg)
+  "Disarm `emacos-assist--forget-confirm-pending' on any button that
+ISN'T the Forget command itself.  The Forget command-list button runs
+through `emacos--run-command' with `emacos-assist-forget' as ARG.
+
+The pending flag is buffer-local; check it in the .assist buffer
+where it lives (the top-buffer / target window) — not whatever buffer
+emacs happens to be current when the tap arrives.  Registered on
+`emacos--confirm-disarm-functions'."
+  (let* ((tw (and (fboundp 'emacos--target) (emacos--target)))
+         (buf (and tw (window-buffer tw))))
+    (when (and buf
+               (buffer-local-value 'emacos-assist--forget-confirm-pending buf)
+               (not (and (eq action #'emacos--run-command)
+                         (eq arg #'emacos-assist-forget))))
+      (with-current-buffer buf
+        (setq emacos-assist--forget-confirm-pending nil))
+      (when (fboundp 'emacos--render-page) (emacos--render-page)))))
+
+(add-hook 'emacos--confirm-disarm-functions
+          #'emacos-assist--maybe-disarm-forget)
 
 (defun emacos-assist--post-forget (thread-id)
   "Fire-and-forget POST /forget {thread_id}; kills the response buffer."

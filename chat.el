@@ -777,6 +777,21 @@ forget; the conversation otherwise persists across turns and restarts."
     (setq emacos--chat-confirm-pending t)
     (when (fboundp 'emacos--render-page) (emacos--render-page)))))
 
+(defun emacos--chat-maybe-disarm-confirm (action arg)
+  "Disarm `emacos--chat-confirm-pending' on any button that ISN'T the
+New-chat command itself.  The New-chat command-list button runs through
+`emacos--run-command' with `emacos--chat-new-chat' as ARG, so that's the
+\"armed command\" pair; every other tap clears the pending state and
+re-renders.  Registered on `emacos--confirm-disarm-functions'."
+  (when (and emacos--chat-confirm-pending
+             (not (and (eq action #'emacos--run-command)
+                       (eq arg #'emacos--chat-new-chat))))
+    (setq emacos--chat-confirm-pending nil)
+    (when (fboundp 'emacos--render-page) (emacos--render-page))))
+
+(add-hook 'emacos--confirm-disarm-functions
+          #'emacos--chat-maybe-disarm-confirm)
+
 (defun emacos--chat-forget-server ()
   "POST /clear so the server forgets the persistent conversation.
 Argument-free: /clear resets server-side conversation state — the

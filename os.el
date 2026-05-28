@@ -499,19 +499,29 @@ the letter-key `substring').  Pure — testable off the device."
   (let ((s (if emacos--caps (upcase kg) kg)))
     s))
 
+(defvar emacos--confirm-disarm-functions nil
+  "Abnormal hook of disarm functions for two-tap-confirm features.
+Each registered function receives (ACTION ARG) — the button being
+tapped (ARG is the command, ACTION is usually `emacos--run-command').
+Each disarm-fn should clear its own pending-armed state and re-render,
+UNLESS the (ACTION ARG) pair IS the armed command itself (in which
+case the user is performing the confirming second tap and arming must
+persist into that handler's check).
+
+The phone touchscreen can't tap modal y-or-n-p / GUI dialogs, so every
+destructive command instead uses the in-row two-tap pattern: first tap
+arms (relabels its button to \"Confirm X?\"), second tap fires.  Any
+other button tap cancels the pending arm via this hook — so the armed
+state can't linger across unrelated interactions.  Add a disarm-fn from
+the feature's own file (chat.el for New-chat, emacos-assist.el for
+Forget, etc.); the shared disarm rail keeps os.el out of the loop.")
+
 (defun emacos--maybe-cancel-confirm (action arg)
-  "Cancel a pending New-chat confirmation when ANY button other than the
-New-chat command itself is tapped, so the armed \"Confirm clear?\" state
-can't linger (the two-tap design in `emacos--chat-new-chat').  Command-list
-buttons run their command through `emacos--run-command' (the command is
-ARG), so the New-chat command is the (`emacos--run-command' . `emacos--chat-new-chat')
-pair; every other tap disarms and re-renders.  No-op when nothing is
-armed, which is the common case."
-  (when (and (bound-and-true-p emacos--chat-confirm-pending)
-             (not (and (eq action #'emacos--run-command)
-                       (eq arg #'emacos--chat-new-chat))))
-    (setq emacos--chat-confirm-pending nil)
-    (emacos--render-page)))
+  "Run `emacos--confirm-disarm-functions' with the tapped (ACTION ARG).
+Each registered disarm-fn decides whether the current tap matches its
+armed command (= confirming second tap, keep armed) or not (disarm).
+No-op when nothing is armed, which is the common case."
+  (run-hook-with-args 'emacos--confirm-disarm-functions action arg))
 
 (defun emacos--btn (label action &optional arg height bg)
   "Insert a clickable button showing LABEL that calls ACTION (with ARG).
