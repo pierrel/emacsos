@@ -145,6 +145,33 @@ def test_resolve_refuses_assist_paths():
         be.read("/foo.assist")     # the refusal reaches the file tools
 
 
+def test_ls_grep_glob_filter_assist_out_of_results():
+    # Decision 8: .assist exclusion is uniform, not just read/write/edit —
+    # grep/ls/glob must not surface transcript paths/contents (otherwise the
+    # refusal on read is trivially bypassed by grepping the workdir).  Patch
+    # the BaseSandbox parent so we test the filter, not its parse format.
+    from unittest.mock import patch
+    from deepagents.backends.sandbox import BaseSandbox
+    from deepagents.backends.protocol import LsResult, GrepResult, GlobResult
+    be = EmacsBackend("/data/proj", _make_eval())
+
+    with patch.object(BaseSandbox, "ls",
+                      return_value=LsResult(entries=[{"path": "a.txt"},
+                                                     {"path": "chat.assist"}])):
+        assert [e["path"] for e in be.ls("/").entries] == ["a.txt"]
+
+    with patch.object(BaseSandbox, "grep",
+                      return_value=GrepResult(matches=[
+                          {"path": "a.txt", "line": 1, "text": "hit"},
+                          {"path": "chat.assist", "line": 2, "text": "you> secret"}])):
+        assert [m["path"] for m in be.grep("hit").matches] == ["a.txt"]
+
+    with patch.object(BaseSandbox, "glob",
+                      return_value=GlobResult(matches=[{"path": "a.txt"},
+                                                       {"path": "chat.assist"}])):
+        assert [m["path"] for m in be.glob("*").matches] == ["a.txt"]
+
+
 # --- protocol lineage: SandboxBackendProtocol => execute tool enabled -------
 
 def test_is_sandbox_backend_protocol_and_enables_execute():

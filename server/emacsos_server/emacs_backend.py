@@ -152,6 +152,11 @@ class EmacsBackend(BaseSandbox):
 
     # --- path resolution: a guardrail for the file tools (NOT execute) ------
 
+    @staticmethod
+    def _is_assist_path(p: str) -> bool:
+        """True for a path naming a .assist transcript (the chat UI owns it)."""
+        return (p or "").rstrip("/").endswith(".assist")
+
     def _resolve(self, path: str | None) -> str:
         """Prefix PATH with ``work_dir`` (mirrors DockerSandboxBackend), and
         guard the agent's *file tools* against escaping the directory or
@@ -162,7 +167,7 @@ class EmacsBackend(BaseSandbox):
             path = "/"
         if ".." in path.split("/"):
             raise ValueError(f"path escapes the working directory: {path!r}")
-        if path.rstrip("/").endswith(".assist"):
+        if self._is_assist_path(path):
             raise ValueError(
                 ".assist transcript files are managed by the chat UI; "
                 "the agent can't read or modify them")
@@ -174,7 +179,16 @@ class EmacsBackend(BaseSandbox):
         return self.work_dir + (path if path.startswith("/") else "/" + path)
 
     def ls(self, path: str = "/"):
-        return super().ls(self._resolve(path))
+        # Decision 8: .assist transcripts are excluded from the fs tools
+        # *uniformly* — not only refused for read/write/edit but filtered out
+        # of listings/searches too, so the agent doesn't list, glob, or grep a
+        # transcript's contents back into its own context.  (A tidiness
+        # guardrail; execute still bypasses it by design.)
+        res = super().ls(self._resolve(path))
+        if res.entries:
+            res.entries = [e for e in res.entries
+                           if not self._is_assist_path(e.get("path", ""))]
+        return res
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000):
         return super().read(self._resolve(file_path), offset, limit)
@@ -188,10 +202,18 @@ class EmacsBackend(BaseSandbox):
                             replace_all)
 
     def grep(self, pattern: str, path: str | None = None, glob: str | None = None):
-        return super().grep(pattern, self._resolve(path or "/"), glob)
+        res = super().grep(pattern, self._resolve(path or "/"), glob)
+        if res.matches:   # drop matches inside .assist transcripts (see ls)
+            res.matches = [m for m in res.matches
+                           if not self._is_assist_path(m.get("path", ""))]
+        return res
 
     def glob(self, pattern: str, path: str = "/"):
-        return super().glob(pattern, self._resolve(path))
+        res = super().glob(pattern, self._resolve(path))
+        if res.matches:   # drop .assist matches (see ls)
+            res.matches = [m for m in res.matches
+                           if not self._is_assist_path(m.get("path", ""))]
+        return res
 
     # --- bulk transfer (not the hot path; implemented via execute) ----------
 

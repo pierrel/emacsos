@@ -216,6 +216,22 @@ the next status's clear-bracket would wipe out streamed tokens."
       (emacos--chat-dispatch-line "{\"type\":\"token\",\"text\":\"hi\"}")
       (should-not called))))
 
+(ert-deftest chat-test-dispatch-line-abandons-when-stream-buffer-killed ()
+  "If the .assist surface is killed mid-stream, events must NOT fall back to
+*chat* — the stream is abandoned (state torn down, *chat* never created)."
+  (chat-test--reset)
+  (let ((dead (generate-new-buffer "doomed.assist")))
+    (let ((kill-buffer-query-functions nil)) (kill-buffer dead))  ; now dead
+    (setq emacos--chat-in-flight t
+          emacos--chat-stream-buffer dead)
+    (let ((rendered nil))
+      (cl-letf (((symbol-function 'emacos--chat-handle-token)
+                 (lambda (_) (setq rendered t))))
+        (emacos--chat-dispatch-line "{\"type\":\"token\",\"text\":\"hi\"}")
+        (should-not rendered)                ; nothing leaked into a render target
+        (should-not emacos--chat-in-flight)  ; stream abandoned
+        (should-not (get-buffer emacos--chat-buffer-name)))))) ; *chat* not created
+
 ;;; Request encoding (wire shape contract)
 
 (defun chat-test--decode-utf8-json (bytes)

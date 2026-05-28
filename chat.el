@@ -147,9 +147,29 @@ rather than pushing it forward.")
 
 (defun emacos--chat-render-buffer ()
   "The buffer the stream handlers render into: the active stream buffer if
-set and live, else the *chat* buffer (creating it if needed)."
+set and live, else the *chat* buffer (creating it if needed).
+The *chat* fallback is reached only with NO active stream (legacy path) or a
+live target — the stream paths intercept a killed target first via
+`emacos--chat-render-target-lost-p', so a dead .assist buffer never falls
+through to *chat'."
   (or (and (buffer-live-p emacos--chat-stream-buffer) emacos--chat-stream-buffer)
       (emacos--chat-buffer)))
+
+(defun emacos--chat-render-target-lost-p ()
+  "Non-nil when a stream is in flight but the surface it renders into was
+killed.  Falling back to *chat* then would leak this conversation's tokens
+into the unrelated legacy buffer, so the stream paths abandon instead."
+  (and emacos--chat-stream-buffer
+       (not (buffer-live-p emacos--chat-stream-buffer))))
+
+(defun emacos--chat-abandon-stream ()
+  "Kill the in-flight URL process and tear down silently — used when the
+originating .assist surface was killed mid-stream, so there is nowhere to
+render the rest of the response (and nothing to error onto)."
+  (when (and (processp emacos--chat-process)
+             (process-live-p emacos--chat-process))
+    (delete-process emacos--chat-process))
+  (emacos--chat-stream-cleanup))
 
 (defun emacos--chat-surface-context (buf)
   "Request context plist (:thread-id :workdir) for chat-surface BUF.
@@ -456,11 +476,12 @@ synthesized cleanup within ~5s of the real connection close."
                          (- (float-time) emacos--chat-last-event-time)
                        0.0)))
       (when (>= quiet-for emacos--chat-watchdog-quiet-secs)
-        (if (> emacos--chat-tokens-seen 0)
-            (emacos--chat-handle-end nil)
-          (emacos--chat-handle-error
-           (list :type "error"
-                 :reason "connection closed without end event")))))))
+        (cond
+         ((emacos--chat-render-target-lost-p) (emacos--chat-abandon-stream))
+         ((> emacos--chat-tokens-seen 0) (emacos--chat-handle-end nil))
+         (t (emacos--chat-handle-error
+             (list :type "error"
+                   :reason "connection closed without end event"))))))))
 
 (defconst emacos--chat-event-handlers
   '(("start"     . emacos--chat-handle-start)
@@ -578,6 +599,8 @@ has cleared (eg. url-http drains buffered bytes after ABORT
 deletes the process) so a late `start' can't resurrect bot
 markers/lines after the UI has been cleaned up."
   (when emacos--chat-in-flight
+    (if (emacos--chat-render-target-lost-p)
+        (emacos--chat-abandon-stream)   ; surface killed mid-stream: bail
     (let ((event (condition-case _
                      (json-parse-string line
                                         :object-type 'plist
@@ -592,7 +615,7 @@ markers/lines after the UI has been cleaned up."
             (condition-case err
                 (funcall handler event)
               (error
-               (message "chat: handler %s failed: %s" etype err)))))))))
+               (message "chat: handler %s failed: %s" etype err))))))))))
 
 ;; Note: no process-sentinel installed.  url-http swaps sentinels
 ;; mid-stream as its state machine progresses (idle → async →
@@ -778,8 +801,10 @@ cleaned-up UI.  Safe no-op when no stream is in flight."
     (when (and (processp emacos--chat-process)
                (process-live-p emacos--chat-process))
       (delete-process emacos--chat-process))
-    (emacos--chat-handle-error
-     (list :type "error" :reason reason))))
+    (if (emacos--chat-render-target-lost-p)
+        (emacos--chat-stream-cleanup)   ; nowhere to render the error
+      (emacos--chat-handle-error
+       (list :type "error" :reason reason)))))
 
 (defun emacos--chat-abort ()
   "Cancel the in-flight stream.  Synchronously kills the URL process
