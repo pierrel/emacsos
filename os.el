@@ -783,10 +783,11 @@ see `emacos--render-page'."
 (defun emacos--render-action-row ()
   "Render the editing keys across two rows: DEL (one letter-key width) +
 SPC (fills the rest of the row) on one row, then MOD / CAPS / TAB / RET
-with RET DOUBLE-WIDE.  MOD is leftmost on row 2; the row is 5 units /
-3 gaps, shrinking the four buttons uniformly ~25% vs the previous
-4-unit layout.  Accent the MOD button when a modifier is active
-(firebrick4 vs Chat's dodger blue)."
+with MOD and RET both DOUBLE-WIDE.  MOD is leftmost on row 2; the row
+is 6 units / 3 gaps.  MOD is doubled (matching RET) because it's a
+frequent state-toggle on a 320x240 screen where 1u was too narrow for
+a fingertip (live-pass found taps missing the target).  Accent the MOD
+button when a modifier is active (firebrick4 vs Chat's dodger blue)."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))
          (gap-w emacos--btn-gap)
@@ -796,8 +797,8 @@ with RET DOUBLE-WIDE.  MOD is leftmost on row 2; the row is 5 units /
          ;; minus DEL — so the spacebar reads as the wide primary key and
          ;; no slack is left at the right edge.
          (spc   (- (emacos--unit-width win-w gap-w 1 1) third))
-         ;; MOD(1) + CAPS(1) + TAB(1) + RET(2) = 5 units, 3 gaps.
-         (unit  (emacos--unit-width win-w gap-w 5 3)))
+         ;; MOD(2) + CAPS(1) + TAB(1) + RET(2) = 6 units, 3 gaps.
+         (unit  (emacos--unit-width win-w gap-w 6 3)))
     ;; Row: DEL (left, letter-key width), SPC (right, fills the rest).
     (emacos--btn (emacos--center "DEL" third) #'emacos--tap-backspace nil
                  emacos--btn-label-scale)
@@ -806,13 +807,13 @@ with RET DOUBLE-WIDE.  MOD is leftmost on row 2; the row is 5 units /
     (emacos--btn (emacos--center "SPC" spc) #'emacos--tap-space nil
                  emacos--btn-label-scale)
     (insert "\n")
-    ;; Row: MOD, CAPS, TAB, RET (RET double-wide).  MOD is leftmost so
-    ;; the state-bearing button sits opposite the most-tapped one (RET).
+    ;; Row: MOD(double-wide), CAPS, TAB, RET(double-wide).  MOD is leftmost
+    ;; so the state-bearing button sits opposite the most-tapped one (RET).
     (emacos--btn (emacos--center
                   (if emacos--modifier
                       (symbol-name emacos--modifier)
                     "mod")
-                  unit)
+                  (* 2 unit))
                  #'emacos--tap-modifier nil emacos--btn-label-scale
                  (and emacos--modifier "firebrick4"))
     (insert " ")

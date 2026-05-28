@@ -190,16 +190,18 @@ VWIDTH (left/right); both land in the (VWIDTH . HWIDTH) cons."
       (should (equal line-width (cons emacos--btn-hpad emacos--btn-vpad))))))
 
 (ert-deftest test-os-action-row-widths ()
-  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: MOD/CAPS/TAB 1
-unit, RET 2 units (double-wide; 5 units / 3 gaps total).  All positive;
-the wide ones beat the narrow."
+  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: MOD 2 units +
+CAPS 1 + TAB 1 + RET 2 (6 units / 3 gaps total).  MOD and RET are both
+`(* 2 unit)' so the state-toggle and the most-tapped key get equal
+fingertip-friendly width on a 320x240 screen.  All positive; the wide
+ones beat the narrow."
   (let* ((win-w 36) (gap 1.5)
          (third (emacos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
-         (unit  (emacos--unit-width win-w gap 5 3)))   ; MOD/CAPS/TAB=1u, RET=2u
+         (unit  (emacos--unit-width win-w gap 6 3)))   ; CAPS/TAB=1u, MOD/RET=2u
     (should (> third 0))
     (should (> unit 0))
     (should (> (* 2 third) third))   ; SPC (2/3) wider than DEL (1/3)
-    (should (> (* 2 unit) unit))))   ; RET (2u) wider than MOD/CAPS/TAB (1u)
+    (should (> (* 2 unit) unit))))   ; MOD/RET (2u) wider than CAPS/TAB (1u)
 
 (ert-deftest test-os-action-row-renders-del-spc-caps-tab-ret ()
   (with-temp-buffer

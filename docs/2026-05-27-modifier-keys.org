@@ -55,16 +55,20 @@ design team reached:
    Emacs's own =key-binding=.
 
 Placement followed from #2: MOD slots leftmost on action-row line 2.
-Honest math: =MOD CAPS TAB RET= as 5 units / 3 gaps shrinks *all
-four* buttons by ~25% (unit goes 4 → 3 cells; RET goes 8 → 6).  Not
-just RET.  Live-pass watch item — if cramped, fall back to keeping
-RET at 2u and letting CAPS/TAB shrink with fractional unit math.
+Layout: =MOD(2) CAPS(1) TAB(1) RET(2)= = 6 units / 3 gaps.  MOD is
+*double-wide* (same width as RET) — the original 5u/3g with MOD=1
+made MOD ~3 cells wide at win-w 20 / label-scale 0.8, which the
+live-pass found too narrow for a fingertip on the 320x240 screen
+(taps were missing the target).  Doubling MOD's unit-count brings it
+to the same fingertip-friendly width as RET without shrinking CAPS
+or TAB.
 
 * Design
 
 The MOD button slots into the existing action row's second line at
-the left: =[MOD] [CAPS] [TAB] [RET]= (5 units, 3 gaps; RET stays
-double-wide).  Tapping MOD cycles =nil → 'C → 'M → 'C-M → nil=.
+the left: =[MOD(2u)] [CAPS] [TAB] [RET(2u)]= (6 units, 3 gaps; MOD
+and RET are both double-wide).  Tapping MOD cycles =nil → 'C → 'M
+→ 'C-M → nil=.
 When MOD is non-nil, every letter-key tap routes to a *bound-command*
 dispatcher instead of insertion.
 
