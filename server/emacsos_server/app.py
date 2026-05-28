@@ -414,6 +414,15 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             yield ndjson.event("error",
                                reason="file-backed chat requires `workdir`")
             return
+    elif workdir:
+        # `workdir` only has meaning for file-backed chat, which always sends
+        # a `thread_id` too.  A `workdir` without one would be silently
+        # ignored as the legacy *chat* conversation — reject the malformed
+        # shape rather than route a file-backed SEND into the legacy thread.
+        yield ndjson.event(
+            "error",
+            reason="`workdir` requires a `thread_id` (file-backed chat)")
+        return
 
     # Single-flight: serialize the body of the stream so two /chat
     # coroutines don't run the model in parallel.  Acquire BEFORE the

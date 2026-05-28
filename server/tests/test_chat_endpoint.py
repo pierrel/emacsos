@@ -246,6 +246,22 @@ def test_missing_phone_yields_error_event(client):
     assert not [e for e in events if e["type"] == "end"]
 
 
+def test_workdir_without_thread_id_is_rejected(client):
+    """`workdir` only has meaning for file-backed chat, which always sends a
+    `thread_id` too.  A workdir without one must be rejected (before the
+    lock), not silently routed into the legacy *chat* conversation."""
+    body = _chat_body("hi")
+    body["workdir"] = "/data/proj"
+    with client.stream("POST", "/chat", json=body) as r:
+        events = _collect_events(r)
+
+    errors = [e for e in events if e["type"] == "error"]
+    assert len(errors) == 1
+    assert "workdir" in errors[0]["reason"].lower()
+    assert "thread_id" in errors[0]["reason"].lower()
+    assert not [e for e in events if e["type"] == "end"]
+
+
 # --- response shape --------------------------------------------------------
 
 def test_content_type_is_ndjson(client):

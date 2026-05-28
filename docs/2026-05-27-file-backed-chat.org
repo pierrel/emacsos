@@ -44,11 +44,11 @@ and the design-review team's findings.
 - A new major mode (=emacos-assist-mode=) for =.assist= files: the chat
   surface (the *refactored* buffer-agnostic =chat.el= stream engine — see
   Decision 5), with a command surface keyed on the *mode*.
-- File format: a =#+assist_thread: <uuid>= header + the =you>=/=bot>=
-  transcript + any notes.  Save transcript-only, on =you>=-commit and on
+- File format: a =#+assist_thread: <thread-id>= header + the =you>=/=bot>=
+  transcript + any notes.  Save the whole buffer, on =you>=-commit and on
   end/error/abort.  Reopen does NOT re-parse turns (Decision 10).
-- Client mints a UUID per new file and sends =thread_id= on every =/chat=
-  (absent ⇒ the legacy fixed id, so =*chat*= is untouched).
+- Client mints a 32-hex slug (md5) per new file and sends =thread_id= on
+  every =/chat= (absent ⇒ the legacy fixed id, so =*chat*= is untouched).
 - Server: =/chat= keyed by =thread_id=; a new =/forget {thread_id}=
   endpoint; per-thread checkpoint.  Fixed-id =/clear= frozen as legacy.
 - The *EmacsBackend* (in =emacsos-server=): implements deepagents'
@@ -160,10 +160,11 @@ second SEND while any stream is in flight is refused with a hint.  This
 turns =*chat*= into a degenerate one-buffer client of the same engine — a
 refactor, not a fork.
 
-** 6. Thread identity: client-minted UUID in a =#+assist_thread:= header; file is a mirror
+** 6. Thread identity: client-minted 32-hex slug in a =#+assist_thread:= header; file is a mirror
 
-On the first SEND in a new =.assist= the client mints a UUID, writes
-=#+assist_thread: <uuid>= at the top, and *saves the file before issuing
+On the first SEND in a new =.assist= the client mints a 32-hex slug (md5 —
+slug-safe, matches the server's =[A-Za-z0-9_-]{1,128}= validator), writes
+=#+assist_thread: <slug>= at the top, and *saves the file before issuing
 the POST* (so a crash can't leave a checkpoint with no file pointer).
 =thread_id= is sent on *every* =/chat=; absent ⇒ the legacy
 =CONVERSATION_THREAD_ID= (so =*chat*= needs no client change).  The

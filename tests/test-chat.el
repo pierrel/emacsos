@@ -232,6 +232,26 @@ the next status's clear-bracket would wipe out streamed tokens."
         (should-not emacos--chat-in-flight)  ; stream abandoned
         (should-not (get-buffer emacos--chat-buffer-name)))))) ; *chat* not created
 
+(ert-deftest chat-test-send-save-failure-tears-down-not-strands ()
+  "A pre-POST transcript save failure must surface an error + tear the
+stream down (the save is inside the request's error guard), not strand the
+UI in the in-flight/ABORT state with no process to clean it up."
+  (chat-test--reset)
+  (let ((buf (get-buffer-create emacos--chat-buffer-name)))
+    (emacos--chat-init-buffer buf)
+    (with-current-buffer buf (goto-char (point-max)) (insert "hello"))
+    (cl-letf (((symbol-function 'emacos--chat-save-surface)
+               (lambda (_buf) (error "disk full")))
+              ((symbol-function 'emacos--chat-read-auth-file)
+               (lambda () nil))
+              ;; The save throws before url-retrieve; assert we never reach it.
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _) (error "url-retrieve must not be reached"))))
+      (emacos--chat-send buf)
+      (should-not emacos--chat-in-flight)        ; cleaned up, not stranded
+      (should (string-match-p "disk full"
+                              (with-current-buffer buf (buffer-string)))))))
+
 ;;; Request encoding (wire shape contract)
 
 (defun chat-test--decode-utf8-json (bytes)

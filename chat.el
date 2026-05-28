@@ -437,8 +437,14 @@ of the terminal handlers (end, error, abort, watchdog)."
       (when (markerp m) (set-marker m nil)))
     (set sym nil))
   ;; Persist a file-backed (.assist) surface's transcript on stream
-  ;; end/error/abort, then drop the stream-buffer reference.
-  (emacos--chat-save-surface emacos--chat-stream-buffer)
+  ;; end/error/abort, then drop the stream-buffer reference.  Best-effort:
+  ;; a save failure here (e.g. the same broken file that triggered the error
+  ;; we're cleaning up after) must NOT abort teardown and strand the UI
+  ;; in-flight — surface it and carry on.
+  (condition-case err
+      (emacos--chat-save-surface emacos--chat-stream-buffer)
+    (error (message "chat: couldn't save transcript: %s"
+                    (error-message-string err))))
   (setq emacos--chat-stream-buffer nil)
   (setq emacos--chat-tokens-seen 0
         emacos--chat-last-event-time nil
@@ -660,9 +666,6 @@ per-file conversation and operates on that directory."
                     (insert "\nyou> " msg)
                     (add-text-properties before (point)
                                          '(read-only t front-sticky t rear-nonsticky t))))))))
-        ;; Persist the you> turn before the request goes out (file-backed
-        ;; .assist surfaces only; no-op for the ephemeral *chat*).
-        (emacos--chat-save-surface buf)
         ;; First-token watchdog.  Fires once if no event lands
         ;; within the configured timeout AND we're still in flight.
         ;; Uses `emacos--chat-terminate-stream' so the URL process is
@@ -695,6 +698,13 @@ per-file conversation and operates on that directory."
                                       msg auth
                                       (plist-get ctx :thread-id)
                                       (plist-get ctx :workdir)))
+                   ;; Persist the you> turn just before the POST fires
+                   ;; (file-backed .assist only; no-op for *chat*).  Bound
+                   ;; here, inside the request's error guard, so a save
+                   ;; failure (read-only file, missing dir) tears the stream
+                   ;; down via the same handler instead of stranding the UI
+                   ;; in-flight with no process to clean it up.
+                   (_save (emacos--chat-save-surface buf))
                    ;; url-retrieve args: URL, CALLBACK, CBARGS, SILENT,
                    ;; INHIBIT-COOKIES.  (No TIMEOUT arg in Emacs >=24;
                    ;; we rely on `emacos--chat-first-token-timer' and
@@ -728,7 +738,7 @@ per-file conversation and operates on that directory."
           (error
            (emacos--chat-handle-error
             (list :type "error"
-                  :reason (format "url-retrieve failed: %s"
+                  :reason (format "send failed: %s"
                                   (error-message-string err))))))))))
 
 (defun emacos--chat-new-chat ()
