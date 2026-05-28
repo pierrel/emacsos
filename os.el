@@ -742,12 +742,20 @@ see `emacos--render-page'."
                  (trunc     (substring display 0 (min (length display) btn-w)))
                  (label     (emacos--center trunc btn-w)))
             (if dimmed-p
-                ;; Empty subset under MOD: dimmed, non-tappable placeholder.
-                ;; Use plain dimmed text (not a button) so it's visually
-                ;; distinct from live keys — slot stays positional.
-                (insert (propertize label 'face
-                                    `(:foreground "gray40"
-                                      :height ,emacos--btn-label-scale)))
+                ;; Empty subset under MOD: render a button-shaped slot with
+                ;; a darker bg + dim fg.  Same box/height as live buttons so
+                ;; the slot stays positional; the bg+fg contrast reads as
+                ;; "dimmed, inactive" rather than a plain `propertize' which
+                ;; on the phone's buffer background looked like a blank
+                ;; white block.  `#'ignore' makes the tap a no-op.
+                (let ((btn-start (point)))
+                  (emacos--btn label #'ignore nil
+                               emacos--btn-label-scale "gray15")
+                  ;; Override the button face's hardcoded `:foreground "white"'
+                  ;; with a dim gray; PREPEND so it wins the face merge.
+                  (add-face-text-property btn-start (point)
+                                          '(:foreground "gray45")
+                                          nil))
               (let ((btn-start (point)))
                 (emacos--btn label #'emacos--tap-key kg
                              emacos--btn-label-scale)
