@@ -13,13 +13,21 @@ in the phone UX that aren't load-bearing for any specific
 experiment but compound across all of them.  Worth a dedicated
 pass.
 
-** TODO Ctrl/Meta and shift
-There should be control and meta keys on the keyboard to issue keyboard-bound commands.
+** DONE Ctrl/Meta modifier keys
 
-Some thinking around this:
-- They should each probably be 1 button that toggles between C/M/C-M/open (no modifier) and the other shift/not-shift
-- The actual keys/characters on the keyboard should be filtered to just those that have a "completion" with those modifier keys (so no characters that don't complete the binding)
-- The control state should persist across keystrokes ("C" remains "on" until explicitly changed)
+Shipped on the =modifier-keys= branch: a leftmost MOD button on the
+action row cycles =nil → C → M → C-M → nil=; under a non-nil
+modifier, the T9 grid filters to letters that have a binding under
+the current modifier in the target buffer's full active-keymap stack
+(via =key-binding=), and a tap *fires* the bound command instead of
+inserting a letter.  Single-letter fast-path (one bound letter →
+fire on tap, no wait); multi-letter subset → arm-then-commit with
+multi-tap cycling.  Sticky modifier (only an explicit MOD tap
+changes it).  QUIT abandons an armed binding; every other utility
+tap commits it.  Shift was rolled into the existing CAPS (locked
+decision; under MOD, caps is ignored and canonical lowercase keys
+go to the keymap walker).  Full design + decisions in
+[[file:docs/2026-05-27-modifier-keys.org][2026-05-27-modifier-keys.org]].
 
 ** DONE Dynamic keyboard surface based on top buffer
 

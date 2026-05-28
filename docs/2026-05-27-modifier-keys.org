@@ -1,0 +1,309 @@
+#+title: Modifier Keys: Ctrl / Meta / Ctrl-Meta on the T9 Keyboard
+#+date: 2026-05-27
+
+The phone can type letters but can't issue keyboard-bound commands.
+You can run named commands via the command list or =M-x=, but the
+muscle memory of =C-s=, =C-n=, =M-w=, =C-M-f= is unreachable — and
+these are the keystrokes a heavy Emacs user reaches for first.  This
+branch adds modifier keys (Ctrl, Meta, Ctrl-Meta) to the T9 keyboard
+so a tap of =C= + =q= fires whatever =C-q= is bound to in the top
+buffer.
+
+The roadmap line is verbatim ([[file:../roadmap.org][roadmap.org]] §"Ctrl/Meta and shift"): one
+MOD button cycling none → C → M → C-M; the grid filters to letters
+that have a binding under the current modifier; modifier state
+persists across keystrokes.
+
+* Problem
+
+A T9 keyboard built for typing doesn't issue commands.  =M-x
+find-file RET= is ~20 multi-taps; =C-s=, =C-n=, =M-w= are
+*unreachable*.  For a phone meant to host Emacs, the keystrokes that
+make Emacs *Emacs* must be one tap away.
+
+The roadmap names the shape: one button per modifier cycle (none → C
+→ M → C-M), letters filtered to those that have a binding under the
+current modifier, state persists (=C= stays on across keystrokes).
+
+* Locked decisions (user-set, verbatim)
+
+Three answers the user gave in chat before the design started.  They
+are the *constraints* the design works within, not conclusions the
+design team reached:
+
+1. *Keep T9 if possible.*  User: "lets try to keep t9 if possible.
+   C- 'qw' click is C-q and C- 'qw' 'qw' is C-w. does that make
+   sense?"  → Multi-tap semantics extend to modifiers: the *first*
+   click on a group with one bound letter under the modifier fires
+   it; on a group with multiple, the first click arms and re-taps
+   cycle.  (The user's "click is C-q" reading is honored literally
+   when the group has one bound letter; the cycle kicks in only when
+   there's something to cycle through.)
+
+2. *Caps stays as-is.*  User: "actually lets keep the caps as-is.
+   that should work find. let me know if that causes any difficulty.
+   also make a rec on where this modifier should be. i think to the
+   left of the caps and the caps shifts over a bit and ret shrinks a
+   little."  → No new =S-= modifier.  Cycle is exactly =none → C →
+   M → C-M → none=.  Under a modifier, caps state is *ignored*;
+   canonical lowercase keys go to the keymap walker (the rare
+   =C-S-q= case is a v2 concern, see "Out of scope").
+
+3. *Full active-keymap stack.*  User: "the latter as recommended."
+   → The filter walks the target buffer's full active-keymap stack
+   (major + minor + global + text-property/overlay at point) via
+   Emacs's own =key-binding=.
+
+Placement followed from #2: MOD slots leftmost on action-row line 2.
+Honest math: =MOD CAPS TAB RET= as 5 units / 3 gaps shrinks *all
+four* buttons by ~25% (unit goes 4 → 3 cells; RET goes 8 → 6).  Not
+just RET.  Live-pass watch item — if cramped, fall back to keeping
+RET at 2u and letting CAPS/TAB shrink with fractional unit math.
+
+* Design
+
+The MOD button slots into the existing action row's second line at
+the left: =[MOD] [CAPS] [TAB] [RET]= (5 units, 3 gaps; RET stays
+double-wide).  Tapping MOD cycles =nil → 'C → 'M → 'C-M → nil=.
+When MOD is non-nil, every letter-key tap routes to a *bound-command*
+dispatcher instead of insertion.
+
+The T9 grid keeps its shape (3 rows × 3 groups; multi-tap cycles
+inside a group).  Under a modifier, each group is *filtered* to the
+subset of its letters that have a binding in the top buffer's full
+active-keymap stack — and a same-key re-tap cycles only that subset.
+Groups with no bound letters dim (don't disappear — positional
+muscle memory matters more than reflow tidiness).
+
+** Single-letter fast-path
+
+Most filtered T9 groups have at most one bound letter under any
+given modifier (e.g. =C-q= but not =C-w= in most modes).  In that
+case the click *fires immediately* — no arm, no timer, no preview.
+The user's grammar in locked decision #1 ("click is C-q") reads
+literally that way, and the visible grid (one letter in the group)
+tells the user a tap will fire rather than cycle.
+
+When the filtered subset has two or more letters (e.g. both =C-q=
+and =C-w= bound in a buffer), the multi-tap-as-command dance kicks
+in — see below.
+
+** Multi-tap-as-command (the arm-then-commit dance)
+
+Text multi-tap commits the first letter immediately and re-types on
+subsequent taps (=delete-char= + =insert=; insertion is undo-safe).
+Commands have side effects — we can't "un-fire" =C-q= to retry as
+=C-w=.
+
+So when the bound subset has ≥ 2 letters, the first tap *arms* a
+binding (visible in the tapped button); a same-key re-tap cycles the
+armed letter; the binding *commits* (fires) on the 1.0s timeout, on
+a tap to a different group, on a MOD tap, or on any other utility
+tap *except QUIT*.  QUIT abandons (see Decision A3 below).
+
+** Sticky modifier
+
+After a binding fires, =emacos--modifier= stays where it was.  You
+can keep typing =C-q C-w C-e= without re-tapping MOD.  Only an
+explicit MOD tap changes the modifier.
+
+* Decisions
+
+** A. Arming + preview (multi-tap meets side-effecting commands)
+
+Three options:
+- (a) Fire on first tap; ignore re-taps.  Loses the cycle entirely.
+  Rejected.
+- (b) Fire on first tap; re-taps fire the next letter too.  =C-q=
+  already ran; re-running may not be idempotent.  Rejected.
+- (c) Arm-then-commit (with the single-letter fast-path above).
+  *Picked.*
+
+State carried on =emacos--armed-tap=:
+- =:group <bound-subset>= — the *filtered* group string, not the
+  original =kg= (the user-visible cycle).
+- =:index <n>= — position within the subset.
+- =:window <w>= — captured at arm time; validated at commit (D3).
+- =:buffer <b>= — captured at arm time; validated at commit.  The
+  window can re-point at a different buffer if the original is
+  killed, so window-liveness isn't enough.
+
+The 1.0s timer matches =emacos--commit-timer= cadence — one rhythm
+for multi-tap muscle memory.
+
+Preview = armed letter rendered in =:weight bold :foreground
+"yellow"= inside the same button label.  No new vertical band.  If
+face-stacking inside a 3-cell button is illegible at the real font on
+the phone, named fallback: *capitalize the armed letter* (e.g. =ery=
+displays as =eRy= when cycling on =r=) — single-glyph signal that
+doesn't add characters, doesn't trip the substring clamp.  Pinned at
+face-stacking primary; capitalize-fallback is the v2 patch if needed.
+
+*A1: sticky modifier survives a fired binding.*  After commit,
+=emacos--modifier= is untouched — the whole point of "sticky."
+
+*A2: tapping MOD while a binding is armed COMMITS the armed binding,
+then advances MOD.*  The 1.0s timer is the abandon path; an explicit
+MOD tap is "I'm done with this letter, change my mind about the
+modifier."  (Alternative considered: abandon-on-MOD.  Rejected — the
+timer already provides one abandon path, and "MOD does two unrelated
+things based on whether something is armed" is more surprising than
+"MOD commits and advances.")
+
+*A3: QUIT abandons; every other utility tap commits.*  SPC, RET, DEL,
+TAB, M-x, command-list items, and MOD-tap all commit the armed
+binding first (the user is moving forward with new input).  *QUIT*
+abandons (=emacos--abandon-armed-tap=) — QUIT is the phone's =C-g=,
+documented as the "smart escape" for clearing in-flight clutter; if
+it fired the armed command, it would be the opposite of an escape.
+Implementation: split the commit seam into =emacos--commit-armed-tap=
+(fires) and =emacos--abandon-armed-tap= (clears without firing);
+each handler tops with the right one.
+
+** B. Filter — full active-keymap stack via =key-binding=
+
+- =where-is-internal= (reverse direction): rejected.
+- Per-keymap walk (manual): rejected (reproduces =key-binding=,
+  brittle re: overriding-local-map, text-property keymaps, etc.).
+- =key-binding= against the canonicalized prefix, in
+  =with-current-buffer (window-buffer (emacos--target))=: picked.
+  =commandp= guards.
+
+=key-binding= consults active keymaps *at the buffer's current point*
+— so text-property =keymap= and overlay =local-map= properties are
+respected as the user expects (the binding fired matches what would
+happen if they typed the key directly).  This is intentional and
+tested (=test-os-letter-bound-p-respects-point=).
+
+*B1: prefix keys (=C-x= → =Control-X-prefix=) filtered out* by
+=commandp= (a keymap is not commandp).  v1 ships single-key
+modifiers only.  *This means =C-x C-s=, =C-x C-f=, =C-x b=, and
+their =C-x= siblings are unreachable via MOD in v1* — they remain
+reachable via =M-x= or the command list, but it's an honest
+ergonomic cost.  Chord-prefix sequences are a layered follow-up
+(see Out of scope).
+
+*B2: compute the filtered layout once per render* (let-bound in
+=emacos--render-keyboard=); no module-level cache.  Re-renders
+happen on MOD/caps toggle, top-buffer change, and command-set
+change — NOT per keystroke.  ~26 =key-binding= calls per re-render
+is sub-millisecond on the Zero W (single-core ARM11, 512 MB);
+revisit only if live measurement bites.
+
+*B3: empty groups dim, don't disappear.*  =:foreground "gray40"=,
+button action =#'ignore=.  Positional muscle memory matters more
+than reflow tidiness on the phone.
+
+** C. Visual signal
+
+*C1: MOD button accent when active.*  =bg= arg of =emacos--btn= reuses
+the existing button-bg seam; =firebrick4= chosen (different from
+Chat's =dodger blue= so the two affordances don't blend).
+
+*C2: grid filters; no banner.*  Bound letters render normally;
+unbound groups dimmed.  Banner above the keyboard was considered and
+rejected (320×240 is too small to spend a row on a state indicator
+the MOD button already shows).
+
+** D. Failure modes & teardown
+
+Baked into the design upfront, per the Phase 1 / Phase 2 workflow
+guidance about catching failure modes before code review surfaces
+them.
+
+*D1: MOD state survives every binding outcome.*  The bound command
+can open a minibuffer, throw, or change major mode.
+=emacos--run-command='s =unwind-protect= keeps refresh+refocus alive;
+=emacos--armed-tap= is cleared *before* =call-interactively= so a
+re-entrant fire can't loop.  Only an explicit MOD tap changes the
+modifier.
+
+*D2: no explicit hot-reload glue.*  =defvar= no-ops when bound, so
+=emacos--modifier= survives a hot reload of =os.el=.  The MOD button
+label is computed at render time from the state var; it can drift
+from the state only between reload and the next render, which the
+follower (=window-buffer-change-functions=) resolves on next buffer
+touch.  If that proves annoying live, the fix is one line at file
+load.
+
+*D3: capture window AND buffer at arm time; validate at commit.*
+Window can re-point at a different buffer if the captured buffer is
+killed, so window-liveness isn't enough.  Commit-time check:
+=(and (window-live-p w) (buffer-live-p b) (eq (window-buffer w) b))=.
+On any failure: silent abandon, clear, re-render.
+
+*Race — armed letter unbound at commit time* (e.g. a minor mode was
+disabled between the prior re-render and the 1s commit): commit-time
+=key-binding= returns nil; silent abandon (no message — the phone
+has no log surface), clear =emacos--armed-tap=, re-render.
+
+*Buffer killed before commit*: caught by D3's liveness check; silent
+abandon.  Don't =with-current-buffer= a dead buffer — clear and
+liveness-check *before* the buffer dispatch.
+
+** Why NOT =set-transient-map=
+
+The natural Emacs primitive for "sticky modifier" is
+=set-transient-map=.  It's wrong for us: =set-transient-map=
+intercepts *real keystrokes* at the command loop level via
+=overriding-terminal-local-map=.  Our "modifier" is a software-side
+toggle that changes how *on-screen button taps* are interpreted; we
+never see real keys.  Its TIMEOUT / KEEP-PRED are also designed for
+*transient* maps (short-lived), and we want sticky-until-toggled.
+Rolling our own state is the right shape; this note is here so a
+future reader doesn't propose it as a "simplification."
+
+* Failure modes
+
+(Folded into Decision D.)
+
+* Out of scope
+
+1. *Chord prefix sequences (=C-x C-s=, =C-c C-c=).*  v1 ships
+   single-key modifiers only — =C-x= the prefix is filtered out by
+   the =commandp= check (B1).  The natural layered follow-up: an
+   "armed-prefix" sub-state where the MOD button stays armed
+   waiting for a second key.  Separate doc when we get to it; not a
+   roadmap TODO until the user asks.
+
+2. *=S-= shift modifier.*  Locked decision 2: caps stays as-is for
+   typing.  Shifted bindings (=C-S-q=) would surface via the
+   bound-keys filter only if the user has them bound under that
+   exact name; not designed for explicitly.
+
+3. *Per-major-mode filter cache.*  B2 says compute per-render.  If
+   the Zero W's =key-binding= × 26 cost bites, the follow-up is a
+   hash on =(major-mode × minor-mode-list × modifier)=.  Verify
+   live first.
+
+4. *Transient-buffer filter suppression.*  When a bound command
+   opens the minibuffer, the next filter recomputes against the
+   minibuffer's keymap (very different bindings); the grid will
+   flicker as the minibuffer opens and closes.  Tolerated in v1;
+   the follow-up is to render the filter against the *intended*
+   buffer's keymap while a transient buffer is on top.
+
+5. *Status-banner UI.*  C2 says no banner; grid + button label
+   carry the signal.
+
+* Acceptance / Done when
+
+- =make test-elisp= passes (existing + new modifier tests).
+- On phone (Emacs 30.1, 26-col window):
+  - MOD button cycles =mod → C → M → C-M → mod=; accent on non-nil.
+  - Under =C= in =*scratch*=: grid filters to bound letters;
+    unbound groups dim.
+  - Tap a group with one bound letter under C: command fires
+    immediately (single-letter fast-path).
+  - Tap a group with two bound letters under C: armed indicator
+    on the first; re-tap moves to the second; 1s → fires.
+  - Same followed immediately by MOD tap: prior arm fires, MOD
+    advances to =M= (A2).
+  - QUIT during armed: abandons silently; MOD state survives.
+  - CAPS toggle under MOD doesn't change the keystroke
+    (canonical lowercase).
+  - Switching =*scratch*= ↔ org file under =C= re-filters per-buffer.
+  - No re-render loop, no flicker beyond the (accepted)
+    minibuffer-transient case.
+- =roadmap.org='s "Ctrl/Meta and shift" line flips TODO → DONE
+  with a link to this doc.

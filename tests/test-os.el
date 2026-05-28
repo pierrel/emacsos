@@ -471,5 +471,379 @@ collapse popup windows (harmless no-op when there are none)."
       (emacos--tap-tab)
       (should (eq called 'complete)))))
 
+;;; Modifier keys (Ctrl / Meta / Ctrl-Meta) — see
+;;; docs/2026-05-27-modifier-keys.org.  Pure helpers tested directly;
+;;; tap dispatch + commit/abandon tested with real keymaps in
+;;; with-temp-buffer scopes and minimal cl-letf stubs.
+
+(ert-deftest test-os-modifier-cycle-none-C-M-CM-none ()
+  "Pure cycle, no state side effects."
+  (should (eq (emacos--modifier-next nil) 'C))
+  (should (eq (emacos--modifier-next 'C) 'M))
+  (should (eq (emacos--modifier-next 'M) 'C-M))
+  (should (eq (emacos--modifier-next 'C-M) nil)))
+
+(ert-deftest test-os-modifier-prefix-strings ()
+  (should (equal (emacos--modifier-prefix nil) ""))
+  (should (equal (emacos--modifier-prefix 'C) "C-"))
+  (should (equal (emacos--modifier-prefix 'M) "M-"))
+  (should (equal (emacos--modifier-prefix 'C-M) "C-M-")))
+
+(ert-deftest test-os-cycle-modifier-mutates-state ()
+  (let ((emacos--modifier nil))
+    (emacos--cycle-modifier) (should (eq emacos--modifier 'C))
+    (emacos--cycle-modifier) (should (eq emacos--modifier 'M))
+    (emacos--cycle-modifier) (should (eq emacos--modifier 'C-M))
+    (emacos--cycle-modifier) (should (eq emacos--modifier nil))))
+
+(ert-deftest test-os-modifier-label ()
+  "Button label reflects the modifier state — \"mod\" when off."
+  (let ((emacos--modifier nil)) (should (equal (emacos--modifier-label) "mod")))
+  (let ((emacos--modifier 'C)) (should (equal (emacos--modifier-label) "C")))
+  (let ((emacos--modifier 'M)) (should (equal (emacos--modifier-label) "M")))
+  (let ((emacos--modifier 'C-M)) (should (equal (emacos--modifier-label) "C-M"))))
+
+;;; Filter — empty / partial / all-bound (Decision B)
+;;
+;; `key-binding' walks the FULL active keymap stack including the
+;; global map, where (in a vanilla Emacs) `C-q' = `quoted-insert',
+;; `C-y' = `yank', etc.  Tests that just `(use-local-map ...)' or set
+;; `overriding-local-map' would still see those — and the filter
+;; would return most of the alphabet, not the specific subset under
+;; test.  Stub `key-binding' to consult ONLY the test's keymap.
+
+(defun test-os--with-map (map fn)
+  "Run FN with `key-binding' stubbed to look up keys ONLY in MAP.
+MAP is a sparse keymap.  Sidesteps the global map's near-saturated
+C-/M- bindings so a test of \"only C-q is bound\" is actually true."
+  (cl-letf (((symbol-function 'key-binding)
+             (lambda (kseq &optional _accept-default &rest _)
+               (let ((b (lookup-key map kseq)))
+                 ;; lookup-key returns a NUMBER for partial sequences;
+                 ;; treat that as unbound (we only probe single keys).
+                 (if (numberp b) nil b)))))
+    (funcall fn)))
+
+(ert-deftest test-os-bound-letters-in-group ()
+  "letter-bound-p is the leaf; bound-letters-in-group filters one group.
+Covers the empty / partial / all-bound cases in one shot."
+  (with-temp-buffer
+    (let ((map (make-sparse-keymap)))
+      (define-key map (kbd "C-q") #'ignore)
+      (define-key map (kbd "C-y") #'ignore)
+      (test-os--with-map map
+        (lambda ()
+          (let ((buf (current-buffer)))
+            ;; partial: only q,y bound in "qwerty"
+            (should (equal (emacos--bound-letters-in-group "qwerty" 'C buf) "qy"))
+            ;; empty: nothing bound under M
+            (should (equal (emacos--bound-letters-in-group "qwerty" 'M buf) ""))
+            ;; single-letter result preserved
+            (should (equal (emacos--bound-letters-in-group "qw" 'C buf) "q"))))))))
+
+(ert-deftest test-os-letter-bound-p-rejects-non-command ()
+  "Prefix keys (function-value is a keymap) must NOT be commandp."
+  (with-temp-buffer
+    (let ((map (make-sparse-keymap)))
+      (define-key map (kbd "C-z") (make-sparse-keymap))   ; prefix
+      (test-os--with-map map
+        (lambda ()
+          (should-not (emacos--letter-bound-p ?z 'C (current-buffer))))))))
+
+(ert-deftest test-os-bound-groups-preserves-shape ()
+  "bound-groups returns the same row/col shape as emacos-t9-layout."
+  (with-temp-buffer
+    (let ((map (make-sparse-keymap)))
+      (define-key map (kbd "C-q") #'ignore)
+      (test-os--with-map map
+        (lambda ()
+          (let ((bg (emacos--bound-groups 'C (current-buffer))))
+            (should (= (length bg) (length emacos-t9-layout)))
+            (cl-loop for filt-row in bg
+                     for orig-row in emacos-t9-layout
+                     do (should (= (length filt-row) (length orig-row))))
+            ;; q lives in the first group of the first row; only q bound.
+            (should (equal (caar bg) "q"))))))))
+
+;;; Tap dispatch under MOD
+;;
+;; These tests shadow the global keymap via `overriding-local-map' so
+;; the filter returns ONLY the letters the test explicitly binds — not
+;; whatever the developer's emacs has globally under C- (e.g. C-q is
+;; globally `quoted-insert', C-w is `kill-region').  Without the
+;; shadow the filter's bound-subset includes most of the alphabet
+;; under C-, and the test for "single-letter fast-path" can't fire.
+
+(defmacro test-os--with-tap-env (bindings &rest body)
+  "Run BODY with a fresh keymap holding BINDINGS as THE keymap for
+`key-binding', plus a consistent view of the test's window/buffer.
+
+Stubs:
+- `key-binding' → consults only the test map (no global noise).
+- `emacos--target' → returns the selected window.
+- `window-buffer' → returns the temp buffer (so D3 validation passes;
+  in batch mode the selected window doesn't display the temp buffer).
+- `emacos--refocus', `emacos--render-page', `run-with-timer' → no-ops.
+
+BINDINGS is a list of (KEY CMD) pairs; `kbd' is applied to KEY."
+  (declare (indent 1))
+  `(let ((map (make-sparse-keymap)))
+     ,@(mapcar (lambda (b) `(define-key map (kbd ,(car b)) ,(cadr b)))
+               bindings)
+     (let ((win (selected-window))
+           (buf (current-buffer)))
+       (cl-letf (((symbol-function 'key-binding)
+                  (lambda (kseq &optional _accept-default &rest _)
+                    (let ((b (lookup-key map kseq)))
+                      (if (numberp b) nil b))))
+                 ((symbol-function 'window-buffer) (lambda (&optional _) buf))
+                 ((symbol-function 'emacos--target) (lambda () win))
+                 ((symbol-function 'emacos--refocus) (lambda () nil))
+                 ((symbol-function 'emacos--render-page) (lambda () nil))
+                 ((symbol-function 'run-with-timer) (lambda (&rest _) nil)))
+         ,@body))))
+
+(ert-deftest test-os-tap-modified-key-single-bound-fires-immediately ()
+  "Single-letter fast-path: only one letter bound under MOD → fire on
+tap, no arm, no timer.  Honors the user's literal \"click is C-q\"."
+  (let ((fired nil)
+        (emacos--modifier 'C)
+        (emacos--armed-tap nil))
+    (with-temp-buffer
+      (test-os--with-tap-env (("C-q" (lambda () (interactive) (setq fired t))))
+        (emacos--tap-modified-key "qw")
+        (should fired)
+        (should-not emacos--armed-tap)))))
+
+(ert-deftest test-os-tap-modified-key-arms-then-commits ()
+  "Multi-letter subset: first tap arms (no fire), re-tap cycles,
+explicit commit fires the cycled letter."
+  (let ((fired-cmd nil)
+        (emacos--modifier 'C)
+        (emacos--armed-tap nil)
+        (emacos--armed-tap-timer nil))
+    (with-temp-buffer
+      (test-os--with-tap-env
+          (("C-q" (lambda () (interactive) (setq fired-cmd 'q)))
+           ("C-w" (lambda () (interactive) (setq fired-cmd 'w))))
+        ;; First tap: arms at q.
+        (emacos--tap-modified-key "qw")
+        (should emacos--armed-tap)
+        (should (equal (plist-get emacos--armed-tap :group) "qw"))
+        (should (= (plist-get emacos--armed-tap :index) 0))
+        (should-not fired-cmd)
+        ;; Re-tap: cycles to w.
+        (emacos--tap-modified-key "qw")
+        (should (= (plist-get emacos--armed-tap :index) 1))
+        (should-not fired-cmd)
+        ;; Commit fires C-w.
+        (emacos--commit-armed-tap)
+        (should (eq fired-cmd 'w))
+        (should-not emacos--armed-tap)))))
+
+(ert-deftest test-os-tap-modified-key-empty-group-noop ()
+  "Empty subset under MOD: silent no-op (no fire, no arm)."
+  (let ((emacos--modifier 'C)
+        (emacos--armed-tap nil))
+    (with-temp-buffer
+      (test-os--with-tap-env ()                       ; nothing bound
+        (emacos--tap-modified-key "qw")
+        (should-not emacos--armed-tap)))))
+
+(ert-deftest test-os-tap-modified-key-different-group-commits-prior ()
+  "Arm group A (qw), tap group B (as): A's binding fires, B becomes armed."
+  (let ((fired-cmd nil)
+        (emacos--modifier 'C)
+        (emacos--armed-tap nil)
+        (emacos--armed-tap-timer nil))
+    (with-temp-buffer
+      (test-os--with-tap-env
+          (("C-q" (lambda () (interactive) (setq fired-cmd 'q)))
+           ("C-w" (lambda () (interactive) (setq fired-cmd 'w)))
+           ("C-a" (lambda () (interactive) (setq fired-cmd 'a)))
+           ("C-s" (lambda () (interactive) (setq fired-cmd 's))))
+        (emacos--tap-modified-key "qw")     ; arms C-q
+        (should-not fired-cmd)
+        (emacos--tap-modified-key "as")     ; commits C-q, arms C-a
+        (should (eq fired-cmd 'q))
+        (should (equal (plist-get emacos--armed-tap :group) "as"))
+        (should (= (plist-get emacos--armed-tap :index) 0))))))
+
+;;; A2: MOD-tap commits armed, advances state.  A3: QUIT abandons; SPC/RET/DEL/TAB commit.
+
+(ert-deftest test-os-tap-modifier-with-armed-commits-then-cycles ()
+  "A2: MOD-tap with a binding armed COMMITS the armed binding, then
+advances the modifier cycle."
+  (let ((fired nil)
+        (emacos--modifier 'C)
+        (emacos--armed-tap nil)
+        (emacos--armed-tap-timer nil))
+    (with-temp-buffer
+      (test-os--with-tap-env
+          (("C-q" (lambda () (interactive) (setq fired t)))
+           ("C-w" #'ignore))                          ; force arm path
+        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil)))
+          (setq emacos--armed-tap
+                (list :group "qw" :index 0
+                      :window win :buffer (current-buffer)))
+          (emacos--tap-modifier)
+          (should fired)                              ; A2: armed fired
+          (should (eq emacos--modifier 'M))           ; ... then advanced
+          (should-not emacos--armed-tap))))))
+
+(ert-deftest test-os-tap-quit-abandons-armed ()
+  "A3: QUIT abandons (does NOT fire) the armed binding.
+QUIT is the phone's C-g; firing the armed command on QUIT would
+violate the documented escape-hatch contract."
+  (let ((fired nil)
+        (emacos--armed-tap nil)
+        (emacos--modifier 'C))
+    (with-temp-buffer
+      (test-os--with-tap-env
+          (("C-q" (lambda () (interactive) (setq fired t))))
+        (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
+                  ((symbol-function 'delete-other-windows) #'ignore))
+          (setq emacos--armed-tap
+                (list :group "q" :index 0
+                      :window win :buffer (current-buffer)))
+          (emacos--tap-quit)
+          (should-not fired)
+          (should-not emacos--armed-tap))))))
+
+(ert-deftest test-os-utility-taps-commit-armed ()
+  "A3 (non-QUIT half): SPC / RET / DEL / TAB commit any armed binding
+before doing their thing.  QUIT is its own test (abandons)."
+  (dolist (tap-fn '(emacos--tap-space emacos--tap-return
+                    emacos--tap-backspace emacos--tap-tab))
+    (let ((fired nil)
+          (emacos--armed-tap nil)
+          (emacos--modifier 'C))
+      (with-temp-buffer
+        (test-os--with-tap-env
+            (("C-q" (lambda () (interactive) (setq fired t))))
+          (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
+                    ;; suppress side effects of the real handlers
+                    ((symbol-function 'indent-for-tab-command)
+                     (lambda (&rest _) (interactive))))
+            (setq emacos--armed-tap
+                  (list :group "q" :index 0
+                        :window win :buffer (current-buffer)))
+            (funcall tap-fn)
+            (should fired)
+            (should-not emacos--armed-tap)))))))
+
+;;; A1: sticky modifier survives binding fire
+
+(ert-deftest test-os-modifier-survives-binding-fire ()
+  "After a command fires, emacos--modifier is unchanged — that's the
+whole point of \"sticky\"."
+  (let ((emacos--modifier 'C)
+        (emacos--armed-tap nil))
+    (with-temp-buffer
+      (test-os--with-tap-env (("C-q" (lambda () (interactive))))
+        (emacos--tap-modified-key "qw")               ; single-letter fast-fire
+        (should (eq emacos--modifier 'C))))))
+
+;;; Caps ignored under MOD (locked decision 2)
+
+(ert-deftest test-os-modifier-ignores-caps ()
+  "Caps state is ignored under MOD; canonical lowercase key fires.
+If caps influenced the lookup, the test would probe C-Q (unbound) and
+the binding would not fire."
+  (let ((fired nil)
+        (emacos--modifier 'C)
+        (emacos--caps t)
+        (emacos--armed-tap nil))
+    (with-temp-buffer
+      (test-os--with-tap-env
+          (("C-q" (lambda () (interactive) (setq fired t))))
+        (emacos--tap-modified-key "qw")               ; only q bound
+        (should fired)))))
+
+;;; Race + teardown (Decision D)
+
+(ert-deftest test-os-modifier-runtime-unbinding-is-silent ()
+  "Race: armed letter unbound between arm and commit (e.g. minor mode
+disabled).  commit-armed-tap silently abandons — no error, no fire."
+  (let ((emacos--armed-tap nil)
+        (emacos--armed-tap-timer nil)
+        (emacos--modifier 'C))
+    (with-temp-buffer
+      (test-os--with-tap-env ()                       ; nothing bound NOW
+        (setq emacos--armed-tap
+              (list :group "q" :index 0
+                    :window win :buffer (current-buffer)))
+        ;; Should not throw, should clear state.
+        (emacos--commit-armed-tap)
+        (should-not emacos--armed-tap)))))
+
+(ert-deftest test-os-modifier-armed-abandoned-on-buffer-killed ()
+  "D3: captured buffer killed before commit → silent abandon.
+Defends against `with-current-buffer' on a dead buffer."
+  (let ((emacos--armed-tap nil)
+        (emacos--modifier 'C))
+    (let ((win (selected-window))
+          (buf (generate-new-buffer " *armed-buffer-killed*")))
+      (with-current-buffer buf
+        (let ((map (make-sparse-keymap)))
+          (define-key map (kbd "C-q") #'ignore)
+          (use-local-map map)))
+      (setq emacos--armed-tap
+            (list :group "q" :index 0 :window win :buffer buf))
+      (kill-buffer buf)
+      (emacos--commit-armed-tap)               ; must not throw
+      (should-not emacos--armed-tap))))
+
+(ert-deftest test-os-modifier-armed-abandoned-on-buffer-change ()
+  "D3: window still live but now displays a DIFFERENT buffer (the
+captured buffer was killed or the user switched).  Silent abandon."
+  (let ((fired nil)
+        (emacos--armed-tap nil)
+        (emacos--modifier 'C))
+    (let ((win (selected-window))
+          (buf-arm (generate-new-buffer " *arm*"))
+          (buf-now (generate-new-buffer " *now*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf-arm
+              (let ((map (make-sparse-keymap)))
+                (define-key map (kbd "C-q")
+                  (lambda () (interactive) (setq fired t)))
+                (use-local-map map)))
+            (setq emacos--armed-tap
+                  (list :group "q" :index 0 :window win :buffer buf-arm))
+            (set-window-buffer win buf-now)
+            (emacos--commit-armed-tap)
+            (should-not fired)
+            (should-not emacos--armed-tap))
+        (kill-buffer buf-arm)
+        (kill-buffer buf-now)))))
+
+;;; Action row rendering
+
+(ert-deftest test-os-action-row-has-mod-button ()
+  "Action row line 2 is MOD CAPS TAB RET (MOD added leftmost)."
+  (with-temp-buffer
+    (let ((emacos--modifier nil) (emacos--caps nil))
+      (emacos--render-action-row)
+      (let ((s (buffer-string)))
+        (should (string-match-p "mod" s))
+        (should (string-match-p "DEL" s))
+        (should (string-match-p "SPC" s))
+        (should (string-match-p "caps" s))
+        (should (string-match-p "TAB" s))
+        (should (string-match-p "RET" s))))))
+
+(ert-deftest test-os-action-row-mod-label-cycles ()
+  "MOD button label reflects the current state through all four
+positions of the cycle."
+  (dolist (pair '((nil . "mod") (C . "C") (M . "M") (C-M . "C-M")))
+    (with-temp-buffer
+      (let ((emacos--modifier (car pair))
+            (emacos--caps nil))
+        (emacos--render-action-row)
+        (should (string-match-p (regexp-quote (cdr pair))
+                                (buffer-string)))))))
+
 (provide 'test-os)
 ;;; test-os.el ends here
