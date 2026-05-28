@@ -172,8 +172,8 @@ each handler tops with the right one.
 =key-binding= consults active keymaps *at the buffer's current point*
 — so text-property =keymap= and overlay =local-map= properties are
 respected as the user expects (the binding fired matches what would
-happen if they typed the key directly).  This is intentional and
-tested (=test-os-letter-bound-p-respects-point=).
+happen if they typed the key directly).  This is an inherited property
+of =key-binding= itself, not separately unit-tested.
 
 *B1: prefix keys (=C-x= → =Control-X-prefix=) filtered out* by
 =commandp= (a keymap is not commandp).  v1 ships single-key

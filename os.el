@@ -137,18 +137,6 @@ nil maps to the empty string; the symbols C, M, C-M map to \"C-\",
   (pcase mod
     ('nil 'C) ('C 'M) ('M 'C-M) ('C-M nil)))
 
-(defun emacos--cycle-modifier ()
-  "Advance `emacos--modifier' one step in the cycle.
-Pure state update — split out so the cycle is testable without stubbing
-render/refocus."
-  (setq emacos--modifier (emacos--modifier-next emacos--modifier)))
-
-(defun emacos--modifier-label ()
-  "Display string for the MOD button:
-\"mod\" when off (lowercase \"available\" affordance, mirrors caps/CAPS),
-else the modifier name (\"C\", \"M\", or \"C-M\")."
-  (if emacos--modifier (symbol-name emacos--modifier) "mod"))
-
 (defun emacos--letter-bound-p (ch modifier buf)
   "Non-nil iff MODIFIER + CH is bound to a command in BUF's active keymaps
 at point.  `key-binding' consults the full active-keymap stack
@@ -188,9 +176,14 @@ positional as empty strings (not removed) so the grid doesn't reflow."
 
 (defun emacos--abandon-armed-tap ()
   "Clear `emacos--armed-tap' WITHOUT firing it.  QUIT's path; also used
-internally when arm-time validation fails (dead window/buffer)."
-  (emacos--cancel-armed-tap-timer)
-  (setq emacos--armed-tap nil))
+internally when arm-time validation fails (dead window/buffer).  When
+state actually cleared, re-renders so the armed-letter preview goes away
+(no other path is guaranteed to render after an abandon — notably QUIT
+in the active-minibuffer branch which `throws' before its own render)."
+  (let ((had-state emacos--armed-tap))
+    (emacos--cancel-armed-tap-timer)
+    (setq emacos--armed-tap nil)
+    (when had-state (emacos--render-page))))
 
 (defun emacos--commit-armed-tap ()
   "Fire the armed binding (if any) in its captured window/buffer; clear
@@ -198,10 +191,16 @@ state.  Silent no-op when nothing is armed.  D3 validation: silent
 abandon if the captured window/buffer no longer exists or the window has
 re-pointed at a different buffer.  Race-safe: also a silent no-op when
 the binding has evaporated since arm time (a minor mode disabled, a
-keymap mutated)."
+keymap mutated).
+
+Dispatches via the CAPTURED window — not `emacos--run-command' which
+would re-derive target via `emacos--target' and prefer any minibuffer
+that happened to pop up between arm and the 1s timer fire.  D3 is the
+whole point of capturing :window at arm time; honor it at fire time."
   (let ((armed emacos--armed-tap))
     ;; Clear FIRST so a re-entrant fire (the command itself triggers a
     ;; render/follower that calls back into a commit path) can't loop.
+    ;; abandon-armed-tap also re-renders, clearing the armed highlight.
     (emacos--abandon-armed-tap)
     (when armed
       (let* ((w (plist-get armed :window))
@@ -211,7 +210,6 @@ keymap mutated)."
         (when (and (window-live-p w)
                    (buffer-live-p b)
                    (eq (window-buffer w) b)
-                   (stringp subset)
                    (< i (length subset)))
           (let* ((ch (aref subset i))
                  (kseq (kbd (concat (emacos--modifier-prefix emacos--modifier)
@@ -219,10 +217,15 @@ keymap mutated)."
                  ;; Look up in the captured buffer (not the current one).
                  (binding (with-current-buffer b (key-binding kseq t))))
             (when (and binding (commandp binding))
-              ;; emacos--run-command handles unwind-protect + refresh +
-              ;; refocus; the target it derives matches our captured `w'
-              ;; (validation just confirmed `w' is the live editing window).
-              (emacos--run-command binding))))))))
+              (unwind-protect
+                  (with-selected-window w
+                    (call-interactively binding))
+                ;; Mirror emacos--run-command's post-action refresh:
+                ;; re-render when the command-set changed (the follower
+                ;; on a top-buffer swap will do its own render).
+                (unless (equal (emacos--top-commands) emacos--last-commands)
+                  (emacos--render-page))
+                (emacos--refocus)))))))))
 
 ;;; Key actions
 
@@ -274,28 +277,28 @@ inserting a letter.  Three paths by bound-subset size:
      ;; Empty subset: silent no-op (no fire, no arm).
      ((or (null subset) (string-empty-p subset))
       nil)
-     ;; Single-letter fast-path: fire immediately.  Commit any prior
-     ;; arm first (different-group/different-letter semantics).
+     ;; Single-letter fast-path: fire immediately.  `emacos--run-command'
+     ;; tops with `emacos--commit-armed-tap', which fires any prior arm
+     ;; (different-group/different-letter semantics) and re-renders the
+     ;; stale armed highlight away — no need for an explicit commit here.
      ((= (length subset) 1)
-      (emacos--commit-armed-tap)
-      (when (and w buf)
-        (let* ((ch (aref subset 0))
-               (kseq (kbd (concat (emacos--modifier-prefix emacos--modifier)
-                                  (char-to-string ch))))
-               (binding (with-current-buffer buf (key-binding kseq t))))
-          (when (and binding (commandp binding))
-            (emacos--run-command binding)))))
+      (let* ((ch (aref subset 0))
+             (kseq (kbd (concat (emacos--modifier-prefix emacos--modifier)
+                                (char-to-string ch))))
+             (binding (with-current-buffer buf (key-binding kseq t))))
+        (when (and binding (commandp binding))
+          (emacos--run-command binding))))
      ;; Multi-letter subset: arm-then-commit cycle.
      (t
       (let ((armed emacos--armed-tap))
         (if (and armed
                  (equal (plist-get armed :group) subset)
                  (eq (plist-get armed :window) w))
-            ;; Same group: cycle within the bound subset.
-            (setq emacos--armed-tap
-                  (plist-put (copy-sequence armed) :index
-                             (mod (1+ (plist-get armed :index))
-                                  (length subset))))
+            ;; Same group: cycle within the bound subset.  `plist-put'
+            ;; mutates the cons spine in place and returns the same head;
+            ;; the setq is for documentation, not aliasing.
+            (plist-put armed :index
+                       (mod (1+ (plist-get armed :index)) (length subset)))
           ;; Different group (or first arm): commit any prior, arm new.
           (emacos--commit-armed-tap)
           (setq emacos--armed-tap
@@ -312,7 +315,7 @@ A2: when a binding is armed, COMMITS it before advancing the modifier.
 Sticky modifier survives that commit (A1) — the cycle still steps once."
   (emacos--commit)              ; commit any in-flight multi-tap letter
   (emacos--commit-armed-tap)    ; A2: commit armed binding (no-op if nil)
-  (emacos--cycle-modifier)
+  (setq emacos--modifier (emacos--modifier-next emacos--modifier))
   (emacos--render-page)
   (emacos--refocus))
 
@@ -675,14 +678,17 @@ rather than only M-x."
        (t emacos-global-commands))))))
 
 (defun emacos--on-window-buffer-change (_frame)
-  "Re-render when the top buffer changes the command set.
-Registered on `window-buffer-change-functions'.  No-ops while a render
-is in progress (the `emacos--in-render' re-entry guard) and when the
-derived command set is unchanged — so transient buffers (*Completions*,
-*Help*) don't flicker the command list.  The keyboard itself never
-moves; only the command-list band could change."
+  "Re-render when the top buffer changes the command set, OR when a
+modifier is active (the keymap filter is per-buffer; two buffers with
+the same command-set can still have different active keymaps via minor
+modes).  Registered on `window-buffer-change-functions'.  No-ops while
+a render is in progress (the `emacos--in-render' re-entry guard) and,
+when no modifier is active, when the derived command set is unchanged —
+so transient buffers (*Completions*, *Help*) don't flicker the command
+list."
   (unless (or emacos--in-render
-              (equal (emacos--top-commands) emacos--last-commands))
+              (and (null emacos--modifier)
+                   (equal (emacos--top-commands) emacos--last-commands)))
     (emacos--render-page)))
 
 ;;; Surface renderers (the four bands of the composite)
@@ -754,10 +760,14 @@ see `emacos--render-page'."
                          (lead      (/ pad 2))
                          (armed-pos (+ btn-start lead armed-idx)))
                     (when (< armed-pos (point))
+                      ;; PREPEND (no APPEND arg): in face merging, earlier
+                      ;; entries win on conflict.  With APPEND=t the
+                      ;; button face's `:foreground "white"' would win and
+                      ;; the armed letter would render invisibly.
                       (add-face-text-property
                        armed-pos (1+ armed-pos)
                        '(:weight bold :foreground "yellow")
-                       t)))))))
+                       nil)))))))
           (setq col-i (1+ col-i))))
       (insert "\n")
       (setq row-i (1+ row-i)))))
@@ -790,7 +800,11 @@ with RET DOUBLE-WIDE.  MOD is leftmost on row 2; the row is 5 units /
     (insert "\n")
     ;; Row: MOD, CAPS, TAB, RET (RET double-wide).  MOD is leftmost so
     ;; the state-bearing button sits opposite the most-tapped one (RET).
-    (emacos--btn (emacos--center (emacos--modifier-label) unit)
+    (emacos--btn (emacos--center
+                  (if emacos--modifier
+                      (symbol-name emacos--modifier)
+                    "mod")
+                  unit)
                  #'emacos--tap-modifier nil emacos--btn-label-scale
                  (and emacos--modifier "firebrick4"))
     (insert " ")

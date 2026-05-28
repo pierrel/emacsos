@@ -190,15 +190,16 @@ VWIDTH (left/right); both land in the (VWIDTH . HWIDTH) cons."
       (should (equal line-width (cons emacos--btn-hpad emacos--btn-vpad))))))
 
 (ert-deftest test-os-action-row-widths ()
-  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: CAPS/TAB 1 unit,
-RET 2 units (double-wide).  All positive; the wide ones beat the narrow."
+  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: MOD/CAPS/TAB 1
+unit, RET 2 units (double-wide; 5 units / 3 gaps total).  All positive;
+the wide ones beat the narrow."
   (let* ((win-w 36) (gap 1.5)
          (third (emacos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
-         (unit  (emacos--unit-width win-w gap 4 2)))   ; CAPS/TAB=1u, RET=2u
+         (unit  (emacos--unit-width win-w gap 5 3)))   ; MOD/CAPS/TAB=1u, RET=2u
     (should (> third 0))
     (should (> unit 0))
     (should (> (* 2 third) third))   ; SPC (2/3) wider than DEL (1/3)
-    (should (> (* 2 unit) unit))))   ; RET (2u) wider than CAPS/TAB (1u)
+    (should (> (* 2 unit) unit))))   ; RET (2u) wider than MOD/CAPS/TAB (1u)
 
 (ert-deftest test-os-action-row-renders-del-spc-caps-tab-ret ()
   (with-temp-buffer
@@ -488,20 +489,6 @@ collapse popup windows (harmless no-op when there are none)."
   (should (equal (emacos--modifier-prefix 'C) "C-"))
   (should (equal (emacos--modifier-prefix 'M) "M-"))
   (should (equal (emacos--modifier-prefix 'C-M) "C-M-")))
-
-(ert-deftest test-os-cycle-modifier-mutates-state ()
-  (let ((emacos--modifier nil))
-    (emacos--cycle-modifier) (should (eq emacos--modifier 'C))
-    (emacos--cycle-modifier) (should (eq emacos--modifier 'M))
-    (emacos--cycle-modifier) (should (eq emacos--modifier 'C-M))
-    (emacos--cycle-modifier) (should (eq emacos--modifier nil))))
-
-(ert-deftest test-os-modifier-label ()
-  "Button label reflects the modifier state — \"mod\" when off."
-  (let ((emacos--modifier nil)) (should (equal (emacos--modifier-label) "mod")))
-  (let ((emacos--modifier 'C)) (should (equal (emacos--modifier-label) "C")))
-  (let ((emacos--modifier 'M)) (should (equal (emacos--modifier-label) "M")))
-  (let ((emacos--modifier 'C-M)) (should (equal (emacos--modifier-label) "C-M"))))
 
 ;;; Filter — empty / partial / all-bound (Decision B)
 ;;
@@ -821,29 +808,110 @@ captured buffer was killed or the user switched).  Silent abandon."
 
 ;;; Action row rendering
 
-(ert-deftest test-os-action-row-has-mod-button ()
-  "Action row line 2 is MOD CAPS TAB RET (MOD added leftmost)."
-  (with-temp-buffer
-    (let ((emacos--modifier nil) (emacos--caps nil))
-      (emacos--render-action-row)
-      (let ((s (buffer-string)))
-        (should (string-match-p "mod" s))
-        (should (string-match-p "DEL" s))
-        (should (string-match-p "SPC" s))
-        (should (string-match-p "caps" s))
-        (should (string-match-p "TAB" s))
-        (should (string-match-p "RET" s))))))
-
 (ert-deftest test-os-action-row-mod-label-cycles ()
-  "MOD button label reflects the current state through all four
-positions of the cycle."
+  "Action row line 2 is MOD CAPS TAB RET; MOD label reflects the
+current state through all four positions of the cycle (and the row
+keeps showing DEL/SPC/caps/TAB/RET alongside)."
   (dolist (pair '((nil . "mod") (C . "C") (M . "M") (C-M . "C-M")))
     (with-temp-buffer
       (let ((emacos--modifier (car pair))
             (emacos--caps nil))
         (emacos--render-action-row)
-        (should (string-match-p (regexp-quote (cdr pair))
-                                (buffer-string)))))))
+        (let ((s (buffer-string)))
+          (should (string-match-p (regexp-quote (cdr pair)) s))
+          (should (string-match-p "DEL" s))
+          (should (string-match-p "SPC" s))
+          (should (string-match-p "caps" s))
+          (should (string-match-p "TAB" s))
+          (should (string-match-p "RET" s)))))))
+
+;;; Armed-letter preview rendering — face priority
+
+(ert-deftest test-os-armed-letter-face-wins-foreground ()
+  "When a group is armed, the armed letter's face must place yellow
+*before* the button's white in the merged face list (else the white
+wins via face-merge precedence and the indicator renders invisibly).
+Regression for the APPEND=t-vs-nil choice in `add-face-text-property'."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-q") #'ignore)
+    (define-key map (kbd "C-w") #'ignore)
+    (with-temp-buffer
+      (let ((emacos--modifier 'C)
+            (emacos--caps nil)
+            (emacos--armed-tap (list :group "qw" :index 1
+                                     :window (selected-window)
+                                     :buffer (current-buffer)))
+            (kbd-buf (current-buffer)))
+        (cl-letf (((symbol-function 'key-binding)
+                   (lambda (kseq &optional _accept-default &rest _)
+                     (let ((b (lookup-key map kseq)))
+                       (if (numberp b) nil b))))
+                  ((symbol-function 'emacos--target)
+                   (lambda () (selected-window)))
+                  ((symbol-function 'window-buffer)
+                   (lambda (&optional _) kbd-buf)))
+          (emacos--render-keyboard)
+          ;; Find the position whose face property mentions "yellow"
+          ;; (the armed letter), then verify yellow precedes white in
+          ;; THAT character's merged face spec.  Searching the whole
+          ;; buffer-string would compare unrelated positions' faces.
+          (let ((armed-face nil))
+            (save-excursion
+              (goto-char (point-min))
+              (while (and (not armed-face) (< (point) (point-max)))
+                (let ((face (get-text-property (point) 'face)))
+                  (when (string-match-p "yellow" (format "%S" face))
+                    (setq armed-face face)))
+                (forward-char 1)))
+            (should armed-face)             ; armed face exists
+            (let* ((s (format "%S" armed-face))
+                   (y-pos (string-match ":foreground[ \t]+\"yellow\"" s))
+                   (w-pos (string-match ":foreground[ \t]+\"white\"" s)))
+              (should y-pos)
+              (when w-pos
+                (should (< y-pos w-pos))))))))))
+
+;;; Re-render on commit/abandon — armed highlight clears
+
+(ert-deftest test-os-abandon-armed-tap-re-renders-when-state-cleared ()
+  "Stale yellow highlight class of bug: after armed state clears (via
+QUIT, timer, MOD-tap, etc.) the rendered yellow must go away — the
+abandon seam re-renders to make that true.  No render fires when there
+was nothing to clear (saves cycles)."
+  (let ((renders 0))
+    (cl-letf (((symbol-function 'emacos--render-page)
+               (lambda () (cl-incf renders))))
+      ;; No state to clear → no render.
+      (let ((emacos--armed-tap nil)
+            (emacos--armed-tap-timer nil))
+        (emacos--abandon-armed-tap)
+        (should (= renders 0)))
+      ;; State was set → render once.
+      (let ((emacos--armed-tap (list :group "q" :index 0
+                                     :window (selected-window)
+                                     :buffer (current-buffer)))
+            (emacos--armed-tap-timer nil))
+        (emacos--abandon-armed-tap)
+        (should (= renders 1))
+        (should-not emacos--armed-tap)))))
+
+;;; Follower under MOD re-renders on buffer change regardless of command-set
+
+(ert-deftest test-os-follower-rerenders-under-modifier-even-if-set-same ()
+  "Under MOD, the keymap filter is per-buffer (minor modes vary even
+when the major-mode command set doesn't).  The follower must re-render
+on buffer change when modifier is active, regardless of whether
+top-commands changed."
+  (let ((rendered nil)
+        (emacos--in-render nil)
+        (emacos--last-commands '(("SAME" . same)))
+        (emacos--modifier 'C))
+    (cl-letf (((symbol-function 'emacos--render-page)
+               (lambda () (setq rendered t)))
+              ((symbol-function 'emacos--top-commands)
+               (lambda () '(("SAME" . same)))))
+      (emacos--on-window-buffer-change nil)
+      (should rendered))))
 
 (provide 'test-os)
 ;;; test-os.el ends here
