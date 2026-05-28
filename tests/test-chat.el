@@ -252,6 +252,29 @@ UI in the in-flight/ABORT state with no process to clean it up."
       (should (string-match-p "disk full"
                               (with-current-buffer buf (buffer-string)))))))
 
+(ert-deftest chat-test-rollback-note-targets-chat-not-active-stream ()
+  "An async /rollback result must land in *chat* (the legacy config flow),
+not in a .assist stream the user started before the callback returned."
+  (chat-test--reset)
+  (let ((chat (emacos--chat-buffer))            ; *chat*, initialized w/ prompt
+        (assist (generate-new-buffer "x.assist")))
+    (unwind-protect
+        (progn
+          (with-current-buffer assist (emacos--chat-write-prompt))
+          (setq emacos--chat-stream-buffer assist) ; pretend it's the live target
+          (let ((resp (generate-new-buffer " *rollback-resp*")))
+            (with-current-buffer resp
+              (insert "HTTP/1.1 200 OK\n\n{\"status\":\"applied\",\"detail\":\"ok\"}")
+              (goto-char (point-min))
+              (emacos--chat-rollback-callback nil)))  ; kills resp internally
+          (should (string-match-p "rollback applied"
+                                  (with-current-buffer chat (buffer-string))))
+          (should-not (string-match-p "rollback"
+                                      (with-current-buffer assist (buffer-string)))))
+      (when (buffer-live-p assist)
+        (let ((kill-buffer-query-functions nil)) (kill-buffer assist)))
+      (setq emacos--chat-stream-buffer nil))))
+
 ;;; Request encoding (wire shape contract)
 
 (defun chat-test--decode-utf8-json (bytes)

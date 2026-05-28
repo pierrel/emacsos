@@ -388,11 +388,15 @@ Otherwise (error before any server response), synthesize a fresh
                      '(read-only t front-sticky t rear-nonsticky t)))))))))))
     (emacos--chat-stream-cleanup)))
 
-(defun emacos--chat-note (text)
-  "Insert TEXT as a read-only `bot> ' note line above the input prompt
-in *chat*.  Used for applied / rollback notices (system messages, not
-streamed bot output)."
-  (let ((buf (emacos--chat-render-buffer)))
+(defun emacos--chat-note (text &optional buffer)
+  "Insert TEXT as a read-only `bot> ' note line above the input prompt.
+Renders into BUFFER, defaulting to the active render target
+\(`emacos--chat-render-buffer').  Used for applied / rollback notices
+(system messages, not streamed bot output).  Async, non-stream callers —
+the /rollback flow, a legacy *chat*-only config operation — MUST pass an
+explicit buffer so a delayed response can't land in an unrelated .assist
+stream that started meanwhile."
+  (let ((buf (or buffer (emacos--chat-render-buffer))))
     (when (and buf (buffer-live-p buf))
       (with-current-buffer buf
         (let* ((inhibit-read-only t)
@@ -866,13 +870,17 @@ transcript by `emacos--chat-rollback-callback'."
            (url-request-extra-headers
             '(("Content-Type" . "application/json; charset=utf-8")))
            (url-request-data (emacos--chat-encode-rollback auth)))
-      (emacos--chat-note "[rolling back…]")
+      ;; Rollback is a legacy *chat*-only config flow; pin its notices to
+      ;; *chat* (not the implicit render target) so the async callback can't
+      ;; write into a .assist stream the user starts before it returns.
+      (emacos--chat-note "[rolling back…]" (emacos--chat-buffer))
       (condition-case err
           (url-retrieve (emacos--chat-endpoint "/rollback")
                         #'emacos--chat-rollback-callback nil t t)
         (error
          (emacos--chat-note
-          (format "[rollback failed: %s]" (error-message-string err))))))))
+          (format "[rollback failed: %s]" (error-message-string err))
+          (emacos--chat-buffer)))))))
 
 (defun emacos--chat-rollback-callback (status &rest _)
   "Parse the /rollback JSON response and report it in the transcript.
@@ -899,7 +907,8 @@ repeated rollbacks don't leak ` *http*` buffers."
     (unwind-protect
         (let ((st (or (plist-get result :status) "error"))
               (detail (or (plist-get result :detail) "")))
-          (emacos--chat-note (format "[rollback %s: %s]" st detail))
+          (emacos--chat-note (format "[rollback %s: %s]" st detail)
+                             (emacos--chat-buffer))
           ;; A reached rollback (applied / load_error) consumes the undo;
           ;; hide ROLLBACK until the next apply.  noop/unreachable/error
           ;; keep it available to retry.

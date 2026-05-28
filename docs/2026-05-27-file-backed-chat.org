@@ -120,10 +120,14 @@ Each backend call is one batched =emacsclient= round-trip.
   commands (git, a formatter, a small script) fine; heavy builds/tests are
   slow.  This is "edit + light run," not a build farm.
 - *=execute= is uncontained* (Security): it's a real shell on the phone —
-  full network, full filesystem, any binary.  Implementation hotspots are
-  =edit='s exact-string-replace and =read='s =cat -n= + offset/limit over
-  elisp; =execute='s exit-code/stderr capture; =grep=/=glob= as one
-  batched elisp call each (deferrable to stub if slow on the phone).
+  full network, full filesystem, any binary.  ALL the fs tools route through
+  it: EmacsBackend inherits =read/write/edit/ls/grep/glob= from deepagents'
+  =BaseSandbox=, which builds ordinary shell commands (=cat=, =ls=, =grep=,
+  =sed=, =find=, ...) and runs each via =execute= — the one elisp
+  =call-process-shell-command= round trip.  EmacsBackend itself adds only
+  =execute= (that transport + base64 framing + exit-code capture), =_resolve=
+  (the working-dir / =.assist= guardrail), and the =.assist= result filtering
+  on =ls/grep/glob=.  No direct =insert-file-contents=/=write-region=.
 
 ** 4. Lives in =emacsos-server=, not assist — one generic assist seam
 
