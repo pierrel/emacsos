@@ -109,11 +109,14 @@ EmacsBackend and can be retired later.)
 ** 3. In-place via elisp on the phone — no sync, no docker; execute runs on the phone
 
 *Opinionated.*  Every backend method runs by driving the phone's emacs
-daemon over =emacsclient=: fs ops via =insert-file-contents= /
-=write-region= / =directory-files=; =execute(command)= via a shell on the
-phone (=process-file= / =shell-command-to-string= with =default-directory=
-= the working dir, capturing exit code + output into an =ExecuteResponse=).
-Each backend call is one batched =emacsclient= round-trip.
+daemon over =emacsclient=.  =execute(command)= evaluates an elisp
+=call-process-shell-command= in a shell rooted at the working dir,
+capturing exit code + combined output (base64-framed) into an
+=ExecuteResponse=.  The fs ops (=read/write/edit/ls/grep/glob=) are NOT
+custom elisp — they're inherited from deepagents' =BaseSandbox=, which
+builds ordinary shell commands (=cat=, =ls=, =grep=, =sed=, =find=, ...)
+and runs each through =execute=.  So every backend call is one
+=emacsclient= round-trip carrying a shell command.
 
 *Accepted realities:*
 - *Compute is the phone's.*  The Zero 2 W (512 MB, quad A53) runs simple

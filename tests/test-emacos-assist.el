@@ -4,7 +4,8 @@
 ;; the header parse + thread-id mint, the surface context, the command set,
 ;; the mode's open-time setup, and the chat.el engine changes that make it
 ;; buffer-agnostic (render-buffer target + thread_id/workdir encoding).
-;; The live stream + the EmacsBackend round trip are validated on the phone.
+;; The live stream + the EmacsBackend round trip are out of scope here (they
+;; need a phone); the end-to-end round-trip on hardware is still pending.
 ;;
 ;; Placeholder workdir is /data/proj (a `/home/...' path would trip the
 ;; no-real-paths audit).
