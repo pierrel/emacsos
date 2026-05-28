@@ -93,6 +93,18 @@
     (should (equal emacos-assist--thread-id "m1"))           ; header parsed
     (should (get-text-property (point-min) 'read-only))))    ; transcript locked
 
+(ert-deftest test-assist-mode-reused-prompt-is-read-only ()
+  ;; On reopen, a trailing prompt already in the saved file is reused (no
+  ;; fresh write-prompt) — but it must still be read-only, with only the
+  ;; input region after it editable.
+  (with-temp-buffer
+    (insert "#+assist_thread: m2\n\nyou> hi\nbot> hello\n> ")
+    (emacos-assist-mode)
+    (let* ((istart (emacos--chat-input-start (current-buffer)))
+           (prompt-start (- istart (length emacos--chat-prompt))))
+      (should (= istart (point-max)))                        ; reused, none appended
+      (should (get-text-property prompt-start 'read-only))))) ; prompt itself locked
+
 (ert-deftest test-assist-mode-registered-in-auto-mode-alist ()
   (should (eq (cdr (assoc "\\.assist\\'" auto-mode-alist)) 'emacos-assist-mode)))
 

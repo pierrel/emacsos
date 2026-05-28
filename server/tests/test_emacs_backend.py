@@ -71,11 +71,24 @@ def test_execute_nonzero_exit():
     assert r.output == "oops"
 
 
-def test_execute_timeout_surfaces_guidance():
+def test_execute_124_hedges_timeout_guidance():
     be = EmacsBackend("/w", _make_eval("124\n"))
     r = be.execute("sleep 999")
     assert r.exit_code == 124
-    assert "wall-clock limit" in r.output
+    # Hedged ("most likely"), not a false assertion — a command can exit 124.
+    assert "124" in r.output and "wall-clock" in r.output
+    assert "most likely" in r.output
+
+
+def test_execute_137_does_not_falsely_claim_timeout():
+    # 137 = SIGKILL: could be timeout's kill-after, but also an OOM on the
+    # 512MB phone — must NOT assert it "exceeded the wall-clock limit".
+    be = EmacsBackend("/w", _make_eval("137\n"))
+    r = be.execute("./big-build")
+    assert r.exit_code == 137
+    assert "137" in r.output
+    assert "out-of-memory" in r.output
+    assert "exceeded" not in r.output
 
 
 def test_execute_transport_failure_is_a_result_not_a_raise():

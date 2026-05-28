@@ -120,9 +120,18 @@ class EmacsBackend(BaseSandbox):
 
         exit_code, output = self._decode(raw)
 
-        if exit_code in (124, 137):  # `timeout` SIGTERM / SIGKILL
-            output = (f"[command exceeded {t}s wall-clock limit on the phone; "
-                      f"narrow its scope and retry]\n") + (output or "(no output)")
+        # 124/137 are `timeout`'s codes when it kills a runaway — but it also
+        # passes the command's OWN status through, so a command can legitimately
+        # exit these (137 = SIGKILL is a plausible OOM on a 512MB phone).  Hedge
+        # the note instead of falsely asserting a timeout.
+        if exit_code == 124:
+            output = (f"[exit 124 — most likely the {t}s wall-clock `timeout`; "
+                      f"if so, narrow the command's scope and retry]\n"
+                      ) + (output or "(no output)")
+        elif exit_code == 137:
+            output = (f"[exit 137 (SIGKILL) — the {t}s timeout's kill-after, an "
+                      f"out-of-memory kill (the phone has 512MB), or an external "
+                      f"kill]\n") + (output or "(no output)")
 
         truncated = len(output) > MAX_OUTPUT_CHARS
         if truncated:

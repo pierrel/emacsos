@@ -152,11 +152,15 @@ existing transcript read-only.  Leaves the buffer's modified flag unchanged
     (unless (emacos--chat-input-start (current-buffer))
       (goto-char (point-max))
       (emacos--chat-write-prompt))
-    ;; Mark the transcript (everything before the input prompt) read-only.
-    (let* ((istart (emacos--chat-input-start (current-buffer)))
-           (prompt-start (and istart (- istart (length emacos--chat-prompt)))))
-      (when (and prompt-start (> prompt-start (point-min)))
-        (add-text-properties (point-min) prompt-start
+    ;; Mark the transcript AND the trailing prompt read-only, up to the start
+    ;; of the editable input region (`istart').  Marking THROUGH the prompt
+    ;; matters on reopen: a prompt reused from the saved file skipped
+    ;; `emacos--chat-write-prompt' (which read-only-marks a fresh prompt), so
+    ;; without this it would reload editable.  Only the region after the
+    ;; prompt stays typeable (the prompt's rear-nonsticky allows that).
+    (let ((istart (emacos--chat-input-start (current-buffer))))
+      (when (and istart (> istart (point-min)))
+        (add-text-properties (point-min) istart
                              '(read-only t front-sticky t rear-nonsticky t))))
     (unless was-modified (set-buffer-modified-p nil)))
   (goto-char (point-max)))
