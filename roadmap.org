@@ -416,15 +416,25 @@ proof the modem stack works.  Depends on: Cellular modem, the shared modem-watch
 Display things like the date, time and battery percentage. Consider removing most of
 everything else from the modeline.
 
-Today the modeline is just the =" EmacsOS"= label (=os.el:544=; the init snippet
-shrinks its face, =deploy/emacsos-init.el.in=).  Replace it with a glanceable
-=mode-line-format=: time + date (=display-time-mode=), battery % (=display-battery-mode=
-/ the =battery= package, which reads =/sys/class/power_supply/=), and wifi / cell
-signal (fed from the Wifi and modem layers).  Strip the default clutter (buffer
-position, minor modes, encoding) — at ~16 rows on 320x240 every row counts.  Mostly a
-=mode-line-format= rewrite plus two built-in minor modes.  Caveat: the bare Zero W has
-no battery gauge, so battery % needs a power HAT (e.g. PiSugar) that publishes a
-=power_supply= node — confirm what the build has.
+*PARTIAL* — the *network (wifi/cell) segment* shipped with the cellular branch
+([[file:docs/2026-05-26-cellular-data-connectivity.org][docs/2026-05-26-cellular-data-connectivity.org]]):
+=mode-line-format= is now a minimal global default (=setq-default= at the top of
+=os.el=) carrying the =" EmacsOS"= label + a tappable =:eval= segment from
+=emacos-net-mode-line-string= (=network.el=), with the stock clutter (buffer
+position, minor modes, encoding) stripped.  *REMAINING:* time + date
+(=display-time-mode=), battery % (=display-battery-mode= reads
+=/sys/class/power_supply/=), and any residual clutter — append into the same list.
+
+*Battery hardware (this build, measured 2026-05-30):* a single Li-ion cell feeds the
+Pi via 2× [[https://www.adafruit.com/product/2465][Adafruit PowerBoost 1000C (#2465)]]
+— DC/DC boost + LiPo charger.  The PowerBoost reports state via *analog LEDs only*
+(low-battery red / charging yellow / full green); there is *no I2C/SPI* digital
+readout, so nothing publishes a =/sys/class/power_supply/= node and
+=display-battery-mode= has nothing to read (confirmed empty 2026-05-30).
+*For a numeric % in the modeline:* add a *fuel-gauge IC* (e.g. MAX17048 / LC709203F)
+on I2C across the same battery, whose driver exposes a =power_supply= node.
+*Cheaper interim:* wire one of the PowerBoost's status pins (LBO / CHG / DONE) to a
+GPIO and surface a charging / low-battery *flag* (no %) in the modeline.
 
 ** TODO 
 
