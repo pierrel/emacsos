@@ -111,6 +111,33 @@ never an empty list — so a plain text buffer keeps them one tap away."
       (let ((kill-buffer-query-functions nil))
         (kill-buffer chat-buf)))))
 
+(ert-deftest test-os-top-commands-assist-reads-buffer-local-confirm-pending ()
+  "`emacos-assist--forget-confirm-pending' is buffer-local to each
+.assist buffer.  `emacos--top-commands' must call
+`emacos-assist--command-set' INSIDE that buffer so the buffer-local
+value is read — otherwise the keyboard's render-time `current-buffer'
+\(the *keyboard* buffer) yields the global nil, the command-set
+returns \"Forget\" instead of \"Confirm forget?\", and the two-tap
+relabel never shows.  Caught live 2026-05-30."
+  (require 'emacos-assist)
+  (with-temp-buffer
+    (emacos-assist-mode)
+    (setq emacos-assist--forget-confirm-pending t)
+    (let ((assist-buf (current-buffer))
+          (keyboard-buf (get-buffer-create "*keyboard*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
+                    ((symbol-function 'emacos--target) (lambda () 'w))
+                    ((symbol-function 'window-buffer) (lambda (_) assist-buf)))
+            ;; Simulate the render-time call site: `current-buffer' is the
+            ;; keyboard buffer (where `--render-keyboard' inserts), NOT the
+            ;; .assist file.  The fix is `with-current-buffer assist-buf'
+            ;; around `(emacos-assist--command-set)' inside top-commands.
+            (with-current-buffer keyboard-buf
+              (let ((emacos--chat-in-flight nil))
+                (should (assoc "Confirm forget?" (emacos--top-commands))))))
+        (kill-buffer keyboard-buf)))))
+
 (ert-deftest test-os-top-commands-capped-at-max ()
   "The command list shows at most `emacos--max-commands' (the renderer
 caps it); a mode with more entries than that is truncated by the

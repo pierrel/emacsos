@@ -683,7 +683,14 @@ rather than only M-x."
         (emacos--chat-command-set))
        ((and buf (with-current-buffer buf
                    (derived-mode-p 'emacos-assist-mode)))
-        (emacos-assist--command-set))
+        ;; Run `emacos-assist--command-set' INSIDE the .assist buffer:
+        ;; it reads `emacos-assist--forget-confirm-pending', which is
+        ;; buffer-local to each .assist file (a "Confirm forget?" arm
+        ;; on one .assist file mustn't bleed into another's command list).
+        ;; The render call site has the *keyboard* buffer as
+        ;; `current-buffer', so without this wrap the buffer-local read
+        ;; sees nil and "Forget" never relabels — caught live 2026-05-30.
+        (with-current-buffer buf (emacos-assist--command-set)))
        ((emacos--mode-commands-for mode))
        (t emacos-global-commands))))))
 
