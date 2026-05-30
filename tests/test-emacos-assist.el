@@ -104,18 +104,60 @@
         (should-not posted)))))
 
 (ert-deftest test-assist-forget-second-tap-confirms ()
-  "Armed, a second tap POSTs /forget and disarms."
-  (with-temp-buffer
-    (setq emacos-assist--thread-id "abc"
-          emacos-assist--forget-confirm-pending t)
-    (let ((posted nil))
-      (cl-letf (((symbol-function 'emacos-assist--post-forget)
-                 (lambda (_id) (setq posted t)))
-                ((symbol-function 'emacos--render-page) (lambda () nil)))
-        (let ((emacos--chat-in-flight nil))
-          (emacos-assist-forget))
-        (should-not emacos-assist--forget-confirm-pending)
-        (should posted)))))
+  "Armed, a second tap POSTs /forget, wipes the local .assist buffer
+\(clears transcript, clears thread-id), and disarms.  Both halves of
+\"Forget = server forgets + this chat is fresh\" are exercised."
+  (let ((file (make-temp-file "test-assist-forget" nil ".assist")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+assist_thread: abc\n\nyou> earlier\nbot> reply\n> "))
+          (with-current-buffer (find-file-noselect file)
+            (setq emacos-assist--thread-id "abc"
+                  emacos-assist--forget-confirm-pending t)
+            (let ((posted-with nil))
+              (cl-letf (((symbol-function 'emacos-assist--post-forget)
+                         (lambda (id) (setq posted-with id)))
+                        ((symbol-function 'emacos--render-page) (lambda () nil)))
+                (let ((emacos--chat-in-flight nil))
+                  (emacos-assist-forget))
+                (should-not emacos-assist--forget-confirm-pending)
+                ;; /forget was posted against the OLD thread-id (not nil —
+                ;; the wipe clears it but we capture it first).
+                (should (equal posted-with "abc"))
+                ;; Local buffer was wiped: thread-id cleared, transcript
+                ;; gone, only a trailing prompt remains.
+                (should-not emacos-assist--thread-id)
+                (should-not (string-match-p "earlier\\|reply"
+                                            (buffer-string)))))))
+      (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest test-assist-wipe-buffer-resets-and-persists ()
+  "`emacos-assist--wipe-buffer' clears thread-id, erases the transcript,
+re-runs init (which appends a fresh trailing prompt), and saves.  The
+next send would mint a new thread-id and write its header."
+  (let ((file (make-temp-file "test-assist-wipe" nil ".assist")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+assist_thread: old123\n\nyou> hi\nbot> bye\n> "))
+          (with-current-buffer (find-file-noselect file)
+            (setq emacos-assist--thread-id "old123")
+            (emacos-assist--wipe-buffer)
+            (should-not emacos-assist--thread-id)
+            ;; Old transcript and header are gone.
+            (let ((body (buffer-string)))
+              (should-not (string-match-p "old123\\|hi\\|bye" body))
+              ;; A trailing prompt was re-added by --init-buffer.
+              (should (emacos--chat-input-start (current-buffer))))
+            ;; And it was saved (no longer modified).
+            (should-not (buffer-modified-p))
+            ;; On-disk content reflects the wipe (no old header / transcript).
+            (let ((on-disk (with-temp-buffer
+                             (insert-file-contents file)
+                             (buffer-string))))
+              (should-not (string-match-p "old123\\|hi\\|bye" on-disk)))))
+      (when (file-exists-p file) (delete-file file)))))
 
 (ert-deftest test-assist-forget-command-set-relabels-when-armed ()
   "When `emacos-assist--forget-confirm-pending' is t, the command list

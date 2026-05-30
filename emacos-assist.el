@@ -126,15 +126,37 @@ dialog, both of which fought the touchscreen
    ((not emacos-assist--thread-id)
     (message "no server conversation to forget yet"))
    (emacos-assist--forget-confirm-pending
-    ;; Second tap: confirmed — fire for real.
-    (setq emacos-assist--forget-confirm-pending nil)
-    (emacos-assist--post-forget emacos-assist--thread-id)
-    (message "asked the server to forget this conversation")
+    ;; Second tap: confirmed — POST /forget AND wipe the .assist file
+    ;; (mirrors `emacos--chat-new-chat' clearing the *chat* buffer).
+    ;; Order: capture the old id first, clear pending state, POST
+    ;; (fire-and-forget against the old id), then wipe locally.
+    (let ((old-tid emacos-assist--thread-id))
+      (setq emacos-assist--forget-confirm-pending nil)
+      (emacos-assist--post-forget old-tid)
+      (emacos-assist--wipe-buffer))
+    (message "forgot the conversation; this chat is fresh")
     (when (fboundp 'emacos--render-page) (emacos--render-page)))
    (t
     ;; First tap: arm, and re-render so the button relabels.
     (setq emacos-assist--forget-confirm-pending t)
     (when (fboundp 'emacos--render-page) (emacos--render-page)))))
+
+(defun emacos-assist--wipe-buffer ()
+  "Reset this .assist buffer to a fresh-conversation state and persist:
+clear the buffer-local thread id, erase contents (including the old
+header + transcript), re-run `emacos-assist--init-buffer' to add a
+trailing prompt and re-mark read-only, then save.  The next send mints
+a new thread-id and writes its header into the now-empty file.
+
+Called from `emacos-assist-forget' after the /forget POST: the SERVER
+forgot the old checkpoint AND the LOCAL transcript clears, so the
+chat is fresh on both sides.  Mirrors `emacos--chat-new-chat' →
+`emacos--chat-init-buffer' for the *chat* buffer."
+  (setq emacos-assist--thread-id nil)
+  (let ((inhibit-read-only t))
+    (erase-buffer))
+  (emacos-assist--init-buffer)
+  (emacos-assist--save))
 
 (defun emacos-assist--maybe-disarm-forget (action arg)
   "Disarm `emacos-assist--forget-confirm-pending' on any button that
