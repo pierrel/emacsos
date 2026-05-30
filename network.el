@@ -23,7 +23,7 @@
 ;; Defined in os.el (which `require's this file).  Resolved at call time.
 (declare-function emacos--btn "os")
 (declare-function emacos--target "os")
-(defvar emacos--btn-scale)  ; uniform keyboard/page button height, owned by os.el
+(defvar emacos--btn-label-scale)  ; label font :height; owned by os.el (vpad gives the button its tap-target height separately)
 
 (defcustom emacos-net-refresh-interval 30
   "Seconds between background network-status refreshes.
@@ -302,7 +302,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
                           ('nil "off")
                           (_ "?"))))
         (emacos--btn (if (eq (emacos-net-state-wifi-on st) t) " Wifi off " " Wifi on ")
-                     #'emacos-net-toggle-wifi nil emacos--btn-scale)
+                     #'emacos-net-toggle-wifi nil emacos--btn-label-scale)
         (insert "\n\n")
         ;; Cell
         (if (emacos-net-state-cell-provisioned st)
@@ -313,7 +313,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
                                 (if (string-empty-p s) "" (format " (%s)" s)))))
               (emacos--btn (if (eq (emacos-net-state-active-iface st) 'cell)
                                " Cell off " " Cell on ")
-                           #'emacos-net-toggle-cell nil emacos--btn-scale))
+                           #'emacos-net-toggle-cell nil emacos--btn-label-scale))
           (insert "Cell: not set up (run cellular bring-up)"))
         (insert "\n\n")
         ;; Wifi networks
@@ -328,7 +328,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
                                ((eq kind 'needs-password) "[lock] ")
                                (t "")))
                    (label (format " %s%s  %s%% " mark ssid (or sig "?"))))
-              (emacos--btn label #'emacos-net-connect ssid emacos--btn-scale)
+              (emacos--btn label #'emacos-net-connect ssid emacos--btn-label-scale)
               (insert "\n"))))
         (when (seq-some (lambda (n) (eq (emacos-net--connect-kind n) 'needs-password))
                         (emacos-net-state-wifi-list st))
