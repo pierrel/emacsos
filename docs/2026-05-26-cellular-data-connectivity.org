@@ -420,7 +420,9 @@ connect, and the modeline *tap* on the panel.
 
 Each its own design doc + branch.
 
-1. *WireGuard for the away phone* — *the immediate follow-up*, and the reason
+1. *WireGuard for the away phone* — *SHIPPED 2026-05-31* in
+   [[file:2026-05-31-wireguard-away-phone.org][2026-05-31-wireguard-away-phone.org]].
+   Was the immediate follow-up and the reason
    "done when" stops at the public internet.  Turns the cellular public IP
    into a path home; the server→phone back-channel is the crux (Decision 1).
    Note the latency caveat already flagged in the roadmap: =call_emacs='s 15s

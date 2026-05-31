@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup server setup-server test-server test-elisp smoke
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -71,6 +71,62 @@ cellular-bringup:
 	@{ printf 'APN=%s\n' '$(APN)'; \
 	   if [ -n '$(APN_AUTH_FILE)' ]; then cat '$(APN_AUTH_FILE)'; fi; \
 	 } | ssh phone "sudo bash $(PHONE_DEPLOY_TMP); rc=\$$?; rm -f $(PHONE_DEPLOY_TMP); exit \$$rc"
+
+# === WireGuard for the away phone ===
+# See docs/2026-05-31-wireguard-away-phone.org for the full setup runbook.
+#
+# Order (one-time, per phone):
+#   1) make wg-phone-bringup SERVER_PUBKEY=... WG_ENDPOINT='[v6]:51821' \
+#        WG_ADDR=10.0.0.X/32 WG_ALLOWED_IPS='<wg-subnet>, <server-lan-ip>/32'
+#      (installs wg on the phone, generates a keypair, writes wg0.conf,
+#       brings up; prints the phone's public key at the end.)
+#   2) make wg-add-peer PEER_PUBKEY=<phone-pubkey> PEER_WG_IP=10.0.0.X/32 \
+#        PEER_LABEL=phone
+#      (appends the peer on the dev box's wg server and live-reloads.)
+#
+# Both targets require sudo (server-side: prompts locally; phone-side:
+# passwordless sudo on the Pi).  Secrets flow via env / stdin, NEVER argv.
+
+WG_DEPLOY_TMP ?= /tmp/wg-phone-bringup.sh
+SERVER_PUBKEY ?=
+WG_ENDPOINT ?=
+WG_ADDR ?=
+WG_ALLOWED_IPS ?=
+PEER_LABEL ?= phone
+PEER_PUBKEY ?=
+PEER_WG_IP ?=
+
+wg-phone-bringup:
+	@[ -n "$(SERVER_PUBKEY)" ] || { echo "error: SERVER_PUBKEY is required"; exit 1; }
+	@[ -n "$(WG_ENDPOINT)" ]   || { echo "error: WG_ENDPOINT is required (e.g. '[<server-v6>]:51821')"; exit 1; }
+	@[ -n "$(WG_ADDR)" ]       || { echo "error: WG_ADDR is required (e.g. 10.0.0.X/32)"; exit 1; }
+	@[ -n "$(WG_ALLOWED_IPS)" ]|| { echo "error: WG_ALLOWED_IPS is required"; exit 1; }
+	scp deploy/wireguard/phone-bringup.sh phone:$(WG_DEPLOY_TMP)
+	@{ printf 'SERVER_PUBKEY=%s\n' '$(SERVER_PUBKEY)'; \
+	   printf 'WG_ENDPOINT=%s\n'   '$(WG_ENDPOINT)';   \
+	   printf 'WG_ADDR=%s\n'       '$(WG_ADDR)';       \
+	   printf 'WG_ALLOWED_IPS=%s\n' '$(WG_ALLOWED_IPS)'; \
+	   printf 'PEER_LABEL=%s\n'    '$(PEER_LABEL)';    \
+	 } | ssh phone "sudo bash $(WG_DEPLOY_TMP); rc=\$$?; rm -f $(WG_DEPLOY_TMP); exit \$$rc"
+
+# Local (server-side) — invokes sudo via the user's shell, prompts for password.
+wg-add-peer:
+	@[ -n "$(PEER_PUBKEY)" ] || { echo "error: PEER_PUBKEY is required (the new peer's wg pubkey)"; exit 1; }
+	@[ -n "$(PEER_WG_IP)" ]  || { echo "error: PEER_WG_IP is required (e.g. 10.0.0.X/32)"; exit 1; }
+	PEER_PUBKEY='$(PEER_PUBKEY)' PEER_WG_IP='$(PEER_WG_IP)' PEER_LABEL='$(PEER_LABEL)' \
+	  bash deploy/wireguard/server-add-peer.sh
+
+# === Playground (bot-facing scripts on the phone) ===
+# Pushes deploy/playground/*.sh + cellular.md to ~/playground/ on the phone.
+# Idempotent — re-run any time you change one of those files in the repo.
+PHONE_PLAYGROUND_DIR ?= ~/playground
+
+playground-install:
+	ssh phone "mkdir -p $(PHONE_PLAYGROUND_DIR)"
+	scp deploy/playground/cell-validate.sh deploy/playground/cell-test.sh deploy/playground/cellular.md \
+	  phone:$(PHONE_PLAYGROUND_DIR)/
+	ssh phone "chmod +x $(PHONE_PLAYGROUND_DIR)/cell-validate.sh $(PHONE_PLAYGROUND_DIR)/cell-test.sh"
+	@echo "✓ playground files installed to phone:$(PHONE_PLAYGROUND_DIR)/"
 
 test-elisp:
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-network.el -f ert-run-tests-batch-and-exit

@@ -1,0 +1,284 @@
+#+title: WireGuard for the Away Phone — Server-Initiated Back-Channel Over Cellular
+#+date: 2026-05-31
+
+The "Remote connectivity: WireGuard for the away phone" item in [[file:../roadmap.org][roadmap.org]]:
+make the home assist server reachable from the phone (and vice versa, for the
+=emacsclient= back-channel) when the phone is off the home LAN — specifically
+on T-Mobile cellular.  This is the prerequisite the
+[[file:2026-05-26-cellular-data-connectivity.org][cellular-data-connectivity]] doc
+deferred ("done when" stopped at public-internet reach; reaching the *home server*
+needs a network path home, which is this).
+
+* Goal
+
+After this lands, the phone:
+- Reaches the home assist server's =/chat= endpoint *whether on home wifi or on
+  T-Mobile cellular*, via a single unchanged =emacos-chat-server-url=.
+- Is reachable from the home server's =emacsclient= back-channel
+  (=request.client.host= path in =server/emacsos_server/phone.py=) in both
+  situations — so agent =eval_elisp= tool calls survive a wifi → cellular flip.
+- Stays reachable when wifi flaps mid-conversation.
+
+A successful run: with phone on cellular only, =ssh phone-wg= from the dev box
+works, the bot's =eval_elisp= tool calls land on the phone, and any phone-side
+=/chat= POST traverses the tunnel to the home server.
+
+* Scope
+
+*In:*
+- WG server on the home dev box, listening UDP 51821 on the home router's
+  public IPv4 *and* on the home router's public IPv6 (firewall pinhole + router
+  port-forward respectively).
+- WG endpoint on phone is the dev box's *stable EUI-64 IPv6* address (so the
+  same =Endpoint = [v6]:51821= line works on wifi *and* on T-Mobile's
+  IPv6-only cellular — see Decision 2).
+- Phone wg conf carries =MTU = 1280= (T-Mobile cellular PMTU + wg overhead make
+  the wg-quick default unsafe for TCP — see Decision 4).
+- Phone wg =AllowedIPs= includes both the wg subnet *and* the home server's LAN
+  IP (so the phone reaches the chat URL via the tunnel transparently).
+- Server-side firewall rules: UDP 51821 forwarded to dev box on IPv4; UDP 51821
+  *inbound allowed* (no NAT needed) on IPv6 to the dev box's stable v6.
+- Reproducible setup: =deploy/wireguard/= scripts (one server-side, one
+  phone-side) + =make wg-*= targets; private keys are generated *on the
+  phone* and never leave it.
+
+*Out (called out so they don't sneak in):*
+- *464XLAT / clatd on the phone.*  T-Mobile cellular is IPv6-only; the wg
+  *tunnel itself* now rides v6 cleanly, but for the phone to reach
+  IPv4-only sites *over cellular*, it would need CLAT.  Out of scope for this
+  item — separate roadmap item if/when wanted.  WG works without it.
+- *DDNS / hostname for the WG endpoint.*  We use the raw stable v6 directly
+  because the ISP-assigned /64 has been stable.  If the prefix ever renumbers,
+  the fix is documented (update the v6 in the phone conf + bounce wg-quick) —
+  if it churns often enough to annoy, graduate to a dual-stack hostname with a
+  DDNS updater for the AAAA.  Both options weighed in §"Decisions rejected".
+- *Auto re-resolve on family change.*  WG's userspace socket is sticky on the
+  bind interface once chosen (Decision 4, "bounce-on-family-change").  We
+  document the manual remedy; a NetworkManager dispatcher script that bounces
+  wg on RA/route changes is a follow-up if this becomes routine.
+- *MASQUERADE / SNAT on the server.*  The phone reaches the server directly via
+  wg + the =<server-lan-ip>/32= AllowedIP route; no source rewriting is needed.
+
+* Decisions
+
+** 1. Topology: home server is the WG endpoint; no relay box
+
+*Opinionated.*  The instinct was to put the wg listener on a public-routed box
+(the rathole-style relay pattern).  Rejected because the
+home dev box is already publicly reachable for other services (the iOS web UI
+reaches it directly via the home router's port-forwards), so there's no NAT/CGNAT
+problem to solve.  *Topology is two-peer*: home dev box (<server-wg-ip>) ↔ phone
+(<phone-wg-ip>), with the dev box also peering existing clients (the operator's
+laptop at <other-peer-wg-ip> was already configured).  No third party, fewer moving parts,
+lower latency on the back-channel (no extra hop through Hetzner).
+
+** 2. WG endpoint is the dev box's stable EUI-64 *IPv6*
+
+*Opinionated, learned the hard way.*  Started with the v4 endpoint
+(=<home-public-ipv4>:51821=, the home router's WAN-side v4).  This works on wifi but
+*does not work on T-Mobile cellular*: T-Mobile assigns the phone an IPv6 prefix
+only, so any IPv4 destination is unreachable without CLAT, and the wg tunnel
+itself died the moment wifi went off.  Fix: use the dev box's *stable global
+IPv6* directly — both wifi (when v6 is enabled on the home LAN) and cellular
+have native v6, so the same =Endpoint = [v6]:51821= line works on both.
+
+The address must be *stable* — privacy temporaries rotate every few hours and
+would break the wg config.  On the dev box, set the NM connection to
+=ipv6.addr-gen-mode=eui64= + =ipv6.ip6-privacy=0= so only the deterministic
+EUI-64-derived address (predictable from the MAC) is on the interface, no
+privacy temps.  See the runbook's "Server-side IPv6 setup" step.
+
+Hostname-with-A+AAAA was also weighed; rejected for now because the ISP's /64
+has been stable and a hostname adds a DDNS updater dependency.  Documented as
+the follow-up if prefixes start churning.
+
+** 3. WG listener accepts both v4 and v6 transparently
+
+The kernel wg socket dual-stacks on the listen port; nothing extra to configure.
+The home router needs *two* rules: a UDP 51821 *port-forward* (v4, NAT), and a
+UDP 51821 *firewall pinhole* (v6, no NAT — IPv6 is end-to-end so it's a pure
+allow rule targeting the dev box's stable v6).  The phone uses only the v6
+endpoint, but the laptop (which can be on networks without v6) still uses the
+v4 endpoint — both clients work concurrently against the same listener.
+
+** 4. =MTU = 1280= on the phone wg interface
+
+*Critical for TCP over wg over cellular.*  Default wg-quick MTU is 1420 (for v4
+endpoint) or ~1400 (for v6).  T-Mobile cellular path's effective MTU + wg
+encapsulation overhead made TCP segments fragment and silently drop;
+ICMP echoes (small) survived, ssh (large) timed out at handshake.  =MTU = 1280=
+(the IPv6 minimum) is conservative but works on every path.  Set in the
+=[Interface]= block of the phone's =/etc/wireguard/wg0.conf=.
+
+** 5. WG endpoint family change requires =wg-quick down/up= (not just =syncconf=)
+
+*Sharp edge we hit.*  When the wg endpoint changes from v4 to v6 (or any time
+the OUTBOUND family/interface changes), =wg syncconf= updates the kernel state
+but the underlying UDP socket *stays bound to its original family/interface*.
+The phone keeps sending from the original interface — even when routing now
+points elsewhere — so the server's cached peer endpoint never updates.
+
+*Symptom:* server's =wg show= shows the peer's endpoint stuck on the "old"
+network long after the routing has moved.  *Fix:* =wg-quick down wg0; wg-quick
+up wg0= on the affected side.  This recreates the socket with current routing
+in mind.  Documented in the phone-side bring-up script and the runbook.
+
+** 6. =AllowedIPs= on the phone includes the home server's LAN IP
+
+Phone's =AllowedIPs = <wg-subnet>, <server-lan-ip>/32=.  The =/32= makes the
+phone reach the home server's *LAN address* via the tunnel — so the chat URL
+in =chat.el='s defcustom (=http://<server-lan-ip>:8765/chat=) just works from
+both wifi and cellular without changing it.  Trade-off: when phone and server
+are on the same LAN, LAN-direct ssh from the server to the phone's LAN IP
+*fails by design* — wg's strict-source-validation on the server drops the
+phone's reply (inner src = phone LAN IP, AllowedIPs = =<phone-wg-ip>/32= on the
+server side).  The workaround is to always use the wg IP from the dev box
+(=ssh phone-wg= → =<phone-wg-ip>=); the LAN alias =ssh phone= → =<phone-lan-ip>= is
+broken for as long as this AllowedIP exists.  Acceptable, since the wg IP is
+the universal path anyway.
+
+** 7. Private keys generated on the phone, never leave it
+
+Phone wg keypair is generated by =deploy/wireguard/phone-bringup.sh= running on
+the phone (passwordless sudo).  Only the *public* key crosses the wire — both
+into Claude's session output and (manually pasted) into the server's
+=make wg-add-peer PHONE_PUBKEY==... target.  Same discipline as the cellular
+bring-up's stdin-only secret handling.
+
+* Repository layout (what lives where)
+
+| File / path | Purpose |
+| --- | --- |
+| =docs/2026-05-31-wireguard-away-phone.org= | This doc. |
+| =deploy/wireguard/server-add-peer.sh= | Server-side: append a peer block to =/etc/wireguard/wg0.conf= and live-reload via =wg syncconf= (preserves existing peers' handshakes).  Idempotent. |
+| =deploy/wireguard/phone-bringup.sh= | Phone-side: install wireguard, generate keypair, write =wg0.conf=, enable + bring up =wg-quick@wg0=.  Idempotent.  Secrets via stdin. |
+| =deploy/playground/cell-validate.sh= | Deterministic internet-reachability probe (carrier, DNS, v4, v6).  Lives on the phone in =~/playground/=. |
+| =deploy/playground/cell-test.sh= | Fire-and-forget cellular cutover test: deactivate wifi → validate → reactivate.  Uses =nmcli connection down/up= (not rfkill; see [[file:2026-05-26-cellular-data-connectivity.org][cellular-data-connectivity]] doc for why). |
+| =deploy/playground/cellular.md= | Instructions for the assistant bot on how to switch the phone between home wifi and cellular. |
+| =Makefile= targets: =wg-add-peer=, =wg-phone-bringup=, =playground-install= | Driver targets that invoke the scripts with operator-supplied secrets via stdin. |
+
+No operator secrets, IPs, hostnames, or pubkeys land in any tracked file —
+they all flow at runtime via Make-vars / stdin (mirrors the cellular-bringup
+APN handling).
+
+* Bring-up runbook (new phone, from scratch)
+
+Assumes: cellular bring-up done first (the
+[[file:2026-05-26-cellular-data-connectivity.org][cellular doc]]'s
+=make cellular-bringup=), home v6 enabled on the router, and the home router
+already has the IPv4 port-forward for UDP 51821 (for any existing clients like
+a laptop).
+
+** Server-side IPv6 setup (one-time, before adding any v6-capable peer)
+
+1. *Enable a stable v6 address on the dev box.*  On the wired NM connection
+   (or whichever connection has the public v6):
+   #+begin_src bash
+   sudo nmcli con modify "Wired connection 1" ipv6.addr-gen-mode eui64 ipv6.ip6-privacy 0
+   sudo nmcli device reapply <wired-iface>     # NOT `con up` — reapply is non-disruptive
+   ip -6 addr show <wired-iface> scope global  # note the new stable v6
+   #+end_src
+   The address is deterministic from the NIC's MAC (EUI-64); record it for
+   the firewall rule and the phone conf.
+2. *Open UDP 51821 inbound on IPv6* on the home router's firewall, targeted at
+   the dev box's stable v6.  (Router-specific UI — usually called "IPv6
+   firewall" / "IPv6 pinholes" / "Access Control".)  IPv4 port-forward stays
+   as-is for existing peers.
+
+** Phone-side setup
+
+1. *Install + generate keypair on the phone, get its pubkey:*
+   #+begin_src bash
+   make wg-phone-bringup \
+       SERVER_PUBKEY=<server's wg pubkey> \
+       WG_ENDPOINT='[<dev-box-stable-v6>]:51821' \
+       WG_ADDR=<phone-wg-ip>/32 \
+       WG_ALLOWED_IPS='<wg-subnet>, <server-lan-ip>/32'
+   #+end_src
+   The script installs wg, generates the phone keypair, writes
+   =/etc/wireguard/wg0.conf= with =MTU = 1280= and =PersistentKeepalive = 25=,
+   enables =wg-quick@wg0= for boot, brings it up, and *prints the phone's
+   public key* at the end — note that for the next step.
+2. *Add the phone as a peer on the server:*
+   #+begin_src bash
+   make wg-add-peer PHONE_PUBKEY=<the phone's pubkey from step 1> \
+       PHONE_WG_IP=<phone-wg-ip>
+   #+end_src
+   This appends a =[Peer]= block and =wg syncconf= live-reloads — *no existing
+   peers are disrupted*.
+3. *Verify:*
+   #+begin_src bash
+   # From the dev box:
+   ping <phone-wg-ip>                           # should be ~5ms over wifi
+   ssh phone-wg                            # works
+   # On the phone (via ssh):
+   sudo wg show wg0                        # latest handshake recent, endpoint v6
+   #+end_src
+
+** "ssh phone-wg" alias
+
+Add to =~/.ssh/config= on machines that need direct phone access:
+#+begin_src
+Host phone-wg
+    HostName <phone-wg-ip>
+    User <user>
+#+end_src
+
+* Cellular cutover validation (the away-phone scenario)
+
+The bot-driven test (which originally couldn't survive the cutover, before this
+work) now passes end-to-end.  Drive it from the dev box:
+
+#+begin_src bash
+ssh phone-wg 'nohup bash ~/playground/cell-test.sh > /dev/null 2>&1 < /dev/null &'
+sleep 30
+ssh phone-wg 'cat ~/playground/cell-test.out'
+#+end_src
+
+A passing run shows: =wifi down: OK=, then =cell-validate.sh= with =OVERALL:
+PASS  (carrier=cell)= over the cellular default route, then =wifi up: OK=.
+*Throughout*, =ping <phone-wg-ip>= from the dev box continues to return (high
+latency during the cellular window — ~100-300ms — but no drops), and
+=ssh phone-wg= remains usable for inspection.
+
+* Known nuances / limitations (capture so future-you doesn't re-debug)
+
+- *Bounce wg-quick when the WG endpoint family changes.*  =wg syncconf=
+  updates the peer's configured endpoint but the kernel socket's bind state
+  is sticky.  Fix: =sudo wg-quick down wg0; sudo wg-quick up wg0= on the side
+  whose outbound family/interface changed.  See Decision 5.
+- *Do NOT toggle wifi via rfkill (=nmcli radio wifi off/on=).*  =systemd-rfkill=
+  persists the soft-block across reboots; a reboot mid-cutover strands the
+  phone with wifi soft-blocked and unreachable.  Use =nmcli connection
+  down/up preconfigured= instead (the playground scripts do).
+- *T-Mobile cellular is IPv6-only.*  The wg *tunnel* rides v6 cleanly with the
+  v6 endpoint; *destinations* you reach over cellular are also v6-only without
+  CLAT.  =cell-validate.sh='s pass criterion is "DNS + at least one of
+  v4/v6," so a cell-only validate shows =IPv4: FAIL / IPv6: PASS / OVERALL:
+  PASS=.  Working as intended.
+- *MTU = 1280 is mandatory on the phone wg interface.*  Without it,
+  TCP-over-wg-over-cellular drops large segments silently (ICMP still works,
+  which makes the failure mode confusing).  Set in =[Interface]=; survives
+  reboots.
+- *LAN ssh from dev box to phone's LAN IP (=ssh phone= → =.99=) is broken by
+  design.*  See Decision 6.  Always use =ssh phone-wg=.
+- *Power on the modem still matters.*  The cellular bring-up doc's #1 risk
+  (HAT power) is still real; laptop-USB-powering the phone is insufficient
+  for the modem chain.  The wg tunnel only matters if cellular is up, and
+  cellular only works under adequate power.
+
+* Out of scope / next experiments
+
+1. *CLAT (=clatd= / 464XLAT) on the phone* — would let IPv4-only destinations
+   reach the phone over cellular.  Not needed for the wg back-channel (which
+   is v6 native); only relevant for general v4 web reach over cellular.
+2. *Hostname (DDNS) for the WG endpoint* — if the ISP starts renumbering the
+   /64.  Add =wg.<your-domain>= with A + AAAA, point Endpoint at hostname,
+   wire up DDNS updater for AAAA.
+3. *NetworkManager dispatcher script to auto-bounce wg on network changes* —
+   would remove the manual =wg-quick down/up= chore if family-changes become
+   frequent.  Not worth the moving part yet.
+4. *=request.client.host=-driven src selection in =server/emacsos_server/phone.py=
+   over wg* — verified to work in practice (server sees phone as =<phone-wg-ip>=
+   when it POSTs over wg, emacsclient back-channels to that wg IP), no code
+   change needed.  Note kept here as a forward-link to that surface.

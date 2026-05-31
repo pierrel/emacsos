@@ -277,7 +277,24 @@ applied here.  Surfaced by the code-review team; not done in the
 channel PR because that PR shouldn't widen scope to `app.py`'s
 logging.
 
-** TODO Remote connectivity: WireGuard for the away phone
+** DONE Remote connectivity: WireGuard for the away phone
+
+*Shipped 2026-05-31* —
+[[file:docs/2026-05-31-wireguard-away-phone.org][docs/2026-05-31-wireguard-away-phone.org]].
+Two-peer topology (home dev box ↔ phone, no relay box — the home server is
+already publicly reachable).  Phone wg conf uses the dev box's stable EUI-64
+IPv6 as Endpoint so the same line works over wifi and over T-Mobile cellular
+(which is IPv6-only).  =MTU = 1280= on the phone wg interface to survive
+cellular PMTU + wg overhead for TCP.  Server-side firewall: IPv4 port-forward +
+IPv6 inbound pinhole for UDP 51821.  Reproducible setup via
+=deploy/wireguard/{server-add-peer,phone-bringup}.sh= + =make wg-add-peer= /
+=make wg-phone-bringup=; private keys are generated on the phone and never
+leave it.  Notes the sharp edges captured in the doc (wg-quick bounce required
+when endpoint family changes; LAN ssh to phone is broken by the AllowedIP
+trade-off — use =ssh phone-wg= → =10.0.0.X=; rfkill-persists-across-reboots
+trap for cellular cutover, addressed in the playground scripts).
+
+The original write-up below is preserved for historical context.
 
 Today the whole channel assumes the phone and server share a LAN.
 The phone POSTs =/chat= to the server's local IP, and the server
