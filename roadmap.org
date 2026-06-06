@@ -126,6 +126,28 @@ Other dimensions worth iterating once the basic args preview lands:
 
 * Other / cross-cutting
 
+** TODO Drop the deprecated =loop_exploration_tools= kwarg (SMALL — do next)
+
+Small, mechanical cleanup — do this next; it's a ~5-minute change, not an
+experiment.
+
+assist rolled back its LoopDetectionMiddleware to only the two exact-repeat
+patterns (same-tool-same-error / same-tool-same-args) and removed the
+distinct-args "exploration breadth" pattern that =loop_exploration_tools= fed.
+The kwarg is now a deprecated *no-op* on the assist side: =create_agent= /
+=Thread= still ACCEPT it (so we don't break) but ignore it.
+
+We still pass it:
+- =server/emacsos_server/app.py:276= → =create_agent(loop_exploration_tools=LOOP_EXPLORATION_TOOLS, ...)=
+- =LOOP_EXPLORATION_TOOLS = frozenset({"eval_elisp"})= at =server/emacsos_server/channel.py:298=
+- imported at =app.py:34=
+
+Action: drop the kwarg at the call site and remove =LOOP_EXPLORATION_TOOLS=
+(and its import).  =eval_elisp= is unaffected — loop detection now applies the
+exact-repeat guards uniformly to every tool, so there's nothing to tune per
+tool.  Once emacsos stops passing it, assist can delete the no-op param
+entirely (its docstrings already point here).
+
 ** DONE Conversation persistence across /chat requests
 
 Shipped: =_build_thread= now persists the conversation across /chat turns
