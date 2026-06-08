@@ -1,0 +1,188 @@
+#+title: Hardware Build Log: the field-test handheld
+#+date: 2026-06-08
+
+*Living doc.* Unlike the dated design docs in this directory, this one is
+a running build log for the *physical* device — the bill of materials,
+what's connected, how it's held together, and what's still unknown. Edit
+it as you build; append dated notes under [[*Iteration log][Iteration log]] so the history of
+the physical build survives the way the design history does.
+
+Goal of the current milestone: take the existing bench rig *outside* and
+field-test it one-handed, *without a real case*. Everything below is
+scoped to that.
+
+* What this device is
+A malleable Emacs handheld — a 320x240 touchscreen frame with a nine-key
+(T9) keyboard, on a Raspberry Pi, talking over a tunnel to the =assist=
+agent at home. See [[file:../README.org][README.org]] and the manifesto post
+"Where we are now" on larochelle.io for the why. This doc is only the
+*hardware*.
+
+* Bill of materials
+** On hand / connected (documented + tested)
+| Subsystem    | Part                                      | Status / notes                                                                 |
+|--------------+-------------------------------------------+--------------------------------------------------------------------------------|
+| Mainboard    | Raspberry Pi Zero 2 W                     | 64-bit quad-core, kernel =6.12…-rpi-v8=. Working. See [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]]. |
+| Display      | 320x240 touchscreen                       | Working. *Model/chipset undocumented* — see [[*Known unknowns][Known unknowns]].                   |
+| Modem        | Waveshare SIM7600G-H 4G HAT               | Same module as the OurPhone project. USB→=qmi_wwan=, =/dev/cdc-wdm0=, =wwan0=, ModemManager+NM. Brought up; see [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]]. |
+| Cell antenna | (ships with the SIM7600 HAT, u.FL/IPEX)   | "I have an antenna, just need to connect it." Confirm connector before the walk. |
+| Power        | 2× Adafruit PowerBoost 1000C (#2465)      | DC/DC boost + LiPo charger, daisy-chained. + a Li-ion cell. Working.            |
+| Battery gauge| — (none)                                  | PowerBoost reports state via *analog LEDs only*; =power_supply= node confirmed absent 2026-05-30. No software battery %. |
+| Off-home net | WireGuard away-phone                       | Shipped. MTU 1280, keepalive 25, stable v6 endpoint, server UDP 51821. See [[file:2026-05-31-wireguard-away-phone.org][WireGuard doc]]. |
+| Home net     | On-board 2.4 GHz WiFi (Zero 2 W)          | NM metric 100, auto failover to cellular (+20000 penalty on dead links).        |
+
+** To buy for the field test (the bench→field gap)
+The one load-bearing constraint: the SIM7600 HAT must be powered from a
+*separate ≥2.5–3 A rail, NOT bus-powered off the Pi* ([[file:2026-05-26-cellular-data-connectivity.org][cellular doc]] ~l.289).
+On the bench that's a wall supply; outdoors it isn't there.
+
+| Item                              | Why                                                        | Rough cost |
+|-----------------------------------+-----------------------------------------------------------+------------|
+| ≥3 A USB power bank for the modem | Feeds the modem's *own* rail (Rail 2). *First check if your existing bank already does ≥3 A* — if so, point it at the modem and skip this. See [[*Power & wiring][Power & wiring]]. | $0–40      |
+| Activated data SIM (known APN)    | =make cellular-bringup APN=…=. T-Mobile/IPv6-only is the tested path. Standard SIM form factor. | carrier    |
+| Backing plate (acrylic/FR4/ply)   | The structural "phone body" — see [[*Assembly: the slab][Assembly]].                       | $5         |
+| M2.5 nylon standoff + screw kit   | Rigidify the Pi+screen GPIO sandwich; mount modem to a corner. | $6         |
+| Adhesive-back Velcro (hook+loop)  | Repositionable mount for power bank + modem.               | $5         |
+| Strain-relief consumables         | Short USB-OTG cable, zip-ties + adhesive mounts, hot glue. | $5–10      |
+*Total new spend ≈ $40–70.* No new screen/modem/battery needed — those
+are on hand.
+
+* Assembly: the slab (no case)
+Don't enclose anything. Mount everything to *one rigid flat plate* and
+hold the plate like a phone. The plate does the structural job a case
+would, with zero design time.
+
+** Layout
+- *Substrate:* 3mm acrylic / FR4 protoboard / thin plywood (foamcore is
+  fine for the very first walk). Cut slightly bigger than the screen.
+- *Front — boards:* Pi + display HAT are already a GPIO sandwich; make it
+  rigid with M2.5 nylon standoffs + screws through the mounting holes.
+  The SIM7600 connects by *USB, not the header*, so it doesn't stack —
+  standoff or VHB-tape it to a free corner.
+- *Back — power:* Velcro the power bank (so you can pull it to recharge)
+  and the modem if not standoff'd. Velcro over tape: repositionable,
+  survives many test cycles.
+
+** The two joints that actually break
+Everything else is cosmetic. These two will kill a field test if not
+strain-relieved:
+1. *Modem USB-OTG micro joint.* A micro-USB plug cantilevered off the Pi
+   snaps / intermittently disconnects under hand flex. Anchor the cable
+   to the plate (zip-tie + adhesive mount, or hot glue) ~1" back from the
+   connector so movement pulls on the plate, not the plug. Shortest OTG
+   cable possible.
+2. *Antenna u.FL/IPEX connector.* Rated for only a handful of mating
+   cycles; tears off if the pigtail flops. Tape the pigtail down *at the
+   connector*, route to the *top edge*, let only the radiating element
+   hang free. Don't coil it against the boards (detunes it).
+
+** Fastest viable build (one evening, ~$15 consumables on top of the BOM)
+1. Cut a backing plate.
+2. Standoff the Pi+screen sandwich to the front.
+3. Velcro the power bank + modem to the back/corner.
+4. Strain-relief the OTG plug *and* the antenna pigtail.
+5. Antenna whip out the top edge, taped at the root.
+When the connectors prove they survive a few outings, *then* it's worth a
+printed case.
+
+* Power & wiring
+The rule that trips people up: *two power rails, one data link.* The Pi
+and the modem are powered separately; they're only joined by a USB data
+cable. Never try to power the modem *through* the Pi — the Zero 2 W
+can't source the SIM7600's transmit-burst current, and you'll get
+brownouts / dropped registration exactly when the radio keys up.
+
+#+begin_example
+                          ┌──────── ANTENNA (u.FL → top edge) ───────┐
+                          │                                          ▲
+   ┌───────────────────┐  │   data only (USB-OTG, short cable)   ┌───┴──────────────┐
+   │  Pi Zero 2 W      │  │   ◄══════════════════════════════►   │ SIM7600G-H HAT   │
+   │  [320x240 screen  │  │  Pi inner micro-USB    SIM7600 USB   │ (qmi_wwan→wwan0) │
+   │   on GPIO header]  │  │  (HOST port)           (data port)   │                  │
+   └─────────┬─────────┘  │                                      └─────────┬────────┘
+             │ PWR IN                                                      │ PWR IN
+             │ (outer micro-USB)                                          │ (≥2.5–3 A,
+             ▼                                                             ▼  its OWN rail)
+   ┌───────────────────┐                                       ┌────────────────────────┐
+   │ RAIL 1            │                                       │ RAIL 2                 │
+   │ 2× PowerBoost     │                                       │ power-bank port @ ≥3 A │
+   │ 1000C + Li-ion    │                                       │ (PD/QC ok)             │
+   │ (analog-LED gauge)│                                       │                        │
+   └───────────────────┘                                       └────────────────────────┘
+#+end_example
+
+- *RAIL 1 → Pi.* The existing PowerBoost + Li-ion stack into the Pi's
+  *outer* micro-USB (=PWR IN=). Unchanged from the bench rig.
+- *RAIL 2 → modem.* A power-bank port rated *≥2.5–3 A* into the SIM7600's
+  own power input. On the bench this was a wall supply; outdoors it's the
+  second port of the power bank. *Do not* bus-power the modem off the Pi.
+- *Data link.* Pi's *inner* micro-USB (the USB *host* port, enabled by
+  =dtoverlay=dwc2,dr_mode=host= + =otg_mode=1= in =/boot/firmware/config.txt=,
+  per [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]] ~l.289) → SIM7600 data port, via the *shortest*
+  USB-OTG cable you have. This is joint #1 from [[*The two joints that actually break][above]] — strain-relieve it.
+- *Antenna* off the SIM7600's u.FL, routed to the top edge — joint #2.
+
+** Choosing the modem's power source
+You already have *two* independent sources: the PowerBoost+Li-ion stack
+(Rail 1, on the Pi) is separate from any USB bank. So the simplest field
+rig needs *no new purchase*:
+
+- *First choice:* point your *existing single-output power bank at the
+  modem* (Rail 2) and keep the Pi on the PowerBoost. Two physically
+  separate sources = genuinely independent rails. *Only requirement:* the
+  bank's port delivers *≥3 A* — check the label for =5V⎓3A=, or a USB-C
+  *PD* / *QC* port (PD negotiates 5 V/3 A cleanly). A =5V/2.4A= (or 2.1 A)
+  bank is marginal for the modem's transmit bursts; upgrade if so.
+- *Do NOT use a USB Y-splitter on one bank.* A passive splitter doesn't
+  make two rails — it *parallels both loads onto one regulated output*,
+  which (a) shares that port's total current budget between Pi and modem,
+  and (b) re-creates the shared rail this whole design avoids: the modem's
+  2–3 A transmit bursts sag the rail and brown out the Pi. A splitter
+  defeats the purpose.
+- *If you do buy a bank* (existing one is <3 A, or you want to retire the
+  PowerBoost for the walk): get a port *individually* rated =5V/3A= or a
+  USB-C *PD* port. Anker (PowerCore), INIU, UGREEN, Baseus are reliable.
+  ⚠️ "2 ports" alone isn't enough — many cheap dual-port banks share one
+  internal converter rated ~2.4 A *total* (no better than a splitter).
+  Look for *per-port* ratings or PD.
+
+* Open decisions
+- *Battery placement:* flat on the back (thicker, balanced, holds like a
+  phone — leaning this way for the first walk) vs. on a short lead in
+  pocket/other hand (lighter slab, one more cable to strain-relieve).
+- *Antenna routing:* top-edge whip is the default; revisit if cellular
+  signal is poor during the first walk.
+
+* Known unknowns
+- *Display model is undocumented.* Every doc says "320x240 touchscreen"
+  and never names the HAT, chipset (ILI9341? ST7789?), interface
+  (SPI/DPI), or touch type (resistive vs capacitive). The =dtoverlay= that
+  would name it lives in =/boot/firmware/config.txt= on the device, not in
+  this repo. *Action:* on the Pi, =grep -i dtoverlay /boot/firmware/config.txt=
+  and record the answer here. Matters for outdoor touch: resistive needs
+  firm taps; capacitive dislikes gloves/sweat.
+- *Battery runtime is unmeasured* and unreadable in software (no fuel
+  gauge). For the first walk, watch the PowerBoost red LED and time-box
+  the test. Optional follow-up: add a MAX17048 or LC709203F I²C fuel
+  gauge (~$5; named in [[file:../roadmap.org][roadmap.org]]) to expose battery % to
+  =display-battery-mode=.
+- *Antenna part* not named; confirm it ships with the HAT and which
+  connector before relying on it.
+- *Storage (microSD) size* and *enclosure* not documented (no case is the
+  point, for now).
+
+* Field-test checklist (fill in as you go)
+- [ ] Display model recorded (=dtoverlay=)
+- [ ] Data SIM activated + APN known
+- [ ] =make cellular-bringup APN=…= run, cellular default route confirmed
+- [ ] WireGuard away-phone tunnel up over cellular (not home WiFi)
+- [ ] Antenna connected + strain-relieved
+- [ ] Modem on its own ≥3 A power rail; OTG joint strain-relieved
+- [ ] Slab assembled; one-handed hold confirmed
+- [ ] First walk: time-boxed, watching battery LED
+
+* Iteration log
+Append dated entries as the build progresses.
+- *2026-06-08* — Doc started. BOM + slab assembly plan captured from the
+  bench rig + cellular/WireGuard docs. Nothing new bought or assembled
+  yet; this is the plan to build against.
