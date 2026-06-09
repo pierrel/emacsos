@@ -26,8 +26,8 @@ agent at home. See [[file:../README.org][README.org]] and the manifesto post
 | Display      | 320x240 touchscreen                       | Working. *Model/chipset undocumented* — see [[*Known unknowns][Known unknowns]].                   |
 | Modem        | Waveshare SIM7600G-H 4G HAT               | Same module as the OurPhone project. USB→=qmi_wwan=, =/dev/cdc-wdm0=, =wwan0=, ModemManager+NM. Brought up; see [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]]. |
 | Cell antenna | (ships with the SIM7600 HAT, u.FL/IPEX)   | "I have an antenna, just need to connect it." Confirm connector before the walk. |
-| Power        | 2× Adafruit PowerBoost 1000C (#2465)      | DC/DC boost + LiPo charger, daisy-chained. + a Li-ion cell. Working.            |
-| Battery gauge| — (none)                                  | PowerBoost reports state via *analog LEDs only*; =power_supply= node confirmed absent 2026-05-30. No software battery %. |
+| Power        | 2× Adafruit PowerBoost 1000C (#2465)      | DC/DC boost + LiPo charger. + a Li-ion cell. One PowerBoost now powers the Pi; see [[*Power & wiring][Power & wiring]] for the planned shared-cell rig. |
+| Battery gauge| — (planned: MAX17048)                     | PowerBoost has *analog LEDs only*; =power_supply= node confirmed absent 2026-05-30. Plan: a MAX17048 I²C gauge the Pi reads and shows in Emacs (no separate screen). See [[*Power & wiring][Power & wiring]]. |
 | Off-home net | WireGuard away-phone                       | Shipped. MTU 1280, keepalive 25, stable v6 endpoint, server UDP 51821. See [[file:2026-05-31-wireguard-away-phone.org][WireGuard doc]]. |
 | Home net     | On-board 2.4 GHz WiFi (Zero 2 W)          | NM metric 100, auto failover to cellular (+20000 penalty on dead links).        |
 
@@ -38,14 +38,16 @@ On the bench that's a wall supply; outdoors it isn't there.
 
 | Item                              | Why                                                        | Rough cost |
 |-----------------------------------+-----------------------------------------------------------+------------|
-| ≥3 A USB power bank for the modem | Feeds the modem's *own* rail (Rail 2). *First check if your existing bank already does ≥3 A* — if so, point it at the modem and skip this. See [[*Power & wiring][Power & wiring]]. | $0–40      |
+| Bare 5 V/3 A boost board          | The modem's *own* rail (Rail 2) off the shared cell. See [[*Power & wiring][Power & wiring]]. | $3         |
+| MAX17048 I²C fuel gauge (Adafruit #5580) | Pi reads cell % over I²C → shown in Emacs. No screen to mount/power. Closes the battery-gauge gap. | $5         |
+| Acrylic experiment base plate     | The structural "phone body": a clear acrylic sheet with a *grid of holes* — bolt Pi/modem/boards anywhere. Get the grid style, not Pi-cutout. [[https://www.cytron.io/p-rpi-acrylic-experiment-base-plate][photo]]; US: search "acrylic experiment platform Raspberry Pi". | $6–10      |
+| M2.5 nylon standoff + screw kit   | Rigidify the Pi+screen GPIO sandwich; mount boards to the plate. | $6         |
 | Activated data SIM (known APN)    | =make cellular-bringup APN=…=. T-Mobile/IPv6-only is the tested path. Standard SIM form factor. | carrier    |
-| Backing plate (acrylic/FR4/ply)   | The structural "phone body" — see [[*Assembly: the slab][Assembly]].                       | $5         |
-| M2.5 nylon standoff + screw kit   | Rigidify the Pi+screen GPIO sandwich; mount modem to a corner. | $6         |
-| Adhesive-back Velcro (hook+loop)  | Repositionable mount for power bank + modem.               | $5         |
+| Adhesive-back Velcro (hook+loop)  | Repositionable mount for the cell + power boards + modem.  | $5         |
 | Strain-relief consumables         | Short USB-OTG cable, zip-ties + adhesive mounts, hot glue. | $5–10      |
-*Total new spend ≈ $40–70.* No new screen/modem/battery needed — those
-are on hand.
+*Total new spend ≈ $30–45.* Pi, screen, modem, PowerBoost, and Li-ion
+cell are on hand — the new parts are the modem boost board, the fuel
+gauge, and the slab/mounting bits.
 
 * Assembly: the slab (no case)
 Don't enclose anything. Mount everything to *one rigid flat plate* and
@@ -53,15 +55,17 @@ hold the plate like a phone. The plate does the structural job a case
 would, with zero design time.
 
 ** Layout
-- *Substrate:* 3mm acrylic / FR4 protoboard / thin plywood (foamcore is
-  fine for the very first walk). Cut slightly bigger than the screen.
+- *Substrate:* an acrylic experiment base plate (grid of holes, [[https://www.cytron.io/p-rpi-acrylic-experiment-base-plate][photo]]) is
+  the easy buy; bare 3mm acrylic / FR4 protoboard / thin plywood also work
+  (foamcore is fine for the very first walk). Cut/pick slightly bigger than
+  the screen.
 - *Front — boards:* Pi + display HAT are already a GPIO sandwich; make it
   rigid with M2.5 nylon standoffs + screws through the mounting holes.
   The SIM7600 connects by *USB, not the header*, so it doesn't stack —
   standoff or VHB-tape it to a free corner.
-- *Back — power:* Velcro the power bank (so you can pull it to recharge)
-  and the modem if not standoff'd. Velcro over tape: repositionable,
-  survives many test cycles.
+- *Back — power:* Velcro the cell + the two power boards (PowerBoost,
+  modem boost) and the modem if not standoff'd, so you can pull the cell to
+  swap/recharge. Velcro over tape: repositionable, survives many test cycles.
 
 ** The two joints that actually break
 Everything else is cosmetic. These two will kill a field test if not
@@ -79,7 +83,7 @@ strain-relieved:
 ** Fastest viable build (one evening, ~$15 consumables on top of the BOM)
 1. Cut a backing plate.
 2. Standoff the Pi+screen sandwich to the front.
-3. Velcro the power bank + modem to the back/corner.
+3. Velcro the cell + power boards + modem to the back/corner.
 4. Strain-relief the OTG plug *and* the antenna pigtail.
 5. Antenna whip out the top edge, taped at the root.
 When the connectors prove they survive a few outings, *then* it's worth a
@@ -92,59 +96,77 @@ cable. Never try to power the modem *through* the Pi — the Zero 2 W
 can't source the SIM7600's transmit-burst current, and you'll get
 brownouts / dropped registration exactly when the radio keys up.
 
+The design: *one shared cell, two independent 5 V converters, an I²C
+gauge the Pi reads.* Sharing the *cell* is fine — it's only the *5 V
+rails* that must stay separate so the modem's transmit bursts don't sag
+the Pi.
+
 #+begin_example
-                          ┌──────── ANTENNA (u.FL → top edge) ───────┐
-                          │                                          ▲
-   ┌───────────────────┐  │   data only (USB-OTG, short cable)   ┌───┴──────────────┐
-   │  Pi Zero 2 W      │  │   ◄══════════════════════════════►   │ SIM7600G-H HAT   │
-   │  [320x240 screen  │  │  Pi inner micro-USB    SIM7600 USB   │ (qmi_wwan→wwan0) │
-   │   on GPIO header]  │  │  (HOST port)           (data port)   │                  │
-   └─────────┬─────────┘  │                                      └─────────┬────────┘
-             │ PWR IN                                                      │ PWR IN
-             │ (outer micro-USB)                                          │ (≥2.5–3 A,
-             ▼                                                             ▼  its OWN rail)
-   ┌───────────────────┐                                       ┌────────────────────────┐
-   │ RAIL 1            │                                       │ RAIL 2                 │
-   │ 2× PowerBoost     │                                       │ power-bank port @ ≥3 A │
-   │ 1000C + Li-ion    │                                       │ (PD/QC ok)             │
-   │ (analog-LED gauge)│                                       │                        │
-   └───────────────────┘                                       └────────────────────────┘
+                       ANTENNA (u.FL whip → top edge)
+                              │
+   ┌──────────────────┐   data only (USB-OTG, short)   ┌──────────────────┐
+   │  Pi Zero 2 W     │ ◄═══════════════════════════►  │  SIM7600G-H HAT  │
+   │ [320x240 screen] │  Pi inner micro-USB (HOST)     │ (qmi_wwan→wwan0) │
+   └─┬──────────┬─────┘                                └─────────┬────────┘
+     │ I²C      │ 5V PWR IN (outer micro-USB)            5V PWR IN│ (≥3 A)
+     │          │ ▲  RAIL 1                              RAIL 2 ▲ │
+     ▼          │ │                                             │ │
+ ┌────────┐  ┌──┴─┴──────────┐                         ┌────────┴─┴──────┐
+ │MAX17048│  │ PowerBoost    │                         │ 5 V/3 A boost   │
+ │ gauge  │  │ 1000C         │                         │ board           │
+ └───┬────┘  │ (charge+boost)│                         └────────┬────────┘
+     │       └──────┬────────┘                                  │
+     │   taps cell  │  ▲ wall recharge (micro-USB IN)  taps cell│
+     └──────────────┴──┴──────────────────────────────────────-┘
+                       │
+                       ▼
+               ┌──────────────┐
+               │ Li-ion cell  │  one shared cell (or a parallel 18650 pack)
+               └──────────────┘
 #+end_example
 
-- *RAIL 1 → Pi.* The existing PowerBoost + Li-ion stack into the Pi's
-  *outer* micro-USB (=PWR IN=). Unchanged from the bench rig.
-- *RAIL 2 → modem.* A power-bank port rated *≥2.5–3 A* into the SIM7600's
-  own power input. On the bench this was a wall supply; outdoors it's the
-  second port of the power bank. *Do not* bus-power the modem off the Pi.
+- *RAIL 1 → Pi.* A PowerBoost 1000C boosts the shared cell to 5 V into the
+  Pi's *outer* micro-USB (=PWR IN=), and is also the *charger* — wall
+  recharge goes into the PowerBoost's micro-USB IN, same as the bench rig.
+- *RAIL 2 → modem.* A *bare 5 V/3 A boost board* taps the *same cell* and
+  feeds the SIM7600's own power input. A single PowerBoost (~2 A peak) is
+  too weak for the radio's ≥3 A bursts, which is why the modem gets its own
+  3 A boost rather than a second PowerBoost. *Do not* bus-power the modem
+  off the Pi.
+- *Battery % → Pi → Emacs.* The *MAX17048* fuel gauge sits across the
+  *raw cell* (3.0–4.2 V, *not* a 5 V rail) and talks I²C to the Pi —
+  =SDA=→GPIO2, =SCL=→GPIO3, =3V3=, =GND= (enable with =dtparam=i2c_arm=on=).
+  The Pi reads state-of-charge and shows it in Emacs; no separate screen.
+  One gauge, one cell: the MAX17048 is single-cell with a *fixed* I²C
+  address (0x36), so keep one shared cell (or a parallel 18650 pack = one
+  logical cell). This is the [[file:../roadmap.org][roadmap]] fuel-gauge item, now load-bearing.
 - *Data link.* Pi's *inner* micro-USB (the USB *host* port, enabled by
   =dtoverlay=dwc2,dr_mode=host= + =otg_mode=1= in =/boot/firmware/config.txt=,
   per [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]] ~l.289) → SIM7600 data port, via the *shortest*
   USB-OTG cable you have. This is joint #1 from [[*The two joints that actually break][above]] — strain-relieve it.
 - *Antenna* off the SIM7600's u.FL, routed to the top edge — joint #2.
 
-** Choosing the modem's power source
-You already have *two* independent sources: the PowerBoost+Li-ion stack
-(Rail 1, on the Pi) is separate from any USB bank. So the simplest field
-rig needs *no new purchase*:
+** Reading the gauge into Emacs
+Two ways to get the MAX17048's % onto the screen; start with the first:
 
-- *First choice:* point your *existing single-output power bank at the
-  modem* (Rail 2) and keep the Pi on the PowerBoost. Two physically
-  separate sources = genuinely independent rails. *Only requirement:* the
-  bank's port delivers *≥3 A* — check the label for =5V⎓3A=, or a USB-C
-  *PD* / *QC* port (PD negotiates 5 V/3 A cleanly). A =5V/2.4A= (or 2.1 A)
-  bank is marginal for the modem's transmit bursts; upgrade if so.
-- *Do NOT use a USB Y-splitter on one bank.* A passive splitter doesn't
-  make two rails — it *parallels both loads onto one regulated output*,
-  which (a) shares that port's total current budget between Pi and modem,
-  and (b) re-creates the shared rail this whole design avoids: the modem's
-  2–3 A transmit bursts sag the rail and brown out the Pi. A splitter
-  defeats the purpose.
-- *If you do buy a bank* (existing one is <3 A, or you want to retire the
-  PowerBoost for the walk): get a port *individually* rated =5V/3A= or a
-  USB-C *PD* port. Anker (PowerCore), INIU, UGREEN, Baseus are reliable.
-  ⚠️ "2 ports" alone isn't enough — many cheap dual-port banks share one
-  internal converter rated ~2.4 A *total* (no better than a splitter).
-  Look for *per-port* ratings or PD.
+1. *Userspace read (recommended for emacsos).* A tiny poller reads the SOC
+   register (0x04) over I²C — a few lines of Python =smbus= or an =i2cget=
+   call — and a modeline element in elisp shows the %. Full control, no
+   kernel/overlay fiddling, and it slots into the same server-next-to-
+   =assist= pattern already in place.
+2. *Kernel driver.* The in-tree =max17040= driver supports the MAX17048 and
+   exposes =/sys/class/power_supply/.../capacity=, which =display-battery-mode=
+   reads directly. Conceptually cleaner, but on Pi OS you must instantiate
+   it (a custom dtoverlay, or =echo max17048 0x36 > .../new_device= at boot),
+   so it's more setup than option 1.
+
+** If the Pi ever browns out under load
+Sharing the cell is fine; sharing a *5 V converter* is not. If the modem's
+bursts ever drop the Pi (undervolt / lightning-bolt), the clean fix is
+full isolation: a *second cell + second boost board* so the two rails
+share nothing. Avoid a passive USB Y-splitter for the same reason — it
+parallels both loads onto one regulated output, re-creating exactly the
+shared rail this design avoids.
 
 * Open decisions
 - *Battery placement:* flat on the back (thicker, balanced, holds like a
@@ -161,11 +183,10 @@ rig needs *no new purchase*:
   this repo. *Action:* on the Pi, =grep -i dtoverlay /boot/firmware/config.txt=
   and record the answer here. Matters for outdoor touch: resistive needs
   firm taps; capacitive dislikes gloves/sweat.
-- *Battery runtime is unmeasured* and unreadable in software (no fuel
-  gauge). For the first walk, watch the PowerBoost red LED and time-box
-  the test. Optional follow-up: add a MAX17048 or LC709203F I²C fuel
-  gauge (~$5; named in [[file:../roadmap.org][roadmap.org]]) to expose battery % to
-  =display-battery-mode=.
+- *Battery % — design resolved, not yet built.* The plan (MAX17048 over
+  I²C → Emacs) is in [[*Power & wiring][Power & wiring]]; until it's wired, watch the PowerBoost
+  red LED and time-box the first walk. Still unknown: actual *runtime* (Wh
+  of the cell ÷ ~5–8 W load), measurable once the gauge is reading.
 - *Antenna part* not named; confirm it ships with the HAT and which
   connector before relying on it.
 - *Storage (microSD) size* and *enclosure* not documented (no case is the
@@ -177,12 +198,20 @@ rig needs *no new purchase*:
 - [ ] =make cellular-bringup APN=…= run, cellular default route confirmed
 - [ ] WireGuard away-phone tunnel up over cellular (not home WiFi)
 - [ ] Antenna connected + strain-relieved
-- [ ] Modem on its own ≥3 A power rail; OTG joint strain-relieved
+- [ ] Modem on its own 5 V/3 A boost rail off the shared cell; OTG joint strain-relieved
+- [ ] MAX17048 wired (I²C); % reading into the Emacs modeline
 - [ ] Slab assembled; one-handed hold confirmed
-- [ ] First walk: time-boxed, watching battery LED
+- [ ] First walk: time-boxed (battery % in Emacs, or PowerBoost LED until the gauge is wired)
 
 * Iteration log
 Append dated entries as the build progresses.
 - *2026-06-08* — Doc started. BOM + slab assembly plan captured from the
   bench rig + cellular/WireGuard docs. Nothing new bought or assembled
   yet; this is the plan to build against.
+- *2026-06-09* — Power architecture settled. Dropped the consumer power
+  bank in favor of a stripped-down rig: one shared Li-ion cell, a
+  PowerBoost (charge + Pi rail) and a bare 5 V/3 A boost board (modem
+  rail), with a MAX17048 I²C gauge the Pi reads into the Emacs modeline —
+  no LCD. BOM, wiring diagram, and known-unknowns updated to match; added
+  the acrylic experiment base plate + standoff kit as concrete parts.
+  Still plan-only — nothing bought/assembled.
