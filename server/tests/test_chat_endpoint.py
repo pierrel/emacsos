@@ -289,7 +289,7 @@ def test_start_event_carries_stream_id_and_ts(client):
 def test_start_stream_iter_passes_phone_ctx_to_build_thread(client):
     """The /chat handler must pass the parsed PhoneContext through to
     `_start_stream_iter` so the Thread is built with the right
-    `extra_config`.  Mocks at the build-thread boundary and asserts
+    `configurable`.  Mocks at the build-thread boundary and asserts
     on the captured PhoneContext."""
     import emacsos_server.app as app_mod
     from emacsos_server.channel import PhoneContext
@@ -359,19 +359,19 @@ def test_build_thread_binds_fixed_id_and_persistent_checkpointer(tmp_path, monke
     assert captured["thread_id"] == app_mod.CONVERSATION_THREAD_ID
     # Same persistent checkpointer instance the rest of the server uses.
     assert captured["checkpointer"] is app_mod._checkpointer()
-    # Phone toolset + context still wired through unchanged.
-    assert captured["extra_tools"] is app_mod.EMACS_TOOLS
-    assert captured["extra_config"]["configurable"]["phone_context"] is ctx
-    # eval_elisp opts into the relaxed LoopDetection threshold so the
-    # agent's emacs exploration isn't terminated prematurely.
-    assert captured["loop_exploration_tools"] == frozenset({"eval_elisp"})
+    # Phone toolset rides the AgentSpec; per-request context rides the
+    # dedicated configurable= kwarg (the AgentSpec port).
+    spec = captured["spec"]
+    assert spec.tools == tuple(app_mod.EMACS_TOOLS)
+    assert captured["configurable"]["phone_context"] is ctx
+    # The dead loop_exploration_tools kwarg is gone with the port.
+    assert "loop_exploration_tools" not in captured
     # The config-apply skill is wired in so the agent learns the
     # verify->apply_config workflow instead of wandering.  Assert on
     # contents (route -> backend), not identity, so the test isn't coupled
     # to _skill_sources()'s caching.
-    skill_sources = captured["extra_skill_sources"]
-    assert app_mod.EMACSOS_SKILLS_ROUTE in skill_sources
-    assert skill_sources[app_mod.EMACSOS_SKILLS_ROUTE] is not None
+    assert app_mod.EMACSOS_SKILLS_ROUTE in spec.skill_sources
+    assert spec.skill_sources[app_mod.EMACSOS_SKILLS_ROUTE] is not None
 
 
 # --- file-backed chat: per-thread keying + EmacsBackend ---------------------
@@ -406,11 +406,12 @@ def test_build_thread_file_chat_uses_emacs_backend_and_no_emacs_tools(tmp_path, 
     app_mod._build_thread(ctx, thread_id="abc-123", workdir="/data/proj")
 
     assert captured["thread_id"] == "abc-123"
-    assert "extra_tools" not in captured            # no emacs-control tools
-    be = captured["default_backend"]
+    spec = captured["spec"]
+    assert spec.tools == ()                         # no emacs-control tools
+    be = spec.default_backend
     assert isinstance(be, EmacsBackend)
     assert be.work_dir == "/data/proj"
-    assert captured["extra_config"]["configurable"]["phone_context"] is ctx
+    assert captured["configurable"]["phone_context"] is ctx
 
 
 def test_build_thread_file_chat_requires_workdir(tmp_path, monkeypatch):

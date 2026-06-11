@@ -9,10 +9,11 @@ ASSIST_MODEL_URL must be set when the server is invoked OR by the
 time the first /chat lands; without it, agent construction fails
 on the first chat and the client sees a clean `error` event.
 
-Agent-callable phone-control tools (eg. `eval_elisp`) are wired in
-via `extra_tools=EMACS_TOOLS` on `Thread`; per-request phone identity
-flows through `extra_config={"configurable": {"phone_context": ...}}`
-and tools read it via the `config: RunnableConfig` parameter.
+Agent-callable phone-control tools (eg. `eval_elisp`) are declared on
+the `AgentSpec` (assist's embedder contract — `spec=AgentSpec(tools=
+EMACS_TOOLS)` on `Thread`); per-request phone identity flows through
+`configurable={"phone_context": ...}` and tools read it via the
+`config: RunnableConfig` parameter.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .channel import EMACS_TOOLS, LOOP_EXPLORATION_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
+from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
 from .config import Config
 from .config_repo import ConfigRepo, render
 from . import apply as apply_mod
@@ -44,17 +45,17 @@ app = FastAPI(title="emacsos-server", version="0.2.0")
 config = Config.from_env()
 
 # Embedder skill route: a virtual-path backend holding our SKILL.md files,
-# passed to the agent via create_agent's extra_skill_sources (ADDS to the
-# built-in assist skills — distinct key from assist's SKILLS_ROUTE).  The
-# config-apply skill teaches the verify->apply_config workflow so the small
-# model doesn't wander on persistent-config requests.
+# declared via `AgentSpec.skill_sources` (ADDS to the built-in assist
+# skills — distinct key from assist's SKILLS_ROUTE).  The config-apply
+# skill teaches the verify->apply_config workflow so the small model
+# doesn't wander on persistent-config requests.
 EMACSOS_SKILLS_ROUTE = "/emacsos-skills/"
 _SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 _SKILL_SOURCES = None
 
 
 def _skill_sources() -> dict:
-    """Route -> backend mapping for `create_agent(extra_skill_sources=...)`.
+    """Route -> backend mapping for `AgentSpec.skill_sources`.
     Built lazily so the `FilesystemBackend` import defers deepagents'
     transitive imports off module load — same reason `_build_thread`
     imports `assist.thread.Thread` lazily."""
@@ -224,7 +225,7 @@ def _checkpointer():
     `check_same_thread=False` because turns run on `run_in_executor`
     worker threads; SqliteSaver serializes all DB access behind its own
     internal lock, and `_STREAM_LOCK` keeps operations from overlapping
-    semantically.  Follows `assist.thread.ThreadManager`'s setup (we skip
+    semantically.  Follows `assist.thread_manager.ThreadManager`'s setup (we skip
     its upfront DB-file touch — `sqlite3.connect` creates the file).
 
     First-init has no construction lock of its own: it's safe because
@@ -260,7 +261,10 @@ def _build_thread(phone_ctx: PhoneContext, thread_id=None, workdir=None):
     The per-request phone context is threaded into the RunnableConfig in
     both modes.  Raises whatever assist raises during construction."""
     # Import inside so module import doesn't trigger assist's
-    # transitive imports during server startup.
+    # transitive imports during server startup.  Construction stays on
+    # the pump executor thread (via `_start_stream_iter`) — Thread's
+    # model probe + skill scanning must never run on the event loop.
+    from assist.spec import AgentSpec
     from assist.thread import Thread
 
     tid = thread_id or CONVERSATION_THREAD_ID
@@ -268,15 +272,11 @@ def _build_thread(phone_ctx: PhoneContext, thread_id=None, workdir=None):
     server_dir = _thread_working_dir(tid)
     _private_makedirs(server_dir)
 
-    # model=None lets Thread call `select_chat_model` itself (reads ASSIST_MODEL_URL).
-    kwargs = dict(
-        working_dir=server_dir,
-        thread_id=tid,
-        checkpointer=_checkpointer(),
-        loop_exploration_tools=LOOP_EXPLORATION_TOOLS,
-        extra_skill_sources=_skill_sources(),
-        extra_config={"configurable": {PHONE_CONTEXT_KEY: phone_ctx}},
-    )
+    # The AgentSpec is assist's embedder contract: what THIS agent is
+    # (tools / skills / backend).  Built per turn — the file-chat
+    # EmacsBackend closes over the per-request phone identity, so a spec
+    # must never be cached as a module constant.
+    spec_kwargs = dict(skill_sources=_skill_sources())
     if thread_id is not None:
         if not workdir:
             raise ValueError("file-backed chat requires `workdir`")
@@ -292,13 +292,22 @@ def _build_thread(phone_ctx: PhoneContext, thread_id=None, workdir=None):
                 timeout=EXEC_TIMEOUT_SECONDS + 15)
         # default_backend (mutually exclusive with sandbox_backend) — being a
         # SandboxBackendProtocol, it auto-enables deepagents' `execute` tool.
-        kwargs["default_backend"] = EmacsBackend(workdir, _eval)
+        spec_kwargs["default_backend"] = EmacsBackend(workdir, _eval)
     else:
-        # sandbox_backend=None (the default): no container; the emacs-control
-        # toolset is bound for the legacy fixed conversation.
-        kwargs["extra_tools"] = EMACS_TOOLS
+        # No container; the emacs-control toolset is bound for the
+        # legacy fixed conversation.
+        spec_kwargs["tools"] = tuple(EMACS_TOOLS)
 
-    t = Thread(**kwargs)
+    # model=None lets Thread call `select_chat_model` itself (reads
+    # ASSIST_MODEL_URL).  Per-request phone identity rides the dedicated
+    # `configurable=` kwarg (formerly extra_config).
+    t = Thread(
+        working_dir=server_dir,
+        thread_id=tid,
+        checkpointer=_checkpointer(),
+        spec=AgentSpec(**spec_kwargs),
+        configurable={PHONE_CONTEXT_KEY: phone_ctx},
+    )
     # Surface the resolved context window: summarization's 0.85 trigger
     # only fires if the model profile exposes max_input_tokens, so log it
     # to make a windowing misconfig visible rather than silently degraded.

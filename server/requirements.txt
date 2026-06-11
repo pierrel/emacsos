@@ -5,7 +5,7 @@ httpx>=0.24
 pytest>=7
 
 # assist is installed editably from $(ASSIST_REPO_DIR) by the
-# Makefile (see setup-server).  Editable required: assist's pyproject
-# doesn't bundle templates/ in the wheel, so a non-editable install
-# crashes at import time.  TODO upstream: fix assist's pyproject so a
-# plain wheel install works.
+# Makefile (see setup-server).  Editable is a dev-freshness choice, no
+# longer a requirement: assist's wheel bundles templates/ and skills/
+# since the embedder-contract refactor (2026-06-11), so a plain wheel
+# install works too.
