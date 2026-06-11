@@ -126,10 +126,11 @@ Other dimensions worth iterating once the basic args preview lands:
 
 * Other / cross-cutting
 
-** TODO Drop the deprecated =loop_exploration_tools= kwarg (SMALL — do next)
+** DONE Drop the deprecated =loop_exploration_tools= kwarg (SMALL — do next)
 
-Small, mechanical cleanup — do this next; it's a ~5-minute change, not an
-experiment.
+Done on branch =port-to-agentspec= (2026-06-11), folded into the AgentSpec
+port: the kwarg and =LOOP_EXPLORATION_TOOLS= are gone from =_build_thread= /
+=channel.py=.
 
 assist rolled back its LoopDetectionMiddleware to only the two exact-repeat
 patterns (same-tool-same-error / same-tool-same-args) and removed the

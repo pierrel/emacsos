@@ -285,6 +285,3 @@ def get_config() -> str:
 # a sub-agent and the result stops surfacing — the event silently never
 # fires and the ROLLBACK button never appears.
 EMACS_TOOLS = [eval_elisp, apply_config, get_config]
-# (LOOP_EXPLORATION_TOOLS was removed with the AgentSpec port: assist's
-# loop detection dropped the per-tool Pattern-C threshold in its
-# loop-detection rollback, making the kwarg a no-op we no longer pass.)
