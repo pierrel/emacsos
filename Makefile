@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -173,6 +173,26 @@ setup-server: $(SERVER_STAMP)
 server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m uvicorn emacsos_server.app:app \
 	  --host 0.0.0.0 --port $${EMACSOS_SERVER_PORT:-8765} --reload
+
+# Install the emacsos server as a systemd unit (the persistent equivalent
+# of `make server`, mirroring assist's assist-web.service).  Substitutes
+# operator user/paths into deploy/emacsos-server.service.in at install time
+# so nothing host-specific is committed.  Runs as your user, enabled on
+# boot, restart-on-failure, started after llamacpp.  Needs interactive sudo
+# (writes /etc/systemd/system and enables the unit).  Point EMACSOS_ENV_FILE
+# at the env that defines ASSIST_MODEL_URL (defaults to the assist .dev.env).
+EMACSOS_SERVER_PORT ?= 8765
+EMACSOS_ENV_FILE ?= $(ASSIST_REPO_DIR)/.dev.env
+install-server-service: $(SERVER_STAMP)
+	sed -e 's|@@USER@@|$(shell id -un)|g' \
+	    -e 's|@@SERVER_DIR@@|$(CURDIR)/server|g' \
+	    -e 's|@@ENV_FILE@@|$(EMACSOS_ENV_FILE)|g' \
+	    -e 's|@@PORT@@|$(EMACSOS_SERVER_PORT)|g' \
+	    deploy/emacsos-server.service.in \
+	  | sudo tee /etc/systemd/system/emacsos-server.service >/dev/null
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now emacsos-server.service
+	@echo "✓ emacsos-server.service installed + enabled + started on :$(EMACSOS_SERVER_PORT)"
 
 test-server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m pytest tests/ -v
