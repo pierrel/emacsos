@@ -15,23 +15,31 @@ number to the deterministic `emacos-call` command. You act entirely through
 Contacts live in plain files on the phone — by default
 `~/.emacs.d/emacsos/contacts.org`, plus anything under
 `~/.emacs.d/emacsos/contacts/`. Each entry is a name with a phone number near
-it. Search for the requested name:
+it. Search for the name. Match it as a LITERAL and shell-quote it — a name
+may contain spaces, apostrophes, or quotes — so use `shell-quote-argument`
+(prevents shell injection) and `grep -F` (no regex surprises):
 
 ```elisp
 (shell-command-to-string
- "grep -rinE -A2 'NAME' ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null")
+ (concat "grep -irF -A2 -- " (shell-quote-argument NAME)
+         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null"))
 ```
 
 From the matching block, take the phone number — digits with an optional
 leading `+`. Prefer E.164 (leading `+` and country code).
 
-If the number isn't in the matched block (the file may format it
-differently, or place it before the name / farther away), read the whole
-file and find it there — don't guess:
+If the number isn't in the matched block (it may sit farther from the name),
+RE-GREP with a wider context window. Do NOT `cat` the whole file — it holds
+other people's numbers and the tool result goes back to the model; keep that
+PII out of the result:
 
 ```elisp
-(shell-command-to-string "cat ~/.emacs.d/emacsos/contacts.org")
+(shell-command-to-string
+ (concat "grep -irF -A8 -B2 -- " (shell-quote-argument NAME)
+         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null"))
 ```
+
+If it's still not found, tell the user you couldn't find a number for them.
 
 - **No match** → tell the user "No contact named X" and STOP. Never invent a
   number, never dial.
