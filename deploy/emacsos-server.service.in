@@ -1,0 +1,22 @@
+# Template for the EmacsOS server systemd unit.  Installed (with paths/user
+# substituted) by `make install-server-service` — see the Makefile target.
+# Placeholders (@@...@@) are filled at install time so no operator-specific
+# path lands in the repo.
+[Unit]
+Description=EmacsOS server (FastAPI gateway embedding the assist agent)
+After=network-online.target llamacpp.service
+Wants=network-online.target llamacpp.service
+
+[Service]
+Type=exec
+User=@@USER@@
+WorkingDirectory=@@SERVER_DIR@@
+# Source the agent env (ASSIST_MODEL_URL &c.) via a login shell so an
+# `export KEY=val`/quoted .dev.env parses the same way `make server` does,
+# then exec uvicorn (no --reload for a service).
+ExecStart=/bin/bash -lc 'set -a; . @@ENV_FILE@@; set +a; exec .venv/bin/python -m uvicorn emacsos_server.app:app --host 0.0.0.0 --port @@PORT@@'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
