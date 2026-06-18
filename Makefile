@@ -45,6 +45,9 @@ phone-install:
 local-deploy:
 	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
 	scp os.el chat.el emacos-assist.el network.el phone:$(PHONE_EMACSOS_DIR)/
+	# Phone-side helper scripts (the call skill shells out to these via
+	# eval_elisp -- mmcli lives on the phone, so the scripts do too).
+	scp server/emacsos_server/skills/call/place_call.sh server/emacsos_server/skills/call/hangup.sh phone:$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
 	# run -- the snippet re-applies (setq emacos-chat-server-url ...)
 	# which would otherwise be reset back to the defcustom default
