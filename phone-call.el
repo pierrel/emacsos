@@ -25,12 +25,19 @@ root via polkit when emacs runs without a login session."
       (cons code (string-trim (buffer-string))))))
 
 (defun emacos-call--modem-index ()
-  "Return the modem's numeric index as a string, or nil if none present.
-Resolved fresh each call because the SIM7600 re-enumerates under load
-and its index changes."
-  (let ((out (cdr (emacos-call--mmcli "-L"))))
-    (when (string-match "/Modem/\\([0-9]+\\)" out)
-      (match-string 1 out))))
+  "Resolve the modem's numeric index, fresh (the SIM7600 re-enumerates
+under load and its index changes).  Return the index as a string; or an
+\"error: ...\" status string that distinguishes a DENIED mmcli
+(passwordless sudo / polkit not configured) from a genuinely ABSENT
+modem, so a sudo regression isn't misreported as \"no modem\".  Callers
+pass an \"error:\"-prefixed return straight through."
+  (let* ((r (emacos-call--mmcli "-L"))
+         (code (car r)) (out (cdr r)))
+    (cond
+     ((string-match "/Modem/\\([0-9]+\\)" out) (match-string 1 out))
+     ((and (not (zerop code)) (string-match-p "sudo\\|password" out))
+      "error: mmcli unavailable (passwordless sudo not configured?)")
+     (t "error: no modem found"))))
 
 ;;;###autoload
 (defun emacos-call (number)
@@ -44,8 +51,8 @@ number) and by the agent via eval_elisp."
          (if (not (string-match-p emacos-call--number-re number))
              (format "error: invalid number: %s" number)
            (let ((m (emacos-call--modem-index)))
-             (if (not m)
-                 "error: no modem found"
+             (if (string-prefix-p "error:" m)
+                 m
                (let* ((create (cdr (emacos-call--mmcli
                                     "-m" m
                                     (format "--voice-create-call=number=%s" number))))
@@ -59,6 +66,8 @@ number) and by the agent via eval_elisp."
                   ((not path) (format "error: could not create call: %s" create))
                   ((zerop (car (emacos-call--mmcli "-o" path "--start")))
                    (format "dialing: %s" path))
+                  ;; --start failed: drop the orphaned (created-but-unstarted)
+                  ;; call object so it can't linger before returning the error.
                   (t (emacos-call--mmcli "-o" path "--hangup")
                      (format "error: dial failed (modem not registered?) for %s"
                              path)))))))))
@@ -73,9 +82,11 @@ Returns \"hung-up: ...\" or \"error: ...\"."
   (let* ((m (emacos-call--modem-index))
          (status
           (cond
-           ((not m) "error: no modem found")
+           ((string-prefix-p "error:" m) m)
            ((zerop (car (emacos-call--mmcli "-m" m "--voice-hangup-all")))
             "hung-up: all calls ended")
+           ;; Benign after a mid-call USB re-enumeration: the call dropped
+           ;; with the old modem, so there's nothing left to hang up.
            (t "error: hangup failed (no active call?)"))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))

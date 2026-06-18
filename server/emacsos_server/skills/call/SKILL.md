@@ -25,6 +25,14 @@ it. Search for the requested name:
 From the matching block, take the phone number — digits with an optional
 leading `+`. Prefer E.164 (leading `+` and country code).
 
+If the number isn't in the matched block (the file may format it
+differently, or place it before the name / farther away), read the whole
+file and find it there — don't guess:
+
+```elisp
+(shell-command-to-string "cat ~/.emacs.d/emacsos/contacts.org")
+```
+
 - **No match** → tell the user "No contact named X" and STOP. Never invent a
   number, never dial.
 - **More than one match** → list them and ask which. STOP — don't guess.

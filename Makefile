@@ -129,7 +129,7 @@ playground-install:
 	@echo "✓ playground files installed to phone:$(PHONE_PLAYGROUND_DIR)/"
 
 test-elisp:
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-network.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-network.el -l tests/test-call.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

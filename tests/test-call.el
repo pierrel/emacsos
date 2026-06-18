@@ -9,6 +9,12 @@
 (require 'cl-lib)
 (require 'phone-call)
 
+;; Special (dynamic) so the stub lambda built in `test-call--stub' and the
+;; `let'-binding in `test-call--with' refer to the SAME variable across
+;; functions (a lexical binding wouldn't reach the stub).
+(defvar test-call--seen nil
+  "Arg-lists passed to the stubbed `emacos-call--mmcli', most-recent-first.")
+
 (defun test-call--stub (responses)
   "Return a stub for `emacos-call--mmcli' driven by RESPONSES.
 RESPONSES is a list of (PRED . (CODE . OUT)); the first PRED matching the
@@ -66,6 +72,38 @@ arg list wins.  Also records calls in the dynamic var `test-call--seen'."
                   (cons 0 "/org/freedesktop/ModemManager1/Modem/3"))
             (cons (lambda (a) (member "--voice-hangup-all" a)) (cons 0 "")))
     (should (string-prefix-p "hung-up:" (emacos-hang-up)))))
+
+(ert-deftest emacos-call-create-failure ()
+  "Create yields no /Call/N path -> error, and --start is never issued."
+  (test-call--with
+      (list (cons (lambda (a) (member "-L" a))
+                  (cons 0 "/org/freedesktop/ModemManager1/Modem/3"))
+            (cons (lambda (a) (test-call--has a "--voice-create-call"))
+                  (cons 1 "error: couldn't create call")))
+    (should (string-prefix-p "error: could not create call"
+                             (emacos-call "+14155550123")))
+    (should-not (cl-some (lambda (a) (member "--start" a)) test-call--seen))))
+
+(ert-deftest emacos-call-sudo-unavailable ()
+  "Denied mmcli (no passwordless sudo) is reported distinctly, not as no-modem."
+  (test-call--with
+      (list (cons (lambda (a) (member "-L" a))
+                  (cons 1 "sudo: a password is required")))
+    (should (string-prefix-p "error: mmcli unavailable"
+                             (emacos-call "+14155550123")))))
+
+(ert-deftest emacos-call-number-boundaries ()
+  "Too short / too long reject without touching mmcli (the dial guard)."
+  (test-call--with nil
+    (should (string-prefix-p "error: invalid number" (emacos-call "1234")))
+    (should (string-prefix-p "error: invalid number"
+                             (emacos-call "1234567890123456")))
+    (should (null test-call--seen))))
+
+(ert-deftest emacos-hang-up-no-modem ()
+  (test-call--with (list (cons (lambda (a) (member "-L" a))
+                               (cons 0 "No modems were found")))
+    (should (string-prefix-p "error: no modem found" (emacos-hang-up)))))
 
 (provide 'test-call)
 ;;; test-call.el ends here

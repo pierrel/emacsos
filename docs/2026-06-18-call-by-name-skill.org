@@ -34,8 +34,10 @@ the two actors is *determinism*:
   *confirm with the user*, then =(emacos-call "+1...")=; =(emacos-hang-up)= to
   end. No new server tools, no server events.
 - *Contacts*: plain files on the phone (=~/.emacs.d/emacsos/contacts.org= and
-  =contacts/=). Private/untracked PII; a fake-persona =contacts.example.org=
-  ships as the template. The skill searches them; nothing is committed.
+  =contacts/=). Private/untracked PII. A fake-persona =contacts.example.org= in
+  the skill dir documents the format *for reference* — the operator copies it to
+  the phone themselves; it is NOT auto-deployed and calling never reads it. The
+  skill searches the phone files; nothing real is committed.
 - *Confirm-before-dial* lives in the agent (the skill mandates it), not in the
   primitive — currently a conversational "yes".
 
@@ -63,6 +65,11 @@ the two actors is *determinism*:
 - *Two-tap confirm button + call-state modeline + Hang-up button* in the phone
   UI. Today: confirm is conversational ("yes"); hang-up is =(emacos-hang-up)=
   via the agent or =M-x=. These are user-side wrappers on the primitives.
+  Priority order (per review): the *two-tap dial button* is the STRUCTURAL fix
+  for confirm-before-dial (the human tap, not the model, becomes the dial
+  trigger — fix-by-construction), and a *one-tap Hang-up* is the worst current
+  latency gap (ending a live call shouldn't need an agent round-trip). Both
+  rank above the contacts picker.
 - *Contacts picker* — the deterministic user path for "call by name" without the
   agent (tap a contact -> number -> =emacos-call=). Today a name-based call goes
   through the agent (fuzzy resolution is agent work, by the principle).
@@ -72,7 +79,10 @@ the two actors is *determinism*:
 - Full loop end-to-end from the phone: =call <name>= -> load_skill ->
   =eval_elisp= grep -> confirm -> =(emacos-call "+1...")= -> dial. Verified.
 - Voice + the dial recipe work on the SIM7600G-H (see the call-audio doc).
-- 143 ERT pass (6 new), =phone-call.el= byte-compile clean.
+- 152 ERT pass (9 call tests in =tests/test-call.el=), =phone-call.el=
+  byte-compile clean. (The =test-elisp= target lists test files explicitly, so
+  it had to be taught about the new file — caught in review; the call tests
+  weren't running until then.)
 
 * Open / known issues
 - *Reliable calls need the modem power rail (hardware).* On the current
@@ -85,3 +95,14 @@ the two actors is *determinism*:
   history is fine. Possibly worth a prompt nudge for robustness.
 - *Server is a manual process* today; the =emacsos-server-service= branch adds a
   systemd unit (=make install-server-service=) to cut over.
+- *Skill is offered on both chat surfaces but only operable on the home
+  =*chat*=.* The =call= skill is discoverable in the file-backed =.assist=
+  surface too, but that surface has =execute= (shell), not the =eval_elisp=
+  lever the skill is written against, and =emacos-call= is elisp — so "call X"
+  inside a =.assist= buffer would not work. Validated only on the home =*chat*=
+  (the phone's default). Fix later: scope the skill to the =eval_elisp= surface,
+  or make it surface-agnostic.
+- *Confirm-before-dial is prose-only.* The skill mandates it, but a small model
+  follows prose weakly and a missed confirm places a real call. An accepted v1
+  trade-off (skill-first, no propose_call). The structural fix is the deferred
+  two-tap dial button (above) — make it the first UI follow-up.
