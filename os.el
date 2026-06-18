@@ -985,6 +985,7 @@ window-buffer-change follower can't recurse into an in-progress render."
 (require 'chat)
 (require 'emacos-assist)
 (require 'network)
+(require 'phone-call)
 
 (provide 'os)
 ;;; os.el ends here

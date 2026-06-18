@@ -34,7 +34,7 @@ phone-install:
 	@echo "→ Installing to phone:$(PHONE_EMACSOS_DIR)"
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	ssh phone "mkdir -p $(PHONE_EMACSOS_DIR)"
-	scp os.el chat.el emacos-assist.el network.el phone:$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el emacos-assist.el network.el phone-call.el phone:$(PHONE_EMACSOS_DIR)/
 	sed "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" deploy/emacsos-init.el.in \
 	  | ssh phone "cat > $(PHONE_INIT_SNIPPET)"
 	@echo
@@ -44,16 +44,13 @@ phone-install:
 
 local-deploy:
 	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
-	scp os.el chat.el emacos-assist.el network.el phone:$(PHONE_EMACSOS_DIR)/
-	# Phone-side helper scripts (the call skill shells out to these via
-	# eval_elisp -- mmcli lives on the phone, so the scripts do too).
-	scp server/emacsos_server/skills/call/place_call.sh server/emacsos_server/skills/call/hangup.sh phone:$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el emacos-assist.el network.el phone-call.el phone:$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
 	# run -- the snippet re-applies (setq emacos-chat-server-url ...)
 	# which would otherwise be reset back to the defcustom default
 	# when chat.el is reloaded.  Conditional so a fresh phone (no
 	# phone-install yet) still gets a working code reload.
-	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
+	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 # Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
 # docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific

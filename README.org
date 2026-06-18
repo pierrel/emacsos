@@ -196,3 +196,56 @@ ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 - =deploy/= — install artifacts (init snippet template)
 - =references/= — research papers informing the keyboard design
 - =Makefile= — launch + deploy + test + smoke targets
+
+* Layers
+Control of the system should be funneled mainly through emacs. This allows the user and agent to access the same functionality. The agent and user should be acting through emacs: either elisp or direct, interactive commands. See below:
+
+#+begin_src dot :file images/layers.png
+digraph G {
+    user -> agent;
+    agent -> skills;
+    skills -> emacs_interactive_commands;
+    skills -> elisp;
+    user -> emacs_interactive_commands;
+    emacs_interactive_commands -> phone_calls;
+    emacs_interactive_commands -> file_ops;
+    emacs_interactive_commands -> buffer_management;
+    emacs_interactive_commands -> other_things;
+}
+#+end_src
+
+#+RESULTS:
+[[file:images/layers.png]]
+
+** The principle: deterministic primitives + an interpretive agent
+
+Everything the device *does* is an emacs command, and the line between the two
+actors is *determinism*:
+
+- *Emacs interactive commands are deterministic primitives.* A concrete
+  argument in, the same action out — every time, with no language model in the
+  loop and no callback into the agent. =(emacos-call "+14155550123")= dials that
+  number. It does not ask "who is that?", it does not confirm, it does not think.
+  These primitives are the reliable floor that the user (by tapping) and the
+  agent (by evaluating elisp) share equally.
+
+- *The agent is the interpretive layer on top.* Turning fuzzy human intent
+  ("call Pierre") into a concrete primitive call is irreducibly the agent's job:
+  who is Pierre, what does "call" mean, what is his number, is there more than
+  one match? Resolution, disambiguation, and confirmation live *here* — never
+  inside a primitive.
+
+- *Skills are elisp recipes.* A skill does not add a bespoke tool; it tells the
+  agent which elisp to evaluate — to either *initiate* a deterministic command
+  (=(emacos-call "+1…")=) or *change/extend* functionality (define a command,
+  then persist it via the config layer). The agent's one universal lever is
+  evaluating elisp.
+
+So a feature is built as: a deterministic emacs command (shared by user and
+agent) + a skill that teaches the agent how to resolve intent down to that
+command's concrete arguments. "call Pierre" is agent work; =(emacos-call
+"+1…")= is a primitive. They must not blur together.
+
+(Agent-platform services that are *not* device control — the language model,
+conversation memory, config git-versioning/rollback — stay server-side; the
+deterministic-primitive rule is about controlling the *device*.)
