@@ -57,7 +57,7 @@ number) and by the agent via eval_elisp."
                                     "-m" m
                                     (format "--voice-create-call=number=%s" number))))
                       ;; Use the FULL /org/.../Call/N path: mmcli segfaults on
-                      ;; a truncated path (see docs/2026-06-18-call-audio.org).
+                      ;; a truncated path (see the call-audio findings doc).
                       (path (when (string-match
                                    "/org/freedesktop/ModemManager1/Call/[0-9]+"
                                    create)

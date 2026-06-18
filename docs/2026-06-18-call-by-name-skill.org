@@ -3,7 +3,8 @@
 
 The "call <name>" feature, and the architectural principle it established. The
 *hardware/recording* side (modem, PCM capture, transcription) is its sibling
-doc [[file:2026-06-18-call-audio.org][2026-06-18-call-audio.org]]; this doc is the *control-plane design*.
+doc =2026-06-18-call-audio.org= (it lands with the hardware-build work — not in
+this branch yet); this doc is the *control-plane design*.
 
 * The principle (now in README "Layers")
 Everything the device does is an emacs command, and the dividing line between
@@ -78,7 +79,8 @@ the two actors is *determinism*:
 * Validated (live, 2026-06-18)
 - Full loop end-to-end from the phone: =call <name>= -> load_skill ->
   =eval_elisp= grep -> confirm -> =(emacos-call "+1...")= -> dial. Verified.
-- Voice + the dial recipe work on the SIM7600G-H (see the call-audio doc).
+- Voice + the dial recipe work on the SIM7600G-H (documented in the sibling
+  call-audio findings doc that lands with the hardware-build work).
 - 152 ERT pass (9 call tests in =tests/test-call.el=), =phone-call.el=
   byte-compile clean. (The =test-elisp= target lists test files explicitly, so
   it had to be taught about the new file — caught in review; the call tests
