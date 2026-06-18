@@ -411,6 +411,12 @@ a phone number without leaving the keyboard.
 ** TODO Speech to text
 T9 is terrible.
 
+*STT VALIDATED (2026-06-18)* — =faster-whisper= =base.en= on *CPU* transcribed a
+real call clip accurately (the RTX 3090 is occupied by llama.cpp, ~2 GB free, so
+CPU; fast enough for short clips).  Pipeline + gotchas (16 kHz, normalize, VAD)
+in [[file:docs/2026-06-18-call-audio.org][docs/2026-06-18-call-audio.org]].  The
+Pi Zero *2* W is quad-core 64-bit (the "too weak" note below was for the Zero W).
+
 Push-to-talk dictation as a faster input path.  The Pi Zero W is too weak for
 real-time on-device whisper (single-core ARM11, 512 MB), so do it server-side — the
 home assist server is already there: a command records via ALSA (=arecord=, needs
@@ -422,6 +428,15 @@ hold-speak-release drops accurate text into the current buffer.
 
 ** TODO Phone calling
 Needs "3G antenna" and "Headphone jack".
+
+*VOICE CONFIRMED on hardware (2026-06-18)* —
+[[file:docs/2026-06-18-call-audio.org][docs/2026-06-18-call-audio.org]]: a test
+call placed via =mmcli --voice= rang + connected on T-Mobile (=dialing →
+ringing-out → active=); no =NO CARRIER= / VoLTE dead end.  Call audio is *not* a
+USB sound card — it's a raw 16 kHz/16-bit/mono PCM stream on =/dev/ttyUSB4=
+gated by =AT+CPCMREG=1=.  In-call *recording* + transcription is proven; two-way
+*talking* is pending the headset/dongle.  Remaining build work: the
+AT-port-ownership udev rule and a call-audio bridge daemon (see the doc).
 
 A command + call buffer: enter a number (needs *Numbers*), dial via the modem
 (=mmcli --voice= or =AT D=), and show call state (dialing / ringing / connected /
@@ -508,6 +523,15 @@ reports signal, and does data + SMS + (if voice-capable) a test call.
 
 ** TODO Audio I/O ("headphone jack")
 I need to purchase and connect a headphone jack onto the pi zero w.
+
+*UPDATE (2026-06-18)* — see [[file:docs/2026-06-18-call-audio.org][docs/2026-06-18-call-audio.org]].
+The modem HAT is the Waveshare *4G HAT (B)*: it already has an onboard NAU8810
+codec + a 3.5mm TRRS headset jack (call audio via =AT+CSDVC=, the analog
+fallback) *and* exposes call audio as a raw PCM stream on =/dev/ttyUSB4=
+(=AT+CPCMREG=1=) — the software path, which records/transcribes today.  For
+*media* audio (TTS/STT, not the call): a USB audio dongle (Sabrent AU-MMSA) into
+a free USB-A port on the HAT's built-in hub — no extra OTG hub needed.  Two
+inherently-separate endpoints; unifying onto one headset is the Option-1 bridge.
 
 The Zero W has *no analog audio* — no 3.5mm jack and no analog out on the header
 (unlike full-size Pis) — so this is really "add audio I/O", output *and* a mic (calls
