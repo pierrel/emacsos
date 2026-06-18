@@ -22,7 +22,7 @@ Return a cons (EXIT-CODE . TRIMMED-OUTPUT).  mmcli voice control needs
 root via polkit when emacs runs without a login session.  A failure to
 even launch the process (e.g. `sudo' absent / not on PATH) is caught and
 returned as a non-zero code with the message, so callers always get a
-status string and the primitive never raises a signal."
+(code . output) cons and this helper never raises a signal."
   (with-temp-buffer
     (let* ((raw (condition-case err
                     (apply #'call-process "sudo" nil t nil "-n" "mmcli" args)
@@ -94,13 +94,16 @@ Returns \"hung-up: ...\" or \"error: ...\"."
   (interactive)
   (let* ((m (emacos-call--modem-index))
          (status
-          (cond
-           ((string-prefix-p "error:" m) m)
-           ((zerop (car (emacos-call--mmcli "-m" m "--voice-hangup-all")))
-            "hung-up: all calls ended")
-           ;; Benign after a mid-call USB re-enumeration: the call dropped
-           ;; with the old modem, so there's nothing left to hang up.
-           (t "error: hangup failed (no active call?)"))))
+          (if (string-prefix-p "error:" m)
+              m
+            (let ((r (emacos-call--mmcli "-m" m "--voice-hangup-all")))
+              (if (zerop (car r))
+                  "hung-up: all calls ended"
+                ;; Often benign (the call already dropped on a mid-call USB
+                ;; re-enumeration), but surface mmcli's reason, not a guess.
+                (format "error: hangup failed: %s"
+                        (let ((d (cdr r)))
+                          (if (string= d "") "no active call?" d))))))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 

@@ -19,9 +19,12 @@ it. Search for the name. Match it as a LITERAL and shell-quote it — a name
 may contain spaces, apostrophes, or quotes — so use `shell-quote-argument`
 (prevents shell injection) and `grep -F` (no regex surprises):
 
+`-m 5` caps the matches so a short/common name can't dump the whole file
+(other contacts' numbers are PII — keep them out of the result):
+
 ```elisp
 (shell-command-to-string
- (concat "grep -irF -A2 -- " (shell-quote-argument NAME)
+ (concat "grep -irF -m 5 -A2 -- " (shell-quote-argument NAME)
          " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null"))
 ```
 
@@ -35,7 +38,7 @@ PII out of the result:
 
 ```elisp
 (shell-command-to-string
- (concat "grep -irF -A8 -B2 -- " (shell-quote-argument NAME)
+ (concat "grep -irF -m 5 -A8 -B2 -- " (shell-quote-argument NAME)
          " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null"))
 ```
 

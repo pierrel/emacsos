@@ -21,8 +21,12 @@ RESPONSES is a list of (PRED . (CODE . OUT)); the first PRED matching the
 arg list wins.  Also records calls in the dynamic var `test-call--seen'."
   (lambda (&rest args)
     (push args test-call--seen)
-    (or (cdr (cl-find-if (lambda (r) (funcall (car r) args)) responses))
-        (cons 0 ""))))
+    (let ((hit (cl-find-if (lambda (r) (funcall (car r) args)) responses)))
+      (if hit
+          (cdr hit)
+        ;; Fail loudly on an unanticipated mmcli call rather than masking it
+        ;; with a default success — a test must declare every call it expects.
+        (error "unexpected emacos-call--mmcli call: %S" args)))))
 
 (defmacro test-call--with (responses &rest body)
   (declare (indent 1))
@@ -61,7 +65,8 @@ arg list wins.  Also records calls in the dynamic var `test-call--seen'."
                   (cons 0 "/org/freedesktop/ModemManager1/Modem/3"))
             (cons (lambda (a) (test-call--has a "--voice-create-call"))
                   (cons 0 "Successfully created new call: /org/freedesktop/ModemManager1/Call/2"))
-            (cons (lambda (a) (member "--start" a)) (cons 1 "error")))
+            (cons (lambda (a) (member "--start" a)) (cons 1 "error"))
+            (cons (lambda (a) (member "--hangup" a)) (cons 0 "")))
     (should (string-prefix-p "error: dial failed" (emacos-call "+14155550123")))
     ;; start failed -> we must have issued a --hangup on the created path
     (should (cl-some (lambda (a) (member "--hangup" a)) test-call--seen))))

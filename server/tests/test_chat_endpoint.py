@@ -474,6 +474,17 @@ def test_config_apply_skill_directs_to_get_config_not_phone_probe():
     assert "read it first with `eval_elisp`" not in text
 
 
+def test_skill_sources_has_call_skill_with_confirm_guidance():
+    """The call skill ships and keeps its confirm-before-dial mandate — it can
+    place a REAL phone call, so guard its presence + the safety instruction."""
+    import emacsos_server.app as app_mod
+    path = os.path.join(app_mod._SKILLS_DIR, "call", "SKILL.md")
+    assert os.path.exists(path)
+    text = open(path).read()
+    assert "emacos-call" in text
+    assert "Confirm before dialing" in text
+
+
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):
     """The checkpointer is built once and reused — two turns share it, so
     the conversation accumulates in one threads.db."""
