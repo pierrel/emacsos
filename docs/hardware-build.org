@@ -23,7 +23,7 @@ agent at home. See [[file:../README.org][README.org]] and the manifesto post
 | Subsystem    | Part                                      | Status / notes                                                                 |
 |--------------+-------------------------------------------+--------------------------------------------------------------------------------|
 | Mainboard    | Raspberry Pi Zero 2 W                     | 64-bit quad-core, kernel =6.12…-rpi-v8=. Working. See [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]]. |
-| Display      | 320x240 touchscreen                       | Working. *Model/chipset undocumented* — see [[*Known unknowns][Known unknowns]].                   |
+| Display      | Adafruit PiTFT 2.8" Capacitive            | Working. ILI9340 over SPI (=fb_ili9340=, =/dev/fb1=, 64 MHz, =rotate=180= → 320x240, ~31 fps); FT5x06 *capacitive* touch on I²C-1 @ 0x38. Overlay: =dtoverlay=pitft28-capacitive,rotate=180,speed=64000000,fps=30=. Recorded 2026-06-17. |
 | Modem        | Waveshare SIM7600G-H 4G HAT               | Same module as the OurPhone project. USB→=qmi_wwan=, =/dev/cdc-wdm0=, =wwan0=, ModemManager+NM. Brought up; see [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]]. |
 | Cell antenna | (ships with the SIM7600 HAT, u.FL/IPEX)   | "I have an antenna, just need to connect it." Confirm connector before the walk. |
 | Power        | 2× Adafruit PowerBoost 1000C (#2465)      | DC/DC boost + LiPo charger. + a Li-ion cell. One PowerBoost now powers the Pi; see [[*Power & wiring][Power & wiring]] for the planned shared-cell rig. |
@@ -40,7 +40,7 @@ On the bench that's a wall supply; outdoors it isn't there.
 |-----------------------------------+-----------------------------------------------------------+------------|
 | Bare 5 V/3 A boost board          | The modem's *own* rail (Rail 2) off the shared cell. See [[*Power & wiring][Power & wiring]]. | $3         |
 | MAX17048 I²C fuel gauge (Adafruit #5580) | Pi reads cell % over I²C → shown in Emacs. No screen to mount/power. Closes the battery-gauge gap. | $5         |
-| Acrylic experiment base plate     | The structural "phone body": a clear acrylic sheet with a *grid of holes* — bolt Pi/modem/boards anywhere. Get the grid style, not Pi-cutout. [[https://www.cytron.io/p-rpi-acrylic-experiment-base-plate][photo]]; US: search "acrylic experiment platform Raspberry Pi". | $6–10      |
+| Acrylic base plate / blank sheet  | The structural "phone body": a rigid flat plate to bolt the Pi+screen standoffs to (Velcro the rest). True "grid of holes" plates are scarce off-the-shelf — Cytron's is *discontinued*. Easiest buys: a [[https://www.protostax.com/products/protostax-for-breadboard][ProtoStax acrylic baseplate]] (~$15, pre-threaded holes — ignore the walls), or a blank 1/8" cast-acrylic sheet you drill where needed. *Avoid* Pi-cutout plates (they fix the Pi in one spot). | $6–15      |
 | M2.5 nylon standoff + screw kit   | Rigidify the Pi+screen GPIO sandwich; mount boards to the plate. | $6         |
 | Activated data SIM (known APN)    | =make cellular-bringup APN=…=. T-Mobile/IPv6-only is the tested path. Standard SIM form factor. | carrier    |
 | Adhesive-back Velcro (hook+loop)  | Repositionable mount for the cell + power boards + modem.  | $5         |
@@ -55,10 +55,11 @@ hold the plate like a phone. The plate does the structural job a case
 would, with zero design time.
 
 ** Layout
-- *Substrate:* an acrylic experiment base plate (grid of holes, [[https://www.cytron.io/p-rpi-acrylic-experiment-base-plate][photo]]) is
-  the easy buy; bare 3mm acrylic / FR4 protoboard / thin plywood also work
-  (foamcore is fine for the very first walk). Cut/pick slightly bigger than
-  the screen.
+- *Substrate:* a rigid flat plate. Off-the-shelf "grid of holes" acrylic is
+  scarce (Cytron's is discontinued) — a [[https://www.protostax.com/products/protostax-for-breadboard][ProtoStax acrylic baseplate]]
+  (pre-threaded holes) is the easy buy; bare 3mm cast acrylic / FR4
+  protoboard / thin plywood also work, drilled where needed (foamcore is
+  fine for the very first walk). Cut/pick slightly bigger than the screen.
 - *Front — boards:* Pi + display HAT are already a GPIO sandwich; make it
   rigid with M2.5 nylon standoffs + screws through the mounting holes.
   The SIM7600 connects by *USB, not the header*, so it doesn't stack —
@@ -135,7 +136,9 @@ the Pi.
   off the Pi.
 - *Battery % → Pi → Emacs.* The *MAX17048* fuel gauge sits across the
   *raw cell* (3.0–4.2 V, *not* a 5 V rail) and talks I²C to the Pi —
-  =SDA=→GPIO2, =SCL=→GPIO3, =3V3=, =GND= (enable with =dtparam=i2c_arm=on=).
+  =SDA=→GPIO2, =SCL=→GPIO3, =3V3=, =GND=. I²C is *already enabled*
+  (=dtparam=i2c_arm=on=, for the capacitive touch) — bus 1 is live with the
+  touch at 0x38, and the gauge's 0x36 is free, so no overlay work needed.
   The Pi reads state-of-charge and shows it in Emacs; no separate screen.
   One gauge, one cell: the MAX17048 is single-cell with a *fixed* I²C
   address (0x36), so keep one shared cell (or a parallel 18650 pack = one
@@ -145,6 +148,44 @@ the Pi.
   per [[file:2026-05-26-cellular-data-connectivity.org][cellular doc]] ~l.289) → SIM7600 data port, via the *shortest*
   USB-OTG cable you have. This is joint #1 from [[*The two joints that actually break][above]] — strain-relieve it.
 - *Antenna* off the SIM7600's u.FL, routed to the top edge — joint #2.
+
+** Fanning the one cell out to all three loads
+The cell is a *single* two-wire pack (one red =+=, one black/white =−=, often
+on a JST-PH plug) — there are not separate batteries for the Pi and the modem.
+All three loads hang off that *same* pair *in parallel*: both red into one
+node, both black/white into the other.
+
+#+begin_example
+   cell + ●──┬───────────┬───────────┐
+             │           │           │
+        PowerBoost   modem 5V/3A   MAX17048
+         VBAT+        boost VIN+    VBAT
+             │           │           │
+   cell − ●──┴───────────┴───────────┘   (commoned the same way)
+#+end_example
+
+This parallel tap is the *intended* design — sharing the *cell* is fine; only
+the *5 V rails* downstream must stay separate (above). To actually join three
+pairs to one cell, pick one:
+- *Solder + heatshrink* the three =+= leads together and the three =−= leads
+  together. Cheapest and most reliable; best for the high-current modem tap.
+- *2-row screw terminal block* — =+= on one row, =−= on the other, short leads
+  to each board. Most flexible, since the bare boost board and the MAX17048
+  have screw/solder terminals (not JST).
+- *JST-PH parallel "Y" splitter* — tidy if the cell uses the standard JST-PH,
+  but see the current note — a thin JST is a bottleneck for the modem rail.
+
+Two hazards this build must respect:
+1. *Current rating.* The shared node carries the *sum* of both rails. A modem
+   transmit burst (≥3 A at 5 V ≈ 15 W) pulls ~4–5 A from the ~3.7 V cell
+   *plus* the Pi rail — call it *6–8 A peak* through that one node. A standard
+   JST-PH is only ~2–3 A. So don't run everything through one thin JST: use
+   *≥20 AWG* at the parallel node, split as close to the cell as possible, and
+   prefer *soldering* the modem tap over a flimsy Y-cable. An inline fuse on
+   the cell =+= is good Li-ion practice.
+2. *Polarity.* *Meter the cell before connecting* — reversed polarity instantly
+   kills both boost boards. Adafruit's JST-PH convention is red =+=, black =−=;
+   a *white* =−= is unusual, so confirm which wire is which, don't assume.
 
 ** Reading the gauge into Emacs
 Two ways to get the MAX17048's % onto the screen; start with the first:
@@ -176,13 +217,13 @@ shared rail this design avoids.
   signal is poor during the first walk.
 
 * Known unknowns
-- *Display model is undocumented.* Every doc says "320x240 touchscreen"
-  and never names the HAT, chipset (ILI9341? ST7789?), interface
-  (SPI/DPI), or touch type (resistive vs capacitive). The =dtoverlay= that
-  would name it lives in =/boot/firmware/config.txt= on the device, not in
-  this repo. *Action:* on the Pi, =grep -i dtoverlay /boot/firmware/config.txt=
-  and record the answer here. Matters for outdoor touch: resistive needs
-  firm taps; capacitive dislikes gloves/sweat.
+- *Display model — RESOLVED 2026-06-17.* It's an *Adafruit PiTFT 2.8"
+  Capacitive*: ILI9340 chipset over *SPI* (=fb_ili9340= fbtft driver,
+  =spi0.0= @ 64 MHz, native 240x320 → =rotate=180= → 320x240, ~31 fps, on
+  =/dev/fb1=); touch is *capacitive*, =edt_ft5x06= driver on I²C bus 1 @
+  0x38 (panel "EP0110M09"). Overlay in =/boot/firmware/config.txt=:
+  =dtoverlay=pitft28-capacitive,rotate=180,speed=64000000,fps=30=. Outdoor
+  implication: capacitive, so it dislikes gloves/sweat (no firm-tap issue).
 - *Battery % — design resolved, not yet built.* The plan (MAX17048 over
   I²C → Emacs) is in [[*Power & wiring][Power & wiring]]; until it's wired, watch the PowerBoost
   red LED and time-box the first walk. Still unknown: actual *runtime* (Wh
@@ -193,7 +234,7 @@ shared rail this design avoids.
   point, for now).
 
 * Field-test checklist (fill in as you go)
-- [ ] Display model recorded (=dtoverlay=)
+- [X] Display model recorded (=dtoverlay=) — Adafruit PiTFT 2.8" Capacitive (ILI9340 SPI / FT5x06 touch), 2026-06-17
 - [ ] Data SIM activated + APN known
 - [ ] =make cellular-bringup APN=…= run, cellular default route confirmed
 - [ ] WireGuard away-phone tunnel up over cellular (not home WiFi)
@@ -215,3 +256,21 @@ Append dated entries as the build progresses.
   no LCD. BOM, wiring diagram, and known-unknowns updated to match; added
   the acrylic experiment base plate + standoff kit as concrete parts.
   Still plan-only — nothing bought/assembled.
+- *2026-06-17* — Sourcing: the Cytron experiment base plate cited here is
+  *discontinued*, and was a labeled Pi+breadboard plate, not the uniform
+  grid this doc wants. True "grid of holes" acrylic is scarce as a stocked
+  product (the uniform-M3-grid versions are mostly 3D-print files). Updated
+  the BOM + substrate notes to point at a ProtoStax acrylic baseplate or a
+  blank cast-acrylic sheet you drill. Still plan-only — nothing bought.
+- *2026-06-17* — Display identified off the running device (=config.txt= +
+  dmesg/lsmod): *Adafruit PiTFT 2.8" Capacitive* — ILI9340 over SPI
+  (=fb_ili9340=, =/dev/fb1=, 64 MHz, rotate 180 → 320x240), capacitive
+  =edt_ft5x06= touch on I²C-1 @ 0x38. Closed the display known-unknown +
+  checklist item. Also confirmed I²C is already on, with 0x36 free for the
+  planned MAX17048 gauge — no overlay work needed for it.
+- *2026-06-17* — Added a *Fanning the one cell out to all three loads*
+  subsection to Power & wiring: the single 2-wire cell is paralleled to both
+  boosts + the gauge (intended; only the 5 V rails stay separate), how to
+  make the junction (solder / terminal block / JST-Y), and the two hazards —
+  the shared node carries the *summed* ~6–8 A peak (don't bottleneck on a thin
+  JST), and meter polarity before connecting.
