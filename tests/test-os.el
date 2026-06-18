@@ -232,13 +232,14 @@ ones beat the narrow."
 
 (ert-deftest test-os-action-row-renders-del-spc-mode-tab-ret ()
   (with-temp-buffer
-    (emacos--render-action-row)
-    (let ((s (buffer-string)))
-      (should (string-match-p "DEL" s))
-      (should (string-match-p "SPC" s))
-      (should (string-match-p "abc" s))   ; the mode button, default `lower'
-      (should (string-match-p "TAB" s))
-      (should (string-match-p "RET" s)))))
+    (let ((emacos--kbd-mode 'lower))    ; bind, don't rely on the global default
+      (emacos--render-action-row)
+      (let ((s (buffer-string)))
+        (should (string-match-p "DEL" s))
+        (should (string-match-p "SPC" s))
+        (should (string-match-p "abc" s))   ; the mode button in `lower'
+        (should (string-match-p "TAB" s))
+        (should (string-match-p "RET" s))))))
 
 ;;; Double-tap-space → ". " gesture
 

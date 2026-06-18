@@ -894,7 +894,8 @@ button when a modifier is active (firebrick4 vs Chat's dodger blue)."
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center
                   (pcase emacos--kbd-mode
-                    ('lower "abc") ('caps "ABC") ('number "123") ('symbol "#+="))
+                    ('lower "abc") ('caps "ABC") ('number "123") ('symbol "#+=")
+                    (_ "abc"))   ; unknown mode -> letters, matching emacos--active-layout
                   unit)
                  #'emacos--tap-cycle-mode nil emacos--btn-label-scale)
     (insert " ")
