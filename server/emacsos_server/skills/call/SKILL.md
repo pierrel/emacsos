@@ -19,13 +19,14 @@ it. Search for the name. Match it as a LITERAL and shell-quote it — a name
 may contain spaces, apostrophes, or quotes — so use `shell-quote-argument`
 (prevents shell injection) and `grep -F` (no regex surprises):
 
-`-m 5` caps the matches so a short/common name can't dump the whole file
-(other contacts' numbers are PII — keep them out of the result):
+`-m 5` caps matches per file and `| head -c 2000` is a hard total cap, so a
+short/common name (across many files) can't dump lots of other contacts'
+numbers (PII) into the result:
 
 ```elisp
 (shell-command-to-string
  (concat "grep -irF -m 5 -A2 -- " (shell-quote-argument NAME)
-         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null"))
+         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null | head -c 2000"))
 ```
 
 From the matching block, take the phone number — digits with an optional
@@ -39,7 +40,7 @@ PII out of the result:
 ```elisp
 (shell-command-to-string
  (concat "grep -irF -m 5 -A8 -B2 -- " (shell-quote-argument NAME)
-         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null"))
+         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null | head -c 2000"))
 ```
 
 If it's still not found, tell the user you couldn't find a number for them.
