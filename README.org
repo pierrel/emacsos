@@ -249,3 +249,16 @@ command's concrete arguments. "call Ana" is agent work; =(emacos-call
 (Agent-platform services that are *not* device control — the language model,
 conversation memory, config git-versioning/rollback — stay server-side; the
 deterministic-primitive rule is about controlling the *device*.)
+
+** =*chat*= is the universal launchpad
+
+The home =*chat*= buffer is the phone's default, general-purpose surface — a
+scratch/launchpad for anything that doesn't have its own app. Through
+=eval_elisp= it runs *generic elisp* and, via that, any *interactive command*:
+search files, open a buffer, change config, place a call. Both levers live
+here — the open-ended one (evaluate elisp) and the deterministic primitives
+(commands) — so a skill's job is to *direct the model on which to use*: search
+and inspect by *evaluating elisp*; act by *invoking a command*. (The call skill
+is the worked example: it greps the user's files for a number via elisp, then
+dials via the =emacos-call= command.) New capabilities slot in the same way — a
+deterministic command plus a skill that routes to it — not as bespoke tools.
