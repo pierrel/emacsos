@@ -230,13 +230,13 @@ ones beat the narrow."
     (should (> (* 2 third) third))   ; SPC (2/3) wider than DEL (1/3)
     (should (> (* 2 unit) unit))))   ; MOD/RET (2u) wider than CAPS/TAB (1u)
 
-(ert-deftest test-os-action-row-renders-del-spc-caps-tab-ret ()
+(ert-deftest test-os-action-row-renders-del-spc-mode-tab-ret ()
   (with-temp-buffer
     (emacos--render-action-row)
     (let ((s (buffer-string)))
       (should (string-match-p "DEL" s))
       (should (string-match-p "SPC" s))
-      (should (string-match-p "caps" s))
+      (should (string-match-p "abc" s))   ; the mode button, default `lower'
       (should (string-match-p "TAB" s))
       (should (string-match-p "RET" s)))))
 
@@ -768,7 +768,7 @@ If caps influenced the lookup, the test would probe C-Q (unbound) and
 the binding would not fire."
   (let ((fired nil)
         (emacos--modifier 'C)
-        (emacos--caps t)
+        (emacos--kbd-mode 'caps)
         (emacos--armed-tap nil))
     (with-temp-buffer
       (test-os--with-tap-env
@@ -840,17 +840,17 @@ captured buffer was killed or the user switched).  Silent abandon."
 (ert-deftest test-os-action-row-mod-label-cycles ()
   "Action row line 2 is MOD CAPS TAB RET; MOD label reflects the
 current state through all four positions of the cycle (and the row
-keeps showing DEL/SPC/caps/TAB/RET alongside)."
+keeps showing DEL/SPC/the mode button (abc)/TAB/RET alongside)."
   (dolist (pair '((nil . "mod") (C . "C") (M . "M") (C-M . "C-M")))
     (with-temp-buffer
       (let ((emacos--modifier (car pair))
-            (emacos--caps nil))
+            (emacos--kbd-mode 'lower))
         (emacos--render-action-row)
         (let ((s (buffer-string)))
           (should (string-match-p (regexp-quote (cdr pair)) s))
           (should (string-match-p "DEL" s))
           (should (string-match-p "SPC" s))
-          (should (string-match-p "caps" s))
+          (should (string-match-p "abc" s))
           (should (string-match-p "TAB" s))
           (should (string-match-p "RET" s)))))))
 
@@ -866,7 +866,7 @@ Regression for the APPEND=t-vs-nil choice in `add-face-text-property'."
     (define-key map (kbd "C-w") #'ignore)
     (with-temp-buffer
       (let ((emacos--modifier 'C)
-            (emacos--caps nil)
+            (emacos--kbd-mode 'lower)
             (emacos--armed-tap (list :group "qw" :index 1
                                      :window (selected-window)
                                      :buffer (current-buffer)))
@@ -941,6 +941,61 @@ top-commands changed."
                (lambda () '(("SAME" . same)))))
       (emacos--on-window-buffer-change nil)
       (should rendered))))
+
+;;; Keyboard mode cycle: numbers / symbols ;;;
+
+(ert-deftest test-os-active-layout-per-mode ()
+  "The active layout follows the mode; lower/caps both type letters."
+  (let ((emacos--kbd-mode 'lower))  (should (eq (emacos--active-layout) emacos-t9-layout)))
+  (let ((emacos--kbd-mode 'caps))   (should (eq (emacos--active-layout) emacos-t9-layout)))
+  (let ((emacos--kbd-mode 'number)) (should (eq (emacos--active-layout) emacos-123-layout)))
+  (let ((emacos--kbd-mode 'symbol)) (should (eq (emacos--active-layout) emacos-symbols-layout))))
+
+(ert-deftest test-os-char-str-upcases-only-in-caps ()
+  (let ((emacos--kbd-mode 'lower)) (should (equal (emacos--char-str ?a) "a")))
+  (let ((emacos--kbd-mode 'caps))  (should (equal (emacos--char-str ?a) "A")))
+  ;; caps is a no-op for digits/symbols (upcase leaves them unchanged)
+  (let ((emacos--kbd-mode 'caps))
+    (should (equal (emacos--char-str ?7) "7"))
+    (should (equal (emacos--char-str ?@) "@"))))
+
+(ert-deftest test-os-cycle-mode-sequence ()
+  "CAPS cycles lower -> caps -> number -> symbol -> lower."
+  (cl-letf (((symbol-function 'emacos--render-page) #'ignore)
+            ((symbol-function 'emacos--refocus) #'ignore)
+            ((symbol-function 'emacos--commit) #'ignore)
+            ((symbol-function 'emacos--commit-armed-tap) #'ignore))
+    (let ((emacos--kbd-mode 'lower))
+      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'caps))
+      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'number))
+      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'symbol))
+      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'lower)))))
+
+(ert-deftest test-os-mode-button-label-per-mode ()
+  "The mode button shows abc/ABC/123/#+= for each mode."
+  (dolist (pair '((lower . "abc") (caps . "ABC") (number . "123") (symbol . "#+=")))
+    (with-temp-buffer
+      (let ((emacos--modifier nil) (emacos--kbd-mode (car pair)))
+        (emacos--render-action-row)
+        (should (string-match-p (regexp-quote (cdr pair)) (buffer-string)))))))
+
+(ert-deftest test-os-numbers-9-0-share-key ()
+  "Numbers layer: 1-8 single-tap, 9 and 0 share the last key."
+  (let ((groups (apply #'append emacos-123-layout)))
+    (should (member "90" groups))
+    (dolist (d '("1" "2" "3" "4" "5" "6" "7" "8"))
+      (should (member d groups)))))
+
+(ert-deftest test-os-mod-filters-active-layer ()
+  "MOD reads the ACTIVE layer, so C-/M- works over digits too (not just
+letters): bound-groups returns the number layout's shape with the bound
+digit surviving the filter."
+  (with-temp-buffer
+    (test-os--with-tap-env (("C-7" (lambda () (interactive))))
+      (let* ((emacos--kbd-mode 'number)
+             (bg (emacos--bound-groups 'C (current-buffer))))
+        (should (= (length bg) (length emacos-123-layout)))
+        (should (member "7" (apply #'append bg)))))))
 
 (provide 'test-os)
 ;;; test-os.el ends here

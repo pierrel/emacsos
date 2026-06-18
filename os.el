@@ -39,14 +39,37 @@
   '(("qw" "ertyui" "op")
     ("as" "dfgh"   "jkl")
     ("zxc" "vbn"   "m"))
-  "Optimal-T9 keyboard layout.  Each key group is a string of letters.")
+  "Optimal-T9 letter layout.  Each key group is a string of letters.")
+
+(defvar emacos-123-layout
+  '(("1" "2" "3")
+    ("4" "5" "6")
+    ("7" "8" "90"))
+  "Numbers layer.  Digits 1-8 are single-tap; 9 and 0 share the last key.")
+
+(defvar emacos-symbols-layout
+  '((".:/" ",;\"" "?!'")
+    ("@#&" "-_~"  "+*=")
+    ("()%" "[]$"  "{}|"))
+  "Symbols layer.  Multi-tap reaches the rarer symbols in a group.")
+
+(defun emacos--active-layout ()
+  "The key-group layout for the current `emacos--kbd-mode'.
+`lower' and `caps' both type letters; `number'/`symbol' swap the grid."
+  (pcase emacos--kbd-mode
+    ('number emacos-123-layout)
+    ('symbol emacos-symbols-layout)
+    (_       emacos-t9-layout)))
 
 ;; Multi-tap state
 (defvar emacos--target-window nil)
 (defvar emacos--current-key nil)
 (defvar emacos--tap-index 0)
 (defvar emacos--commit-timer nil)
-(defvar emacos--caps nil)
+(defvar emacos--kbd-mode 'lower
+  "Active keyboard mode, cycled by the CAPS button:
+`lower' (abc) -> `caps' (ABC) -> `number' (123) -> `symbol' (#+=) -> loop.
+Replaces the old caps boolean: `caps' is the uppercase-letters state.")
 
 ;; Double-tap-space → ". " state
 (defvar emacos--last-space-time nil
@@ -126,8 +149,9 @@ Prefer the minibuffer when it is active."
   (setq emacos--current-key nil emacos--tap-index 0))
 
 (defun emacos--char-str (ch)
-  "Return CH as a string, respecting caps state."
-  (funcall (if emacos--caps #'upcase #'identity)
+  "Return CH as a string, upcased only in `caps' mode.
+A no-op for digits/symbols (upcase leaves them unchanged)."
+  (funcall (if (eq emacos--kbd-mode 'caps) #'upcase #'identity)
            (char-to-string ch)))
 
 ;;; Modifier-key state + filter (see docs/2026-05-27-modifier-keys.org).
@@ -178,7 +202,7 @@ positional as empty strings (not removed) so the grid doesn't reflow."
             (mapcar (lambda (kg)
                       (emacos--bound-letters-in-group kg modifier buf))
                     row))
-          emacos-t9-layout))
+          (emacos--active-layout)))
 
 (defun emacos--cancel-armed-tap-timer ()
   "Cancel the armed-tap timer if it's running."
@@ -389,9 +413,16 @@ just-typed space into \". \" — the familiar mobile period shortcut (see
           (delete-char -1)))
       (emacos--refocus))))
 
-(defun emacos--tap-caps ()
-  "Toggle caps lock and re-render the keyboard."
-  (setq emacos--caps (not emacos--caps))
+(defun emacos--tap-cycle-mode ()
+  "Cycle the keyboard mode: lower -> caps -> number -> symbol -> lower.
+One button does shift + layer.  A MOD modifier stays active across the
+cycle (it then filters whatever layer now shows); like other utility taps,
+any in-flight multi-tap letter and pending armed binding commit first."
+  (emacos--commit)                 ; finalize any in-flight multi-tap letter
+  (emacos--commit-armed-tap)       ; utility tap commits an armed binding
+  (setq emacos--kbd-mode
+        (pcase emacos--kbd-mode
+          ('lower 'caps) ('caps 'number) ('number 'symbol) (_ 'lower)))
   (emacos--render-page)
   (emacos--refocus))
 
@@ -508,7 +539,7 @@ the letter-key `substring').  Pure — testable off the device."
 
 (defun emacos--key-display (kg)
   "Format key group KG for display."
-  (let ((s (if emacos--caps (upcase kg) kg)))
+  (let ((s (if (eq emacos--kbd-mode 'caps) (upcase kg) kg)))
     s))
 
 (defvar emacos--confirm-disarm-functions nil
@@ -765,7 +796,7 @@ see `emacos--render-page'."
          (armed-idx  (and emacos--armed-tap
                           (plist-get emacos--armed-tap :index)))
          (row-i 0))
-    (dolist (row emacos-t9-layout)
+    (dolist (row (emacos--active-layout))
       (let ((col-i 0))
         (dolist (kg row)
           (when (> col-i 0)
@@ -858,8 +889,11 @@ button when a modifier is active (firebrick4 vs Chat's dodger blue)."
                  (and emacos--modifier "firebrick4"))
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
-    (emacos--btn (emacos--center (if emacos--caps "CAPS" "caps") unit)
-                 #'emacos--tap-caps nil emacos--btn-label-scale)
+    (emacos--btn (emacos--center
+                  (pcase emacos--kbd-mode
+                    ('lower "abc") ('caps "ABC") ('number "123") ('symbol "#+="))
+                  unit)
+                 #'emacos--tap-cycle-mode nil emacos--btn-label-scale)
     (insert " ")
     (put-text-property (1- (point)) (point) 'display `(space :width ,gap-w))
     (emacos--btn (emacos--center "TAB" unit) #'emacos--tap-tab nil
