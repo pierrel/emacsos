@@ -72,15 +72,18 @@ number) and by the agent via eval_elisp."
                                    "/org/freedesktop/ModemManager1/Call/[0-9]+"
                                    create)
                               (match-string 0 create))))
-                 (cond
-                  ((not path) (format "error: could not create call: %s" create))
-                  ((zerop (car (emacos-call--mmcli "-o" path "--start")))
-                   (format "dialing: %s" path))
-                  ;; --start failed: drop the orphaned (created-but-unstarted)
-                  ;; call object so it can't linger before returning the error.
-                  (t (emacos-call--mmcli "-o" path "--hangup")
-                     (format "error: dial failed (modem not registered?) for %s"
-                             path)))))))))
+                 (if (not path)
+                     (format "error: could not create call: %s" create)
+                   (let ((start (emacos-call--mmcli "-o" path "--start")))
+                     (if (zerop (car start))
+                         (format "dialing: %s" path)
+                       ;; --start failed: drop the orphaned (created-but-
+                       ;; unstarted) call object, then surface mmcli's ACTUAL
+                       ;; reason rather than a fixed guess.
+                       (emacos-call--mmcli "-o" path "--hangup")
+                       (format "error: dial failed: %s"
+                               (let ((d (cdr start)))
+                                 (if (string= d "") "mmcli --start failed" d)))))))))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 
