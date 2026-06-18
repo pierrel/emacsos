@@ -24,9 +24,14 @@ even launch the process (e.g. `sudo' absent / not on PATH) is caught and
 returned as a non-zero code with the message, so callers always get a
 status string and the primitive never raises a signal."
   (with-temp-buffer
-    (let ((code (condition-case err
+    (let* ((raw (condition-case err
                     (apply #'call-process "sudo" nil t nil "-n" "mmcli" args)
-                  (error (insert (error-message-string err)) 1))))
+                  (error (insert (error-message-string err)) 1)))
+           ;; call-process returns a descriptive STRING (not an int) when the
+           ;; child dies on a signal — e.g. mmcli segfaults. Normalize to a
+           ;; non-zero int (and record the description) so callers' arithmetic
+           ;; (`zerop' on the code) never sees a non-integer.
+           (code (if (integerp raw) raw (progn (insert (format " (%s)" raw)) 1))))
       (cons code (string-trim (buffer-string))))))
 
 (defun emacos-call--modem-index ()

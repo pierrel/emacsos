@@ -115,5 +115,15 @@ raised signal — so the primitives keep their string-return contract."
       (should (= (car r) 1))
       (should (string-match-p "sudo" (cdr r))))))
 
+(ert-deftest emacos-call--mmcli-normalizes-signal-death ()
+  "A signal-killed child (call-process returns a STRING) becomes a non-zero
+INT code, so callers' (zerop code) never breaks; the description is kept."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (&rest _) (insert "partial") "Segmentation fault")))
+    (let ((r (emacos-call--mmcli "-L")))
+      (should (integerp (car r)))
+      (should (= (car r) 1))
+      (should (string-match-p "Segmentation fault" (cdr r))))))
+
 (provide 'test-call)
 ;;; test-call.el ends here
