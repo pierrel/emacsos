@@ -1,0 +1,19 @@
+# EXAMPLE contacts file — copy to ~/.emacs.d/emacsos/contacts.org ON THE PHONE
+# and put your REAL contacts there. That phone file is PRIVATE: it holds real
+# names + numbers (PII) and must NEVER be committed to this repo.
+#
+# Format is intentionally loose — the call skill just searches for a name with
+# a nearby phone number, so any of these shapes works. Numbers should be E.164
+# (leading + and country code) so the modem dials them reliably.
+
+* Sam Rivers
+  :PROPERTIES:
+  :PHONE: +15551230001
+  :END:
+
+* Jordan Lee
+  :PROPERTIES:
+  :PHONE: +15551230002
+  :END:
+
+* Pizza Place :: +15551230003
