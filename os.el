@@ -419,8 +419,8 @@ just-typed space into \". \" — the familiar mobile period shortcut (see
   "Cycle the keyboard mode: lower -> caps -> number -> symbol -> lower.
 One button does shift + layer.  A MOD modifier stays active across the
 cycle (it then filters whatever layer now shows); like other utility taps,
-any in-flight multi-tap letter and pending armed binding commit first."
-  (emacos--commit)                 ; finalize any in-flight multi-tap letter
+any in-flight multi-tap character and pending armed binding commit first."
+  (emacos--commit)                 ; finalize any in-flight multi-tap character
   (emacos--commit-armed-tap)       ; utility tap commits an armed binding
   (setq emacos--kbd-mode
         (pcase emacos--kbd-mode
