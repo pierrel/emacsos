@@ -105,5 +105,15 @@ arg list wins.  Also records calls in the dynamic var `test-call--seen'."
                                (cons 0 "No modems were found")))
     (should (string-prefix-p "error: no modem found" (emacos-hang-up)))))
 
+(ert-deftest emacos-call--mmcli-catches-launch-failure ()
+  "A process-launch failure (e.g. sudo absent) returns a status cons, not a
+raised signal — so the primitives keep their string-return contract."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (&rest _)
+               (signal 'file-error '("Searching for program" "no such file" "sudo")))))
+    (let ((r (emacos-call--mmcli "-L")))
+      (should (= (car r) 1))
+      (should (string-match-p "sudo" (cdr r))))))
+
 (provide 'test-call)
 ;;; test-call.el ends here

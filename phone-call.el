@@ -19,9 +19,14 @@ reach mmcli.")
 (defun emacos-call--mmcli (&rest args)
   "Run \"mmcli ARGS\" as root (passwordless sudo), capturing output.
 Return a cons (EXIT-CODE . TRIMMED-OUTPUT).  mmcli voice control needs
-root via polkit when emacs runs without a login session."
+root via polkit when emacs runs without a login session.  A failure to
+even launch the process (e.g. `sudo' absent / not on PATH) is caught and
+returned as a non-zero code with the message, so callers always get a
+status string and the primitive never raises a signal."
   (with-temp-buffer
-    (let ((code (apply #'call-process "sudo" nil t nil "-n" "mmcli" args)))
+    (let ((code (condition-case err
+                    (apply #'call-process "sudo" nil t nil "-n" "mmcli" args)
+                  (error (insert (error-message-string err)) 1))))
       (cons code (string-trim (buffer-string))))))
 
 (defun emacos-call--modem-index ()
