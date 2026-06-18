@@ -1,0 +1,87 @@
+#+title: Call-by-name + the Layers model (deterministic primitives + interpretive agent)
+#+date: 2026-06-18
+
+The "call <name>" feature, and the architectural principle it established. The
+*hardware/recording* side (modem, PCM capture, transcription) is its sibling
+doc [[file:2026-06-18-call-audio.org][2026-06-18-call-audio.org]]; this doc is the *control-plane design*.
+
+* The principle (now in README "Layers")
+Everything the device does is an emacs command, and the dividing line between
+the two actors is *determinism*:
+
+- *Emacs interactive commands are deterministic primitives.* Concrete arg in,
+  same action out — no model in the loop, no callback into the agent.
+  =(emacos-call "+14155550123")= dials that number; it does not ask "who?",
+  does not confirm, does not think. The shared, reliable floor for both the
+  user (tap) and the agent (eval elisp).
+- *The agent is the interpretive layer.* Fuzzy intent ("call Ana" -> who, what
+  number, which match, confirm) is irreducibly the agent's job; it lives in a
+  *skill*, never in a primitive.
+- *Skills are elisp recipes*, not bespoke tools: resolve intent, then eval
+  elisp to initiate a deterministic command (or define+persist new
+  functionality). =eval_elisp= is the agent's one universal lever.
+- *Boundary:* device control -> emacs/elisp; agent-platform services (the
+  model, conversation memory, config git-versioning/rollback) -> server.
+
+* As built
+- *phone-call.el* (on the phone): =emacos-call= (number -> dial via mmcli) and
+  =emacos-hang-up=. Deterministic, segfault-safe full call-path, sudo-aware.
+  Return status strings (=dialing:= / =hung-up:= / =error: ...=) so the agent's
+  =eval_elisp= can branch. Shipped by =make local-deploy= / =phone-install=;
+  =os.el= requires it. Unit-tested in =tests/test-call.el= (mmcli stubbed).
+- *call skill* (=server/emacsos_server/skills/call/SKILL.md=): a pure agent
+  recipe — search the phone's contact files (=eval_elisp= grep), disambiguate,
+  *confirm with the user*, then =(emacos-call "+1...")=; =(emacos-hang-up)= to
+  end. No new server tools, no server events.
+- *Contacts*: plain files on the phone (=~/.emacs.d/emacsos/contacts.org= and
+  =contacts/=). Private/untracked PII; a fake-persona =contacts.example.org=
+  ships as the template. The skill searches them; nothing is committed.
+- *Confirm-before-dial* lives in the agent (the skill mandates it), not in the
+  primitive — currently a conversational "yes".
+
+* Differences from the earlier plan / current state — CALL THESE OUT
+1. *Dropped the get_contacts tool.* The original architect plan added a
+   =get_contacts= tool; we use a skill-directed =eval_elisp= grep of contact
+   files instead (more flexible, no bespoke tool).
+2. *Dropped propose_call + the server `call-proposed` event.* The earlier UI
+   plan derived a server event (mirroring =applied=) to drive a two-tap button.
+   Under the Layers model this is the wrong layer: a call is an emacs command;
+   the agent confirms conversationally; a user-side two-tap is a wrapper on the
+   primitive. No signal tool / server event is needed.
+3. *place_call.sh/hangup.sh removed.* Logic moved into the =emacos-call= /
+   =emacos-hang-up= emacs commands so the *user* shares the exact primitive,
+   not just the agent. (Earlier they were shell scripts the agent ran by path.)
+4. *"agent may dial" decision, refined.* The user chose "agent may dial"; the
+   refinement is that the agent dials by evaluating the *deterministic*
+   primitive =(emacos-call "+1...")= — name resolution never reaches the
+   primitive.
+5. *Three-phase workflow, compressed.* This was built iteratively/live rather
+   than design-doc-first; this doc + the review team are the retroactive design
+   gate the user asked for.
+
+* Deferred (not built)
+- *Two-tap confirm button + call-state modeline + Hang-up button* in the phone
+  UI. Today: confirm is conversational ("yes"); hang-up is =(emacos-hang-up)=
+  via the agent or =M-x=. These are user-side wrappers on the primitives.
+- *Contacts picker* — the deterministic user path for "call by name" without the
+  agent (tap a contact -> number -> =emacos-call=). Today a name-based call goes
+  through the agent (fuzzy resolution is agent work, by the principle).
+- *Multiple numbers per contact*, richer contact search.
+
+* Validated (live, 2026-06-18)
+- Full loop end-to-end from the phone: =call <name>= -> load_skill ->
+  =eval_elisp= grep -> confirm -> =(emacos-call "+1...")= -> dial. Verified.
+- Voice + the dial recipe work on the SIM7600G-H (see the call-audio doc).
+- 143 ERT pass (6 new), =phone-call.el= byte-compile clean.
+
+* Open / known issues
+- *Reliable calls need the modem power rail (hardware).* On the current
+  wall->phone->modem path the modem intermittently re-enumerates on the
+  TX-burst and drops the call; the Pi shows no undervoltage (it's the modem's
+  own rail). The parallel rig (separate >=3A modem rail) is the fix. Not a
+  software issue.
+- *Stale conversation can derail the skill load* — a pre-skill =*chat*=
+  checkpoint once made the model refuse; a New chat (/clear) fixes it. Normal
+  history is fine. Possibly worth a prompt nudge for robustness.
+- *Server is a manual process* today; the =emacsos-server-service= branch adds a
+  systemd unit (=make install-server-service=) to cut over.
