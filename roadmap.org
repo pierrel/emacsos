@@ -409,6 +409,17 @@ symbols earn a slot (=. : / @ - _= are the high-frequency ones for passwords/URL
 Prerequisite for Wifi and Phone calling.  Done when you can type a WPA password and
 a phone number without leaving the keyboard.
 
+*Design (chosen):* the CAPS button becomes a 4-state CYCLE — abc (lower) → ABC
+(caps lock) → 123 (numbers, 9+0 share the last key) → #+= (symbols, packed since
+no digits compete) → loop.  One button does shift + layer.  =MOD= (C/M) still
+applies in every mode (C-7/M-digit, C-/ undo, etc.) — it filters whatever the
+active layer is, not just letters.
+
+*** TODO Quick lowercase after a capital (caps-cycle follow-up)
+The unified CAPS cycle makes returning ABC→abc a 3-tap trip, which hurts
+Title-case typing.  Solve separately — idea: *long-press a letter key* to toggle
+the case of the just-typed letter (or a one-shot shift).  Decide on the phone.
+
 ** TODO Speech to text
 T9 is terrible.
 
