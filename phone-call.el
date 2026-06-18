@@ -83,7 +83,7 @@ number) and by the agent via eval_elisp."
                        (emacos-call--mmcli "-o" path "--hangup")
                        (format "error: dial failed: %s"
                                (let ((d (cdr start)))
-                                 (if (string= d "") "mmcli --start failed" d)))))))))))
+                                 (if (string= d "") "mmcli --start failed" d))))))))))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 
