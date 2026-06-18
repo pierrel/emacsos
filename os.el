@@ -53,6 +53,11 @@
     ("()%" "[]$"  "{}|"))
   "Symbols layer.  Multi-tap reaches the rarer symbols in a group.")
 
+(defvar emacos--kbd-mode 'lower
+  "Active keyboard mode, cycled by the CAPS button:
+`lower' (abc) -> `caps' (ABC) -> `number' (123) -> `symbol' (#+=) -> loop.
+Replaces the old caps boolean: `caps' is the uppercase-letters state.")
+
 (defun emacos--active-layout ()
   "The key-group layout for the current `emacos--kbd-mode'.
 `lower' and `caps' both type letters; `number'/`symbol' swap the grid."
@@ -66,10 +71,6 @@
 (defvar emacos--current-key nil)
 (defvar emacos--tap-index 0)
 (defvar emacos--commit-timer nil)
-(defvar emacos--kbd-mode 'lower
-  "Active keyboard mode, cycled by the CAPS button:
-`lower' (abc) -> `caps' (ABC) -> `number' (123) -> `symbol' (#+=) -> loop.
-Replaces the old caps boolean: `caps' is the uppercase-letters state.")
 
 ;; Double-tap-space → ". " state
 (defvar emacos--last-space-time nil
@@ -195,9 +196,10 @@ in original order.  Empty string when none."
                      kg)))
 
 (defun emacos--bound-groups (modifier buf)
-  "Return `emacos-t9-layout' filtered to bound-letter subsets under
-MODIFIER in BUF.  Same shape as the layout; empty groups stay
-positional as empty strings (not removed) so the grid doesn't reflow."
+  "Return the ACTIVE layout filtered to bound-char subsets under MODIFIER
+in BUF (so MOD works over letters, digits, or symbols — whatever layer is
+showing).  Same shape as the layout; empty groups stay positional as
+empty strings (not removed) so the grid doesn't reflow."
   (mapcar (lambda (row)
             (mapcar (lambda (kg)
                       (emacos--bound-letters-in-group kg modifier buf))
@@ -769,8 +771,8 @@ list."
 ;; keyboard window scrolls, so bands stack as tall as they need.
 
 (defun emacos--render-keyboard ()
-  "Render the Optimal-T9 letter rows (3 rows of key groups) sized to fit
-the keyboard window.
+  "Render the active layer's rows (3 rows of key groups — letters, digits,
+or symbols per `emacos--kbd-mode') sized to fit the keyboard window.
 
 Under an active modifier (`emacos--modifier' non-nil), groups are
 *filtered* to bound-letter subsets via `emacos--bound-groups' (computed
@@ -853,8 +855,9 @@ see `emacos--render-page'."
 
 (defun emacos--render-action-row ()
   "Render the editing keys across two rows: DEL (one letter-key width) +
-SPC (fills the rest of the row) on one row, then MOD / CAPS / TAB / RET
-with MOD and RET both DOUBLE-WIDE.  MOD is leftmost on row 2; the row
+SPC (fills the rest of the row) on one row, then MOD / mode / TAB / RET
+(the mode button cycles abc/ABC/123/#+=) with MOD and RET both
+DOUBLE-WIDE.  MOD is leftmost on row 2; the row
 is 6 units / 3 gaps.  MOD is doubled (matching RET) because it's a
 frequent state-toggle on a 320x240 screen where 1u was too narrow for
 a fingertip (live-pass found taps missing the target).  Accent the MOD
