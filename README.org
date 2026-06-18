@@ -230,8 +230,8 @@ actors is *determinism*:
   agent (by evaluating elisp) share equally.
 
 - *The agent is the interpretive layer on top.* Turning fuzzy human intent
-  ("call Pierre") into a concrete primitive call is irreducibly the agent's job:
-  who is Pierre, what does "call" mean, what is his number, is there more than
+  ("call Ana") into a concrete primitive call is irreducibly the agent's job:
+  who is Ana, what does "call" mean, what is her number, is there more than
   one match? Resolution, disambiguation, and confirmation live *here* — never
   inside a primitive.
 
@@ -243,7 +243,7 @@ actors is *determinism*:
 
 So a feature is built as: a deterministic emacs command (shared by user and
 agent) + a skill that teaches the agent how to resolve intent down to that
-command's concrete arguments. "call Pierre" is agent work; =(emacos-call
+command's concrete arguments. "call Ana" is agent work; =(emacos-call
 "+1…")= is a primitive. They must not blur together.
 
 (Agent-platform services that are *not* device control — the language model,

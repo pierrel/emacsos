@@ -5,7 +5,7 @@
 ;; modem; `emacos-hang-up' ends the current call.  Same number in -> same
 ;; action out: no name lookup, no confirmation, no agent callback.
 ;;
-;; Name resolution ("call Pierre" -> a number), disambiguation, and
+;; Name resolution ("call Ana" -> a number), disambiguation, and
 ;; confirmation are NOT done here -- that is the agent's interpretive job (the
 ;; `call' skill), or a user-facing picker.  Both the user (interactively) and
 ;; the agent (via eval_elisp, e.g. (emacos-call "+14155550123")) drive these

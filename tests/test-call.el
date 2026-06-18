@@ -32,7 +32,7 @@ arg list wins.  Also records calls in the dynamic var `test-call--seen'."
 (ert-deftest emacos-call-rejects-non-number ()
   "A name (or anything non-numeric) errors without touching mmcli."
   (test-call--with nil
-    (should (string-prefix-p "error: invalid number" (emacos-call "Pierre")))
+    (should (string-prefix-p "error: invalid number" (emacos-call "Ana")))
     (should (null test-call--seen))))
 
 (ert-deftest emacos-call-dials-and-extracts-full-path ()
