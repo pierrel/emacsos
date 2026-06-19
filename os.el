@@ -775,10 +775,10 @@ list."
 or symbols per `emacos--kbd-mode') sized to fit the keyboard window.
 
 Under an active modifier (`emacos--modifier' non-nil), groups are
-*filtered* to bound-letter subsets via `emacos--bound-groups' (computed
+*filtered* to bound-character subsets via `emacos--bound-groups' (computed
 once per render — B2: no module-level cache).  Groups with no bound
-letters under the modifier render as a dimmed placeholder (`gray40',
-non-tappable), preserving positional muscle memory.  An armed letter
+characters under the modifier render as a dimmed placeholder (`gray40',
+non-tappable), preserving positional muscle memory.  An armed character
 (when `emacos--armed-tap' names this group) is face-stacked in bold
 yellow inside its button label.
 
