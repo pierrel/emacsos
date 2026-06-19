@@ -41,7 +41,7 @@ The whole design hinges on facts the spikes established on this SIM7600G-H:
 
 * Architecture (the proven hybrid)
 | Function            | Mechanism                                              |
-| Detect + caller id  | =dbus.el= subscribe =Voice.CallAdded= → =mmcli -o= detail |
+| Detect + caller id  | =dbus.el= =Voice.CallAdded= → =dbus-get-property= detail |
 | Show incoming       | =*incoming-call*= buffer (no modal), caller number     |
 | Answer              | =ATA= on =ttyUSB3= via =make-serial-process=             |
 | Decline / hang up   | =emacos-hang-up= (=mmcli --voice-hangup-all=, exists)    |
@@ -62,9 +62,10 @@ poll+dbus belt-and-suspenders.
   Deterministic: no confirm, no agent (the two-tap screen is the human confirm).
 - Reject = the existing =emacos-hang-up= (=--voice-hangup-all= rejects a ringing
   call too — validated). No separate primitive.
-- =emacos-call--on-call-added (path)= — D-Bus handler: query =mmcli -o path=;
-  if =incoming= + =ringing-in=, store number and =emacos-call-show-incoming=.
-  De-dupe on the path.
+- =emacos-call--on-call-added (path)= — D-Bus handler: read =Direction=/=Number=
+  via =dbus-get-property= (rev 2); if =Direction= = incoming (a newly-added
+  incoming call is ringing by definition, so the redundant =ringing-in= state
+  check is dropped — as-built), store number + =emacos-call-show-incoming=.
 - =emacos-call--watcher-ensure= / =--watcher-stop= — idempotent (mirror
   =emacos-net--ensure-timer=): register =CallAdded= (broad: nil path, so it
   survives modem re-enumeration) + =CallDeleted= (auto-dismiss). Armed from init.
@@ -75,9 +76,8 @@ poll+dbus belt-and-suspenders.
   answer?" → fires =emacos-answer=), *single-tap Decline* (=emacos-hang-up=;
   declining a wrong call should be fast). Disarm via
   =emacos--confirm-disarm-functions= (the =chat.el= pattern). Auto-dismiss +
-  restore the previous buffer on answer/decline/remote-hangup.
-- =*incoming-call*= branch in =emacos--top-commands= so Answer/Decline are also
-  on the always-on command band.
+  restore the previous buffer on answer/decline/remote-hangup. (NO command-band
+  entry — see rev 5; the full-screen buttons cover it.)
 ** os.el
 - Arm =emacos-call--watcher-ensure= in =emacos--init=.
 ** Deploy
@@ -130,9 +130,15 @@ poll+dbus belt-and-suspenders.
    (dropped call is re-callable). Spatial separation is the mis-tap mitigation.
 
 * Open / to validate live
-- The =CallAdded= → =mmcli -o= detail round-trip latency (screen should appear
-  within ~1s of ring).
+- The =CallAdded= → =dbus-get-property= read latency (screen should appear within
+  ~1s of ring); the two reads run synchronously on the main thread in the signal
+  handler — fine on the ring path, the one stall risk if the system bus wedges.
 - =make-serial-process= =ATA= timing vs. the ring window (answer well before
   voicemail).
 - Auto-dismiss correctness on caller-gives-up (=CallDeleted= vs =StateChanged=).
 - Re-enumeration mid-ring (broad signal subscription + fresh modem index).
+- *Known edge (v1):* a call arriving while a minibuffer prompt is active —
+  =emacos--target= prefers the minibuffer window, so the screen could swap there.
+  Rare on this phone (chat/launcher-centric); revisit if observed.
+- *Deferred (multi-call):* a second =CallAdded= (call-waiting) overwrites the
+  shown call; out of scope for v1 (single call at a time).

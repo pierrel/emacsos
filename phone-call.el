@@ -303,7 +303,8 @@ after the modem object path changes on re-enumeration."
             #'emacos-call--on-call-deleted)))))
 
 (defun emacos-call--watcher-stop ()
-  "Unsubscribe the incoming-call signals."
+  "Unsubscribe the incoming-call signals (dev/debug affordance)."
+  (interactive)
   (dolist (h emacos-call--watcher-handles) (ignore-errors (dbus-unregister-object h)))
   (setq emacos-call--watcher-handles nil))
 

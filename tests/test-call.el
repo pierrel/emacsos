@@ -8,6 +8,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'phone-call)
+(require 'os)   ; for emacos--btn-label-scale (render tests) — keeps this file self-contained
 
 ;; Special (dynamic) so the stub lambda built in `test-call--stub' and the
 ;; `let'-binding in `test-call--with' refer to the SAME variable across
@@ -232,6 +233,40 @@ two-tap flips the Answer label."
     (let ((emacos-call--answer-confirm-pending t))
       (emacos-call--maybe-disarm #'emacos-call--answer-tap nil)
       (should emacos-call--answer-confirm-pending))))
+
+;; The dismiss stubs are variadic + guard on our fake `win' (the real
+;; set-window-buffer takes a 3rd arg, and kill-buffer's window machinery calls
+;; it too); kill-buffer is no-op'd so the test isolates the restore decision.
+(defmacro test-call--with-dismiss-window (restored-var &rest body)
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'emacos--target) (lambda () 'win))
+             ((symbol-function 'window-buffer)
+              (lambda (&rest _) (get-buffer emacos-call--incoming-buffer)))
+             ((symbol-function 'set-window-buffer)
+              (lambda (w b &rest _) (when (eq w 'win) (setq ,restored-var b))))
+             ((symbol-function 'kill-buffer) (lambda (&rest _) nil)))
+     (get-buffer-create emacos-call--incoming-buffer)
+     ,@body))
+
+(ert-deftest emacos-call-dismiss-restores-prev-buffer ()
+  "Dismiss restores the captured pre-call buffer when it is still live."
+  (let ((prev (get-buffer-create "test-prev")) (restored nil))
+    (test-call--with-dismiss-window restored
+      (let ((emacos-call--prev-buffer prev))
+        (emacos-call--dismiss-incoming)
+        (should (eq restored prev))
+        (should-not emacos-call--prev-buffer)))   ; cleared
+    (when (buffer-live-p prev) (kill-buffer prev))))
+
+(ert-deftest emacos-call-dismiss-falls-back-to-scratch-when-prev-dead ()
+  "If the captured buffer was killed mid-ring, dismiss restores *scratch*,
+not a dead buffer."
+  (let ((dead (get-buffer-create "test-dead")) (restored nil))
+    (kill-buffer dead)
+    (test-call--with-dismiss-window restored
+      (let ((emacos-call--prev-buffer dead))
+        (emacos-call--dismiss-incoming)
+        (should (eq restored (get-buffer-create "*scratch*")))))))
 
 (provide 'test-call)
 ;;; test-call.el ends here

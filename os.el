@@ -1007,7 +1007,7 @@ window-buffer-change follower can't recurse into an in-progress render."
   (emacos-net--ensure-timer)
   (emacos-net--refresh)
   ;; Listen for incoming calls from boot (D-Bus CallAdded -> incoming screen).
-  (when (fboundp 'emacos-call--watcher-ensure) (emacos-call--watcher-ensure)))
+  (emacos-call--watcher-ensure))
 
 ;; Defer init until the window system is ready
 (add-hook 'window-setup-hook #'emacos--init)
