@@ -42,7 +42,7 @@ distinctive keyword from the description and grep the user's notes WITH CONTEXT
 ```elisp
 (shell-command-to-string
  (concat "grep -rinF -m 5 -A6 -B6 -- " (shell-quote-argument KEYWORD)
-         " ~/org ~/notes ~/Documents ~/.emacs.d/emacsos 2>/dev/null | head -c 3000"))
+         " ~/org ~/notes ~/Documents 2>/dev/null | head -c 3000"))
 ```
 
 From the matched block, take the phone number (digits, optional leading `+`).
