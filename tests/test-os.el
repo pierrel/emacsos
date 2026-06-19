@@ -217,11 +217,11 @@ VWIDTH (left/right); both land in the (VWIDTH . HWIDTH) cons."
       (should (equal line-width (cons emacos--btn-hpad emacos--btn-vpad))))))
 
 (ert-deftest test-os-action-row-widths ()
-  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: MOD 2 units +
-mode 1 + TAB 1 + RET 2 (6 units / 3 gaps total).  MOD and RET are both
-`(* 2 unit)' so the state-toggle and the most-tapped key get equal
-fingertip-friendly width on a 320x240 screen.  All positive; the wide
-ones beat the narrow."
+  "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).
+Row 5: MOD 2 + mode 1 + TAB 1 + RET 2 (6 units / 3 gaps total).  MOD and
+RET are both `(* 2 unit)' so the state-toggle and the most-tapped key get
+equal fingertip-friendly width on a 320x240 screen.  All positive; the
+wide ones beat the narrow."
   (let* ((win-w 36) (gap 1.5)
          (third (emacos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
          (unit  (emacos--unit-width win-w gap 6 3)))   ; mode/TAB=1u, MOD/RET=2u
