@@ -20,29 +20,36 @@ No search.
 
 ## 2. Otherwise, find the number (`eval_elisp` search)
 
-The target is a person or a description. Search the user's files, working
-outward from the most structured source. Match the search term as a LITERAL
-and shell-quote it (`shell-quote-argument` prevents injection; `grep -F` avoids
-regex surprises). Cap output (`-m` per file, `| head -c` total) so a
-short/common term can't dump other people's numbers (PII) into the result.
+The target is a person or a description ("Ana", "the plumber from last week").
+**There is no fixed contacts file** — names and numbers live wherever the user
+keeps notes (commonly org files under `~/org`, plus `~/notes`, `~/Documents`).
+So *search the user's files* for the term.
 
-**a. Contacts first** (structured, fast) — search the name:
+Search principles (apply them, don't just copy the examples):
+- **Pick a distinctive term** — the name, or a keyword from the description
+  ("plumber"). Search a LITERAL, shell-quoted string (`shell-quote-argument`
+  prevents injection; `grep -F` avoids regex surprises).
+- **Grep WITH CONTEXT** (`-A`/`-B`) — the number is usually on a line near the
+  mention, not the matched line itself.
+- **CAP the output** (`-m` per file, `| head -c` total) so a common term can't
+  dump unrelated personal data into the result.
+
+Start narrow (the usual notes locations), with context, capped:
 
 ```elisp
 (shell-command-to-string
- (concat "grep -irF -m 5 -A2 -- " (shell-quote-argument NAME)
-         " ~/.emacs.d/emacsos/contacts.org ~/.emacs.d/emacsos/contacts/ 2>/dev/null | head -c 2000"))
+ (concat "grep -rinF -m 5 -A4 -B2 -- " (shell-quote-argument TERM)
+         " ~/org ~/notes ~/Documents 2>/dev/null | head -c 3000"))
 ```
 
-**b. Notes, if the contact isn't there** — for a *description* ("the plumber
-from last week"), the number lives in a note, not a structured contact. Pick a
-distinctive keyword from the description and grep the user's notes WITH CONTEXT
-(the number is usually near the mention), capped:
+If that finds nothing, widen — search the whole home dir but restrict to
+text/notes files (keeps it fast and avoids binaries), or retry with a looser
+term (a last name, the business type):
 
 ```elisp
 (shell-command-to-string
- (concat "grep -rinF -m 5 -A6 -B6 -- " (shell-quote-argument KEYWORD)
-         " ~/org ~/notes ~/Documents 2>/dev/null | head -c 3000"))
+ (concat "grep -rinF -m 5 -A4 -B2 --include=*.org --include=*.md --include=*.txt -- "
+         (shell-quote-argument TERM) " ~ 2>/dev/null | head -c 3000"))
 ```
 
 From the matched block, take the phone number (digits, optional leading `+`).

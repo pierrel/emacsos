@@ -1,10 +1,12 @@
-# EXAMPLE contacts file — copy to ~/.emacs.d/emacsos/contacts.org ON THE PHONE
-# and put your REAL contacts there. That phone file is PRIVATE: it holds real
-# names + numbers (PII) and must NEVER be committed to this repo.
+# EXAMPLE contacts file — for REFERENCE only. There is NO fixed contacts path.
+# Keep contacts wherever you keep notes ON THE PHONE (e.g. ~/org/contacts.org);
+# the call skill just searches your files (~/org, ~/notes, ...) for a name near
+# a phone number. Your real contacts are PRIVATE (PII) and must NEVER be
+# committed to this repo.
 #
-# Format is intentionally loose — the call skill just searches for a name with
-# a nearby phone number, so any of these shapes works. Numbers should be E.164
-# (leading + and country code) so the modem dials them reliably.
+# Format is intentionally loose — any shape with a name and a nearby number
+# works. Numbers should be E.164 (leading + and country code) so the modem
+# dials them reliably.
 
 * Sam Rivers
   :PROPERTIES:

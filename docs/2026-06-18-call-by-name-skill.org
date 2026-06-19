@@ -34,11 +34,13 @@ the two actors is *determinism*:
   recipe — search the phone's contact files (=eval_elisp= grep), disambiguate,
   *confirm with the user*, then =(emacos-call "+1...")=; =(emacos-hang-up)= to
   end. No new server tools, no server events.
-- *Contacts*: plain files on the phone (=~/.emacs.d/emacsos/contacts.org= and
-  =contacts/=). Private/untracked PII. A fake-persona =contacts.example.org= in
-  the skill dir documents the format *for reference* — the operator copies it to
-  the phone themselves; it is NOT auto-deployed and calling never reads it. The
-  skill searches the phone files; nothing real is committed.
+- *Contacts*: NO fixed location — names/numbers live wherever the user keeps
+  notes on the phone (e.g. =~/org/contacts.org=, or just inline in notes). The
+  skill is fully generic: it greps the user's files (=~/org=, =~/notes=, … then
+  widens to =~= restricted to text files) for a name/keyword near a number.
+  Private/untracked PII; nothing real is committed. A fake-persona
+  =contacts.example.org= in the skill dir documents the format *for reference*
+  only (not auto-deployed, never read by calling).
 - *Confirm-before-dial* lives in the agent (the skill mandates it), not in the
   primitive — currently a conversational "yes".
 
