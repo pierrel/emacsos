@@ -8,7 +8,10 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'phone-call)
-(require 'os)   ; for emacos--btn-label-scale (render tests) — keeps this file self-contained
+;; The render tests stub `emacos--btn'; they only need a value for the
+;; `emacos--btn-label-scale' arg it's passed (phone-call.el declares the var
+;; without a value).  Bind a dummy here instead of pulling in all of os.el.
+(defvar emacos--btn-label-scale 0.8)
 
 ;; Special (dynamic) so the stub lambda built in `test-call--stub' and the
 ;; `let'-binding in `test-call--with' refer to the SAME variable across

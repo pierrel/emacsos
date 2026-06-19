@@ -116,7 +116,12 @@ Returns \"hung-up: ...\" or \"error: ...\"."
 ;; `CallAdded' D-Bus signal + the call's properties (no sudo to read).
 ;; See docs/2026-06-18-inbound-answering.org.
 
-(require 'dbus)
+;; D-Bus is OPTIONAL: it powers only inbound DETECTION.  Outbound (emacos-call
+;; / emacos-hang-up) and answering (emacos-answer, raw AT) work without it.
+;; Soft-require so the file still loads on an Emacs built without D-Bus; the
+;; watcher + property reads are fboundp-guarded so a missing D-Bus just means
+;; "no incoming-call screen", never a load/boot failure.
+(require 'dbus nil t)
 
 ;; Defined in os.el (which `require's this file at its end, so these are
 ;; bound at load time); declared here to keep a standalone byte-compile clean.
@@ -274,9 +279,10 @@ Registered on `emacos--confirm-disarm-functions' (the chat.el pattern)."
 
 (defun emacos-call--call-prop (path prop)
   "Read PROP from the ModemManager Call object at PATH (D-Bus, no sudo)."
-  (ignore-errors
-    (dbus-get-property :system "org.freedesktop.ModemManager1" path
-                       "org.freedesktop.ModemManager1.Call" prop)))
+  (when (fboundp 'dbus-get-property)
+    (ignore-errors
+      (dbus-get-property :system "org.freedesktop.ModemManager1" path
+                         "org.freedesktop.ModemManager1.Call" prop))))
 
 (defun emacos-call--on-call-added (path &rest _)
   "Handle Voice.CallAdded: show the screen for an INCOMING call at PATH.
@@ -298,20 +304,22 @@ gives up."
 (defun emacos-call--watch-call-end (path)
   "Watch the call at PATH so the screen auto-dismisses when it ends.
 Replaces any prior watch (single call at a time)."
-  (when emacos-call--state-handle
-    (ignore-errors (dbus-unregister-object emacos-call--state-handle)))
-  (setq emacos-call--state-handle
-        (dbus-register-signal
-         :system "org.freedesktop.ModemManager1" path
-         "org.freedesktop.ModemManager1.Call" "StateChanged"
-         #'emacos-call--on-call-state)))
+  (when (fboundp 'dbus-register-signal)
+    (when emacos-call--state-handle
+      (ignore-errors (dbus-unregister-object emacos-call--state-handle)))
+    (setq emacos-call--state-handle
+          (dbus-register-signal
+           :system "org.freedesktop.ModemManager1" path
+           "org.freedesktop.ModemManager1.Call" "StateChanged"
+           #'emacos-call--on-call-state))))
 
 (defun emacos-call--watcher-ensure ()
   "Subscribe to Voice.CallAdded (idempotent; safe across hot-reload).  The
 nil-path match is path-independent, so it keeps firing after the modem object
 path changes on re-enumeration.  Per-call StateChanged (for dismissal) is
-registered dynamically in `emacos-call--watch-call-end'."
-  (unless emacos-call--watcher-handles
+registered dynamically in `emacos-call--watch-call-end'.  No-op without D-Bus
+(inbound detection off; outbound/answer still work)."
+  (when (and (not emacos-call--watcher-handles) (fboundp 'dbus-register-signal))
     (setq emacos-call--watcher-handles
           (list
            (dbus-register-signal
