@@ -107,5 +107,205 @@ Returns \"hung-up: ...\" or \"error: ...\"."
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 
+;;; ------------------------------------------------------------------
+;;; Inbound: detect (D-Bus) -> screen -> answer (AT) / decline
+;;; ------------------------------------------------------------------
+;; ModemManager's QMI accept is broken on the SIM7600G-H ("InvalidQosId"),
+;; so we ANSWER via raw AT `ATA' on a ModemManager-ignored AT port (a udev
+;; rule frees ttyUSB3).  DETECTION still rides ModemManager: the Voice
+;; `CallAdded' D-Bus signal + the call's properties (no sudo to read).
+;; See docs/2026-06-18-inbound-answering.org.
+
+(require 'dbus)
+
+;; Defined in os.el (which `require's this file at its end, so these are
+;; bound at load time); declared here to keep a standalone byte-compile clean.
+(declare-function emacos--btn "os")
+(declare-function emacos--target "os")
+(defvar emacos--btn-label-scale)
+(defvar emacos--confirm-disarm-functions)
+
+(defvar emacos-call-at-port "/dev/ttyUSB3"
+  "AT command port for voice control, freed from ModemManager via udev.")
+
+(defconst emacos-call--incoming-buffer "*incoming-call*")
+
+(defvar emacos-call--watcher-handles nil
+  "D-Bus signal registration objects (CallAdded/CallDeleted); nil = unarmed.")
+(defvar emacos-call--ringing-path nil "Object path of the call being shown.")
+(defvar emacos-call--ringing-number nil "Caller number being shown.")
+(defvar emacos-call--prev-buffer nil
+  "Top buffer to restore when the incoming screen dismisses.")
+(defvar emacos-call--answer-confirm-pending nil "Two-tap Answer arm state.")
+
+;;; AT transport on the freed port
+
+(defun emacos-call--at (cmd)
+  "Send AT CMD to `emacos-call-at-port'; return the modem's response string,
+or \"error: ...\".  Per-call open/close with guaranteed teardown -- a leaked
+serial process would make the next open fail device-busy."
+  (condition-case err
+      (let* ((buf (generate-new-buffer " *emacos-at*"))
+             (proc (make-serial-process
+                    :port emacos-call-at-port :speed 115200
+                    :coding 'no-conversion :noquery t :buffer buf)))
+        (unwind-protect
+            (progn
+              (process-send-string proc (concat cmd "\r"))
+              ;; `accept-process-output' returns on ANY output, so loop and
+              ;; accumulate until a terminal token or the deadline.
+              (let ((deadline (+ (float-time) 2.0)))
+                (catch 'done
+                  (while (< (float-time) deadline)
+                    (accept-process-output proc 0.3)
+                    (when (string-match-p
+                           "OK\\|ERROR\\|NO CARRIER\\|BEGIN"
+                           (with-current-buffer buf (buffer-string)))
+                      (throw 'done nil)))))
+              (with-current-buffer buf (buffer-string)))
+          (when (process-live-p proc) (delete-process proc))
+          (when (buffer-live-p buf) (kill-buffer buf))))
+    (error (format "error: AT port %s: %s"
+                   emacos-call-at-port (error-message-string err)))))
+
+;;; Answer (deterministic primitive)
+
+;;;###autoload
+(defun emacos-answer ()
+  "Answer the ringing call.  DETERMINISTIC primitive: sends `ATA' on the
+freed AT port (ModemManager's QMI accept is broken on this modem).
+Returns \"answered: ...\" or \"error: ...\"."
+  (interactive)
+  (let* ((resp (emacos-call--at "ATA"))
+         (status
+          (cond ((string-prefix-p "error:" resp) resp)
+                ((string-match-p "NO CARRIER\\|ERROR" resp)
+                 (format "error: answer failed: %s" (string-trim resp)))
+                ((string-match-p "BEGIN\\|OK" resp) "answered: call active")
+                (t (format "error: answer unconfirmed: %s" (string-trim resp))))))
+    (when (called-interactively-p 'interactive) (message "%s" status))
+    status))
+
+;;; Incoming-call screen (a top buffer, NOT a modal)
+
+(defun emacos-call--render-incoming (number)
+  "Paint the incoming-call screen for NUMBER; return its buffer."
+  (let ((buf (get-buffer-create emacos-call--incoming-buffer)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "\n  Incoming call\n\n  "
+                (if (and number (not (string-empty-p number))) number "Unknown")
+                "\n\n\n")
+        ;; Decline on top, Answer at the bottom -- spatially separated so a
+        ;; mis-tap toward one can't trigger the other.
+        (emacos--btn "  Decline  " #'emacos-call--decline nil emacos--btn-label-scale)
+        (insert "\n\n\n\n\n")
+        (emacos--btn (if emacos-call--answer-confirm-pending
+                         "  Confirm answer?  " "  Answer  ")
+                     #'emacos-call--answer-tap nil emacos--btn-label-scale
+                     (and emacos-call--answer-confirm-pending "firebrick4"))
+        (goto-char (point-min)))
+      (setq buffer-read-only t))
+    buf))
+
+(defun emacos-call-show-incoming (number)
+  "Show the incoming-call screen for NUMBER in the top window."
+  (setq emacos-call--answer-confirm-pending nil)
+  (let ((buf (emacos-call--render-incoming number))
+        (w (and (fboundp 'emacos--target) (emacos--target))))
+    (when (and w (not (eq (window-buffer w) buf)))
+      ;; Capture the pre-call buffer ONCE so dismiss can restore it.
+      (unless (buffer-live-p emacos-call--prev-buffer)
+        (setq emacos-call--prev-buffer (window-buffer w)))
+      (set-window-buffer w buf))))
+
+(defun emacos-call--dismiss-incoming ()
+  "Tear down the incoming screen and restore the pre-call top buffer."
+  (setq emacos-call--ringing-path nil
+        emacos-call--ringing-number nil
+        emacos-call--answer-confirm-pending nil)
+  (let* ((w (and (fboundp 'emacos--target) (emacos--target)))
+         (buf (get-buffer emacos-call--incoming-buffer))
+         (prev (if (buffer-live-p emacos-call--prev-buffer)
+                   emacos-call--prev-buffer
+                 (get-buffer-create "*scratch*"))))
+    (setq emacos-call--prev-buffer nil)
+    (when (and w buf (eq (window-buffer w) buf))
+      (set-window-buffer w prev))
+    (when buf (kill-buffer buf))))
+
+(defun emacos-call--answer-tap ()
+  "Two-tap Answer: first tap arms, second tap answers + dismisses."
+  (if emacos-call--answer-confirm-pending
+      (progn
+        (setq emacos-call--answer-confirm-pending nil)
+        (message "%s" (emacos-answer))
+        (emacos-call--dismiss-incoming))
+    (setq emacos-call--answer-confirm-pending t)
+    (when (get-buffer emacos-call--incoming-buffer)
+      (emacos-call--render-incoming emacos-call--ringing-number))))
+
+(defun emacos-call--decline ()
+  "Decline the ringing call (single tap): hang up + dismiss."
+  (setq emacos-call--answer-confirm-pending nil)
+  (message "%s" (emacos-hang-up))
+  (emacos-call--dismiss-incoming))
+
+(defun emacos-call--maybe-disarm (action _arg)
+  "Disarm the two-tap Answer on any tap that isn't Answer itself.
+Registered on `emacos--confirm-disarm-functions' (the chat.el pattern)."
+  (when (and emacos-call--answer-confirm-pending
+             (not (eq action #'emacos-call--answer-tap)))
+    (setq emacos-call--answer-confirm-pending nil)
+    (when (get-buffer emacos-call--incoming-buffer)
+      (emacos-call--render-incoming emacos-call--ringing-number))))
+
+(add-hook 'emacos--confirm-disarm-functions #'emacos-call--maybe-disarm)
+
+;;; Detection (ModemManager Voice D-Bus signals)
+
+(defun emacos-call--call-prop (path prop)
+  "Read PROP from the ModemManager Call object at PATH (D-Bus, no sudo)."
+  (ignore-errors
+    (dbus-get-property :system "org.freedesktop.ModemManager1" path
+                       "org.freedesktop.ModemManager1.Call" prop)))
+
+(defun emacos-call--on-call-added (path &rest _)
+  "Handle Voice.CallAdded: show the screen for an INCOMING call at PATH.
+A newly-added incoming call is ringing by definition (MMCallDirection:
+1 = incoming)."
+  (when (equal (emacos-call--call-prop path "Direction") 1)
+    (setq emacos-call--ringing-path path
+          emacos-call--ringing-number (or (emacos-call--call-prop path "Number") ""))
+    (emacos-call-show-incoming emacos-call--ringing-number)))
+
+(defun emacos-call--on-call-deleted (path &rest _)
+  "Handle Voice.CallDeleted: dismiss the screen if the shown call ended
+(caller gave up, or the call completed)."
+  (when (equal path emacos-call--ringing-path)
+    (emacos-call--dismiss-incoming)))
+
+(defun emacos-call--watcher-ensure ()
+  "Subscribe to ModemManager incoming-call signals (idempotent; safe across
+hot-reload).  The nil-path match is path-independent, so it keeps firing
+after the modem object path changes on re-enumeration."
+  (unless emacos-call--watcher-handles
+    (setq emacos-call--watcher-handles
+          (list
+           (dbus-register-signal
+            :system "org.freedesktop.ModemManager1" nil
+            "org.freedesktop.ModemManager1.Modem.Voice" "CallAdded"
+            #'emacos-call--on-call-added)
+           (dbus-register-signal
+            :system "org.freedesktop.ModemManager1" nil
+            "org.freedesktop.ModemManager1.Modem.Voice" "CallDeleted"
+            #'emacos-call--on-call-deleted)))))
+
+(defun emacos-call--watcher-stop ()
+  "Unsubscribe the incoming-call signals."
+  (dolist (h emacos-call--watcher-handles) (ignore-errors (dbus-unregister-object h)))
+  (setq emacos-call--watcher-handles nil))
+
 (provide 'phone-call)
 ;;; phone-call.el ends here

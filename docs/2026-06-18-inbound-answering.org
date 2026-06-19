@@ -1,0 +1,138 @@
+#+title: Inbound phone answering (detect → screen → answer/reject)
+#+date: 2026-06-18
+
+Receiving calls on the phone. Outbound (=emacos-call=) already exists; this adds
+the inbound half: detect a ringing call, show who's calling, let the user
+answer or decline. Sibling to the outbound call work and the call-audio
+findings (=2026-06-18-call-audio.org=).
+
+* The principle (Layers)
+Device control is deterministic emacs commands; the agent/skill is the
+interpretive layer. A ringing phone must be answerable with ZERO model
+round-trips, so detection + the answer/decline primitives are pure elisp on the
+phone. Caller-name resolution ("who is +1415…?") is later skill work, never in
+the ring path.
+
+* Hardware reality (validated live 2026-06-18 — drove the design)
+The whole design hinges on facts the spikes established on this SIM7600G-H:
+
+1. *Detection works via ModemManager (QMI).* An inbound call fires
+   =org.freedesktop.ModemManager1.Modem.Voice= → =CallAdded= on the *system*
+   D-Bus, and =mmcli -o <call-path>= reports =direction: incoming=, =state:
+   ringing-in=, and the caller =number= (also =+CLIP= at the AT layer).
+   Verified: caller id arrived at ring time.
+2. *Answering via ModemManager FAILS.* =mmcli --accept= (QMI Voice) errors with
+   =QMI protocol error (41): InvalidQosId= — a SIM7600 QMI-voice gap. The
+   =simtech= MM plugin has no call override (no =mm-call-simtech.c=), so accept
+   falls to the broken generic QMI path. There is NO mmcli/version toggle that
+   fixes this; forcing AT-only mode would sacrifice the QMI data bearer.
+3. *Answering via raw AT works.* =ATA= on a free AT port answers the call:
+   =VOICE CALL: BEGIN=, =+CLCC= state →0 (active), and ModemManager's own QMI
+   view flips to =state: active=. Verified end-to-end: a real 12-second
+   connected call (=VOICE CALL: END: 000012=).
+4. *Freeing an AT port is the enabler.* MM owns both AT ports (=ttyUSB2= primary,
+   =ttyUSB3= secondary). A udev rule tags =ttyUSB3= (USB iface 03, vid 1e0e pid
+   9001) =ID_MM_PORT_IGNORE=1=; after =udevadm reload + MM restart=, MM keeps
+   QMI + GPS + =ttyUSB2= (so detection + data are intact) and =ttyUSB3= is ours
+   for AT (=ATA= / =AT+CHUP= / later =AT+CSDVC= audio). This same freed port is
+   what the call-audio two-way work needs — one rule, both features.
+5. *emacs can drive both halves.* =dbus.el= registers the =CallAdded= signal on
+   the system bus (=:registered t=); =make-serial-process= drives =ttyUSB3=.
+
+* Architecture (the proven hybrid)
+| Function            | Mechanism                                              |
+| Detect + caller id  | =dbus.el= subscribe =Voice.CallAdded= → =mmcli -o= detail |
+| Show incoming       | =*incoming-call*= buffer (no modal), caller number     |
+| Answer              | =ATA= on =ttyUSB3= via =make-serial-process=             |
+| Decline / hang up   | =emacos-hang-up= (=mmcli --voice-hangup-all=, exists)    |
+| Auto-dismiss        | =Voice.CallDeleted= / =Call.StateChanged= → restore     |
+
+Detection stays on ModemManager (QMI) — event-driven, no polling (battery +
+latency win, and =CallAdded= proved reliable). One mechanism, not a
+poll+dbus belt-and-suspenders.
+
+* Build plan
+** phone-call.el (deterministic primitives + watcher + screen)
+- =emacos-call-at-port= (defvar, "/dev/ttyUSB3").
+- =emacos-call--at (cmd)= — open =ttyUSB3= via =make-serial-process= (115200,
+  raw), send =CMD\r=, read the response (~1.5s), return it; =error:= on failure.
+  Per-call open/close (no persistent handle to leak).
+- =emacos-answer= — interactive primitive: =ATA= via =--at=; success when the
+  response shows =VOICE CALL: BEGIN= / =OK=; return "answered: …" / "error: …".
+  Deterministic: no confirm, no agent (the two-tap screen is the human confirm).
+- Reject = the existing =emacos-hang-up= (=--voice-hangup-all= rejects a ringing
+  call too — validated). No separate primitive.
+- =emacos-call--on-call-added (path)= — D-Bus handler: query =mmcli -o path=;
+  if =incoming= + =ringing-in=, store number and =emacos-call-show-incoming=.
+  De-dupe on the path.
+- =emacos-call--watcher-ensure= / =--watcher-stop= — idempotent (mirror
+  =emacos-net--ensure-timer=): register =CallAdded= (broad: nil path, so it
+  survives modem re-enumeration) + =CallDeleted= (auto-dismiss). Armed from init.
+** Incoming-call screen (top buffer, NOT a modal)
+- =emacos-call-show-incoming (number)= — render =*incoming-call*= (big text:
+  number + "Incoming call") + two =emacos--btn= buttons, swap into the top
+  window (the =emacos-net-show= pattern). *Two-tap Answer* (arms → "Confirm
+  answer?" → fires =emacos-answer=), *single-tap Decline* (=emacos-hang-up=;
+  declining a wrong call should be fast). Disarm via
+  =emacos--confirm-disarm-functions= (the =chat.el= pattern). Auto-dismiss +
+  restore the previous buffer on answer/decline/remote-hangup.
+- =*incoming-call*= branch in =emacos--top-commands= so Answer/Decline are also
+  on the always-on command band.
+** os.el
+- Arm =emacos-call--watcher-ensure= in =emacos--init=.
+** Deploy
+- =deploy/99-emacos-free-ttyusb3.rules= committed; =phone-install= installs it +
+  =udevadm reload= + restart ModemManager (one-time; idempotent).
+** Tests (tests/test-call.el, mmcli + serial stubbed)
+- =emacos-answer= sends =ATA=, returns "answered:" on a BEGIN/OK response;
+  surfaces "error:" on a failed/empty response.
+- =emacos-call--on-call-added=: an incoming/ringing path shows the screen with
+  the number; a non-incoming or non-ringing path does NOT.
+- The screen renders the number + Answer + Decline; two-tap Answer arms then
+  fires; Decline calls hang-up.
+
+* Deferred (NOT in this PR)
+- *Audio* (hear/talk): =AT+CSDVC=1= (HAT 3.5mm jack) or the PCM bridge — needs
+  the headset hardware (en route) + live validation. Answer connects the call;
+  audio routing lands when the hardware does.
+- *Caller-name resolution* — a skill maps the number to a contact name for the
+  screen (reuse the call skill's contact grep). Ring path stays agent-free.
+- *In-call screen / one-tap hang-up button* polish beyond the command-band entry.
+
+* Design-review revisions (folded in before coding)
+1. *Explicit save/restore of the top buffer (was a gap).* =emacos-net-show=
+   only swaps a buffer IN; nothing restores. So at show time capture
+   =(window-buffer (emacos--target))= into =emacos-call--prev-buffer=; on dismiss
+   restore it iff still live, else fall back to the default top buffer. Covers
+   caller-gives-up and user-navigated-away (stale/killed buffer).
+2. *D-Bus handler reads call props via =dbus-get-property=, not =mmcli -o=.*
+   Reading =Number=/=Direction=/=State= off the =…Call= interface is a light
+   D-Bus read (no =sudo= subprocess) — avoids blocking the main thread inside the
+   signal callback.
+3. *=emacos-call--at= teardown contract.* =make-serial-process= with
+   =:coding 'no-conversion :noquery t=; read by LOOPing =accept-process-output=
+   accumulating until =OK=/=ERROR=/=BEGIN= or a deadline (not one fixed wait that
+   returns on a partial line); =unwind-protect= =delete-process= + =kill-buffer=
+   on EVERY exit incl. error (a leaked process makes the next open device-busy).
+4. *Idempotent watcher.* Store the =dbus-register-signal= handle in a defvar;
+   =--watcher-ensure= guards =(unless handle …)=; =--watcher-stop=
+   =dbus-unregister-object= + nils it (hot-reload re-=require=/re-init must not
+   double-register). The subscription is service+interface+member with a NIL
+   path, so it is path-independent by construction → survives the modem object
+   path changing on re-enumeration (still a live-validate item, but not a
+   probabilistic mitigation).
+5. *Drop the command-band entry for v1 (simplicity).* The full-screen
+   =*incoming-call*= buffer's two big buttons cover Answer/Decline; a band entry
+   would double the two-tap arm/disarm surface. Place the buttons spatially
+   separated (Decline top, Answer bottom, full-width) for mis-tap safety.
+6. *Tap asymmetry kept, residual named.* Two-tap Answer (accidental answer =
+   live unwanted call you can't yet end gracefully) + single-tap Decline
+   (dropped call is re-callable). Spatial separation is the mis-tap mitigation.
+
+* Open / to validate live
+- The =CallAdded= → =mmcli -o= detail round-trip latency (screen should appear
+  within ~1s of ring).
+- =make-serial-process= =ATA= timing vs. the ring window (answer well before
+  voicemail).
+- Auto-dismiss correctness on caller-gives-up (=CallDeleted= vs =StateChanged=).
+- Re-enumeration mid-ring (broad signal subscription + fresh modem index).

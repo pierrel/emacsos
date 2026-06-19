@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -71,6 +71,18 @@ cellular-bringup:
 	@{ printf 'APN=%s\n' '$(APN)'; \
 	   if [ -n '$(APN_AUTH_FILE)' ]; then cat '$(APN_AUTH_FILE)'; fi; \
 	 } | ssh phone "sudo bash $(PHONE_DEPLOY_TMP); rc=\$$?; rm -f $(PHONE_DEPLOY_TMP); exit \$$rc"
+
+# One-time: hand the SIM7600 secondary AT port (ttyUSB3) to emacsos for raw-AT
+# voice (incoming answer + later call audio).  ModemManager keeps QMI + GPS +
+# the primary AT port, so detection and data are unaffected.  Re-run only if
+# the rule changes.  See docs/2026-06-18-inbound-answering.org.
+install-modem-at-port:
+	scp deploy/99-emacos-free-ttyusb3.rules phone:/tmp/99-emacos-free-ttyusb3.rules
+	ssh phone "sudo mv /tmp/99-emacos-free-ttyusb3.rules /etc/udev/rules.d/ \
+	  && sudo udevadm control --reload-rules \
+	  && sudo udevadm trigger --action=change /dev/ttyUSB3 \
+	  && sudo systemctl restart ModemManager"
+	@echo "✓ ttyUSB3 freed for emacsos AT voice; ModemManager restarted"
 
 # === WireGuard for the away phone ===
 # See docs/2026-05-31-wireguard-away-phone.org for the full setup runbook.

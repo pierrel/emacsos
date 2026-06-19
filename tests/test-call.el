@@ -130,5 +130,108 @@ INT code, so callers' (zerop code) never breaks; the description is kept."
       (should (= (car r) 1))
       (should (string-match-p "Segmentation fault" (cdr r))))))
 
+;;; Inbound: answer / detect / screen ;;;
+
+(ert-deftest emacos-answer-ata-success ()
+  "ATA returning VOICE CALL: BEGIN / OK is reported as answered."
+  (cl-letf (((symbol-function 'emacos-call--at)
+             (lambda (_cmd) "ATA\r\r\nVOICE CALL: BEGIN\r\nOK\r\n")))
+    (should (string-prefix-p "answered:" (emacos-answer)))))
+
+(ert-deftest emacos-answer-no-incoming-call ()
+  "ATA with no call to answer (NO CARRIER) is an error, not a success."
+  (cl-letf (((symbol-function 'emacos-call--at) (lambda (_cmd) "\r\nNO CARRIER\r\n")))
+    (should (string-prefix-p "error: answer failed" (emacos-answer)))))
+
+(ert-deftest emacos-answer-at-port-error-passthrough ()
+  "A serial-port failure surfaces verbatim, not as a false success."
+  (cl-letf (((symbol-function 'emacos-call--at)
+             (lambda (_cmd) "error: AT port /dev/ttyUSB3: no such file")))
+    (should (string-prefix-p "error:" (emacos-answer)))
+    (should-not (string-prefix-p "answered:" (emacos-answer)))))
+
+(ert-deftest emacos-call-render-incoming-shows-number-and-buttons ()
+  "The screen renders the caller number + Answer + Decline; arming the
+two-tap flips the Answer label."
+  (cl-letf (((symbol-function 'emacos--btn)
+             (lambda (label &rest _) (insert label "\n"))))
+    (let ((emacos--btn-label-scale 0.8)
+          (emacos-call--answer-confirm-pending nil))
+      (with-current-buffer (emacos-call--render-incoming "+14155550123")
+        (let ((s (buffer-string)))
+          (should (string-match-p "Incoming call" s))
+          (should (string-match-p (regexp-quote "+14155550123") s))
+          (should (string-match-p "Answer" s))
+          (should (string-match-p "Decline" s))
+          (should-not (string-match-p "Confirm answer?" s))))
+      (let ((emacos-call--answer-confirm-pending t))
+        (with-current-buffer (emacos-call--render-incoming "+14155550123")
+          (should (string-match-p "Confirm answer?" (buffer-string)))))
+      (kill-buffer emacos-call--incoming-buffer))))
+
+(ert-deftest emacos-call-render-incoming-unknown-number ()
+  (cl-letf (((symbol-function 'emacos--btn) (lambda (label &rest _) (insert label "\n"))))
+    (let ((emacos--btn-label-scale 0.8) (emacos-call--answer-confirm-pending nil))
+      (with-current-buffer (emacos-call--render-incoming "")
+        (should (string-match-p "Unknown" (buffer-string))))
+      (kill-buffer emacos-call--incoming-buffer))))
+
+(ert-deftest emacos-call-on-call-added-incoming-shows ()
+  "An INCOMING call (Direction=1) records the path/number and shows the screen."
+  (let ((shown nil) (emacos-call--ringing-path nil))
+    (cl-letf (((symbol-function 'emacos-call--call-prop)
+               (lambda (_p prop) (pcase prop ("Direction" 1) ("Number" "+14155550123"))))
+              ((symbol-function 'emacos-call-show-incoming)
+               (lambda (num) (setq shown num))))
+      (emacos-call--on-call-added "/org/freedesktop/ModemManager1/Call/0")
+      (should (equal shown "+14155550123"))
+      (should (equal emacos-call--ringing-path
+                     "/org/freedesktop/ModemManager1/Call/0")))))
+
+(ert-deftest emacos-call-on-call-added-outgoing-ignored ()
+  "An OUTGOING call (Direction=2) must NOT pop the incoming screen."
+  (let ((shown nil) (emacos-call--ringing-path nil))
+    (cl-letf (((symbol-function 'emacos-call--call-prop)
+               (lambda (_p prop) (pcase prop ("Direction" 2) ("Number" "+1999"))))
+              ((symbol-function 'emacos-call-show-incoming)
+               (lambda (_num) (setq shown t))))
+      (emacos-call--on-call-added "/org/freedesktop/ModemManager1/Call/9")
+      (should-not shown)
+      (should-not emacos-call--ringing-path))))
+
+(ert-deftest emacos-call-on-call-deleted-dismisses-matching ()
+  "CallDeleted dismisses only when it's the call currently shown."
+  (let ((dismissed 0))
+    (cl-letf (((symbol-function 'emacos-call--dismiss-incoming)
+               (lambda () (cl-incf dismissed))))
+      (let ((emacos-call--ringing-path "/Call/3"))
+        (emacos-call--on-call-deleted "/Call/3") (should (= dismissed 1))
+        (emacos-call--on-call-deleted "/Call/8") (should (= dismissed 1))))))
+
+(ert-deftest emacos-call-answer-tap-two-tap ()
+  "First Answer tap arms (no answer); second tap answers + dismisses."
+  (let ((answered 0) (dismissed 0)
+        (emacos-call--answer-confirm-pending nil))
+    (cl-letf (((symbol-function 'emacos-answer) (lambda () (cl-incf answered) "answered: x"))
+              ((symbol-function 'emacos-call--dismiss-incoming) (lambda () (cl-incf dismissed)))
+              ((symbol-function 'emacos-call--render-incoming) (lambda (&rest _) nil)))
+      (emacos-call--answer-tap)
+      (should emacos-call--answer-confirm-pending)
+      (should (= answered 0))
+      (emacos-call--answer-tap)
+      (should (= answered 1))
+      (should (= dismissed 1))
+      (should-not emacos-call--answer-confirm-pending))))
+
+(ert-deftest emacos-call-maybe-disarm-clears-on-other-tap ()
+  "A tap that isn't Answer disarms a pending two-tap; the Answer tap keeps it."
+  (cl-letf (((symbol-function 'emacos-call--render-incoming) (lambda (&rest _) nil)))
+    (let ((emacos-call--answer-confirm-pending t))
+      (emacos-call--maybe-disarm #'emacos-call--decline nil)
+      (should-not emacos-call--answer-confirm-pending))
+    (let ((emacos-call--answer-confirm-pending t))
+      (emacos-call--maybe-disarm #'emacos-call--answer-tap nil)
+      (should emacos-call--answer-confirm-pending))))
+
 (provide 'test-call)
 ;;; test-call.el ends here
