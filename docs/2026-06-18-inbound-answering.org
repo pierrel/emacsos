@@ -45,7 +45,7 @@ The whole design hinges on facts the spikes established on this SIM7600G-H:
 | Show incoming       | =*incoming-call*= buffer (no modal), caller number     |
 | Answer              | =ATA= on =ttyUSB3= via =make-serial-process=             |
 | Decline / hang up   | =emacos-hang-up= (=mmcli --voice-hangup-all=, exists)    |
-| Auto-dismiss        | =Voice.CallDeleted= / =Call.StateChanged= → restore     |
+| Auto-dismiss        | per-call =Call.StateChanged= → terminated → restore     |
 
 Detection stays on ModemManager (QMI) — event-driven, no polling (battery +
 latency win, and =CallAdded= proved reliable). One mechanism, not a
@@ -68,7 +68,10 @@ poll+dbus belt-and-suspenders.
   check is dropped — as-built), store number + =emacos-call-show-incoming=.
 - =emacos-call--watcher-ensure= / =--watcher-stop= — idempotent (mirror
   =emacos-net--ensure-timer=): register =CallAdded= (broad: nil path, so it
-  survives modem re-enumeration) + =CallDeleted= (auto-dismiss). Armed from init.
+  survives modem re-enumeration).  Armed from init.  Auto-dismiss is a
+  PER-CALL =Call.StateChanged= watch registered in =emacos-call--watch-call-end=
+  (CallDeleted does NOT fire promptly on this modem -- validated: the screen
+  stuck; StateChanged->terminated dismisses it within ~2s).
 ** Incoming-call screen (top buffer, NOT a modal)
 - =emacos-call-show-incoming (number)= — render =*incoming-call*= (big text:
   number + "Incoming call") + two =emacos--btn= buttons, swap into the top
@@ -135,7 +138,8 @@ poll+dbus belt-and-suspenders.
   handler — fine on the ring path, the one stall risk if the system bus wedges.
 - =make-serial-process= =ATA= timing vs. the ring window (answer well before
   voicemail).
-- Auto-dismiss correctness on caller-gives-up (=CallDeleted= vs =StateChanged=).
+- [RESOLVED] Auto-dismiss on caller-gives-up: =CallDeleted= was unreliable;
+  per-call =StateChanged=->terminated dismisses within ~2s (validated live).
 - Re-enumeration mid-ring (broad signal subscription + fresh modem index).
 - *Known edge (v1):* a call arriving while a minibuffer prompt is active —
   =emacos--target= prefers the minibuffer window, so the screen could swap there.

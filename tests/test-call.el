@@ -182,6 +182,7 @@ two-tap flips the Answer label."
   (let ((shown nil) (emacos-call--ringing-path nil))
     (cl-letf (((symbol-function 'emacos-call--call-prop)
                (lambda (_p prop) (pcase prop ("Direction" 1) ("Number" "+14155550123"))))
+              ((symbol-function 'emacos-call--watch-call-end) #'ignore)
               ((symbol-function 'emacos-call-show-incoming)
                (lambda (num) (setq shown num))))
       (emacos-call--on-call-added "/org/freedesktop/ModemManager1/Call/0")
@@ -200,14 +201,14 @@ two-tap flips the Answer label."
       (should-not shown)
       (should-not emacos-call--ringing-path))))
 
-(ert-deftest emacos-call-on-call-deleted-dismisses-matching ()
-  "CallDeleted dismisses only when it's the call currently shown."
+(ert-deftest emacos-call-on-call-state-dismisses-on-terminated ()
+  "The watched call going terminated (state 7) dismisses the screen; other
+states (e.g. active=4) do not."
   (let ((dismissed 0))
     (cl-letf (((symbol-function 'emacos-call--dismiss-incoming)
                (lambda () (cl-incf dismissed))))
-      (let ((emacos-call--ringing-path "/Call/3"))
-        (emacos-call--on-call-deleted "/Call/3") (should (= dismissed 1))
-        (emacos-call--on-call-deleted "/Call/8") (should (= dismissed 1))))))
+      (emacos-call--on-call-state 3 4 0) (should (= dismissed 0))    ; ringing->active
+      (emacos-call--on-call-state 4 7 0) (should (= dismissed 1))))) ; ->terminated
 
 (ert-deftest emacos-call-answer-tap-two-tap ()
   "First Answer tap arms (no answer); second tap answers + dismisses."

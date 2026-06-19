@@ -131,7 +131,11 @@ Returns \"hung-up: ...\" or \"error: ...\"."
 (defconst emacos-call--incoming-buffer "*incoming-call*")
 
 (defvar emacos-call--watcher-handles nil
-  "D-Bus signal registration objects (CallAdded/CallDeleted); nil = unarmed.")
+  "Global D-Bus signal registration (Voice.CallAdded); nil = unarmed.")
+(defvar emacos-call--state-handle nil
+  "Per-call Call.StateChanged registration for the shown call; dismisses the
+screen when the caller gives up.  CallDeleted does not fire promptly on this
+modem, so we key dismissal on the call's own state going terminated.")
 (defvar emacos-call--ringing-path nil "Object path of the call being shown.")
 (defvar emacos-call--ringing-number nil "Caller number being shown.")
 (defvar emacos-call--prev-buffer nil
@@ -222,6 +226,9 @@ Returns \"answered: ...\" or \"error: ...\"."
 
 (defun emacos-call--dismiss-incoming ()
   "Tear down the incoming screen and restore the pre-call top buffer."
+  (when emacos-call--state-handle
+    (ignore-errors (dbus-unregister-object emacos-call--state-handle))
+    (setq emacos-call--state-handle nil))
   (setq emacos-call--ringing-path nil
         emacos-call--ringing-number nil
         emacos-call--answer-confirm-pending nil)
@@ -278,35 +285,46 @@ A newly-added incoming call is ringing by definition (MMCallDirection:
   (when (equal (emacos-call--call-prop path "Direction") 1)
     (setq emacos-call--ringing-path path
           emacos-call--ringing-number (or (emacos-call--call-prop path "Number") ""))
+    (emacos-call--watch-call-end path)
     (emacos-call-show-incoming emacos-call--ringing-number)))
 
-(defun emacos-call--on-call-deleted (path &rest _)
-  "Handle Voice.CallDeleted: dismiss the screen if the shown call ended
-(caller gave up, or the call completed)."
-  (when (equal path emacos-call--ringing-path)
-    (emacos-call--dismiss-incoming)))
+(defun emacos-call--on-call-state (_old new _reason)
+  "Dismiss the incoming screen when the watched call ends.
+MMCallState 7 = terminated.  Used instead of Voice.CallDeleted, which does
+not fire promptly on this modem — the screen would stick after the caller
+gives up."
+  (when (eq new 7) (emacos-call--dismiss-incoming)))
+
+(defun emacos-call--watch-call-end (path)
+  "Watch the call at PATH so the screen auto-dismisses when it ends.
+Replaces any prior watch (single call at a time)."
+  (when emacos-call--state-handle
+    (ignore-errors (dbus-unregister-object emacos-call--state-handle)))
+  (setq emacos-call--state-handle
+        (dbus-register-signal
+         :system "org.freedesktop.ModemManager1" path
+         "org.freedesktop.ModemManager1.Call" "StateChanged"
+         #'emacos-call--on-call-state)))
 
 (defun emacos-call--watcher-ensure ()
-  "Subscribe to ModemManager incoming-call signals (idempotent; safe across
-hot-reload).  The nil-path match is path-independent, so it keeps firing
-after the modem object path changes on re-enumeration."
+  "Subscribe to Voice.CallAdded (idempotent; safe across hot-reload).  The
+nil-path match is path-independent, so it keeps firing after the modem object
+path changes on re-enumeration.  Per-call StateChanged (for dismissal) is
+registered dynamically in `emacos-call--watch-call-end'."
   (unless emacos-call--watcher-handles
     (setq emacos-call--watcher-handles
           (list
            (dbus-register-signal
             :system "org.freedesktop.ModemManager1" nil
             "org.freedesktop.ModemManager1.Modem.Voice" "CallAdded"
-            #'emacos-call--on-call-added)
-           (dbus-register-signal
-            :system "org.freedesktop.ModemManager1" nil
-            "org.freedesktop.ModemManager1.Modem.Voice" "CallDeleted"
-            #'emacos-call--on-call-deleted)))))
+            #'emacos-call--on-call-added)))))
 
 (defun emacos-call--watcher-stop ()
   "Unsubscribe the incoming-call signals (dev/debug affordance)."
   (interactive)
   (dolist (h emacos-call--watcher-handles) (ignore-errors (dbus-unregister-object h)))
-  (setq emacos-call--watcher-handles nil))
+  (when emacos-call--state-handle (ignore-errors (dbus-unregister-object emacos-call--state-handle)))
+  (setq emacos-call--watcher-handles nil emacos-call--state-handle nil))
 
 (provide 'phone-call)
 ;;; phone-call.el ends here
