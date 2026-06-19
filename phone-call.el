@@ -153,29 +153,32 @@ modem, so we key dismissal on the call's own state going terminated.")
   "Send AT CMD to `emacos-call-at-port'; return the modem's response string,
 or \"error: ...\".  Per-call open/close with guaranteed teardown -- a leaked
 serial process would make the next open fail device-busy."
-  (condition-case err
-      (let* ((buf (generate-new-buffer " *emacos-at*"))
-             (proc (make-serial-process
-                    :port emacos-call-at-port :speed 115200
-                    :coding 'no-conversion :noquery t :buffer buf)))
-        (unwind-protect
-            (progn
-              (process-send-string proc (concat cmd "\r"))
-              ;; `accept-process-output' returns on ANY output, so loop and
-              ;; accumulate until a terminal token or the deadline.
-              (let ((deadline (+ (float-time) 2.0)))
-                (catch 'done
-                  (while (< (float-time) deadline)
-                    (accept-process-output proc 0.3)
-                    (when (string-match-p
-                           "OK\\|ERROR\\|NO CARRIER\\|BEGIN"
-                           (with-current-buffer buf (buffer-string)))
-                      (throw 'done nil)))))
-              (with-current-buffer buf (buffer-string)))
-          (when (process-live-p proc) (delete-process proc))
-          (when (buffer-live-p buf) (kill-buffer buf))))
-    (error (format "error: AT port %s: %s"
-                   emacos-call-at-port (error-message-string err)))))
+  ;; Buffer created OUTERMOST so it is killed even if `make-serial-process'
+  ;; itself signals (missing/permission-denied port) before the proc exists.
+  (let ((buf (generate-new-buffer " *emacos-at*")))
+    (unwind-protect
+        (condition-case err
+            (let ((proc (make-serial-process
+                         :port emacos-call-at-port :speed 115200
+                         :coding 'no-conversion :noquery t :buffer buf)))
+              (unwind-protect
+                  (progn
+                    (process-send-string proc (concat cmd "\r"))
+                    ;; `accept-process-output' returns on ANY output, so loop
+                    ;; and accumulate until a terminal token or the deadline.
+                    (let ((deadline (+ (float-time) 2.0)))
+                      (catch 'done
+                        (while (< (float-time) deadline)
+                          (accept-process-output proc 0.3)
+                          (when (string-match-p
+                                 "OK\\|ERROR\\|NO CARRIER\\|BEGIN"
+                                 (with-current-buffer buf (buffer-string)))
+                            (throw 'done nil)))))
+                    (with-current-buffer buf (buffer-string)))
+                (when (process-live-p proc) (delete-process proc))))
+          (error (format "error: AT port %s: %s"
+                         emacos-call-at-port (error-message-string err))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
 
 ;;; Answer (deterministic primitive)
 
@@ -307,11 +310,15 @@ Replaces any prior watch (single call at a time)."
   (when (fboundp 'dbus-register-signal)
     (when emacos-call--state-handle
       (ignore-errors (dbus-unregister-object emacos-call--state-handle)))
+    ;; ignore-errors: a registration failure (bus hiccup / MM mid-restart) must
+    ;; not throw out of the CallAdded handler — the screen still shows, it just
+    ;; loses auto-dismiss (the user can still Decline).
     (setq emacos-call--state-handle
-          (dbus-register-signal
-           :system "org.freedesktop.ModemManager1" path
-           "org.freedesktop.ModemManager1.Call" "StateChanged"
-           #'emacos-call--on-call-state))))
+          (ignore-errors
+            (dbus-register-signal
+             :system "org.freedesktop.ModemManager1" path
+             "org.freedesktop.ModemManager1.Call" "StateChanged"
+             #'emacos-call--on-call-state)))))
 
 (defun emacos-call--watcher-ensure ()
   "Subscribe to Voice.CallAdded (idempotent; safe across hot-reload).  The
@@ -320,12 +327,19 @@ path changes on re-enumeration.  Per-call StateChanged (for dismissal) is
 registered dynamically in `emacos-call--watch-call-end'.  No-op without D-Bus
 (inbound detection off; outbound/answer still work)."
   (when (and (not emacos-call--watcher-handles) (fboundp 'dbus-register-signal))
-    (setq emacos-call--watcher-handles
-          (list
-           (dbus-register-signal
-            :system "org.freedesktop.ModemManager1" nil
-            "org.freedesktop.ModemManager1.Modem.Voice" "CallAdded"
-            #'emacos-call--on-call-added)))))
+    ;; condition-case: os.el calls this at boot, so a system-bus/service that
+    ;; isn't ready yet must NOT take down init -- honor the "never a boot
+    ;; failure" promise above (inbound just stays off until re-armed).
+    (condition-case err
+        (setq emacos-call--watcher-handles
+              (list
+               (dbus-register-signal
+                :system "org.freedesktop.ModemManager1" nil
+                "org.freedesktop.ModemManager1.Modem.Voice" "CallAdded"
+                #'emacos-call--on-call-added)))
+      (error (setq emacos-call--watcher-handles nil)
+             (message "emacos-call: inbound watcher unavailable: %s"
+                      (error-message-string err))))))
 
 (defun emacos-call--watcher-stop ()
   "Unsubscribe the incoming-call signals (dev/debug affordance)."
