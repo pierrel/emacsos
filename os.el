@@ -271,14 +271,14 @@ whole point of capturing :window at arm time; honor it at fire time."
   "Handle a tap on key group KG.
 Under an active modifier (`emacos--modifier' non-nil), routes to
 `emacos--tap-modified-key' (fires a bound command).  Otherwise,
-multi-tap cycles through letters for insertion."
+multi-tap cycles through the group's characters for insertion."
   (if emacos--modifier
       (emacos--tap-modified-key kg)
     (let ((w (emacos--target)))
       (when w
         (emacos--cancel-timer)
         (if (equal kg emacos--current-key)
-            ;; Same key: cycle to next letter
+            ;; Same key: cycle to next character
             (let ((i (mod (1+ emacos--tap-index) (length kg))))
               (setq emacos--tap-index i)
               (with-selected-window w
@@ -351,7 +351,7 @@ inserting a letter.  Three paths by bound-subset size:
   "Action handler for the MOD button.
 A2: when a binding is armed, COMMITS it before advancing the modifier.
 Sticky modifier survives that commit (A1) — the cycle still steps once."
-  (emacos--commit)              ; commit any in-flight multi-tap letter
+  (emacos--commit)              ; commit any in-flight multi-tap character
   (emacos--commit-armed-tap)    ; A2: commit armed binding (no-op if nil)
   (setq emacos--modifier (emacos--modifier-next emacos--modifier))
   (emacos--render-page)
@@ -832,8 +832,8 @@ see `emacos--render-page'."
               (let ((btn-start (point)))
                 (emacos--btn label #'emacos--tap-key kg
                              emacos--btn-label-scale)
-                ;; Armed-letter face stacking: bold yellow on the cycled
-                ;; letter inside this group's button (when armed here).
+                ;; Armed-character face stacking: bold yellow on the cycled
+                ;; character inside this group's button (when armed here).
                 (when (and armed-sub (equal subset armed-sub)
                            (numberp armed-idx)
                            (< armed-idx (length trunc)))
@@ -844,7 +844,7 @@ see `emacos--render-page'."
                       ;; PREPEND (no APPEND arg): in face merging, earlier
                       ;; entries win on conflict.  With APPEND=t the
                       ;; button face's `:foreground "white"' would win and
-                      ;; the armed letter would render invisibly.
+                      ;; the armed character would render invisibly.
                       (add-face-text-property
                        armed-pos (1+ armed-pos)
                        '(:weight bold :foreground "yellow")
