@@ -218,17 +218,17 @@ VWIDTH (left/right); both land in the (VWIDTH . HWIDTH) cons."
 
 (ert-deftest test-os-action-row-widths ()
   "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).  Row 5: MOD 2 units +
-CAPS 1 + TAB 1 + RET 2 (6 units / 3 gaps total).  MOD and RET are both
+mode 1 + TAB 1 + RET 2 (6 units / 3 gaps total).  MOD and RET are both
 `(* 2 unit)' so the state-toggle and the most-tapped key get equal
 fingertip-friendly width on a 320x240 screen.  All positive; the wide
 ones beat the narrow."
   (let* ((win-w 36) (gap 1.5)
          (third (emacos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
-         (unit  (emacos--unit-width win-w gap 6 3)))   ; CAPS/TAB=1u, MOD/RET=2u
+         (unit  (emacos--unit-width win-w gap 6 3)))   ; mode/TAB=1u, MOD/RET=2u
     (should (> third 0))
     (should (> unit 0))
     (should (> (* 2 third) third))   ; SPC (2/3) wider than DEL (1/3)
-    (should (> (* 2 unit) unit))))   ; MOD/RET (2u) wider than CAPS/TAB (1u)
+    (should (> (* 2 unit) unit))))   ; MOD/RET (2u) wider than mode/TAB (1u)
 
 (ert-deftest test-os-action-row-renders-del-spc-mode-tab-ret ()
   (with-temp-buffer
@@ -384,17 +384,18 @@ is already in progress, even if the command set differs."
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
 
-;;; Utility row: QUIT + M-x + Chat (CAPS lives on the action row)
+;;; Utility row: QUIT + M-x + Chat (the mode button lives on the action row)
 
 (ert-deftest test-os-utility-row-has-quit-mx-chat ()
   (with-temp-buffer
-    (emacos--render-utility-row)
-    (let ((s (buffer-string)))
-      (should (string-match-p "QUIT" s))
-      (should (string-match-p "M-x" s))
-      (should (string-match-p "Chat" s))
-      ;; CAPS moved to the action row.
-      (should-not (string-match-p "caps\\|CAPS" s)))))
+    (let ((emacos--kbd-mode 'lower))
+      (emacos--render-utility-row)
+      (let ((s (buffer-string)))
+        (should (string-match-p "QUIT" s))
+        (should (string-match-p "M-x" s))
+        (should (string-match-p "Chat" s))
+        ;; the mode button lives on the action row, not here
+        (should-not (string-match-p "abc\\|ABC" s))))))
 
 ;;; emacos--tap-quit (smart escape)
 
@@ -839,9 +840,9 @@ captured buffer was killed or the user switched).  Silent abandon."
 ;;; Action row rendering
 
 (ert-deftest test-os-action-row-mod-label-cycles ()
-  "Action row line 2 is MOD CAPS TAB RET; MOD label reflects the
-current state through all four positions of the cycle (and the row
-keeps showing DEL/SPC/the mode button (abc)/TAB/RET alongside)."
+  "Action row line 2 is MOD / mode button / TAB / RET; the MOD label
+reflects the current state through all four positions of the cycle (and
+the row keeps showing DEL/SPC/the mode button (abc)/TAB/RET alongside)."
   (dolist (pair '((nil . "mod") (C . "C") (M . "M") (C-M . "C-M")))
     (with-temp-buffer
       (let ((emacos--modifier (car pair))
