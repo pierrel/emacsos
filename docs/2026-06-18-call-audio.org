@@ -1,0 +1,123 @@
+#+title: Voice calls + on-device call-audio recording (validated on hardware)
+#+date: 2026-06-18
+
+This doc records what was *verified on the actual device* about placing voice
+calls and capturing call audio on the emacsos phone, plus the architecture for
+the eventual calling / recording / transcription features. Unlike the roadmap
+items (which are intent), everything in the "Confirmed" sections below was run
+live on the phone over WireGuard on 2026-06-18.
+
+* The hardware (confirmed on-device)
+- Modem: =SIMCOM_SIM7600G-H=, firmware =LE20B04SIM7600G22=, model =SIM7600G_V2.0.2=.
+- HAT: the Waveshare *4G HAT (B)* variant — it carries a built-in USB hub
+  (=Terminus 1a40:0101=, two external USB-A ports), an *onboard NAU8810 audio
+  codec*, and a *populated 3.5mm TRRS headset jack*. Call audio is produced on
+  the HAT; it does *not* travel to the Pi over USB by default.
+- Board: Raspberry Pi Zero 2 W. Reached over WireGuard; the WG tunnel rides
+  *wifi* (wlan0), independent of the cellular modem — so disrupting
+  ModemManager/cellular does not drop access (this made the AT probing safe).
+
+** USB serial port map (option driver, behind the HAT hub)
+| Port            | Function                                             |
+|-----------------+------------------------------------------------------|
+| =/dev/ttyUSB0=  | DIAG (binary QCDM)                                   |
+| =/dev/ttyUSB1=  | GPS / NMEA (streams =$GPGGA…=)                       |
+| =/dev/ttyUSB2=  | *AT command port* — owned by ModemManager            |
+| =/dev/ttyUSB3=  | silent / unused on this composition                  |
+| =/dev/ttyUSB4=  | *audio PCM stream* (raw bytes, see below)            |
+| =/dev/cdc-wdm0= | QMI control (data bearer; =qmi_wwan= → =wwan0=)      |
+
+* Confirmed: voice calling works
+A test call placed via ModemManager's voice API
+(=mmcli -m 0 --voice-create-call="number=+1…"= then =--start=) progressed
+=dialing → ringing-out → active= and rang + connected the destination phone.
+No =NO CARRIER=, no VoLTE-provisioning dead end — the scenario that would have
+killed the whole feature. Voice is viable on this SIM/carrier (T-Mobile).
+Placing a call this way needs *no* MM disruption (no debug mode, no freed ports).
+ModemManager's =voice: emergency only: no= means normal calls are permitted.
+
+Raw AT also works (=ATD+1…;= / =ATA= / =AT+CHUP= / =AT+CLCC= / =VOICE CALL: BEGIN=)
+when the AT port is free — see the port-ownership fork below.
+
+* Confirmed: on-device call-audio recording (the key result)
+The SIM7600's "USB audio" is *not* a USB Audio Class sound card — it never
+appears in =aplay -l=. It is a proprietary *raw PCM stream over =/dev/ttyUSB4=*,
+gated by =AT+CPCMREG=1= *after* a call connects. We recorded the far-end
+(downlink) audio of a live call on the phone, fetched the WAV, and transcribed
+it correctly with faster-whisper:
+
+: "This is a test, speaking to a prototype emacs phone, hopefully to be
+:  transcribed correctly. 1-2-3-4-5-6"
+(Sanitized example phrase; the real test clip was transcribed accurately
+except the proper noun "emacs" -> "e-max" — see the gotchas below.)
+
+** The validated recipe
+1. Place the call (=mmcli= voice API, or raw =ATD…;= on a free AT port).
+2. Wait for connect: =AT+CLCC= state =0= (active) or the =VOICE CALL: BEGIN= URC.
+3. =AT+CLVL=5= and =AT+COUTGAIN=8= (boost the downlink level).
+4. =AT+CPCMREG=1= to start the PCM stream.
+5. Read raw bytes from =/dev/ttyUSB4= (non-blocking + select).
+6. =AT+CPCMREG=0,1= then =AT+CHUP= to stop + hang up.
+7. Wrap bytes as a WAV, then transcribe.
+
+** Hard-won gotchas (these were the difference between garbage and a clean transcript)
+- *The PCM is 16 kHz / 16-bit / mono*, NOT the 8 kHz the SIMCom app note implies.
+  Writing the WAV at 8 kHz makes it half-speed and unintelligible. Measure the
+  byte rate and snap to 16000 (we observed ~16381 Hz), or set it explicitly.
+- *The downlink is quiet* (raw rms ~335). =CLVL=5= + =COUTGAIN=8= help, but also
+  *normalize in software* (scale peak to ~0.9 full-scale, ~×3.6 here) before STT.
+- *VAD filtering is mandatory.* Without =vad_filter=True= +
+  =condition_on_previous_text=False=, whisper hallucinates repeated phrases on
+  pauses (an early run on near-silence produced "I'm just going to press the
+  button." twice — pure hallucination).
+- Proper nouns suffer on =base.en= ("emacs" → "e-max"); a larger model or a
+  vocabulary/initial-prompt bias would fix it.
+
+** AT audio commands (capability ranges read from this firmware)
+| Command          | Range / value           | Meaning                                  |
+|------------------+-------------------------+------------------------------------------|
+| =AT+CPCMREG=?=   | =(0-1)=                 | start/stop USB serial-PCM stream         |
+| =AT+CPCMFRM=?=   | =(0-1)=                 | 0=8 kHz, 1=16 kHz (one-way switch)       |
+| =AT+CSDVC=?=     | =(0,1,3)=               | analog device: 0 close,1 handset,3 spkr  |
+| =AT+CLVL=?=      | =(0-5)=                 | rx volume                                |
+| =AT+COUTGAIN=?=  | =(0-8)=                 | output gain                              |
+| =AT+CMICGAIN=?=  | =(0-8)=                 | mic gain                                 |
+
+* Architecture
+Two audio endpoints exist and are *physically separate*: the modem's call audio
+(HAT codec → 3.5mm jack, or the PCM stream) vs. a USB audio dongle (a normal
+ALSA card for media/TTS/STT). They do not natively unify.
+
+- *Option 1 — serial-PCM bridge (chosen).* Keep call audio in software: read
+  =ttyUSB4= for recording/STT, and (full-duplex) write uplink PCM to inject
+  audio. Only path where the agent can hear/record/speak on calls and where one
+  headset (the USB dongle) can serve everything. Validated for *recording*; the
+  uplink/talk direction + headset are pending hardware.
+- *Option 2 — analog jack (fallback).* Use the HAT's 3.5mm jack (=AT+CSDVC=1=)
+  for calls; reliable, near-zero code, but two separate endpoints and the agent
+  can't touch call audio. Keep as the known-good fallback.
+
+** Open design fork: AT-port ownership
+To send =AT+CPCMREG= we need an AT port. =ttyUSB2= is owned by ModemManager. For
+the validation we *stopped MM* (safe here because access is over wifi), which
+drops cellular data for the call's duration and needs a restart afterward — *not*
+acceptable for a real feature. Production should instead free just the AT port
+with a udev =ID_MM_PORT_IGNORE= rule on =ttyUSB2= (match vendor =1e0e= product
+=9001= interface =02=) so the call/audio bridge owns AT + =ttyUSB4= while MM
+keeps managing the data bearer over QMI (=cdc-wdm0=). MM managed data fine via
+QMI throughout testing, which is encouraging for this split — but confirm MM
+still drives the modem with its AT port ignored before committing.
+
+* Speech-to-text
+Validated with =faster-whisper= =base.en= on *CPU* (the RTX 3090 is occupied by
+llama.cpp — only ~2 GB free), in an isolated venv. CPU is fast enough for short
+telephony clips. The roadmap's plan stands: a server-side STT endpoint on the
+home box; record on the phone, POST the wav, get text back.
+
+* Next steps
+1. Hardware in flight: a TRRS headset (HAT jack) + a USB audio dongle (Sabrent
+   AU-MMSA, into a free HAT USB-A port) — for *two-way talking* (today only the
+   downlink was recorded).
+2. Implement the udev AT-port-ownership rule and confirm MM still manages data.
+3. Build a call-audio bridge daemon (record ⇄ play over =ttyUSB4=).
+4. Build the "call X" contacts skill (see roadmap; design started 2026-06-18).
