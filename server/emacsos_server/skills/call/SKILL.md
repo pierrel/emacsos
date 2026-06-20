@@ -22,24 +22,33 @@ No search.
 
 The target is a person or a description ("Ana", "the plumber from last week").
 **There is no fixed contacts file** — names and numbers live wherever the user
-keeps notes (commonly org files under `~/org`, plus `~/notes`, `~/Documents`).
-So *search the user's files* for the term.
+keeps notes. So first *discover* where to look, then search.
 
-Search principles (apply them, don't just copy the examples):
+Search principles (apply them, don't just copy a command):
 - **Pick a distinctive term** — the name, or a keyword from the description
   ("plumber"). Search a LITERAL, shell-quoted string (`shell-quote-argument`
   prevents injection; `grep -F` avoids regex surprises).
-- **Grep WITH CONTEXT** (`-A`/`-B`) — the number is usually on a line near the
-  mention, not the matched line itself.
+- **Grep WITH CONTEXT** (`-A`/`-B`) — the number may be on a line near the
+  mention, not always on the matched line itself.
 - **CAP the output** (`-m` per file, `| head -c` total) so a common term can't
   dump unrelated personal data into the result.
+- **Search multiple directories** — the likely note locations, not one fixed
+  path.
 
-Start narrow (the usual notes locations), with context, capped:
+First, list the home directory and pick the likely places notes/contacts could
+live (a notes or org dir, a contacts file, a documents dir, …):
+
+```elisp
+(shell-command-to-string "ls -p ~ 2>/dev/null")
+```
+
+Then grep the few promising candidates together — with context, capped — where
+CANDIDATES is the space-separated paths you chose from that listing:
 
 ```elisp
 (shell-command-to-string
  (concat "grep -rinF -m 5 -A4 -B2 -- " (shell-quote-argument TERM)
-         " ~/org ~/notes ~/Documents 2>/dev/null | head -c 3000"))
+         " " CANDIDATES " 2>/dev/null | head -c 3000"))
 ```
 
 If that finds nothing, widen — search the whole home dir but restrict to
