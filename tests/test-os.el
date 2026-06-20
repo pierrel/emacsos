@@ -405,27 +405,29 @@ is already in progress, even if the command set differs."
 (ert-deftest test-os-render-page-uses-plane-when-set ()
   "When the top buffer declares a keyboard plane, render-page paints THAT into
 *keyboard* instead of the T9/action/utility/command bands."
-  (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
-             (lambda () (lambda () (insert "PLANE-SENTINEL"))))
-            ((symbol-function 'emacos--top-commands) (lambda () nil)))
-    (emacos--render-page)
-    (with-current-buffer "*keyboard*"
-      (let ((s (buffer-string)))
-        (should (string-match-p "PLANE-SENTINEL" s))
-        (should-not (string-match-p "QUIT" s)))))   ; T9 utility row absent
-  (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))
+  (unwind-protect       ; *keyboard* is a shared global buffer — clean it up even on failure
+      (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
+                 (lambda () (lambda () (insert "PLANE-SENTINEL"))))
+                ((symbol-function 'emacos--top-commands) (lambda () nil)))
+        (emacos--render-page)
+        (with-current-buffer "*keyboard*"
+          (let ((s (buffer-string)))
+            (should (string-match-p "PLANE-SENTINEL" s))
+            (should-not (string-match-p "QUIT" s)))))   ; T9 utility row absent
+    (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
 (ert-deftest test-os-render-page-t9-when-no-plane ()
   "With no plane on the top buffer, render-page paints the normal keyboard
 \(the utility row's QUIT is present, no plane content)."
-  (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
-            ((symbol-function 'emacos--top-commands) (lambda () nil)))
-    (emacos--render-page)
-    (with-current-buffer "*keyboard*"
-      (let ((s (buffer-string)))
-        (should (string-match-p "QUIT" s))
-        (should-not (string-match-p "PLANE-SENTINEL" s)))))
-  (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))
+  (unwind-protect
+      (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
+                ((symbol-function 'emacos--top-commands) (lambda () nil)))
+        (emacos--render-page)
+        (with-current-buffer "*keyboard*"
+          (let ((s (buffer-string)))
+            (should (string-match-p "QUIT" s))
+            (should-not (string-match-p "PLANE-SENTINEL" s)))))
+    (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
 ;;; Utility row: QUIT + M-x + Chat (the mode button lives on the action row)
 

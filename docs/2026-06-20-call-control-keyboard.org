@@ -75,6 +75,13 @@ The outbound =*call*= screen is best-effort via CallAdded(Direction 2); inbound
 - Badge string: active + =*call*= hidden → "● Call"; else "".
 - Back restores the pre-call buffer without clearing call state.
 
+* Validated live (2026-06-20, on device over WireGuard)
+Full flow works on the phone: inbound (incoming screen → Decline/Accept in the
+keyboard → Accept → in-progress → Hang up/Back → Back shows the "● Call" badge →
+tap to return) AND outbound. The outbound path's load-bearing assumption is
+*confirmed*: =Voice.CallAdded= DOES fire for Direction-2 (=--voice-create-call=)
+calls, so dialing shows the =*call*= screen with Hang up/Back.
+
 * Known limitations / residuals (named, not papered over)
 - *Stuck badge if the terminated (state 7) signal is lost while backgrounded.*
   Dismissal keys off StateChanged=7 because CallDeleted is unreliable on this
