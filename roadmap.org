@@ -512,6 +512,16 @@ texting) and STT.  Worth one design pass since the modem, the audio I/O, and the
 call-audio routing between them are interdependent — pick them together, not
 separately.
 
+** TODO Pi rail browns out / reboots when the PowerBoost charge input is unplugged
+Observed 2026-06-20: with battery → PowerBoost 1000C → (USB-A out) → Pi =PWR IN=,
+*unplugging the wall charger from the PowerBoost's micro-USB charge input reboots
+the Pi.* The PowerBoost's USB-power↔battery *load-share transition* dips its 5 V
+output enough to brown out the Zero 2 W. Not urgent (don't hot-swap the charge
+input under load), but fix for field use. Candidate fixes: a *bulk cap on the Pi
+5 V* to ride the transition; verify the PowerBoost's load-share jumper/config; or
+move the Pi to a power-path that doesn't glitch on input removal. Tracks with the
+[[file:docs/hardware-build.org][power-rig work]] (Rail 1).
+
 ** TODO Cellular modem ("3G antenna")
 I have an antenna, just need to connect it and ensure I can connect to a cell network (reliably, with some options around it).
 
