@@ -12,6 +12,9 @@
 ;; `emacos--btn-label-scale' arg it's passed (phone-call.el declares the var
 ;; without a value).  Bind a dummy here instead of pulling in all of os.el.
 (defvar emacos--btn-label-scale 0.8)
+;; os.el defines this buffer-local; the screen renderers set it.  Declare it
+;; here (os.el isn't loaded in these tests) so it goes buffer-local as on device.
+(defvar-local emacos--keyboard-plane nil)
 
 ;; Special (dynamic) so the stub lambda built in `test-call--stub' and the
 ;; `let'-binding in `test-call--with' refer to the SAME variable across
@@ -154,35 +157,69 @@ INT code, so callers' (zerop code) never breaks; the description is kept."
     (should (string-prefix-p "error:" (emacos-answer)))
     (should-not (string-prefix-p "answered:" (emacos-answer)))))
 
-(ert-deftest emacos-call-render-incoming-shows-number-and-buttons ()
-  "The screen renders the caller number + Answer + Decline; arming the
-two-tap flips the Answer label."
-  (cl-letf (((symbol-function 'emacos--btn)
-             (lambda (label &rest _) (insert label "\n"))))
-    (let ((emacos--btn-label-scale 0.8)
-          (emacos-call--answer-confirm-pending nil))
-      (with-current-buffer (emacos-call--render-incoming "+14155550123")
-        (let ((s (buffer-string)))
-          (should (string-match-p "Incoming call" s))
-          (should (string-match-p (regexp-quote "+14155550123") s))
-          (should (string-match-p "Answer" s))
-          (should (string-match-p "Decline" s))
-          (should-not (string-match-p "Confirm answer?" s))))
-      (let ((emacos-call--answer-confirm-pending t))
-        (with-current-buffer (emacos-call--render-incoming "+14155550123")
-          (should (string-match-p "Confirm answer?" (buffer-string)))))
-      (kill-buffer emacos-call--incoming-buffer))))
+(ert-deftest emacos-call-render-incoming-context-and-plane ()
+  "The incoming TOP buffer shows caller context only (controls live in the
+keyboard plane) and sets the incoming keyboard plane."
+  (with-current-buffer (emacos-call--render-incoming "+14155550123")
+    (let ((s (buffer-string)))
+      (should (string-match-p "Incoming call" s))
+      (should (string-match-p (regexp-quote "+14155550123") s))
+      (should-not (string-match-p "Decline" s))   ; moved to the plane
+      (should-not (string-match-p "Accept" s)))
+    (should (eq emacos--keyboard-plane #'emacos-call--plane-incoming)))
+  (kill-buffer emacos-call--incoming-buffer))
 
 (ert-deftest emacos-call-render-incoming-unknown-number ()
-  (cl-letf (((symbol-function 'emacos--btn) (lambda (label &rest _) (insert label "\n"))))
-    (let ((emacos--btn-label-scale 0.8) (emacos-call--answer-confirm-pending nil))
-      (with-current-buffer (emacos-call--render-incoming "")
-        (should (string-match-p "Unknown" (buffer-string))))
-      (kill-buffer emacos-call--incoming-buffer))))
+  (with-current-buffer (emacos-call--render-incoming "")
+    (should (string-match-p "Unknown" (buffer-string))))
+  (kill-buffer emacos-call--incoming-buffer))
+
+(ert-deftest emacos-call-render-active-context-and-plane ()
+  "The *call* TOP buffer shows status + number and sets the active plane."
+  (with-current-buffer (emacos-call--render-active "+14155550123" "In progress")
+    (let ((s (buffer-string)))
+      (should (string-match-p "In progress" s))
+      (should (string-match-p (regexp-quote "+14155550123") s)))
+    (should (eq emacos--keyboard-plane #'emacos-call--plane-active)))
+  (kill-buffer emacos-call--active-buffer))
+
+;; The plane renderers paint *keyboard*; stub the os.el button + centering
+;; primitives to capture labels (the planes run without os.el here).
+(defmacro test-call--render-plane (plane &rest body)
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'emacos--btn)
+              (lambda (label &rest _) (insert label "\n")))
+             ((symbol-function 'emacos--center) (lambda (s &rest _) s)))
+     (with-temp-buffer
+       (funcall ,plane)
+       (let ((s (buffer-string))) ,@body))))
+
+(ert-deftest emacos-call-plane-incoming-buttons ()
+  "Incoming plane paints Decline + Accept; arming flips Accept's label."
+  (let ((emacos-call--answer-confirm-pending nil))
+    (test-call--render-plane #'emacos-call--plane-incoming
+      (should (string-match-p "Decline" s))
+      (should (string-match-p "Accept" s))
+      (should-not (string-match-p "Confirm answer?" s))))
+  (let ((emacos-call--answer-confirm-pending t))
+    (test-call--render-plane #'emacos-call--plane-incoming
+      (should (string-match-p "Confirm answer?" s)))))
+
+(ert-deftest emacos-call-plane-active-buttons ()
+  "Active plane paints Hang up + Back; arming flips Hang up's label."
+  (let ((emacos-call--hangup-confirm-pending nil))
+    (test-call--render-plane #'emacos-call--plane-active
+      (should (string-match-p "Hang up" s))
+      (should (string-match-p "Back" s))
+      (should-not (string-match-p "Confirm hang up?" s))))
+  (let ((emacos-call--hangup-confirm-pending t))
+    (test-call--render-plane #'emacos-call--plane-active
+      (should (string-match-p "Confirm hang up?" s)))))
 
 (ert-deftest emacos-call-on-call-added-incoming-shows ()
-  "An INCOMING call (Direction=1) records the path/number and shows the screen."
-  (let ((shown nil) (emacos-call--ringing-path nil))
+  "An INCOMING call (Direction=1) records path/number, sets state, shows the
+incoming screen."
+  (let ((shown nil) (emacos-call--call-path nil) (emacos-call--state nil))
     (cl-letf (((symbol-function 'emacos-call--call-prop)
                (lambda (_p prop) (pcase prop ("Direction" 1) ("Number" "+14155550123"))))
               ((symbol-function 'emacos-call--watch-call-end) #'ignore)
@@ -190,57 +227,103 @@ two-tap flips the Answer label."
                (lambda (num) (setq shown num))))
       (emacos-call--on-call-added "/org/freedesktop/ModemManager1/Call/0")
       (should (equal shown "+14155550123"))
-      (should (equal emacos-call--ringing-path
+      (should (eq emacos-call--state 'incoming))
+      (should (equal emacos-call--call-path
                      "/org/freedesktop/ModemManager1/Call/0")))))
 
-(ert-deftest emacos-call-on-call-added-outgoing-ignored ()
-  "An OUTGOING call (Direction=2) must NOT pop the incoming screen."
-  (let ((shown nil) (emacos-call--ringing-path nil))
+(ert-deftest emacos-call-on-call-added-outgoing-shows-active ()
+  "An OUTGOING call (Direction=2) shows the in-progress *call* screen, not the
+incoming screen."
+  (let ((active nil) (incoming nil) (emacos-call--state nil) (emacos-call--call-path nil))
     (cl-letf (((symbol-function 'emacos-call--call-prop)
                (lambda (_p prop) (pcase prop ("Direction" 2) ("Number" "+1999"))))
-              ((symbol-function 'emacos-call-show-incoming)
-               (lambda (_num) (setq shown t))))
+              ((symbol-function 'emacos-call--watch-call-end) #'ignore)
+              ((symbol-function 'emacos-call-show-incoming) (lambda (_n) (setq incoming t)))
+              ((symbol-function 'emacos-call--show-active) (lambda (_s) (setq active t))))
       (emacos-call--on-call-added "/org/freedesktop/ModemManager1/Call/9")
-      (should-not shown)
-      (should-not emacos-call--ringing-path))))
+      (should active)
+      (should-not incoming)
+      (should (eq emacos-call--state 'active)))))
 
-(ert-deftest emacos-call-on-call-state-dismisses-on-terminated ()
-  "The watched call going terminated (state 7) dismisses the screen; other
-states (e.g. active=4) do not."
-  (let ((dismissed 0))
-    (cl-letf (((symbol-function 'emacos-call--dismiss-incoming)
-               (lambda () (cl-incf dismissed))))
-      (emacos-call--on-call-state 3 4 0) (should (= dismissed 0))    ; ringing->active
-      (emacos-call--on-call-state 4 7 0) (should (= dismissed 1))))) ; ->terminated
+(ert-deftest emacos-call-on-call-state-active-and-terminated ()
+  "State 4 (active) flips state to active and does NOT dismiss; 7 dismisses."
+  (let ((dismissed 0) (emacos-call--state 'incoming))
+    (cl-letf (((symbol-function 'emacos-call--dismiss) (lambda () (cl-incf dismissed)))
+              ;; no windows in batch -> the active branch's get-buffer-window
+              ;; both return nil, so on-call-state just flips state.
+              ((symbol-function 'emacos-call--show-active) (lambda (&rest _) nil))
+              ((symbol-function 'emacos-call--render-active) (lambda (&rest _) nil)))
+      (emacos-call--on-call-state 3 4 0)
+      (should (= dismissed 0))
+      (should (eq emacos-call--state 'active))
+      (emacos-call--on-call-state 4 7 0)
+      (should (= dismissed 1)))))
 
 (ert-deftest emacos-call-answer-tap-two-tap ()
-  "First Answer tap arms (no answer); second tap answers + dismisses."
-  (let ((answered 0) (dismissed 0)
-        (emacos-call--answer-confirm-pending nil))
+  "First Accept tap arms (no answer); second answers + shows in-progress."
+  (let ((answered 0) (active 0)
+        (emacos-call--answer-confirm-pending nil) (emacos-call--state nil))
     (cl-letf (((symbol-function 'emacos-answer) (lambda () (cl-incf answered) "answered: x"))
-              ((symbol-function 'emacos-call--dismiss-incoming) (lambda () (cl-incf dismissed)))
-              ((symbol-function 'emacos-call--render-incoming) (lambda (&rest _) nil)))
+              ((symbol-function 'emacos-call--show-active) (lambda (&rest _) (cl-incf active))))
       (emacos-call--answer-tap)
       (should emacos-call--answer-confirm-pending)
       (should (= answered 0))
       (emacos-call--answer-tap)
       (should (= answered 1))
-      (should (= dismissed 1))
+      (should (= active 1))
+      (should (eq emacos-call--state 'active))
       (should-not emacos-call--answer-confirm-pending))))
 
-(ert-deftest emacos-call-maybe-disarm-clears-on-other-tap ()
-  "A tap that isn't Answer disarms a pending two-tap; the Answer tap keeps it."
-  (cl-letf (((symbol-function 'emacos-call--render-incoming) (lambda (&rest _) nil)))
-    (let ((emacos-call--answer-confirm-pending t))
-      (emacos-call--maybe-disarm #'emacos-call--decline nil)
-      (should-not emacos-call--answer-confirm-pending))
-    (let ((emacos-call--answer-confirm-pending t))
-      (emacos-call--maybe-disarm #'emacos-call--answer-tap nil)
-      (should emacos-call--answer-confirm-pending))))
+(ert-deftest emacos-call-answer-tap-failure-dismisses ()
+  "A failed answer (not \"answered:\") dismisses rather than showing active."
+  (let ((dismissed 0) (emacos-call--answer-confirm-pending t))
+    (cl-letf (((symbol-function 'emacos-answer) (lambda () "error: answer failed"))
+              ((symbol-function 'emacos-call--show-active)
+               (lambda (&rest _) (error "should not show active on failure")))
+              ((symbol-function 'emacos-call--dismiss) (lambda () (cl-incf dismissed))))
+      (emacos-call--answer-tap)
+      (should (= dismissed 1)))))
 
-;; The dismiss stubs are variadic + guard on our fake `win' (the real
-;; set-window-buffer takes a 3rd arg, and kill-buffer's window machinery calls
-;; it too); kill-buffer is no-op'd so the test isolates the restore decision.
+(ert-deftest emacos-call-hangup-tap-two-tap ()
+  "First Hang-up tap arms; second hangs up + dismisses."
+  (let ((hung 0) (dismissed 0) (emacos-call--hangup-confirm-pending nil))
+    (cl-letf (((symbol-function 'emacos-hang-up) (lambda () (cl-incf hung) "hung-up: x"))
+              ((symbol-function 'emacos-call--dismiss) (lambda () (cl-incf dismissed))))
+      (emacos-call--hangup-tap)
+      (should emacos-call--hangup-confirm-pending)
+      (should (= hung 0))
+      (emacos-call--hangup-tap)
+      (should (= hung 1))
+      (should (= dismissed 1))
+      (should-not emacos-call--hangup-confirm-pending))))
+
+(ert-deftest emacos-call-maybe-disarm-clears-pending ()
+  "A non-arming tap disarms a pending two-tap (Accept or Hang-up); the arming
+button itself keeps it."
+  (let ((emacos-call--answer-confirm-pending t))
+    (emacos-call--maybe-disarm #'emacos-call--decline nil)
+    (should-not emacos-call--answer-confirm-pending))
+  (let ((emacos-call--answer-confirm-pending t))
+    (emacos-call--maybe-disarm #'emacos-call--answer-tap nil)
+    (should emacos-call--answer-confirm-pending))
+  (let ((emacos-call--hangup-confirm-pending t))
+    (emacos-call--maybe-disarm #'emacos-call--back nil)
+    (should-not emacos-call--hangup-confirm-pending))
+  (let ((emacos-call--hangup-confirm-pending t))
+    (emacos-call--maybe-disarm #'emacos-call--hangup-tap nil)
+    (should emacos-call--hangup-confirm-pending)))
+
+(ert-deftest emacos-call-mode-line-badge ()
+  "Badge shows only while active AND the *call* screen is hidden."
+  (let ((emacos-call--state nil))
+    (should (equal (emacos-call-mode-line-string) "")))
+  (when (get-buffer emacos-call--active-buffer)
+    (kill-buffer emacos-call--active-buffer))
+  (let ((emacos-call--state 'active))           ; no *call* window in batch
+    (should (string-match-p "Call" (emacos-call-mode-line-string)))))
+
+;; Dismiss restores the pre-call buffer.  The window stubs are variadic + guard
+;; on our fake `win'; kill-buffer is no-op'd so the test isolates the restore.
 (defmacro test-call--with-dismiss-window (restored-var &rest body)
   (declare (indent 1))
   `(cl-letf (((symbol-function 'emacos--target) (lambda () 'win))
@@ -253,23 +336,24 @@ states (e.g. active=4) do not."
      ,@body))
 
 (ert-deftest emacos-call-dismiss-restores-prev-buffer ()
-  "Dismiss restores the captured pre-call buffer when it is still live."
+  "Dismiss restores the captured pre-call buffer when live, and clears state."
   (let ((prev (get-buffer-create "test-prev")) (restored nil))
     (test-call--with-dismiss-window restored
-      (let ((emacos-call--prev-buffer prev))
-        (emacos-call--dismiss-incoming)
+      (let ((emacos-call--prev-buffer prev) (emacos-call--state 'active))
+        (emacos-call--dismiss)
         (should (eq restored prev))
-        (should-not emacos-call--prev-buffer)))   ; cleared
+        (should-not emacos-call--prev-buffer)     ; cleared
+        (should-not emacos-call--state)))         ; cleared
     (when (buffer-live-p prev) (kill-buffer prev))))
 
 (ert-deftest emacos-call-dismiss-falls-back-to-scratch-when-prev-dead ()
-  "If the captured buffer was killed mid-ring, dismiss restores *scratch*,
+  "If the captured buffer was killed mid-call, dismiss restores *scratch*,
 not a dead buffer."
   (let ((dead (get-buffer-create "test-dead")) (restored nil))
     (kill-buffer dead)
     (test-call--with-dismiss-window restored
       (let ((emacos-call--prev-buffer dead))
-        (emacos-call--dismiss-incoming)
+        (emacos-call--dismiss)
         (should (eq restored (get-buffer-create "*scratch*")))))))
 
 (provide 'test-call)
