@@ -402,12 +402,12 @@ arming button.  Registered on `emacos--confirm-disarm-functions'."
 
 (defconst emacos-call--mode-line-keymap
   (let ((m (make-sparse-keymap)))
-    (define-key m [mode-line mouse-1] #'emacos-call--show-active-again)
+    (define-key m [mode-line mouse-1] #'emacos-call--badge-tap)
     m)
   "Keymap for the tappable call badge (built once; the :eval runs each redisplay).")
 
-(defun emacos-call--show-active-again ()
-  "Re-show the *call* screen (from the modeline badge)."
+(defun emacos-call--badge-tap ()
+  "Modeline call-badge handler: re-show the backgrounded *call* screen."
   (interactive)
   (when (eq emacos-call--state 'active)
     (emacos-call--show-active "In progress")))
@@ -439,9 +439,15 @@ redisplay-time error can never brick the modeline."
   "Handle Voice.CallAdded for a call at PATH (MMCallDirection: 1 incoming,
 2 outgoing).  Incoming → the incoming screen; outgoing → the in-progress
 *call* screen (\"Calling…\").  Registers a per-call StateChanged watch for the
-answered/connected/terminated transitions."
+answered/connected/terminated transitions.
+
+One call at a time BY CONSTRUCTION: a new call arriving while one is already
+tracked (`emacos-call--state' non-nil — e.g. call-waiting, or a fresh ring
+that races a not-yet-dismissed call) is IGNORED, so it can't overwrite the
+live call's path/number or steal its StateChanged watch.  State returns to
+nil on dismiss, freeing the next call."
   (let ((dir (emacos-call--call-prop path "Direction")))
-    (when (memq dir '(1 2))
+    (when (and (memq dir '(1 2)) (null emacos-call--state))
       (setq emacos-call--call-path path
             emacos-call--call-number (or (emacos-call--call-prop path "Number") ""))
       (emacos-call--watch-call-end path)

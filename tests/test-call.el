@@ -356,5 +356,26 @@ not a dead buffer."
         (emacos-call--dismiss)
         (should (eq restored (get-buffer-create "*scratch*")))))))
 
+(ert-deftest emacos-call-back-restores-prev-keeps-active ()
+  "Back returns to the pre-call buffer but leaves the call RUNNING (state
+stays `active', so the modeline badge appears) and disarms a pending hang-up."
+  (let ((prev (get-buffer-create "test-prev")) (restored nil)
+        (emacos-call--state 'active)
+        (emacos-call--hangup-confirm-pending t))
+    (get-buffer-create emacos-call--active-buffer)
+    (let ((emacos-call--prev-buffer prev))
+      (cl-letf (((symbol-function 'emacos--target) (lambda () 'win))
+                ((symbol-function 'window-buffer)
+                 (lambda (&rest _) (get-buffer emacos-call--active-buffer)))
+                ((symbol-function 'set-window-buffer)
+                 (lambda (w b &rest _) (when (eq w 'win) (setq restored b)))))
+        (emacos-call--back)
+        (should (eq restored prev))               ; returned to pre-call buffer
+        (should (eq emacos-call--state 'active))   ; call still running
+        (should-not emacos-call--hangup-confirm-pending)))
+    (when (buffer-live-p prev) (kill-buffer prev))
+    (when (get-buffer emacos-call--active-buffer)
+      (kill-buffer emacos-call--active-buffer))))
+
 (provide 'test-call)
 ;;; test-call.el ends here

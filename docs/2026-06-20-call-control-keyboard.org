@@ -75,6 +75,23 @@ The outbound =*call*= screen is best-effort via CallAdded(Direction 2); inbound
 - Badge string: active + =*call*= hidden → "● Call"; else "".
 - Back restores the pre-call buffer without clearing call state.
 
+* Known limitations / residuals (named, not papered over)
+- *Stuck badge if the terminated (state 7) signal is lost while backgrounded.*
+  Dismissal keys off StateChanged=7 because CallDeleted is unreliable on this
+  modem.  If a backgrounded active call (you tapped Back) ends and the 7 signal
+  never arrives, =emacos-call--state= stays =active= and the "● Call" badge stays
+  lit.  Not fixable by construction without a poll/timeout (rejected as
+  probabilistic).  Escape exists: tap the badge → Hang up → =emacos-hang-up=
+  returns "no active call?" but still dismisses, clearing the state.  A
+  consequence of the single-call guard: while stuck, a genuinely new call is
+  ignored until the badge is cleared.  Accepted residual.
+- *Outbound screen needs live verification.* The outbound =*call*= screen relies
+  on =Voice.CallAdded= firing for Direction-2 (=--voice-create-call=) calls,
+  which is assumed but not yet validated on device (only Direction-1/inbound has
+  been exercised live).  If it doesn't fire, outbound dials get no call UI
+  (hang up via =M-x emacos-hang-up=); inbound — the explicit ask — is unaffected.
+  Verify on the phone before relying on the outbound path.
+
 * Deferred
 - Outbound "Calling…" cancel nuance (ringing-out vs active text) is minimal; one
   =*call*= screen serves both.

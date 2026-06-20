@@ -1004,9 +1004,12 @@ an in-progress render."
         (if plane
             (progn
               (funcall plane)
-              ;; A plane has no command band; keep `emacos--last-commands' in
-              ;; sync with the top buffer so the follower's command-compare
-              ;; doesn't spuriously re-fire while a plane is up.
+              ;; A plane has no command band, so `emacos--render-commands' (which
+              ;; sets `emacos--last-commands') didn't run.  Sync it to the top
+              ;; buffer's set anyway: the follower's skip guard is an AND of
+              ;; command-compare AND plane-compare, so a later follower fire
+              ;; while the plane is still up would otherwise re-render off a
+              ;; stale (pre-call) command set even though the plane is unchanged.
               (setq emacos--last-commands (emacos--top-commands)))
           (emacos--render-keyboard)
           (emacos--render-action-row)
