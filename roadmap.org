@@ -529,6 +529,18 @@ OURS used an [[https://www.communica.co.za/products/hkd-gsm-antenna-on-ipex-13-c
 version (not GSM-only) so it covers the carrier's LTE bands. ~$3-8. Confirm the
 connector matches the modem's MAIN antenna port (u.FL). Not urgent.
 
+** TODO Real-time full-duplex call-audio bridge + uplink
+Downlink is validated end-to-end (capture → USB dongle → headphones) on the
+stable rail — see [[file:docs/2026-06-18-call-audio.org][the call-audio doc, 2026-06-20 update]]. Two pieces remain for a
+real two-way call:
+- *One synchronized bridge process* — read =ttyUSB4= downlink + write uplink in
+  *matched chunks clocked off the modem* (16.7 kHz), NOT two loose =cat=s (which
+  desync → silent downlink + "airplane" static uplink). =AT+CPCMREG=1= is
+  full-duplex; you can't run one direction alone.
+- *Uplink needs a real mic* — the *single-TRRS dongle* (one combined jack);
+  EarPods in the 2-jack dongle's pink (TRS) port is a false-negative.
+Then build it as a daemon and wire it to the call UI. Blocked on the TRRS dongle.
+
 ** TODO Cellular modem ("3G antenna")
 I have an antenna, just need to connect it and ensure I can connect to a cell network (reliably, with some options around it).
 

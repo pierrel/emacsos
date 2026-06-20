@@ -114,10 +114,61 @@ llama.cpp — only ~2 GB free), in an isolated venv. CPU is fast enough for shor
 telephony clips. The roadmap's plan stands: a server-side STT endpoint on the
 home box; record on the phone, POST the wav, get text back.
 
+* Update 2026-06-20: end-to-end downlink playback on a stable rail
+Picked the bring-up back up on the real hardware path. Big result: *downlink
+now works end-to-end* (modem PCM → =ttyUSB4= → captured → USB dongle →
+headphones), on a modem that finally holds a call.
+
+- *The power rail was THE blocker — confirmed.* Interim hookup (stand-in for the
+  Pololu boost, which hasn't arrived): a *5 V USB wall charger* (sacrificial
+  cable, red=5V / black=GND) feeding the HAT's *dedicated 5V/GND posts* via
+  *alligator clips*; data to the Pi stays on the mini-USB "USB hub" (VBUS left
+  connected — see below). With the modem on its own stiff rail, an *outbound
+  call ran the full 40 s with zero re-enumeration*. The instability was the
+  modem's TX-burst brownout, exactly as predicted — a hardware/power problem,
+  not software. The dedicated 5V posts are *bare metal test posts* (no wire
+  hole) — clip or solder to the base; the same input the Pololu will feed, so
+  the wall→Pololu swap happens at the *source* end, no modem-side rework.
+- *Downlink confirmed end-to-end.* Captured 10 s of a live call's downlink →
+  strong signal (peak *76 %* FS, RMS ~5.7 %, ~51 % non-silent) → replayed
+  through the USB dongle to headphones: *clear, correct speed*. The full receive
+  path works.
+- *Rate re-confirmed ~16.7 kHz.* With =CPCMFRM=1=, a 10 s capture measured
+  16736 Hz (a hasty in-call 4 s measure read ~17.76 k — inflated by stream
+  startup bytes; measure over a longer steady window). 16 k, never 8 k.
+- *=AT+CPCMREG=1= is synchronized full-duplex — you cannot do one direction
+  alone.* With it on and *no* uplink writes, the modem TX's buffer garbage (the
+  far end hears "airplane-engine" static); two independent =cat=s
+  (read-pipe-aplay + arecord-pipe-write) *desync* the stream → silent downlink +
+  static uplink. Record-then-play sidesteps it for downlink. Real-time needs a
+  bridge that keeps read+write *balanced at the modem's clock* (one process,
+  matched chunks), not two loose pipes.
+- *Dongle mixer resets on re-enumeration.* A USB audio dongle that re-plugs
+  (e.g. during wiring) comes back with =Speaker= muted/low → silent output even
+  though the PCM is fine. Re-boost =Speaker= (=amixer sset Speaker 90% unmute=)
+  after any re-seat.
+- *Debug gotchas that cost time:* (a) a *dead pair of headphones* read exactly
+  like a software bug — silent output through a clean, signal-bearing path; a
+  known-good headset isolated it instantly (test the transducer early). (b) The
+  C-Media dongle is a *two-jack* type (green out / pink mic, separate); *TRRS
+  earbuds in the pink jack do NOT map a mic* (3-pole jack vs 4-pole plug) — that
+  was the "mic path" false-negative.
+- *Uplink still pending the right hardware:* a *single-TRRS dongle* (one
+  combined jack → a real mic) plus the *synchronized full-duplex bridge* above.
+  Tested with EarPods-in-pink = false-negative, as expected.
+- *Ops note:* WireGuard flakiness can SIGHUP a backgrounded =ssh= dial script
+  mid-run (log stalls at "start", no process left). A *detached* remote process
+  (=setsid=/=nohup=) survives the tunnel hiccup; poll a logfile.
+- *Signal depends on placement.* Registration read 80 % at the window; moving the
+  phone deeper into the house weakens it and can make calls ring out / drop.
+  Reinforces the *smaller-but-better antenna* roadmap item (the bundled whip is
+  bulky; an FPC/u.FL multiband LTE antenna placed well would help marginal spots).
+
 * Next steps
-1. Hardware in flight: a TRRS headset (HAT jack) + a USB audio dongle (Sabrent
-   AU-MMSA, into a free HAT USB-A port) — for *two-way talking* (today only the
-   downlink was recorded).
-2. Implement the udev AT-port-ownership rule and confirm MM still manages data.
-3. Build a call-audio bridge daemon (record ⇄ play over =ttyUSB4=).
-4. Build the "call X" contacts skill (see roadmap; design started 2026-06-18).
+1. *Build the real-time full-duplex call-audio bridge* — one process, matched
+   read/write chunks clocked off =ttyUSB4=, at 16.7 kHz (not two loose =cat=s).
+2. *Uplink test with the single-TRRS dongle* (real mic) once it arrives.
+3. Swap the wall charger for the *Pololu U3V70F5* on the same 5V/GND posts when
+   it lands (permanent rail; data-only USB handling revisited then).
+4. Implement the udev AT-port-ownership rule and confirm MM still manages data.
+5. Build the "call X" contacts skill — *done* (PRs #26/#29, 2026-06-18..20).
