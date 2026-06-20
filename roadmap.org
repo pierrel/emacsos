@@ -522,6 +522,13 @@ input under load), but fix for field use. Candidate fixes: a *bulk cap on the Pi
 move the Pi to a power-path that doesn't glitch on input removal. Tracks with the
 [[file:docs/hardware-build.org][power-rig work]] (Rail 1).
 
+** TODO Smaller cellular antenna (the bundled whip is huge/clunky)
+The SIM7600's bundled whip antenna is bulky. Replace with a small *flexible-PCB
+(FPC) antenna on a u.FL/IPEX connector* — flat, adhesive-backed, far smaller.
+OURS used an [[https://www.communica.co.za/products/hkd-gsm-antenna-on-ipex-13-con][HKD GSM antenna on IPEX-13]] (~R19) — get a *multiband 4G/LTE* FPC
+version (not GSM-only) so it covers the carrier's LTE bands. ~$3-8. Confirm the
+connector matches the modem's MAIN antenna port (u.FL). Not urgent.
+
 ** TODO Cellular modem ("3G antenna")
 I have an antenna, just need to connect it and ensure I can connect to a cell network (reliably, with some options around it).
 
