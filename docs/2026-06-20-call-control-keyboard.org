@@ -92,12 +92,6 @@ calls, so dialing shows the =*call*= screen with Hang up/Back.
   returns "no active call?" but still dismisses, clearing the state.  A
   consequence of the single-call guard: while stuck, a genuinely new call is
   ignored until the badge is cleared.  Accepted residual.
-- *Outbound screen needs live verification.* The outbound =*call*= screen relies
-  on =Voice.CallAdded= firing for Direction-2 (=--voice-create-call=) calls,
-  which is assumed but not yet validated on device (only Direction-1/inbound has
-  been exercised live).  If it doesn't fire, outbound dials get no call UI
-  (hang up via =M-x emacos-hang-up=); inbound — the explicit ask — is unaffected.
-  Verify on the phone before relying on the outbound path.
 
 * Deferred
 - Outbound "Calling…" cancel nuance (ringing-out vs active text) is minimal; one

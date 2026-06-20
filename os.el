@@ -997,7 +997,6 @@ an in-progress render."
   (let* ((buf (get-buffer-create "*keyboard*"))
          (emacos--in-render t)
          (plane (emacos--top-keyboard-plane)))
-    (setq emacos--last-plane plane)
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -1014,7 +1013,12 @@ an in-progress render."
           (emacos--render-keyboard)
           (emacos--render-action-row)
           (emacos--render-utility-row)
-          (emacos--render-commands)))
+          (emacos--render-commands))
+        ;; Record the rendered plane ONLY after the render succeeds (mirrors how
+        ;; `emacos--last-commands' is set during the render): if `(funcall plane)'
+        ;; above signals, `emacos--last-plane' stays unchanged so the follower
+        ;; doesn't treat the half-painted surface as "already rendered".
+        (setq emacos--last-plane plane))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
