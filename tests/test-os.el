@@ -367,11 +367,27 @@ tap)."
 (ert-deftest test-os-follower-noop-when-command-set-unchanged ()
   (let ((rendered nil)
         (emacos--in-render nil)
-        (emacos--last-commands '(("SAME" . same))))
+        (emacos--last-commands '(("SAME" . same)))
+        (emacos--last-plane nil))
     (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-commands) (lambda () '(("SAME" . same)))))
+              ((symbol-function 'emacos--top-commands) (lambda () '(("SAME" . same))))
+              ((symbol-function 'emacos--top-keyboard-plane) (lambda () nil)))
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
+
+(ert-deftest test-os-follower-rerenders-on-plane-change ()
+  "A keyboard-plane change forces a re-render even when the command set is
+identical — two buffers can both fall to the global set yet need different
+planes (e.g. *scratch* vs the *call* screen)."
+  (let ((rendered nil)
+        (emacos--in-render nil)
+        (emacos--last-commands '(("SAME" . same)))
+        (emacos--last-plane nil))
+    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacos--top-commands) (lambda () '(("SAME" . same))))
+              ((symbol-function 'emacos--top-keyboard-plane) (lambda () #'ignore)))
+      (emacos--on-window-buffer-change nil)
+      (should rendered))))
 
 (ert-deftest test-os-follower-noop-during-render ()
   "Re-entry guard (the brick-insurance): the follower bails when a render
@@ -383,6 +399,35 @@ is already in progress, even if the command set differs."
               ((symbol-function 'emacos--top-commands) (lambda () '(("NEW" . new)))))
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
+
+;;; Render dispatch: keyboard plane vs the T9 bands
+
+(ert-deftest test-os-render-page-uses-plane-when-set ()
+  "When the top buffer declares a keyboard plane, render-page paints THAT into
+*keyboard* instead of the T9/action/utility/command bands."
+  (unwind-protect       ; *keyboard* is a shared global buffer — clean it up even on failure
+      (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
+                 (lambda () (lambda () (insert "PLANE-SENTINEL"))))
+                ((symbol-function 'emacos--top-commands) (lambda () nil)))
+        (emacos--render-page)
+        (with-current-buffer "*keyboard*"
+          (let ((s (buffer-string)))
+            (should (string-match-p "PLANE-SENTINEL" s))
+            (should-not (string-match-p "QUIT" s)))))   ; T9 utility row absent
+    (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
+
+(ert-deftest test-os-render-page-t9-when-no-plane ()
+  "With no plane on the top buffer, render-page paints the normal keyboard
+\(the utility row's QUIT is present, no plane content)."
+  (unwind-protect
+      (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
+                ((symbol-function 'emacos--top-commands) (lambda () nil)))
+        (emacos--render-page)
+        (with-current-buffer "*keyboard*"
+          (let ((s (buffer-string)))
+            (should (string-match-p "QUIT" s))
+            (should-not (string-match-p "PLANE-SENTINEL" s)))))
+    (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
 ;;; Utility row: QUIT + M-x + Chat (the mode button lives on the action row)
 

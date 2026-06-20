@@ -16,16 +16,18 @@
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
 ;; Global, minimal modeline: the EmacsOS label + a tappable cell/wifi
-;; status segment (`emacos-net-mode-line-string', network.el), shown on
-;; every top (editing) buffer.  Replaces the stock clutter (buffer
-;; position, minor modes, encoding); the *keyboard* buffer overrides this
-;; to nil on each render (`emacos--render-page').  time/date/battery are
-;; left for the "Modeline status bar" roadmap item to append here.  Set at
-;; load time (not in `emacos--init') so a hot-reload re-applies it.  The
-;; `:eval' resolves the network function at redisplay, after the
-;; `(require 'network)' at the bottom of this file.
+;; status segment (`emacos-net-mode-line-string', network.el) + a tappable
+;; in-call badge (`emacos-call-mode-line-string', phone-call.el — empty
+;; unless a call is active), shown on every top (editing) buffer.  Replaces
+;; the stock clutter (buffer position, minor modes, encoding); the *keyboard*
+;; buffer overrides this to nil on each render (`emacos--render-page').
+;; time/date/battery are left for the "Modeline status bar" roadmap item to
+;; append here.  Set at load time (not in `emacos--init') so a hot-reload
+;; re-applies it.  Both `:eval's resolve their functions at redisplay, after
+;; the `(require 'network)' / `(require 'phone-call)' at the bottom of this file.
 (setq-default mode-line-format
-              '(" EmacsOS  " (:eval (emacos-net-mode-line-string))))
+              '(" EmacsOS  " (:eval (emacos-net-mode-line-string))
+                (:eval (emacos-call-mode-line-string))))
 
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;
@@ -118,6 +120,23 @@ guard is kept even though nothing can trip it now.")
 The follower re-renders only when the top buffer's derived command set
 actually changes, so transient buffers (*Completions*, *Help*) don't
 flicker the command list — the keyboard itself never moves.")
+
+(defvar-local emacos--keyboard-plane nil
+  "Buffer-local override for the keyboard surface: a render function, or nil.
+The bottom `*keyboard*' window is the phone's touch CONTROL PLANE, reactive
+to the top buffer (like the command list).  When the top buffer sets this to
+a function, `emacos--render-page' calls it to paint `*keyboard*' INSTEAD of
+the T9 keyboard/action/utility/command bands — the function runs with
+`*keyboard*' as `current-buffer'.  nil (the default) means the normal
+keyboard.  A call buffer sets this to paint Accept/Decline or Hang-up/Back
+(see phone-call.el).")
+
+(defvar emacos--last-plane 'unset
+  "The keyboard plane `emacos--render-page' last rendered.
+Tracked alongside `emacos--last-commands' so the follower re-renders on a
+PLANE change even when the derived command set is unchanged — two buffers
+can both fall to `emacos-global-commands' yet need different planes (e.g.
+*scratch* vs the *call* screen), so a plane swap must force a render.")
 
 (defun emacos--target ()
   "Return the editing window (not the keyboard).
@@ -716,6 +735,10 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos-net--ensure-timer "network")
 (declare-function emacos-net--refresh "network")
 
+;; Defined in phone-call.el (required at the bottom of this file).
+(declare-function emacos-call--watcher-ensure "phone-call")
+(declare-function emacos-call-mode-line-string "phone-call")
+
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
 buffer — the contents of the command list band.  One `cond':
@@ -750,6 +773,16 @@ rather than only M-x."
        ((emacos--mode-commands-for mode))
        (t emacos-global-commands))))))
 
+(defun emacos--top-keyboard-plane ()
+  "Return the TOP buffer's `emacos--keyboard-plane' (a render fn), or nil.
+nil while the minibuffer is active — a prompt needs the real keyboard, not a
+buffer's control plane.  Otherwise reads the editing window's buffer."
+  (unless (active-minibuffer-window)
+    (let* ((target (emacos--target))
+           (buf (and target (window-buffer target))))
+      (and (buffer-live-p buf)
+           (buffer-local-value 'emacos--keyboard-plane buf)))))
+
 (defun emacos--on-window-buffer-change (_frame)
   "Re-render when the top buffer changes the command set, OR when a
 modifier is active (the keymap filter is per-buffer; two buffers with
@@ -761,7 +794,8 @@ so transient buffers (*Completions*, *Help*) don't flicker the command
 list."
   (unless (or emacos--in-render
               (and (null emacos--modifier)
-                   (equal (emacos--top-commands) emacos--last-commands)))
+                   (equal (emacos--top-commands) emacos--last-commands)
+                   (eq (emacos--top-keyboard-plane) emacos--last-plane)))
     (emacos--render-page)))
 
 ;;; Surface renderers (the four bands of the composite)
@@ -954,19 +988,38 @@ so the follower can no-op when the set is unchanged."
 ;;; Render dispatch
 
 (defun emacos--render-page ()
-  "Render the *keyboard* window: the always-on composite of the T9
-keyboard, the action row, the utility row, and the top-buffer command
-list.  Binds `emacos--in-render' for the duration so the
-window-buffer-change follower can't recurse into an in-progress render."
-  (let ((buf (get-buffer-create "*keyboard*"))
-        (emacos--in-render t))
+  "Render the *keyboard* window.  When the TOP buffer declares a keyboard
+plane (`emacos--keyboard-plane'), paint that instead — the touch control
+plane is reactive to what's on top (a call buffer shows call controls).
+Otherwise the always-on composite of the T9 keyboard, the action row, the
+utility row, and the top-buffer command list.  Binds `emacos--in-render'
+for the duration so the window-buffer-change follower can't recurse into
+an in-progress render."
+  (let* ((buf (get-buffer-create "*keyboard*"))
+         (emacos--in-render t)
+         (plane (emacos--top-keyboard-plane)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (emacos--render-keyboard)
-        (emacos--render-action-row)
-        (emacos--render-utility-row)
-        (emacos--render-commands))
+        (if plane
+            (progn
+              (funcall plane)
+              ;; A plane has no command band, so `emacos--render-commands' (which
+              ;; sets `emacos--last-commands') didn't run.  Sync it to the top
+              ;; buffer's set anyway: the follower's skip guard is an AND of
+              ;; command-compare AND plane-compare, so a later follower fire
+              ;; while the plane is still up would otherwise re-render off a
+              ;; stale (pre-call) command set even though the plane is unchanged.
+              (setq emacos--last-commands (emacos--top-commands)))
+          (emacos--render-keyboard)
+          (emacos--render-action-row)
+          (emacos--render-utility-row)
+          (emacos--render-commands))
+        ;; Record the rendered plane ONLY after the render succeeds (mirrors how
+        ;; `emacos--last-commands' is set during the render): if `(funcall plane)'
+        ;; above signals, `emacos--last-plane' stays unchanged so the follower
+        ;; doesn't treat the half-painted surface as "already rendered".
+        (setq emacos--last-plane plane))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (setq-local mode-line-format nil)
