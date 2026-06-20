@@ -38,16 +38,27 @@ On the bench that's a wall supply; outdoors it isn't there.
 
 | Item                              | Why                                                        | Rough cost |
 |-----------------------------------+-----------------------------------------------------------+------------|
-| Bare 5 V/3 A boost board          | The modem's *own* rail (Rail 2) off the shared cell. See [[*Power & wiring][Power & wiring]]. | $3         |
+| [[https://www.pololu.com/product/2891][Pololu U3V70F5]] 5 V step-up ×2 (*purchased 2026-06-20*) | The modem's *own* ≥3 A rail (Rail 2). ~4–5 A out from a Li-ion = real headroom over the radio burst; *stiff* 5.0 V (no sag, so no need for 5.1 V — see Power & wiring). 2nd unit = spare / single-rail experiment. | ~$15 ea |
+| [[https://www.adafruit.com/product/850][Adafruit #850]] pocket multimeter (*purchased*) | Verify boost = 5.0 V, cell ≈ 3.7 V, *JST polarity before plugging*, and USB-wire continuity. (No amps range — fine; not needed to wire/validate.) | $25 |
+| [[https://www.adafruit.com/product/2975][Adafruit Parts Pal #2975]] (*on hand*) | Bulk caps — parallel ~3–5× of its 100 µF/16 V electrolytics (≈300–500 µF) across the modem `5V`/`GND` to absorb TX bursts. Also: SPDT slide switches (power on/off later), breadboard to bench-test the boost. | $20 |
+| Screw [[https://www.amazon.com/dp/B07V3J3TB5][terminal blocks]] (*on hand*) | Split the shared cell to both converters + tidy the splices. | ~$8 |
+| [[https://www.amazon.com/dp/B01M12PSJM][Hookup wire]], thicker gauge (*on hand*) | The 3 A power legs (cell→converters, converter→modem). *Not* the Parts-Pal jumper wires (signal gauge only). | ~$8 |
 | MAX17048 I²C fuel gauge (Adafruit #5580) | Pi reads cell % over I²C → shown in Emacs. No screen to mount/power. Closes the battery-gauge gap. | $5         |
 | Acrylic base plate / blank sheet  | The structural "phone body": a rigid flat plate to bolt the Pi+screen standoffs to (Velcro the rest). True "grid of holes" plates are scarce off-the-shelf — Cytron's is *discontinued*. Easiest buys: a [[https://www.protostax.com/products/protostax-for-breadboard][ProtoStax acrylic baseplate]] (~$15, pre-threaded holes — ignore the walls), or a blank 1/8" cast-acrylic sheet you drill where needed. *Avoid* Pi-cutout plates (they fix the Pi in one spot). | $6–15      |
 | M2.5 nylon standoff + screw kit   | Rigidify the Pi+screen GPIO sandwich; mount boards to the plate. | $6         |
 | Activated data SIM (known APN)    | =make cellular-bringup APN=…=. T-Mobile/IPv6-only is the tested path. Standard SIM form factor. | carrier    |
 | Adhesive-back Velcro (hook+loop)  | Repositionable mount for the cell + power boards + modem.  | $5         |
 | Strain-relief consumables         | Short USB-OTG cable, zip-ties + adhesive mounts, hot glue. | $5–10      |
-*Total new spend ≈ $30–45.* Pi, screen, modem, PowerBoost, and Li-ion
-cell are on hand — the new parts are the modem boost board, the fuel
-gauge, and the slab/mounting bits.
+*On hand:* Pi Zero 2 W, screen, [[https://www.waveshare.com/sim7600g-h-4g-hat-b.htm][SIM7600G-H HAT]], [[https://www.adafruit.com/product/2465][PowerBoost 1000C #2465]] (Rail 1 + charger), and *two* Li-ion cells —
+*6600 mAh (JST-PH, the shared cell)* and *600 mAh (JST-SM, spare)*. The
+power-rig parts (Pololu boost ×2, multimeter, Parts Pal, terminals, wire)
+are *purchased* (2026-06-20); remaining new spend is the fuel gauge + slab/
+mounting bits.
+
+*Considered & rejected* (for the record): [[https://www.adafruit.com/product/2030][PowerBoost 1000 Basic #2030]] — only
+~2 A, same marginal class as the 1000C, so it can't be the modem rail; the
+[[https://www.amazon.com/dp/B0FHQ5VBPZ][USB Y-splitters]] — wrong direction (male-out→female-in) and the cell plug
+doesn't fit. The Pololu U3V70F5 is the right modem-rail part instead.
 
 * Assembly: the slab (no case)
 Don't enclose anything. Mount everything to *one rigid flat plate* and
@@ -129,11 +140,53 @@ the Pi.
 - *RAIL 1 → Pi.* A PowerBoost 1000C boosts the shared cell to 5 V into the
   Pi's *outer* micro-USB (=PWR IN=), and is also the *charger* — wall
   recharge goes into the PowerBoost's micro-USB IN, same as the bench rig.
-- *RAIL 2 → modem.* A *bare 5 V/3 A boost board* taps the *same cell* and
-  feeds the SIM7600's own power input. A single PowerBoost (~2 A peak) is
-  too weak for the radio's ≥3 A bursts, which is why the modem gets its own
-  3 A boost rather than a second PowerBoost. *Do not* bus-power the modem
-  off the Pi.
+- *RAIL 2 → modem.* A [[https://www.pololu.com/product/2891][Pololu U3V70F5]] 5 V step-up taps the *same cell* and
+  feeds the SIM7600's *dedicated 5 V input* (see "Modem connectors" below).
+  ~4–5 A from a Li-ion = real headroom over the radio burst; it's *stiff*,
+  so set/leave it at *5.0 V* — no need to chase 5.1 V (that was an OURS
+  work-around for a sagging 2 A buck; see "Why this works"). A single
+  PowerBoost (~2 A peak) is too weak, which is why the modem gets the U3V70F5
+  rather than a second PowerBoost. Park *~300–500 µF (≈3–5× 100 µF from the
+  Parts Pal) across the modem `5V`/`GND`* to soak up the TX transient.
+  *Do not* bus-power the modem off the Pi.
+
+  *Modem connectors (verified on the board, 2026-06-20).* The HAT has, besides
+  its 3 USB ports (2× USB-A + 1 mini-USB "USB hub"): a *dedicated `5V`/`GND`
+  power input* (two protrusions) — feed Rail 2 here — and a *USB pad breakout*
+  (`5V`/`DM`/`DP`/`GND`). It is currently (mis)powered through the mini-USB
+  link from the Pi — *that's the brownout path*. Critical: with Rail 2 on the
+  dedicated input, the Pi↔modem USB must be *DATA-ONLY* — *cut the 5 V/VBUS
+  (red) wire* in that cable (keep D+/D−/GND), or use the `DM`/`DP`/`GND` pads
+  and skip `5V`. Otherwise the boost and the Pi's USB VBUS fight as two 5 V
+  sources / back-feed the Pi. (The board stays self-powered over USB, which is
+  fine.) Common ground throughout.
+
+  *Charging = single wall input.* The Pi's PowerBoost 1000C is the *only*
+  charger; it charges the *shared cell*, and the U3V70F5 just taps that same
+  cell — so one micro-USB into the PowerBoost charges the whole device. (This
+  is why Rail 2 is a charger-less boost, not a 2nd PowerBoost.)
+
+  *Why this works (vs. OURS, which uses the same SIM7600 HAT, [[https://github.com/evanman83/OURS-project][repo]]).* OURS ran
+  *one* stiff 5.1 V rail (2× 18650 in series → a buck) to *both* the Pi 3 and
+  the HAT in parallel, with *one* TP4056 charger — and it worked. Two lessons:
+  (1) the real fix isn't "two rails," it's *the modem's 5 V must come straight
+  from a stiff source, in parallel — never routed through the Pi* (our Zero 2 W
+  brownout was exactly the modem drawing through the Pi's USB). (2) They needed
+  5.1 V because a 2 A buck *sagged*; a stiff ≥3 A regulator holds 5.0 V under
+  the burst, so 5.0 V is fine. We keep the rails separate only because we
+  already own the PowerBoost (it gives single-input charging for free); a
+  single U3V70F5 feeding both (pure-OURS style) is the documented alternative.
+
+  *Build / bring-up order (once parts arrive).*
+  1. *Bench-test the U3V70F5 alone* (Parts-Pal breadboard): cell → VIN/GND,
+     confirm *5.0 V* on the multimeter at VOUT before it touches the Pi/modem.
+  2. *Verify JST polarity* on the 6600 mAh (the PowerBoost combo is already
+     proven; re-check anyway) before any connection.
+  3. Cell (JST-PH) → terminal block → *both* PowerBoost (Pi) *and* U3V70F5 in.
+  4. U3V70F5 VOUT/GND → modem dedicated `5V`/`GND` (+ the bulk caps).
+  5. Make the Pi↔modem USB *data-only* (cut VBUS).
+  6. Validate: place/receive calls — the modem should stop re-enumerating /
+     dropping (the failure mode the bench rig hit).
 - *Battery % → Pi → Emacs.* The *MAX17048* fuel gauge sits across the
   *raw cell* (3.0–4.2 V, *not* a 5 V rail) and talks I²C to the Pi —
   =SDA=→GPIO2, =SCL=→GPIO3, =3V3=, =GND=. I²C is *already enabled*
