@@ -315,7 +315,9 @@ ORIGINAL pre-call buffer."
 (defun emacos-call--back ()
   "Leave the *call* screen for the pre-call buffer; the call KEEPS RUNNING.
 The keyboard reverts to T9 and the modeline call badge appears (tap it to
-return).  No-op'd if the *call* screen isn't the one showing."
+return).  Only reachable from the active plane's Back button, so *call* is
+the showing buffer — the buffer-restore is guarded regardless; the disarm +
+re-render always run."
   (setq emacos-call--hangup-confirm-pending nil)
   (let ((w (and (fboundp 'emacos--target) (emacos--target)))
         (prev (if (buffer-live-p emacos-call--prev-buffer)
