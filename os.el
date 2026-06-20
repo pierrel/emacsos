@@ -16,14 +16,15 @@
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
 ;; Global, minimal modeline: the EmacsOS label + a tappable cell/wifi
-;; status segment (`emacos-net-mode-line-string', network.el), shown on
-;; every top (editing) buffer.  Replaces the stock clutter (buffer
-;; position, minor modes, encoding); the *keyboard* buffer overrides this
-;; to nil on each render (`emacos--render-page').  time/date/battery are
-;; left for the "Modeline status bar" roadmap item to append here.  Set at
-;; load time (not in `emacos--init') so a hot-reload re-applies it.  The
-;; `:eval' resolves the network function at redisplay, after the
-;; `(require 'network)' at the bottom of this file.
+;; status segment (`emacos-net-mode-line-string', network.el) + a tappable
+;; in-call badge (`emacos-call-mode-line-string', phone-call.el — empty
+;; unless a call is active), shown on every top (editing) buffer.  Replaces
+;; the stock clutter (buffer position, minor modes, encoding); the *keyboard*
+;; buffer overrides this to nil on each render (`emacos--render-page').
+;; time/date/battery are left for the "Modeline status bar" roadmap item to
+;; append here.  Set at load time (not in `emacos--init') so a hot-reload
+;; re-applies it.  Both `:eval's resolve their functions at redisplay, after
+;; the `(require 'network)' / `(require 'phone-call)' at the bottom of this file.
 (setq-default mode-line-format
               '(" EmacsOS  " (:eval (emacos-net-mode-line-string))
                 (:eval (emacos-call-mode-line-string))))

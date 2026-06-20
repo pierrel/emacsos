@@ -131,9 +131,12 @@ Returns \"hung-up: ...\" or \"error: ...\"."
 (declare-function emacos--center "os")
 (defvar emacos--btn-label-scale)
 (defvar emacos--confirm-disarm-functions)
-;; Buffer-local on a call buffer: names the keyboard plane os.el paints (the
-;; touch control plane is reactive to the top buffer).  Defined in os.el.
-(defvar emacos--keyboard-plane)
+;; Names the keyboard plane os.el paints (the touch control plane is reactive
+;; to the top buffer).  Canonically defined in os.el; declared `defvar-local'
+;; here too so the call-screen renderers' `setq' stays buffer-local even if
+;; this file is loaded before/without os.el (byte-compile, standalone tests) —
+;; idempotent with os.el's identical declaration on device.
+(defvar-local emacos--keyboard-plane nil)
 
 (defvar emacos-call-at-port "/dev/ttyUSB3"
   "AT command port for voice control, freed from ModemManager via udev.")
