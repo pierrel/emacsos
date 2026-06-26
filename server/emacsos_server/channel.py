@@ -384,8 +384,11 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
                     f"failed to record it in git ({e}); the change is live but "
                     "cannot be rolled back from history")
     if status == "applied":
-        return (f"{verb}: loaded cleanly on the phone; the user can roll back "
-                "from the chat UI")
+        # Don't promise the chat-UI ROLLBACK button: it's enabled only by the
+        # `applied` event app.py derives from apply_config, not revert_config —
+        # so it won't appear after a conversational revert.  The user undoes
+        # again by asking (another revert_config), not by tapping.
+        return f"{verb}: loaded cleanly on the phone"
     # load_error: the phone wrote+errored the file, so it IS the live config.
     return (f"{verb}-but-broken: loaded but it errored ({detail}); send a "
             "corrected config or pick a different version to restore")
