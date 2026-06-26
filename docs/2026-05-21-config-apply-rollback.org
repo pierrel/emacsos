@@ -382,3 +382,32 @@ boot-snippet wiring + the real transport against the device.
 - =server/emacsos_server/phone.py=
 - =chat.el=
 - =Makefile=
+
+* Conversational revert + two-tap ROLLBACK (2026-06-25)
+
+A follow-up making rollback CONVERSATIONAL and TARGETED, and guarding the phone
+button.  Three parts:
+
+- *Agent tools* (=channel.py=): =config_history= lists recent saved versions
+  (=<short-sha>  <summary>=, newest first) so the agent can identify a target;
+  =revert_config(target="")= undoes the LAST apply, =revert_config(target=<sha>)=
+  restores an earlier version.  So the user can just say "undo that" / "go back
+  to before the modeline edits" instead of tapping ROLLBACK.
+- *Two mechanisms* (the design fork): undo-last = =git revert HEAD= (clean,
+  reuses =ConfigRepo.rollback=).  Restore-to-version = re-apply that version's
+  body as a NEW commit (=ConfigRepo.body_at(sha)= → apply → commit).  A true
+  =git revert= of a non-HEAD commit ~always CONFLICTS on the single
+  full-snapshot =agent.el=, so restore is roll-forward, not revert.
+- *Shared helper*: =revert_head_and_apply(ctx, repo)= (channel.py) is the
+  revert-then-apply path; both the =/rollback= endpoint (=_do_rollback=) and
+  =revert_config='s undo-last branch call it (one copy of the load-bearing
+  sequence).
+- *Phone UI* (=chat.el=): the ROLLBACK button gets the same TWO-TAP confirm as
+  New chat (=emacos--chat-rollback-pending=): first tap relabels to "Confirm
+  rollback?", second fires; any other tap (or a fresh apply) disarms.
+
+Commit-ordering note: undo-last commits the revert before applying (inherits the
+documented =/rollback= exception); restore applies first and commits only if the
+phone received it (mirrors =apply_config=).  Validated with a model-free docker
+round-trip (apply A/B, undo-last → A, restore → B) against a real emacs daemon;
+the agent-driven path needs the model (deferred while the GPU is down).

@@ -329,6 +329,8 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
     - `nothing to roll back ...` — there was no prior apply to undo.
     - `reverted-but-broken:` / `restored-but-broken:` — loaded but it errored;
       send a corrected config or pick a different version.
+    - `restored-but-unrecorded: ...` — a restored config is LIVE on the phone but
+      the server failed to record it in git; tell the user, do NOT retry.
     - `error: phone unreachable: ... (do not retry — surface to user)`.
     - `error: ...` — e.g. an unknown target sha; tell the user, don't retry.
     """
@@ -372,7 +374,9 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
             repo.write_and_commit(body, f"restore config to {target[:7]}")
         except Exception as e:  # noqa: BLE001
             log.exception("revert_config: commit failed")
-            return (f"{verb}-but-unrecorded: loaded on the phone but the server "
+            # Reachable only on the restore path (undo-last is already committed
+            # by rollback()), so the verb is always "restored".
+            return ("restored-but-unrecorded: loaded on the phone but the server "
                     f"failed to record it in git ({e}); the change is live but "
                     "cannot be rolled back from history")
     if status == "applied":

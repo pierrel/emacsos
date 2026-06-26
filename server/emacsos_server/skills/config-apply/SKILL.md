@@ -68,7 +68,9 @@ re-apply the old config from memory.
 The revert is itself recorded, so the user can undo the undo. If `revert_config`
 returns `nothing to roll back`, there's no saved change to undo — tell the user.
 `reverted-but-broken:` / `restored-but-broken:` means it loaded but errored —
-offer a corrected config or a different version to restore.
+offer a corrected config or a different version to restore. `restored-but-unrecorded:`
+means it's live on the phone but the server couldn't record it in git — tell the
+user; do NOT retry.
 
 ## When a tool reports a problem
 

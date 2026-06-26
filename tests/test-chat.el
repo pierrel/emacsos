@@ -492,16 +492,30 @@ the LAST entry (rarely used)."
     (should-not posted)))
 
 (ert-deftest chat-test-rollback-second-tap-posts-and-disarms ()
-  "Armed, a second ROLLBACK tap POSTs /rollback and disarms."
+  "Armed, a second ROLLBACK tap POSTs to /rollback and disarms."
   (chat-test--reset)
   (emacos--chat-buffer)
   (setq emacos--chat-can-rollback t
         emacos--chat-rollback-pending t)  ; armed → this tap fires
+  (let ((posted-url nil)
+        (emacos-chat-server-url "http://10.0.0.5:8765/chat"))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (url &rest _) (setq posted-url url) nil)))
+      (emacos--chat-rollback))
+    (should (and posted-url (string-suffix-p "/rollback" posted-url)))
+    (should-not emacos--chat-rollback-pending)))
+
+(ert-deftest chat-test-rollback-refuses-in-flight ()
+  "A ROLLBACK tap while a stream is in flight neither arms nor POSTs."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t
+        emacos--chat-in-flight t)
   (let ((posted nil))
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (&rest _) (setq posted t) nil)))
       (emacos--chat-rollback))
-    (should posted)
+    (should-not posted)
     (should-not emacos--chat-rollback-pending)))
 
 (ert-deftest chat-test-rollback-command-set-relabels-when-armed ()
