@@ -32,10 +32,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext
+from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext, revert_head_and_apply
 from .config import Config
-from .config_repo import ConfigRepo, render
-from . import apply as apply_mod
+from .config_repo import ConfigRepo
 from . import stream as ndjson
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -593,16 +592,10 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
     try:
         repo = ConfigRepo(config.config_dir)
         repo.ensure()
-        result = repo.rollback()
-        if not result.ok:
-            return {"status": "noop", "detail": result.detail}
-        # Load the reverted config (the new HEAD) on the phone so the live
-        # state matches the repo again.  Apply the RENDERED file (same
-        # content git holds) so the phone's agent.el stays byte-identical
-        # to the repo, with the lexical-binding cookie.  apply_to_phone
-        # classifies honestly.  `result.version` is non-None when `ok`.
-        ar = apply_mod.apply_to_phone(phone_ctx, render(result.version.body))
-        return {"status": ar.status, "detail": ar.detail}
+        # Shared with the revert_config tool (channel.py) so the
+        # revert-then-apply path lives in one place.
+        status, detail = revert_head_and_apply(phone_ctx, repo)
+        return {"status": status, "detail": detail}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500
         log.exception("rollback failed")
         return {"status": "error", "detail": f"{type(e).__name__}: {e}"}

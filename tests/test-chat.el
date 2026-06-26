@@ -14,6 +14,7 @@
   (setq emacos--chat-in-flight nil
         emacos--chat-can-rollback nil
         emacos--chat-confirm-pending nil
+        emacos--chat-rollback-pending nil
         emacos--chat-process nil
         emacos--chat-stream-insert-marker nil
         emacos--chat-status-start nil
@@ -477,6 +478,59 @@ the LAST entry (rarely used)."
     (insert "HTTP/1.1 200 OK\n\n{\"status\":\"noop\",\"detail\":\"nothing to roll back\"}")
     (emacos--chat-rollback-callback nil))
   (should emacos--chat-can-rollback))
+
+(ert-deftest chat-test-rollback-first-tap-arms ()
+  "First ROLLBACK tap only ARMS the two-tap confirm — it must NOT POST."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t)
+  (let ((posted nil))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (&rest _) (setq posted t) nil)))
+      (emacos--chat-rollback))
+    (should emacos--chat-rollback-pending)
+    (should-not posted)))
+
+(ert-deftest chat-test-rollback-second-tap-posts-and-disarms ()
+  "Armed, a second ROLLBACK tap POSTs /rollback and disarms."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-can-rollback t
+        emacos--chat-rollback-pending t)  ; armed → this tap fires
+  (let ((posted nil))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (&rest _) (setq posted t) nil)))
+      (emacos--chat-rollback))
+    (should posted)
+    (should-not emacos--chat-rollback-pending)))
+
+(ert-deftest chat-test-rollback-command-set-relabels-when-armed ()
+  "Armed, the command set shows \"Confirm rollback?\" instead of ROLLBACK."
+  (chat-test--reset)
+  (let ((emacos--chat-in-flight nil)
+        (emacos--chat-can-rollback t)
+        (emacos--chat-rollback-pending t))
+    (let ((labels (mapcar #'car (emacos--chat-command-set))))
+      (should (member "Confirm rollback?" labels))
+      (should-not (member "ROLLBACK" labels)))))
+
+(ert-deftest chat-test-rollback-disarmed-by-other-tap ()
+  "Tapping any other button disarms a pending ROLLBACK confirm."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-rollback-pending t)
+  (emacos--chat-maybe-disarm-confirm #'emacos--run-command #'emacos--chat-new-chat)
+  (should-not emacos--chat-rollback-pending))
+
+(ert-deftest chat-test-rollback-arming-reset-by-new-apply ()
+  "A new apply (sets can-rollback) clears any stale armed rollback so the
+button reads ROLLBACK, not Confirm rollback?."
+  (chat-test--reset)
+  (emacos--chat-buffer)
+  (setq emacos--chat-rollback-pending t)
+  (emacos--chat-handle-applied '(:detail "applied: set x" :broken nil))
+  (should emacos--chat-can-rollback)
+  (should-not emacos--chat-rollback-pending))
 
 (ert-deftest chat-test-new-chat-first-tap-arms ()
   "First tap only ARMS the two-tap confirm (relabels to Confirm clear?):

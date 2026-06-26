@@ -13,10 +13,12 @@ from emacsos_server.channel import (
     PhoneContext,
     _redact,
     apply_config,
+    config_history,
     eval_elisp,
     get_config,
+    revert_config,
 )
-from emacsos_server.config_repo import ConfigRepo, ConfigRepoError
+from emacsos_server.config_repo import ConfigRepo, ConfigRepoError, render
 
 
 _CTX = PhoneContext(auth_contents="0.0.0.0:1234 555\nsecret\n",
@@ -319,3 +321,113 @@ def test_emacs_tools_includes_apply_config():
 
 def test_emacs_tools_includes_get_config():
     assert get_config in EMACS_TOOLS
+
+
+# --- revert_config ----------------------------------------------------------
+
+def _revert(target, tmp_path, ctx=_CTX, apply_result=None, seed=None):
+    """Invoke revert_config with apply_to_phone mocked + ConfigRepo on a tmp
+    repo.  `seed(repo)` optionally sets up prior commits.  Returns (out, repo)."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    if seed:
+        seed(repo)
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: ctx}} if ctx is not None else {}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=apply_result), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo):
+        out = revert_config.invoke({"target": target}, config=cfg)
+    return out, repo
+
+
+def test_revert_config_undo_last_reverts_and_applies(tmp_path):
+    out, repo = _revert(
+        "", tmp_path,
+        seed=lambda r: r.write_and_commit("(setq x 1)", "set x"),
+        apply_result=ApplyResult("applied", "ok"))
+    assert out.startswith("reverted:")
+    assert repo.current().body == ""  # back to the empty scaffold
+
+
+def test_revert_config_noop_when_nothing_applied(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()  # scaffold only
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone") as m, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": ""}, config=cfg)
+    assert "nothing to roll back" in out
+    m.assert_not_called()
+
+
+def test_revert_config_restore_to_version_reapplies_old_body(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    sha1 = repo.write_and_commit("(setq x 1)", "set x to 1")
+    repo.write_and_commit("(setq x 2)", "set x to 2")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as m, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
+    assert out.startswith("restored:")
+    assert repo.current().body == "(setq x 1)"  # rolled forward to v1
+    assert m.call_args.args[1] == render("(setq x 1)")  # phone got rendered v1
+
+
+def test_revert_config_unknown_target_errors_without_applying(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit("(setq x 1)", "set x")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone") as m, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": "deadbee"}, config=cfg)
+    assert out.startswith("error:")
+    m.assert_not_called()
+
+
+def test_revert_config_requires_phone_context(tmp_path):
+    out, _ = _revert("", tmp_path, ctx=None)
+    assert "phone context not set" in out
+
+
+def test_revert_config_restore_unreachable_does_not_commit(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    sha1 = repo.write_and_commit("(setq x 1)", "v1")
+    repo.write_and_commit("(setq x 2)", "v2")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("unreachable", "refused")), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
+    assert out.startswith("error: phone unreachable")
+    assert repo.current().body == "(setq x 2)"  # restore commits only if reached
+
+
+# --- config_history ---------------------------------------------------------
+
+def test_config_history_lists_versions_newest_first(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit("(setq x 1)", "set x")
+    repo.write_and_commit("(setq y 2)", "set y")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = config_history.invoke({})
+    lines = out.splitlines()
+    assert "set y" in lines[0]  # newest first
+    assert "set x" in lines[1]
+
+
+def test_config_history_empty_when_nothing_applied(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    with patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = config_history.invoke({})
+    assert out.startswith("empty:")
+
+
+def test_revert_and_history_in_exported_tools():
+    names = {t.name for t in EMACS_TOOLS}
+    assert {"config_history", "revert_config"} <= names

@@ -4,7 +4,10 @@ from __future__ import annotations
 import os
 import subprocess
 
-from emacsos_server.config_repo import ConfigRepo, _extract_body, render
+import pytest
+
+from emacsos_server.config_repo import (
+    ConfigRepo, ConfigRepoError, _extract_body, render)
 
 
 def _repo(tmp_path):
@@ -175,3 +178,21 @@ def test_history_newest_first(tmp_path):
     summaries = [v.summary for v in hist]
     assert summaries[0] == "second"
     assert "first" in summaries
+
+
+def test_body_at_returns_the_body_committed_at_a_ref(tmp_path):
+    repo = _repo(tmp_path)
+    repo.ensure()
+    sha1 = repo.write_and_commit("(setq a 1)", "first")
+    repo.write_and_commit("(setq a 2)", "second")
+    # body_at fetches an OLD version's body for a restore-to-version; current()
+    # is unaffected.
+    assert repo.body_at(sha1) == "(setq a 1)"
+    assert repo.current().body == "(setq a 2)"
+
+
+def test_body_at_unknown_ref_raises(tmp_path):
+    repo = _repo(tmp_path)
+    repo.ensure()
+    with pytest.raises(ConfigRepoError):
+        repo.body_at("deadbeef")

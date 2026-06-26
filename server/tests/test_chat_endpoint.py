@@ -623,7 +623,7 @@ def test_do_rollback_reverts_and_applies(tmp_path):
     repo.write_and_commit("(setq x 1)", "v1")
     repo.write_and_commit("(setq x 2)", "v2")
     with patch("emacsos_server.app.ConfigRepo", lambda _d: repo), \
-         patch("emacsos_server.app.apply_mod.apply_to_phone",
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
                return_value=ApplyResult("applied", "ok: loaded")) as m:
         out = _do_rollback(PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.5"))
     assert out["status"] == "applied"
@@ -648,7 +648,7 @@ def test_do_rollback_noop_when_nothing_to_roll_back(tmp_path):
     from emacsos_server.config_repo import ConfigRepo
     repo = ConfigRepo(str(tmp_path / "repo"))  # scaffold only after ensure
     with patch("emacsos_server.app.ConfigRepo", lambda _d: repo), \
-         patch("emacsos_server.app.apply_mod.apply_to_phone") as m:
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as m:
         out = _do_rollback(PhoneContext(auth_contents=_FAKE_AUTH, phone_host="10.0.0.5"))
     assert out["status"] == "noop"
     assert "nothing to roll back" in out["detail"]

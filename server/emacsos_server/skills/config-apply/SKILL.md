@@ -1,6 +1,6 @@
 ---
 name: config-apply
-description: "Change the user's persistent emacs configuration — cursor color or shape, fonts, theme, keybindings, or anything they want kept after a restart. Load this before any eval_elisp or apply_config call so the change is verified live and then saved completely."
+description: "Change the user's persistent emacs configuration — cursor color or shape, fonts, theme, keybindings, or anything they want kept after a restart; also undo or revert a config change, or restore an earlier version. Load this before any eval_elisp, apply_config, config_history, or revert_config call so the change is verified live and then saved completely, and so undo requests use the git-backed revert."
 ---
 
 # Config-apply: verify live, then persist
@@ -51,6 +51,24 @@ Use these as the shape; adapt to whatever the user actually asked for.
 For settings not listed here, the same principle holds: find the durable
 variable / frame parameter / mode, verify it live, then persist the full
 config.
+
+## Undo / revert a change (`revert_config`, `config_history`)
+
+When the user wants to undo a config change ("undo that", "never mind", "put it
+back the way it was"), use `revert_config` — do NOT hand-reconstruct and
+re-apply the old config from memory.
+
+- To undo the LAST applied change, call `revert_config` with no `target` (the
+  default). It git-reverts the last config and loads the result on the phone.
+- To go back FURTHER ("go back to before the modeline edits"), call
+  `config_history` first — it lists recent versions as `<short-sha>  <summary>`,
+  newest first — then call `revert_config` with the matching short-sha as
+  `target` to restore that version. Pick the sha from history; don't guess it.
+
+The revert is itself recorded, so the user can undo the undo. If `revert_config`
+returns `nothing to roll back`, there's no saved change to undo — tell the user.
+`reverted-but-broken:` / `restored-but-broken:` means it loaded but errored —
+offer a corrected config or a different version to restore.
 
 ## When a tool reports a problem
 

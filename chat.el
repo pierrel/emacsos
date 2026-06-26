@@ -75,6 +75,14 @@ confirming tap (`emacos--chat-new-chat'), or by tapping anything else
 linger.  This tap-only guard replaced a minibuffer/GUI confirm that
 fought the touchscreen.")
 
+(defvar emacos--chat-rollback-pending nil
+  "Non-nil when ROLLBACK has been tapped once and awaits a confirming second
+tap — the button relabels to \"Confirm rollback?\".  Rollback reverts the
+last applied config live on the phone, so it gets the same two-tap guard as
+New chat.  Cleared by the confirming tap (`emacos--chat-rollback'), by tapping
+anything else (`emacos--chat-maybe-disarm-confirm'), or when a new apply resets
+the rollback point.")
+
 (defvar emacos--chat-process nil
   "The url-retrieve process backing the in-flight stream, or nil.
 Used by ABORT to delete-process.")
@@ -202,7 +210,7 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
   "Seed BUF with an empty read-only header and a fresh prompt.
 Also clears `emacos--chat-can-rollback' so a fresh / CLEARed transcript
 doesn't dangle a ROLLBACK button with no surrounding context."
-  (setq emacos--chat-can-rollback nil)
+  (setq emacos--chat-can-rollback nil emacos--chat-rollback-pending nil)
   (with-current-buffer buf
     ;; Chat is prose, not code — render the transcript + input in the
     ;; proportional `variable-pitch' face (the keyboard stays monospace
@@ -422,7 +430,7 @@ as the symbol `:false', so test for `t' explicitly)."
      (if broken
          (format "[applied but BROKEN — consider rolling back: %s]" detail)
        (format "[%s]" detail)))
-    (setq emacos--chat-can-rollback t)
+    (setq emacos--chat-can-rollback t emacos--chat-rollback-pending nil)
     (when (fboundp 'emacos--render-page)
       (emacos--render-page))))
 
@@ -778,16 +786,21 @@ forget; the conversation otherwise persists across turns and restarts."
     (when (fboundp 'emacos--render-page) (emacos--render-page)))))
 
 (defun emacos--chat-maybe-disarm-confirm (action arg)
-  "Disarm `emacos--chat-confirm-pending' on any button that ISN'T the
-New-chat command itself.  The New-chat command-list button runs through
-`emacos--run-command' with `emacos--chat-new-chat' as ARG, so that's the
-\"armed command\" pair; every other tap clears the pending state and
-re-renders.  Registered on `emacos--confirm-disarm-functions'."
-  (when (and emacos--chat-confirm-pending
-             (not (and (eq action #'emacos--run-command)
-                       (eq arg #'emacos--chat-new-chat))))
-    (setq emacos--chat-confirm-pending nil)
-    (when (fboundp 'emacos--render-page) (emacos--render-page))))
+  "Disarm a pending two-tap confirm (New chat OR ROLLBACK) when the user taps
+any button that ISN'T the armed one.  Command-list buttons run through
+`emacos--run-command' with the command function as ARG, so a tap on the armed
+command is `(emacos--run-command . <that fn>)`; every other tap clears the
+pending state and re-renders.  Registered on `emacos--confirm-disarm-functions'."
+  (let ((tapped (and (eq action #'emacos--run-command) arg))
+        (dirty nil))
+    (when (and emacos--chat-confirm-pending
+               (not (eq tapped #'emacos--chat-new-chat)))
+      (setq emacos--chat-confirm-pending nil dirty t))
+    (when (and emacos--chat-rollback-pending
+               (not (eq tapped #'emacos--chat-rollback)))
+      (setq emacos--chat-rollback-pending nil dirty t))
+    (when (and dirty (fboundp 'emacos--render-page))
+      (emacos--render-page))))
 
 (add-hook 'emacos--confirm-disarm-functions
           #'emacos--chat-maybe-disarm-confirm)
@@ -863,9 +876,11 @@ appears/disappears with `emacos--chat-can-rollback'."
           (emacos--chat-confirm-pending
            (cons "Confirm clear?" #'emacos--chat-new-chat))
           (t (cons "New chat" #'emacos--chat-new-chat))))
-   ;; ROLLBACK last — rarely used, and only available after an apply.
+   ;; ROLLBACK last — rarely used, and only available after an apply.  Relabels
+   ;; to "Confirm rollback?" once armed (`emacos--chat-rollback-pending').
    (when emacos--chat-can-rollback
-     (list (cons "ROLLBACK" #'emacos--chat-rollback)))))
+     (list (cons (if emacos--chat-rollback-pending "Confirm rollback?" "ROLLBACK")
+                 #'emacos--chat-rollback)))))
 
 ;;; Rollback
 
@@ -878,8 +893,18 @@ request would deadlock — this emacs would be blocked waiting for the
 response it must itself service.  The result is reported in the
 transcript by `emacos--chat-rollback-callback'."
   (interactive)
-  (if emacos--chat-in-flight
-      (message "chat: stream in flight; ABORT before rolling back")
+  (cond
+   (emacos--chat-in-flight
+    (message "chat: stream in flight; ABORT before rolling back"))
+   ((not emacos--chat-rollback-pending)
+    ;; First tap: arm, and re-render so the button relabels to
+    ;; "Confirm rollback?".  Rollback reverts live config on the phone, so
+    ;; guard it behind a confirming second tap like New chat.
+    (setq emacos--chat-rollback-pending t)
+    (when (fboundp 'emacos--render-page) (emacos--render-page)))
+   (t
+    ;; Second tap: confirmed — POST /rollback for real.
+    (setq emacos--chat-rollback-pending nil)
     (let* ((auth (emacos--chat-read-auth-file))
            (url-request-method "POST")
            (url-request-extra-headers
@@ -895,7 +920,7 @@ transcript by `emacos--chat-rollback-callback'."
         (error
          (emacos--chat-note
           (format "[rollback failed: %s]" (error-message-string err))
-          (emacos--chat-buffer)))))))
+          (emacos--chat-buffer))))))))
 
 (defun emacos--chat-rollback-callback (status &rest _)
   "Parse the /rollback JSON response and report it in the transcript.
@@ -928,7 +953,7 @@ repeated rollbacks don't leak ` *http*` buffers."
           ;; hide ROLLBACK until the next apply.  noop/unreachable/error
           ;; keep it available to retry.
           (when (member st '("applied" "load_error"))
-            (setq emacos--chat-can-rollback nil))
+            (setq emacos--chat-can-rollback nil emacos--chat-rollback-pending nil))
           (when (fboundp 'emacos--render-page)
             (emacos--render-page)))
       (when (buffer-live-p resp) (kill-buffer resp)))))

@@ -30,7 +30,7 @@ from langchain_core.tools import tool
 from . import apply as apply_mod
 from . import phone as phone_mod
 from .config import Config
-from .config_repo import ConfigRepo, render
+from .config_repo import ConfigRepo, ConfigRepoError, render
 
 log = logging.getLogger(__name__)
 
@@ -271,17 +271,130 @@ def get_config() -> str:
     return body
 
 
+def revert_head_and_apply(ctx: PhoneContext, repo: ConfigRepo) -> tuple[str, str]:
+    """Undo the last apply: git-revert the config repo's HEAD, then load the
+    resulting config on the phone.  Returns ``(status, detail)`` where status is
+    ``"noop"`` (nothing to undo) or one of ``apply_to_phone``'s statuses.
+
+    Shared by the ``/rollback`` endpoint (app.py) and the ``revert_config`` tool
+    so the revert-then-apply path lives in one place.  May raise
+    ``ConfigRepoError`` on a corrupt repo / revert conflict — callers convert it
+    to a structured result."""
+    result = repo.rollback()
+    if not result.ok:
+        return ("noop", result.detail)
+    # Apply the RENDERED file (what git holds) so the phone's agent.el stays
+    # byte-identical to the repo, with the lexical-binding cookie.
+    ar = apply_mod.apply_to_phone(ctx, render(result.version.body))
+    return (ar.status, ar.detail)
+
+
+@tool
+def config_history() -> str:
+    """List recent saved config versions, newest first, so you can pick which
+    one to revert to with `revert_config`.
+
+    Use this when the user wants to undo more than just the last change — e.g.
+    "go back to how it was before the modeline edits".  Each line is
+    `<short-sha>  <summary>`; pass a short-sha as `revert_config`'s target.
+    Read the saved history here rather than reconstructing it from the chat.
+
+    Returns the lines; or `empty: ...` when nothing has been applied yet; or
+    `error: ...` if history can't be read (tell the user rather than retrying).
+    """
+    try:
+        versions = ConfigRepo(_CONFIG.config_dir).history(limit=10)
+    except Exception as e:  # noqa: BLE001 — surface any failure as a tool-result string
+        log.exception("config_history: read failed")
+        return f"error: could not read config history: {type(e).__name__}: {e}"
+    # The oldest commit is always the empty-config scaffold; with only that one,
+    # nothing has been applied yet.
+    if len(versions) <= 1:
+        return "empty: no config has been applied yet"
+    return "\n".join(f"{v.sha[:7]}  {v.summary}" for v in versions)
+
+
+@tool
+def revert_config(target: str = "", config: RunnableConfig = None) -> str:
+    """Undo a config change and load the result live on the phone.
+
+    - `target` empty (the default) undoes the LAST applied config — the common
+      "undo that" / "never mind" case.
+    - `target` = a short-sha from `config_history` restores THAT version's
+      config (use when the user wants to go back further than the last change;
+      call `config_history` first to find the sha — don't guess it).
+
+    The revert is itself recorded in git, so it too can be undone.  Returns:
+    - `reverted: ...` / `restored: ...` — done and loaded cleanly on the phone.
+    - `nothing to roll back ...` — there was no prior apply to undo.
+    - `reverted-but-broken:` / `restored-but-broken:` — loaded but it errored;
+      send a corrected config or pick a different version.
+    - `error: phone unreachable: ... (do not retry — surface to user)`.
+    - `error: ...` — e.g. an unknown target sha; tell the user, don't retry.
+    """
+    cfg = (config or {}).get("configurable") or {}
+    ctx = cfg.get(PHONE_CONTEXT_KEY)
+    if not isinstance(ctx, PhoneContext):
+        return ("error: phone context not set (server bug — channel tool "
+                "invoked outside a /chat turn)")
+    repo = ConfigRepo(_CONFIG.config_dir)
+    target = target.strip()
+    verb = "reverted" if not target else "restored"
+    try:
+        repo.ensure()
+        if not target:
+            log.info("revert_config (undo last) on %s", ctx.phone_host)
+            status, detail = revert_head_and_apply(ctx, repo)
+            if status == "noop":
+                return detail  # "nothing to roll back (no config applied yet)"
+            body = None  # rollback() already committed the git revert
+        else:
+            log.info("revert_config (restore %s) on %s", target, ctx.phone_host)
+            # Roll-forward: re-apply the old body as a new commit.  A true git
+            # revert of a non-HEAD commit would conflict on the single
+            # full-snapshot file, so restore = re-apply that version's content.
+            body = repo.body_at(target)
+            ar = apply_mod.apply_to_phone(ctx, render(body))
+            status, detail = ar.status, ar.detail
+    except ConfigRepoError as e:
+        log.exception("revert_config failed")
+        return f"error: {e} (do not retry — surface to user)"
+
+    if status == "too_large":
+        return f"error: config too large: {detail}"
+    if status == "unreachable":
+        return (f"error: phone unreachable: {detail} "
+                "(do not retry — surface to user)")
+    if body is not None:
+        # Restore path: commit only after the phone received it (mirrors
+        # apply_config); undo-last was already committed by rollback().
+        try:
+            repo.write_and_commit(body, f"restore config to {target[:7]}")
+        except Exception as e:  # noqa: BLE001
+            log.exception("revert_config: commit failed")
+            return (f"{verb}-but-unrecorded: loaded on the phone but the server "
+                    f"failed to record it in git ({e}); the change is live but "
+                    "cannot be rolled back from history")
+    if status == "applied":
+        return (f"{verb}: loaded cleanly on the phone; the user can roll back "
+                "from the chat UI")
+    # load_error: the phone wrote+errored the file, so it IS the live config.
+    return (f"{verb}-but-broken: loaded but it errored ({detail}); send a "
+            "corrected config or pick a different version to restore")
+
+
 # The exported set of tools emacsos-server adds to every /chat agent
 # via `Thread(..., spec=AgentSpec(tools=EMACS_TOOLS))`.  `eval_elisp` inspects /
 # experiments on the live phone; `get_config` reads the saved config body
 # so the agent can restate-and-change without relying on conversation
 # memory (the committed file is the source of truth post-/clear);
 # `apply_config` ships a verified config to the phone with a git-backed,
-# rollback-able commit.
+# rollback-able commit; `config_history` + `revert_config` make rollback
+# conversational (undo the last change, or restore an older version by sha).
 #
 # `apply_config` in particular must stay a TOP-LEVEL tool (not buried in a
 # sub-agent's toolset): app.py derives the `applied` event by watching the
 # top-level message stream for apply_config's ToolMessage.  Move it into
 # a sub-agent and the result stops surfacing — the event silently never
 # fires and the ROLLBACK button never appears.
-EMACS_TOOLS = [eval_elisp, apply_config, get_config]
+EMACS_TOOLS = [eval_elisp, apply_config, get_config, config_history, revert_config]

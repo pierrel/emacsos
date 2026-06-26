@@ -184,6 +184,14 @@ class ConfigRepo:
         self._git(*_GIT_IDENTITY, "revert", "--no-edit", "HEAD")
         return RollbackResult(ok=True, detail="reverted last apply", version=self.current())
 
+    def body_at(self, ref: str) -> str:
+        """The agent body committed at REF (e.g. a sha from `history()`), with
+        the header/footer stripped — ready to re-apply for a restore-to-version.
+        Raises ConfigRepoError if REF is unknown or has no agent file there."""
+        self.ensure()
+        full = self._git("show", f"{ref}:{AGENT_FILE}").stdout
+        return _extract_body(full)
+
     def history(self, limit: int = 20) -> list[ConfigVersion]:
         """Recent versions, newest first (thin; underpins a future
         history-view affordance)."""
