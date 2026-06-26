@@ -7,7 +7,11 @@ import subprocess
 import pytest
 
 from emacsos_server.config_repo import (
-    ConfigRepo, ConfigRepoError, _extract_body, render)
+    ConfigRepo,
+    ConfigRepoError,
+    _extract_body,
+    render,
+)
 
 
 def _repo(tmp_path):
