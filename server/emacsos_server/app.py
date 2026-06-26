@@ -591,9 +591,8 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
     revert conflict / corrupted repo)."""
     try:
         repo = ConfigRepo(config.config_dir)
-        repo.ensure()
-        # Shared with the revert_config tool (channel.py) so the
-        # revert-then-apply path lives in one place.
+        # Shared with the revert_config tool (channel.py) so the revert-then-apply
+        # path lives in one place; rollback() ensure()s the repo itself.
         status, detail = revert_head_and_apply(phone_ctx, repo)
         return {"status": status, "detail": detail}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500

@@ -30,7 +30,7 @@ from langchain_core.tools import tool
 from . import apply as apply_mod
 from . import phone as phone_mod
 from .config import Config
-from .config_repo import ConfigRepo, ConfigRepoError, render
+from .config_repo import ConfigRepo, ConfigRepoError, SCAFFOLD_SUMMARY, render
 
 log = logging.getLogger(__name__)
 
@@ -307,11 +307,13 @@ def config_history() -> str:
     except Exception as e:  # noqa: BLE001 — surface any failure as a tool-result string
         log.exception("config_history: read failed")
         return f"error: could not read config history: {type(e).__name__}: {e}"
-    # The oldest commit is always the empty-config scaffold; with only that one,
-    # nothing has been applied yet.
-    if len(versions) <= 1:
+    # Drop the empty-config scaffold commit — it's not a user-applied version,
+    # and offering "restore to the scaffold" as a sha confuses the agent (a wipe
+    # is `apply_config` with an empty body, not a restore target).
+    applied = [v for v in versions if v.summary != SCAFFOLD_SUMMARY]
+    if not applied:
         return "empty: no config has been applied yet"
-    return "\n".join(f"{v.sha[:7]}  {v.summary}" for v in versions)
+    return "\n".join(f"{v.sha[:7]}  {v.summary}" for v in applied)
 
 
 @tool
@@ -343,7 +345,9 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
     target = target.strip()
     verb = "reverted" if not target else "restored"
     try:
-        repo.ensure()
+        # No explicit ensure(): rollback()/body_at()/write_and_commit() each
+        # ensure() first, so the path taken below brings the repo to a clean
+        # state itself.
         if not target:
             log.info("revert_config (undo last) on %s", ctx.phone_host)
             status, detail = revert_head_and_apply(ctx, repo)

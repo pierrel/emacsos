@@ -23,6 +23,11 @@ log = logging.getLogger(__name__)
 
 AGENT_FILE = "agent.el"
 
+# Commit message of the empty-config bootstrap commit.  Not a user-applied
+# version — config_history filters it out so the agent isn't offered "restore
+# to the scaffold" as a version.
+SCAFFOLD_SUMMARY = "scaffold: empty agent config"
+
 # Header + footer wrap the agent-supplied body so agent.el is always a
 # loadable feature even when the body is empty (scaffold) — and so the
 # whole-file replace on each apply has stable bookends.
@@ -145,7 +150,7 @@ class ConfigRepo:
         with open(self.agent_path, "w") as f:
             f.write(render(""))
         self._git("add", AGENT_FILE)
-        self._git(*_GIT_IDENTITY, "commit", "-q", "-m", "scaffold: empty agent config")
+        self._git(*_GIT_IDENTITY, "commit", "-q", "-m", SCAFFOLD_SUMMARY)
 
     def write_and_commit(self, body: str, summary: str) -> str:
         """Replace agent.el's body, commit, return the commit sha."""

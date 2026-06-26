@@ -420,6 +420,18 @@ def test_config_history_lists_versions_newest_first(tmp_path):
     assert "set x" in lines[1]
 
 
+def test_config_history_excludes_scaffold(tmp_path):
+    """The empty-config scaffold commit is filtered out — it's not a version
+    the agent should offer as a restore target (Copilot #31)."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit("(setq x 1)", "set x")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = config_history.invoke({})
+    assert "scaffold" not in out
+    assert "set x" in out
+
+
 def test_config_history_empty_when_nothing_applied(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.ensure()
