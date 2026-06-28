@@ -1,0 +1,118 @@
+#+title: Porting emacsos to the PinePhone Pro (the ready-to-use base)
+#+date: 2026-06-28
+
+A second device track: while the [[file:hardware-build.org][hand-built slab]] (Pi Zero 2 W + PiTFT +
+SIM7600 HAT) continues, run emacsos on an *off-the-shelf Linux phone* so there's
+a pocketable, daily-usable device *now*. Decision (2026-06-28): *PinePhone Pro*,
+true pocket-phone form factor, mainline Linux (Mobian / postmarketOS).
+
+This doc is the porting plan: what transfers free, the three real reworks, and
+the EG25-G-vs-SIM7600 modem differences. It's a *checklist to build against once
+the device lands*, not a record of work done — nothing below is ported yet.
+
+* Why this device fits emacsos
+The stack is Emacs (elisp UI) + a Python server that embeds =assist=. Almost
+none of it is Pi-coupled:
+- The UI is *pure elisp* — touch arrives as Emacs mouse events, so the T9
+  keyboard and the no-modal two-tap pattern run on any capacitive screen.
+- The cellular stack drives =mmcli= / =nmcli= *abstractly* (an NM =gsm=
+  connection over =wwan0=), never hand-rolled AT — see
+  =deploy/cellular-bringup.sh= header ("never hand-rolled AT").
+- The PinePhone Pro's *integrated Quectel EG25-G* modem speaks ModemManager/QMI
+  and exposes =/dev/cdc-wdm0= exactly like the SIM7600 HAT. So the hardest-won
+  network work — the [[file:2026-05-31-wireguard-away-phone.org][WireGuard away-phone]] config (MTU 1280, keepalive 25,
+  stable v6 endpoint) and the [[file:2026-05-26-cellular-data-connectivity.org][cellular-data bringup]] — transfers as-is.
+- The server is FastAPI + =emacsclient=, no arch assumptions; and the Pro's
+  4 GB RAM dwarfs the Zero 2 W's 512 MB, so =emacs_backend.py='s weak-hardware
+  timeouts get headroom rather than needing tightening.
+
+Form-factor bonus: the slab's whole *power chapter* (two rails, the modem's
+≥3 A burst sagging the Pi, MAX17048 gauge, strain-relieved OTG + u.FL joints —
+all of [[file:hardware-build.org][hardware-build.org]]) simply *evaporates* on an integrated phone with a
+battery, PMIC, and internal antenna. That's the real reason to keep this track.
+
+* What transfers untouched
+- All elisp: =os.el=, =chat.el=, =network.el=, =phone-call.el= core logic.
+- The T9 keyboard + two-tap no-modal pattern (Emacs mouse events).
+- =deploy/cellular-bringup.sh= (ModemManager/NetworkManager, modem-agnostic).
+- =deploy/wireguard/= (standard Linux WireGuard).
+- The Python server (=server/emacsos_server/=) — runs on Debian/Mobian as-is.
+- The deploy flow: =make phone-install= / =local-deploy= are just scp +
+  =emacsclient= over =ssh phone=.
+
+* The three reworks
+** 1. Display: 320x240 → 1440x720 (medium — the only non-trivial one)
+The Pi build hardcodes the tiny PiTFT geometry; the Pro's OLED is ~3× in each
+axis.
+- =Makefile:148,152= — =set-frame-size (selected-frame) 320 240 t=. Recompute
+  or drop (let the panel drive the frame).
+- =os.el= button/layout sizing is tuned to 320 px width (e.g. the "1u was too
+  narrow" note ~=os.el:896=). Audit the T9 key geometry and chat layout for the
+  larger canvas.
+- Treat this as a *redesign opportunity*, not just a scale: the T9/two-tap
+  ergonomics were shaped by a 320 px wall we no longer hit. Don't just 3×-scale
+  a layout built for a postage stamp.
+- Outside the repo: confirm Mobian/postmarketOS brings the DRM panel up before
+  Emacs starts (standard package config; no SPI framebuffer, no =dtoverlay=).
+
+** 2. Modem AT port + udev rule (low — but see the *simplification* below)
+The SIM7600 path frees a *secondary* AT port from ModemManager to drive raw-AT
+voice, because QMI call-accept is broken on that modem:
+- =phone-call.el:141= — =emacos-call-at-port "/dev/ttyUSB3"= (hardcoded).
+- =deploy/99-emacos-free-ttyusb3.rules= — matches =ID_VENDOR_ID=="1e0e"=,
+  =ID_MODEL_ID=="9001"=, =ID_USB_INTERFACE_NUM=="03"= (SIM7600 USB IDs).
+The EG25-G enumerates differently (Quectel USB IDs, different interface
+numbering), so *if* the raw-AT path is still needed, both the port and the udev
+matcher must be re-derived from the EG25-G's =lsusb= / =ls /dev/ttyUSB*=.
+
+** 3. Emacs daemon boot (low)
+No phone-side systemd unit lives in the repo (the Pi's daemon start is external).
+Add a =~/.config/systemd/user/emacs.service= (or equivalent) for the Pro so the
+UI comes up on boot.
+
+* EG25-G vs SIM7600: the modem differences that matter
+This is where to spend the testing budget — data/SMS/WireGuard are abstracted and
+will "just work," but *voice* is modem-specific.
+
+- *Answering may get SIMPLER, not harder.* The SIM7600 needed the raw-AT =ATA=
+  workaround because *ModemManager's QMI accept is broken on it*
+  (="InvalidQosId"=, documented in [[file:2026-06-18-inbound-answering.org][inbound-answering.org]]). The EG25-G is *the*
+  PinePhone modem and its ModemManager voice support is comparatively mature —
+  so call accept may work through =mmcli --voice-accept-call= directly. If so,
+  rework #2's udev rule + secondary-AT-port handoff can be *deleted*, not
+  ported. Verify live: try the QMI/D-Bus accept path first; only fall back to
+  raw AT if it genuinely fails on this modem.
+- *Call audio is the real X-factor.* The SIM7600 routes in-call audio via
+  =AT+CSDVC= / =AT+CPCMREG= (digital PCM over the modem — see
+  =2026-06-18-call-audio.org=). The EG25-G on the PinePhone routes call audio
+  through the *sound card / ALSA* path instead, not the same AT PCM register.
+  Expect =phone-call.el='s audio routing to need a from-scratch pass against the
+  PinePhone's known audio routing, *not* a line-for-line port. Data, SMS, ring
+  *detection* (the =Voice.CallAdded= D-Bus signal) are unaffected.
+
+* Buy notes
+- *PinePhone Pro Explorer Edition* (Pine64) — 4 GB / 64 GB, EG25-G modem,
+  mainline-Linux target. The recommended buy.
+- *Original PinePhone (Beta/Convergence)* is the cheaper fallback — *same
+  EG25-G modem*, so every cellular/voice finding here transfers identically;
+  only the CPU/RAM headroom for the =assist= server is less.
+- OS: start with *Mobian* for lowest day-1 friction (boots clean, Emacs +
+  Python from Debian repos); postmarketOS is the alternative.
+
+* Port checklist (fill in as the device lands)
+- [ ] Device + activated SIM in hand; Mobian/postmarketOS booted, panel + touch live
+- [ ] Emacs + Python server installed; =make phone-install= path works over ssh
+- [ ] Emacs daemon systemd user unit added; UI comes up on boot
+- [ ] Display: frame geometry + T9/chat layout reworked for 1440x720
+- [ ] =make cellular-bringup APN=…= run; cellular default route confirmed (script unchanged)
+- [ ] WireGuard away-phone tunnel up over cellular (config transfers as-is)
+- [ ] Voice: try QMI/D-Bus call-accept first; delete the raw-AT/udev path if it works
+- [ ] If raw AT still needed: re-derive EG25-G AT port + udev USB-ID matcher
+- [ ] Call audio routed (ALSA/sound-card path — expect rework, not a port)
+- [ ] First pocket carry: daily-driver smoke (chat, a call, data off home WiFi)
+
+* Iteration log
+- *2026-06-28* — Doc started. Decision to add a PinePhone Pro track as the
+  ready-to-use pocket device alongside the hand-built slab. Portability surveyed
+  against the current repo; nothing ported yet. Device not yet ordered (Pierre
+  getting it).
