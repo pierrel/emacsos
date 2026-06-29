@@ -13,6 +13,10 @@ make start
 
 This launches Emacs in a 320x240 pixel window with no user configuration loaded — only =os.el=.
 
+It runs as a *separate Emacs process* (=emacs -Q= skips your =init.el=, site-lisp, and startup screen), so it is a self-contained simulator you can run on your dev machine — including as a window alongside another Emacs session, e.g. under an EXWM desktop — without touching your own configuration. Do *not* =load-file os.el= into your everyday Emacs as a shortcut: =os.el= rebinds keys, registers hooks, and resizes the frame, so it must run in its own =emacs -Q= process to stay isolated.
+
+The chat panel POSTs to =emacos-chat-server-url= (default =http://localhost:8765/chat=). For pure UI/layout work no server is needed; to make the simulator actually reach an agent, run a [[*Chat Server][Chat Server]] and point that variable at it.
+
 * Features
 
 ** Virtual Keyboard
@@ -44,6 +48,8 @@ make start-server
 #+end_src
 
 This launches EmacsOS and starts the Emacs server listening on all interfaces (TCP). An auth file is written to =~/.emacs.d/server/server= containing the port and authentication key.
+
+The same command works for a *local simulator*, not just the phone — run =make start-server= on your dev machine and you can drive the simulator's buffers from your everyday Emacs exactly as below. The auth file is already local (no =scp= needed); it still records =0.0.0.0=, so rewrite that to =127.0.0.1= if your =emacsclient= won't connect to =0.0.0.0=.
 
 ** Sending eval expressions (TCP, no SSH)
 
@@ -97,6 +103,17 @@ emacsclient -f ./server-file -e '(with-selected-window (emacos--target) (erase-b
 emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'   # run a command in the editor
 emacsclient -f ./server-file -e '(emacos--chat-show-top-buffer)'          # switch the editor to the chat app
 #+end_src
+
+*** Driving the =*chat*= buffer
+
+The chat transcript lives in the =*chat*= buffer (the [[*Layers][universal launchpad]]). Read or steer it remotely:
+
+#+begin_src sh
+emacsclient -f ./server-file -e '(with-current-buffer "*chat*" (buffer-string))'   # read the transcript
+emacsclient -f ./server-file -e '(emacos--chat-show-top-buffer)'                    # bring chat to the editor window
+#+end_src
+
+For an *interactive* session in =*chat*= — scrolling, typing, watching a stream — open a terminal frame over SSH (above) and =C-x b *chat*=. The buffer stays in the phone's (or simulator's) Emacs; you are driving the real session remotely, not a copy. A live buffer can't be moved into a *different* Emacs process; the =-e= calls above are snapshots/commands, and the SSH frame is the way to operate it by hand.
 
 * Chat Server
 
