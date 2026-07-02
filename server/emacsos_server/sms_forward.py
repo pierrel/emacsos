@@ -90,6 +90,10 @@ def message_id(sender: str, timestamp: str, text: str) -> str:
 
 def send_sms(to: str, text: str) -> None:
     """mmcli-create + send an SMS (raises RuntimeError on any step failure)."""
+    # Defensive bound on the recipient (assist validates too): it's folded into mmcli's
+    # number='…' arg, so a crafted value must not break out of it.
+    if not re.fullmatch(r"[+0-9A-Za-z]{1,20}", to or ""):
+        raise RuntimeError(f"refusing to send to a malformed number: {to!r}")
     modem = modem_index()
     if modem is None:
         raise RuntimeError("no modem")
@@ -101,10 +105,12 @@ def send_sms(to: str, text: str) -> None:
     if not m:
         raise RuntimeError(f"could not create SMS: {create.stderr.strip()}")
     sms_idx = m.group(1)
-    send = _mmcli("-s", sms_idx, "--send", timeout=30)
-    if send.returncode != 0:
-        raise RuntimeError(f"send failed: {send.stderr.strip()}")
-    delete_sms(modem, sms_idx)          # clean up the sent record
+    try:
+        send = _mmcli("-s", sms_idx, "--send", timeout=30)
+        if send.returncode != 0:
+            raise RuntimeError(f"send failed: {send.stderr.strip()}")
+    finally:
+        delete_sms(modem, sms_idx)      # clean up the record whether the send succeeded or not
 
 
 def _forward_one(modem: str, idx: str) -> None:
