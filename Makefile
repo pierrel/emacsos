@@ -226,9 +226,8 @@ deploy-sms-forward:
 	   printf 'ASSIST_SMS_INBOUND_URL=%s\n'  '$(ASSIST_SMS_INBOUND_URL)'; \
 	   printf 'ASSIST_SMS_FORWARD_PORT=%s\n' '$(EMACSOS_SMS_FORWARD_PORT)'; \
 	 } | ssh $(SMS_FWD_HOST) "umask 077; cat > $(SMS_FWD_ENV)"
-	@H=$$(ssh $(SMS_FWD_HOST) 'echo $$HOME'); U=$$(ssh $(SMS_FWD_HOST) 'id -un'); \
-	 sed -e "s|@@USER@@|$$U|g" \
-	     -e "s|@@ENV_FILE@@|$$H/$(SMS_FWD_ENV)|g" \
+	@H=$$(ssh $(SMS_FWD_HOST) 'echo $$HOME'); \
+	 sed -e "s|@@ENV_FILE@@|$$H/$(SMS_FWD_ENV)|g" \
 	     -e "s|@@SCRIPT_PATH@@|$$H/$(SMS_FWD_DIR)/sms_forward.py|g" \
 	     deploy/sms-forward.service.in \
 	   | ssh $(SMS_FWD_HOST) "sudo tee /etc/systemd/system/sms-forward.service >/dev/null"

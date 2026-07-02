@@ -9,7 +9,9 @@ Wants=network-online.target ModemManager.service
 
 [Service]
 Type=exec
-User=@@USER@@
+# Runs as root: ModemManager SMS delete + create/send require PolicyKit authorization that a
+# normal user lacks (list/read are allowed, delete/send are not). The daemon's sole job is
+# modem SMS I/O, so root is the pragmatic privilege here (same as the cellular bring-up).
 # ASSIST_SMS_SECRET + ASSIST_SMS_INBOUND_URL + ASSIST_SMS_FORWARD_PORT (0600, not in the repo).
 EnvironmentFile=@@ENV_FILE@@
 ExecStart=/usr/bin/python3 @@SCRIPT_PATH@@
