@@ -1,38 +1,48 @@
+#!/usr/bin/env python3
 """sms-forward — the phone's SMS<->assist bridge.
 
-One process owns all SMS I/O with the modem (via ``mmcli``), both directions:
+Runs ON THE PHONE (where the modem / ModemManager live). Deliberately stdlib + ``requests``
+only (no FastAPI/uvicorn) so it deploys to the Pi Zero as a single file against the system
+Python — no venv. One process owns all SMS I/O with the modem via ``mmcli``, both directions:
+
 - inbound: a poll thread reads received SMS, forwards each to assist's ``/inbound/sms``
   (content-hash ``message_id``), and deletes it from the modem store only on a definitive
-  response (2xx accepted/duplicate, or 400 rejected) — so a text that arrives while assist
-  is down is retried, never lost (the modem store is the durable queue).
+  response (2xx accepted/duplicate, or 400 rejected) — a text that arrives while assist is
+  down is retried, never lost (the modem store is the durable queue).
 - outbound: ``POST /outbound/sms`` (called by assist when the user approves a reply)
   ``mmcli``-sends the message.
 
-Kept OFF the emacsos-server (agent) process: SMS I/O changes for modem/cellular reasons, the
-agent for agent reasons. Runs as its own systemd unit. Auth: the shared ``ASSIST_SMS_SECRET``
-(``hmac.compare_digest``), fail-closed.
+Auth both directions: the shared ``ASSIST_SMS_SECRET`` (``hmac.compare_digest``), fail-closed.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
 import subprocess
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
 
 logger = logging.getLogger("sms_forward")
 
 SECRET = os.getenv("ASSIST_SMS_SECRET")
 INBOUND_URL = os.getenv("ASSIST_SMS_INBOUND_URL")      # assist's https://…/inbound/sms
+OUTBOUND_PORT = int(os.getenv("ASSIST_SMS_FORWARD_PORT", "8766"))
 POLL_INTERVAL = float(os.getenv("ASSIST_SMS_POLL_INTERVAL", "20"))
 HTTP_TIMEOUT = float(os.getenv("ASSIST_SMS_HTTP_TIMEOUT", "15"))
+# assist-web serves a mkcert cert on :5050 (for browser geolocation); this machine-to-machine
+# POST rides the WireGuard tunnel (already encrypted) + carries the shared secret, so skip
+# cert verification rather than ship the mkcert CA to the phone. Override to "true" if trusted.
+VERIFY_TLS = os.getenv("ASSIST_SMS_VERIFY_TLS", "false").lower() in ("1", "true", "yes")
+if not VERIFY_TLS:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 _SMS_PATH = re.compile(r"/SMS/(\d+)")
 _MODEM_PATH = re.compile(r"/Modem/(\d+)")
@@ -78,15 +88,33 @@ def message_id(sender: str, timestamp: str, text: str) -> str:
     return hashlib.sha256(f"{sender}\x00{timestamp}\x00{text}".encode()).hexdigest()
 
 
+def send_sms(to: str, text: str) -> None:
+    """mmcli-create + send an SMS (raises RuntimeError on any step failure)."""
+    modem = modem_index()
+    if modem is None:
+        raise RuntimeError("no modem")
+    # mmcli parses text='…' itself; a literal single-quote in the body would break that
+    # parse. Replies are user-approved plain text, so fold ' to a typographic ’ (v1 residual).
+    safe_text = text.replace("'", "’")
+    create = _mmcli("-m", modem, f"--messaging-create-sms=text='{safe_text}',number='{to}'")
+    m = _SMS_PATH.search(create.stdout)
+    if not m:
+        raise RuntimeError(f"could not create SMS: {create.stderr.strip()}")
+    sms_idx = m.group(1)
+    send = _mmcli("-s", sms_idx, "--send", timeout=30)
+    if send.returncode != 0:
+        raise RuntimeError(f"send failed: {send.stderr.strip()}")
+    delete_sms(modem, sms_idx)          # clean up the sent record
+
+
 def _forward_one(modem: str, idx: str) -> None:
     kv = read_sms(idx)
     sender = kv.get("sms.content.number", "")
     text = kv.get("sms.content.text", "")
     ts = kv.get("sms.properties.timestamp", "")
     state = kv.get("sms.properties.state", "")
-    # Only received messages; skip our own sent/draft records.
     if state in ("sent", "sending", "draft"):
-        return
+        return                          # our own sent/draft records
     if not (sender and text):
         logger.warning("deleting unparseable/empty SMS %s (state=%s)", idx, state)
         delete_sms(modem, idx)          # poison record — fail fast so it can't wedge the head
@@ -94,7 +122,8 @@ def _forward_one(modem: str, idx: str) -> None:
     mid = message_id(sender, ts, text)
     try:
         r = requests.post(INBOUND_URL, json={"message_id": mid, "sender": sender, "text": text},
-                          headers={"X-Assist-SMS-Secret": SECRET}, timeout=HTTP_TIMEOUT)
+                          headers={"X-Assist-SMS-Secret": SECRET}, timeout=HTTP_TIMEOUT,
+                          verify=VERIFY_TLS)
     except requests.RequestException as e:
         logger.warning("inbound POST failed for %s (retain, retry next poll): %s", idx, e)
         return
@@ -104,7 +133,7 @@ def _forward_one(modem: str, idx: str) -> None:
         logger.warning("inbound POST returned %s for %s (retain, retry)", r.status_code, idx)
 
 
-def _poll_loop() -> None:
+def poll_loop() -> None:
     logger.info("sms-forward poll loop started (interval=%ss)", POLL_INTERVAL)
     while True:
         try:
@@ -119,44 +148,53 @@ def _poll_loop() -> None:
         time.sleep(POLL_INTERVAL)
 
 
-app = FastAPI()
+class _Handler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802 (http.server API)
+        if self.path.rstrip("/") != "/outbound/sms":
+            return self._json(404, {"error": "not found"})
+        if not SECRET:
+            return self._json(503, {"error": "outbound SMS not configured"})
+        provided = self.headers.get("X-Assist-SMS-Secret")
+        if not (provided and hmac.compare_digest(provided, SECRET)):
+            return self._json(401, {"error": "bad or missing secret"})
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return self._json(400, {"error": "invalid JSON"})
+        to, text = body.get("to"), body.get("text")
+        if not (to and text):
+            return self._json(400, {"error": "to and text are required"})
+        try:
+            send_sms(to, text)
+        except Exception as e:  # noqa: BLE001 — surface any mmcli failure as 502
+            logger.warning("outbound send to %s failed: %s", to, e)
+            return self._json(502, {"error": str(e)})
+        return self._json(200, {"status": "sent"})
+
+    def _json(self, code: int, obj: dict) -> None:
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args) -> None:  # noqa: A003 — quiet the default stderr access log
+        pass
 
 
-@app.on_event("startup")
-def _start_poll() -> None:
-    if not (SECRET and INBOUND_URL):
+def main() -> None:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if SECRET and INBOUND_URL:
+        threading.Thread(target=poll_loop, name="sms-poll", daemon=True).start()
+    else:
         logger.warning("sms-forward inbound DISABLED: set ASSIST_SMS_SECRET + "
                        "ASSIST_SMS_INBOUND_URL to enable")
-        return
-    threading.Thread(target=_poll_loop, name="sms-poll", daemon=True).start()
+    logger.info("sms-forward outbound listening on :%d", OUTBOUND_PORT)
+    ThreadingHTTPServer(("0.0.0.0", OUTBOUND_PORT), _Handler).serve_forever()
 
 
-class _Outbound(BaseModel):
-    to: str
-    text: str
-
-
-@app.post("/outbound/sms")
-def outbound_sms(payload: _Outbound, x_assist_sms_secret: str | None = Header(default=None)):
-    """Send an approved reply via the modem. Called by assist on approval."""
-    if not SECRET:
-        raise HTTPException(status_code=503, detail="outbound SMS not configured")
-    if not (x_assist_sms_secret and hmac.compare_digest(x_assist_sms_secret, SECRET)):
-        raise HTTPException(status_code=401, detail="bad or missing secret")
-    modem = modem_index()
-    if modem is None:
-        raise HTTPException(status_code=503, detail="no modem")
-    # mmcli parses text='…' itself; a literal single-quote in the body would break that
-    # parse. Replies are user-approved plain text, so fold ' to a typographic ’ (v1 residual).
-    safe_text = payload.text.replace("'", "’")
-    create = _mmcli("-m", modem,
-                    f"--messaging-create-sms=text='{safe_text}',number='{payload.to}'")
-    m = _SMS_PATH.search(create.stdout)
-    if not m:
-        raise HTTPException(status_code=500, detail=f"could not create SMS: {create.stderr.strip()}")
-    sms_idx = m.group(1)
-    send = _mmcli("-s", sms_idx, "--send", timeout=30)
-    if send.returncode != 0:
-        raise HTTPException(status_code=502, detail=f"send failed: {send.stderr.strip()}")
-    delete_sms(modem, sms_idx)          # clean up the sent record
-    return {"status": "sent"}
+if __name__ == "__main__":
+    main()

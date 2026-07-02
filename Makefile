@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service install-sms-forward
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -206,20 +206,34 @@ install-server-service: $(SERVER_STAMP)
 	sudo systemctl enable --now emacsos-server.service
 	@echo "✓ emacsos-server.service installed + enabled + started on :$(EMACSOS_SERVER_PORT)"
 
-# The sms-forward bridge: modem SMS <-> assist. Its own unit (owns the modem SMS I/O, off
-# the agent server). Shares EMACSOS_ENV_FILE, which must define ASSIST_SMS_SECRET +
-# ASSIST_SMS_INBOUND_URL (assist's /inbound/sms). Serves /outbound/sms on its own port.
+# Deploy the sms-forward bridge TO THE PHONE (where the modem is). The phone has no repo/
+# venv, so this scp's the single stdlib script + an env file + the unit, then enables it.
+# Secrets flow via stdin (never argv on the phone). Required:
+#   make deploy-sms-forward ASSIST_SMS_SECRET=<shared> ASSIST_SMS_INBOUND_URL=https://<thinky-wg>:5050/inbound/sms
 EMACSOS_SMS_FORWARD_PORT ?= 8766
-install-sms-forward: $(SERVER_STAMP)
-	sed -e 's|@@USER@@|$(shell id -un)|g' \
-	    -e 's|@@SERVER_DIR@@|$(CURDIR)/server|g' \
-	    -e 's|@@ENV_FILE@@|$(EMACSOS_ENV_FILE)|g' \
-	    -e 's|@@PORT@@|$(EMACSOS_SMS_FORWARD_PORT)|g' \
-	    deploy/sms-forward.service.in \
-	  | sudo tee /etc/systemd/system/sms-forward.service >/dev/null
-	sudo systemctl daemon-reload
-	sudo systemctl enable --now sms-forward.service
-	@echo "✓ sms-forward.service installed + enabled + started on :$(EMACSOS_SMS_FORWARD_PORT)"
+SMS_FWD_HOST ?= phone-wg
+SMS_FWD_DIR ?= .local/sms-forward
+SMS_FWD_ENV ?= .config/sms-forward.env
+ASSIST_SMS_SECRET ?=
+ASSIST_SMS_INBOUND_URL ?=
+
+deploy-sms-forward:
+	@[ -n "$(ASSIST_SMS_SECRET)" ]      || { echo "error: ASSIST_SMS_SECRET is required"; exit 1; }
+	@[ -n "$(ASSIST_SMS_INBOUND_URL)" ] || { echo "error: ASSIST_SMS_INBOUND_URL is required (assist's /inbound/sms)"; exit 1; }
+	ssh $(SMS_FWD_HOST) "mkdir -p $(SMS_FWD_DIR) .config"
+	scp server/emacsos_server/sms_forward.py $(SMS_FWD_HOST):$(SMS_FWD_DIR)/sms_forward.py
+	@{ printf 'ASSIST_SMS_SECRET=%s\n'       '$(ASSIST_SMS_SECRET)';      \
+	   printf 'ASSIST_SMS_INBOUND_URL=%s\n'  '$(ASSIST_SMS_INBOUND_URL)'; \
+	   printf 'ASSIST_SMS_FORWARD_PORT=%s\n' '$(EMACSOS_SMS_FORWARD_PORT)'; \
+	 } | ssh $(SMS_FWD_HOST) "umask 077; cat > $(SMS_FWD_ENV)"
+	@H=$$(ssh $(SMS_FWD_HOST) 'echo $$HOME'); U=$$(ssh $(SMS_FWD_HOST) 'id -un'); \
+	 sed -e "s|@@USER@@|$$U|g" \
+	     -e "s|@@ENV_FILE@@|$$H/$(SMS_FWD_ENV)|g" \
+	     -e "s|@@SCRIPT_PATH@@|$$H/$(SMS_FWD_DIR)/sms_forward.py|g" \
+	     deploy/sms-forward.service.in \
+	   | ssh $(SMS_FWD_HOST) "sudo tee /etc/systemd/system/sms-forward.service >/dev/null"
+	ssh $(SMS_FWD_HOST) "sudo systemctl daemon-reload && sudo systemctl enable sms-forward.service && sudo systemctl restart sms-forward.service"
+	@echo "✓ sms-forward deployed to $(SMS_FWD_HOST) on :$(EMACSOS_SMS_FORWARD_PORT)"
 
 test-server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m pytest tests/ -v
