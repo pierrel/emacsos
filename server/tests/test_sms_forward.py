@@ -73,3 +73,31 @@ def test_forward_ignores_our_sent_records(monkeypatch):
     monkeypatch.setattr(sf.requests, "post", lambda *a, **k: posted.append(1))
     sf._forward_one("0", "3")
     assert posted == [] and deleted == []     # a sent record is left alone
+
+
+def test_forward_retains_on_read_failure(monkeypatch):
+    monkeypatch.setattr(sf, "SECRET", "s")
+    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
+    monkeypatch.setattr(sf, "read_sms", lambda idx: None)   # transient mmcli read failure
+    deleted, posted = [], []
+    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
+    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: posted.append(1))
+    sf._forward_one("0", "5")
+    assert deleted == [] and posted == []       # not read → retained, never posted or deleted
+
+
+def test_read_sms_returns_none_on_mmcli_failure(monkeypatch):
+    monkeypatch.setattr(sf, "_mmcli", lambda *a, **k: _cp(stdout="", returncode=1))
+    assert sf.read_sms("3") is None             # nonzero rc / empty -> None (transient)
+
+
+def test_forward_deletes_on_any_2xx(monkeypatch):
+    monkeypatch.setattr(sf, "SECRET", "s")
+    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
+    monkeypatch.setattr(sf, "read_sms", lambda idx: {
+        "sms.content.number": "+1555", "sms.content.text": "hi", "sms.properties.state": "received"})
+    deleted = []
+    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
+    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=204))
+    sf._forward_one("0", "7")
+    assert deleted == ["7"]                     # 204 (a 2xx) acks -> delete, not retry-forever

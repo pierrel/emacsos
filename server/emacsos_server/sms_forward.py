@@ -75,8 +75,14 @@ def parse_sms(keyvalue: str) -> dict:
     return kv
 
 
-def read_sms(idx: str) -> dict:
-    return parse_sms(_mmcli("-s", idx, "--output-keyvalue").stdout)
+def read_sms(idx: str) -> dict | None:
+    """Read one SMS. Returns None on a transient mmcli read failure (nonzero rc / empty
+    output) so the caller RETAINS the SMS for retry rather than mistaking it for a poison
+    record and deleting it (message loss)."""
+    r = _mmcli("-s", idx, "--output-keyvalue")
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return parse_sms(r.stdout)
 
 
 def delete_sms(modem: str, idx: str) -> None:
@@ -115,6 +121,9 @@ def send_sms(to: str, text: str) -> None:
 
 def _forward_one(modem: str, idx: str) -> None:
     kv = read_sms(idx)
+    if kv is None:
+        logger.warning("could not read SMS %s (transient); retaining for retry", idx)
+        return                          # transient read failure — keep it, retry next poll
     sender = kv.get("sms.content.number", "")
     text = kv.get("sms.content.text", "")
     ts = kv.get("sms.properties.timestamp", "")
@@ -133,8 +142,8 @@ def _forward_one(modem: str, idx: str) -> None:
     except requests.RequestException as e:
         logger.warning("inbound POST failed for %s (retain, retry next poll): %s", idx, e)
         return
-    if r.status_code in (200, 400):     # accepted/duplicate, or definitively rejected -> delete
-        delete_sms(modem, idx)
+    if 200 <= r.status_code < 300 or r.status_code == 400:
+        delete_sms(modem, idx)          # any 2xx (accepted/duplicate) or definitive 400 -> delete
     else:                                # 401/503/5xx -> transient, keep it for the next poll
         logger.warning("inbound POST returned %s for %s (retain, retry)", r.status_code, idx)
 
