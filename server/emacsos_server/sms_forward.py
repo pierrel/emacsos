@@ -46,6 +46,7 @@ if not VERIFY_TLS:
 
 _SMS_PATH = re.compile(r"/SMS/(\d+)")
 _MODEM_PATH = re.compile(r"/Modem/(\d+)")
+_MAX_BODY = 64 * 1024   # an SMS reply is tiny; cap the outbound request body
 
 
 def _mmcli(*args: str, timeout: float = 15) -> subprocess.CompletedProcess:
@@ -108,8 +109,8 @@ def send_sms(to: str, text: str) -> None:
     safe_text = text.replace("'", "’")
     create = _mmcli("-m", modem, f"--messaging-create-sms=text='{safe_text}',number='{to}'")
     m = _SMS_PATH.search(create.stdout)
-    if not m:
-        raise RuntimeError(f"could not create SMS: {create.stderr.strip()}")
+    if create.returncode != 0 or not m:
+        raise RuntimeError(f"could not create SMS: {create.stderr.strip() or create.stdout.strip()}")
     sms_idx = m.group(1)
     try:
         send = _mmcli("-s", sms_idx, "--send", timeout=30)
@@ -174,6 +175,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "bad or missing secret"})
         try:
             length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return self._json(400, {"error": "bad Content-Length"})
+        # This daemon runs as root and binds 0.0.0.0; an SMS reply is tiny, so cap the body
+        # to reject a client sending a huge Content-Length (memory/CPU pressure).
+        if length > _MAX_BODY:
+            return self._json(413, {"error": "request too large"})
+        try:
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._json(400, {"error": "invalid JSON"})

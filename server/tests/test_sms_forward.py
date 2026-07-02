@@ -1,7 +1,6 @@
 """Unit tests for the sms-forward bridge — the mmcli parse + the forward/delete-on-ack
 logic, with mmcli and the HTTP POST mocked (no modem, no network)."""
 from types import SimpleNamespace
-from unittest import mock
 
 import emacsos_server.sms_forward as sf
 
@@ -101,3 +100,12 @@ def test_forward_deletes_on_any_2xx(monkeypatch):
     monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=204))
     sf._forward_one("0", "7")
     assert deleted == ["7"]                     # 204 (a 2xx) acks -> delete, not retry-forever
+
+
+def test_send_sms_raises_on_create_failure(monkeypatch):
+    monkeypatch.setattr(sf, "modem_index", lambda: "0")
+    # mmcli create returns nonzero even though stdout has a /SMS/ path
+    monkeypatch.setattr(sf, "_mmcli", lambda *a, **k: _cp(stdout="/SMS/5", returncode=1, stderr="boom"))
+    import pytest
+    with pytest.raises(RuntimeError):
+        sf.send_sms("+15551234567", "hi")
