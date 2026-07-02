@@ -198,8 +198,8 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             return self._json(400, {"error": "invalid JSON"})
         to, text = body.get("to"), body.get("text")
-        if not (to and text):
-            return self._json(400, {"error": "to and text are required"})
+        if not (isinstance(to, str) and to.strip() and isinstance(text, str) and text):
+            return self._json(400, {"error": "to and text must be non-empty strings"})
         try:
             send_sms(to, text)
         except Exception as e:  # noqa: BLE001 — surface any mmcli failure as 502
