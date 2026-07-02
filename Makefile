@@ -207,7 +207,7 @@ install-server-service: $(SERVER_STAMP)
 	@echo "✓ emacsos-server.service installed + enabled + started on :$(EMACSOS_SERVER_PORT)"
 
 # Deploy the sms-forward bridge TO THE PHONE (where the modem is). The phone has no repo/
-# venv, so this scp's the single stdlib script + an env file + the unit, then enables it.
+# venv, so this scp's the single script (stdlib + requests, preinstalled on the phone) + an env file + the unit, then enables it.
 # Secrets flow via stdin (never argv on the phone). Required:
 #   make deploy-sms-forward ASSIST_SMS_SECRET=<shared> ASSIST_SMS_INBOUND_URL=https://<thinky-wg>:5050/inbound/sms
 EMACSOS_SMS_FORWARD_PORT ?= 8766

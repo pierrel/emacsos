@@ -121,3 +121,17 @@ def test_forward_deletes_on_400(monkeypatch):
     monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=400))
     sf._forward_one("0", "8")
     assert deleted == ["8"]                     # 400 = definitive reject -> delete, not retry-forever
+
+
+def test_send_sms_preserves_apostrophes(monkeypatch):
+    monkeypatch.setattr(sf, "modem_index", lambda: "0")
+    calls = []
+    def fake_mmcli(*args, **k):
+        calls.append(args)
+        return _cp(stdout="/SMS/1") if "--send" not in args else _cp(returncode=0)
+    monkeypatch.setattr(sf, "_mmcli", fake_mmcli)
+    monkeypatch.setattr(sf, "delete_sms", lambda m, i: None)
+    sf.send_sms("+15551234567", "don't forget")
+    create = " ".join(calls[0])
+    assert "don't forget" in create            # apostrophe preserved (double-quoted text)
+    assert 'text="' in create                  # uses double quotes for the mmcli value

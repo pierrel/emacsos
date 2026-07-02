@@ -112,10 +112,12 @@ def send_sms(to: str, text: str) -> None:
     modem = modem_index()
     if modem is None:
         raise RuntimeError("no modem")
-    # mmcli parses text='…' itself; a literal single-quote in the body would break that
-    # parse. Replies are user-approved plain text, so fold ' to a typographic ’ (v1 residual).
-    safe_text = text.replace("'", "’")
-    create = _mmcli("-m", modem, f"--messaging-create-sms=text='{safe_text}',number='{to}'")
+    # mmcli parses text="…" itself. Using DOUBLE quotes preserves apostrophes (verified:
+    # "don't" stores as don't) — only a literal double-quote in the body would break the
+    # value, and that's rare in a reply, so fold just " → ” (the recipient number is
+    # already validated to a quote-free shape).
+    safe_text = text.replace('"', '”')
+    create = _mmcli("-m", modem, f'--messaging-create-sms=text="{safe_text}",number="{to}"')
     m = _SMS_PATH.search(create.stdout)
     if create.returncode != 0 or not m:
         raise RuntimeError(f"could not create SMS: {create.stderr.strip() or create.stdout.strip()}")

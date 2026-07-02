@@ -1,6 +1,6 @@
 # Template for the sms-forward systemd unit — the phone's SMS<->assist bridge.
 # Runs ON THE PHONE (where the modem is). Installed by `make deploy-sms-forward`, which
-# scp's the single stdlib script + this unit + an env file to the phone (no repo/venv there).
+# scp's the single script (stdlib + requests, preinstalled on the phone) + this unit + an env file to the phone (no repo/venv there).
 # Placeholders (@@...@@) are filled at deploy time so no operator-specific value lands here.
 [Unit]
 Description=sms-forward (modem SMS <-> assist inbound/outbound)
