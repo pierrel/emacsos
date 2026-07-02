@@ -191,8 +191,11 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
             return self._json(400, {"error": "bad Content-Length"})
-        # This daemon runs as root and binds 0.0.0.0; an SMS reply is tiny, so cap the body
-        # to reject a client sending a huge Content-Length (memory/CPU pressure).
+        # This daemon runs as root and binds 0.0.0.0; an SMS reply is tiny, so cap the body.
+        # A negative length must be rejected too — read(-1) would read until EOF, bypassing
+        # the cap (unbounded read = memory/CPU pressure).
+        if length < 0:
+            return self._json(400, {"error": "bad Content-Length"})
         if length > _MAX_BODY:
             return self._json(413, {"error": "request too large"})
         try:
