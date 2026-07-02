@@ -34,6 +34,9 @@ logger = logging.getLogger("sms_forward")
 SECRET = os.getenv("ASSIST_SMS_SECRET")
 INBOUND_URL = os.getenv("ASSIST_SMS_INBOUND_URL")      # assist's https://…/inbound/sms
 OUTBOUND_PORT = int(os.getenv("ASSIST_SMS_FORWARD_PORT", "8766"))
+# Bind address for the outbound endpoint. Defaults to all interfaces; set to the WireGuard
+# interface IP to reduce exposure (this daemon runs as root).
+BIND_HOST = os.getenv("ASSIST_SMS_BIND", "0.0.0.0")
 POLL_INTERVAL = float(os.getenv("ASSIST_SMS_POLL_INTERVAL", "20"))
 HTTP_TIMEOUT = float(os.getenv("ASSIST_SMS_HTTP_TIMEOUT", "15"))
 # assist-web serves a mkcert cert on :5050 (for browser geolocation); this machine-to-machine
@@ -87,7 +90,12 @@ def read_sms(idx: str) -> dict | None:
 
 
 def delete_sms(modem: str, idx: str) -> None:
-    _mmcli("-m", modem, f"--messaging-delete-sms={idx}")
+    r = _mmcli("-m", modem, f"--messaging-delete-sms={idx}")
+    if r.returncode != 0:
+        # A failed delete leaves the SMS in the store → it'll be re-forwarded (assist dedups
+        # by message_id) or, for a sent record, re-listed; log so a duplicate-causing failure
+        # is detectable.
+        logger.warning("failed to delete SMS %s: %s", idx, r.stderr.strip())
 
 
 def message_id(sender: str, timestamp: str, text: str) -> str:
@@ -165,6 +173,10 @@ def poll_loop() -> None:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    # Per-connection socket timeout — a slow client (slowloris) can't hold a ThreadingHTTPServer
+    # worker open indefinitely; the read raises and the connection is dropped.
+    timeout = 15
+
     def do_POST(self) -> None:  # noqa: N802 (http.server API)
         if self.path.rstrip("/") != "/outbound/sms":
             return self._json(404, {"error": "not found"})
@@ -215,8 +227,8 @@ def main() -> None:
     else:
         logger.warning("sms-forward inbound DISABLED: set ASSIST_SMS_SECRET + "
                        "ASSIST_SMS_INBOUND_URL to enable")
-    logger.info("sms-forward outbound listening on :%d", OUTBOUND_PORT)
-    ThreadingHTTPServer(("0.0.0.0", OUTBOUND_PORT), _Handler).serve_forever()
+    logger.info("sms-forward outbound listening on %s:%d", BIND_HOST, OUTBOUND_PORT)
+    ThreadingHTTPServer((BIND_HOST, OUTBOUND_PORT), _Handler).serve_forever()
 
 
 if __name__ == "__main__":

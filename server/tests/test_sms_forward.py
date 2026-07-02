@@ -109,3 +109,15 @@ def test_send_sms_raises_on_create_failure(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         sf.send_sms("+15551234567", "hi")
+
+
+def test_forward_deletes_on_400(monkeypatch):
+    monkeypatch.setattr(sf, "SECRET", "s")
+    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
+    monkeypatch.setattr(sf, "read_sms", lambda idx: {
+        "sms.content.number": "+1555", "sms.content.text": "hi", "sms.properties.state": "received"})
+    deleted = []
+    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
+    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=400))
+    sf._forward_one("0", "8")
+    assert deleted == ["8"]                     # 400 = definitive reject -> delete, not retry-forever
