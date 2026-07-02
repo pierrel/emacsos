@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service install-sms-forward
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -205,6 +205,21 @@ install-server-service: $(SERVER_STAMP)
 	sudo systemctl daemon-reload
 	sudo systemctl enable --now emacsos-server.service
 	@echo "✓ emacsos-server.service installed + enabled + started on :$(EMACSOS_SERVER_PORT)"
+
+# The sms-forward bridge: modem SMS <-> assist. Its own unit (owns the modem SMS I/O, off
+# the agent server). Shares EMACSOS_ENV_FILE, which must define ASSIST_SMS_SECRET +
+# ASSIST_SMS_INBOUND_URL (assist's /inbound/sms). Serves /outbound/sms on its own port.
+EMACSOS_SMS_FORWARD_PORT ?= 8766
+install-sms-forward: $(SERVER_STAMP)
+	sed -e 's|@@USER@@|$(shell id -un)|g' \
+	    -e 's|@@SERVER_DIR@@|$(CURDIR)/server|g' \
+	    -e 's|@@ENV_FILE@@|$(EMACSOS_ENV_FILE)|g' \
+	    -e 's|@@PORT@@|$(EMACSOS_SMS_FORWARD_PORT)|g' \
+	    deploy/sms-forward.service.in \
+	  | sudo tee /etc/systemd/system/sms-forward.service >/dev/null
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now sms-forward.service
+	@echo "✓ sms-forward.service installed + enabled + started on :$(EMACSOS_SMS_FORWARD_PORT)"
 
 test-server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m pytest tests/ -v

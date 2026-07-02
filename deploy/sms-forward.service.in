@@ -1,0 +1,20 @@
+# Template for the sms-forward systemd unit — the phone's SMS<->assist bridge.
+# Installed (with paths/user substituted) by `make install-sms-forward`.  Placeholders
+# (@@...@@) are filled at install time so no operator-specific path lands in the repo.
+[Unit]
+Description=EmacsOS sms-forward (modem SMS <-> assist inbound/outbound)
+After=network-online.target ModemManager.service
+Wants=network-online.target ModemManager.service
+
+[Service]
+Type=exec
+User=@@USER@@
+WorkingDirectory=@@SERVER_DIR@@
+# Source the shared env (ASSIST_SMS_SECRET, ASSIST_SMS_INBOUND_URL, poll interval) via a
+# login shell, then exec uvicorn serving the outbound endpoint + the inbound poll thread.
+ExecStart=/bin/bash -lc 'set -a; . @@ENV_FILE@@; set +a; exec .venv/bin/python -m uvicorn emacsos_server.sms_forward:app --host 0.0.0.0 --port @@PORT@@'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
