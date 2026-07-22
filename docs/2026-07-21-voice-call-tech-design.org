@@ -9,93 +9,97 @@ clean-interfaces, threat-model). The *Review resolutions* section at the end map
 every finding to where it now lives. Three items are deliberately left as
 *decisions for Pierre* (§0) rather than silently resolved.
 
-* 0. Decisions for Pierre (resolve before Phase 2)
+* 0. Decisions — RESOLVED (Pierre, review round 2)
 
-The PRD invited push-back on its decisions ("opinionated — push back on any").
-Review surfaced three forks the tech design should not settle unilaterally:
+The three forks this design left open are now settled by Pierre's review. Recorded
+here as resolutions (not open questions); §1/§4/§5/§10 are updated to match.
 
-** D1. Where the voice session runs — and which repo owns the feature
-Recommendation: *host the voice session in-process inside assist's =manage.web=*
-(the single-uvicorn web app), with the phone-side *call-bridge* and nothing else
-on the emacsos side. **Consequence Pierre should rule on knowingly:** this makes
-voice *primarily an assist feature* — the flow engine, session state machine,
-receptionist, thread-catalog, call log, STT/TTS, and their tests all land in the
-=assist= repo; emacsos ships only the phone-side =call_bridge.py= daemon. The PRD
-lives in =emacsos/docs=; the bulk of the code will not.
+** D1. Client architecture — RESOLVED: a shared client-agnostic API; voice is a separate thin client
+*Not* the in-process-in-=manage.web= hosting this doc originally recommended.
+Pierre's steer (PR review + inline FB §1): "keep the voice client as a separate
+client process, parallel to Web/CLI, not embedded in =manage.web=; move generic
+client functionality into a shared layer *above* the clients" / "move this one
+layer back so it can be re-used between a new voice client and the existing web
+client" / "a reasonable cut point is a new 'API' client used by web and voice."
 
-Honest trade (the architect's original "forced by reuse" argument was wrong and is
-corrected here — see §1): in-process is *not required* to reuse #198/#199 — that
-machinery is hosted in the web process no matter who submits the turn. In-process
-is chosen because the alternative (an external voice process driving =manage.web=
-over HTTP) needs *new public surface* the web app doesn't have — a machine-readable
-turn-completion + reply-text endpoint (today it's Form→303→HTML), a catalog
-endpoint, and an interactive-preemption parameter — plus polling latency against a
-1.5 s first-audio budget. In-process buys synchronous turn execution on the session
-thread, the turn-completion observer as a *private* hook instead of a public API,
-and direct =acquire(interactive=True)=. The *paid cost*, named not dissolved: the
-assist web process gains onnxruntime/silero + faster-whisper + piper, a WebSocket
-listener, and telephony session state; and every =assist-web= restart/deploy drops
-a live call.
-- *Alternative if Pierre prefers repo-clean over latency:* external voice process
-  in emacsos + ~3 small new JSON routes on =manage.web=. Simpler blast radius on
-  assist's load-bearing files; worse first-audio latency; more public API. §1
-  documents both so the decision is legible.
+Resolution:
+1. *Extract a shared, client-agnostic session/turn API* (working name =assist.session=
+   / an internal service layer) out of =manage.web= — the generic capabilities every
+   client needs: submit-a-turn (the routing decision, §5), the thread catalog (§3),
+   turn-completion observation (§7), and receptionist orchestration (§4). Web reaches
+   these through routes today by reaching into internals; both clients should consume
+   *one* reusable API instead.
+2. *The web client refactors onto that API FIRST*, as its own milestone, and *bakes
+   ≥1 day of real-world production use* before any voice code is layered on or merged
+   over it (Pierre's explicit ask — §10, new phase P0.5). De-risking by construction:
+   prove the extraction against the known-good, well-tested web client before a second
+   consumer exists.
+3. *The voice client is a separate thin client* over that API (parallel to web/CLI),
+   owning only voice-specific concerns (bridge, VAD/endpoint/barge-in/DTMF, STT/TTS,
+   the audio state machine).
+4. *Process topology is a deferred, reversible detail, NOT the decision.* Pierre:
+   "this does not mean we need two (or more) processes — I'm not suggesting multiple
+   processes explicitly." So the shared API is an *internal library boundary*; the
+   voice client may be a module in the same uvicorn process or its own process — a
+   later, reversible call (default: same process unless a reason emerges). This
+   dissolves the old "in-process vs external-HTTP" fork entirely: the layering, not
+   the topology, is the point, and a co-located client calls the API directly (no new
+   public HTTP surface, no polling latency).
+5. *Long-term ownership is documented per component* (§1 ownership table, Pierre's
+   "document long-term ownership, not merely where it initially lands"), and the
+   EmacsOS-client / shared-API / Assist-harness placement is re-evaluated for every
+   responsibility (§1).
 
-** D2. Unknown callers: decline-with-speech (PRD US-6) vs do-not-answer
-The PRD (US-6, Decision 6) answers an unknown caller, speaks a short "not
-available," and hangs up. The threat-model review argues the opposite by
-construction: with *one modem / one concurrent call*, answering-then-declining a
-robocall flood is a *self-DoS on Pierre's own access* (a real call hits a busy
-modem while it's declining a robocall), it's a *billable connected call* per
-unknown ring, and it *reveals more liveness* to a scanner (the number connects to
-a live system) than a silent ring-out. Voicemail is out of scope, so there's no
-product reason to speak to strangers in v1.
-- Recommendation: *do not answer unknown callers* — no =ATA=; let it ring out (the
-  existing =phone-call.el= human incoming screen still works if Pierre wants to
-  pick up). This deletes the decline clip, the pre-auth answer cost, and shrinks
-  the modem-occupancy window. It contradicts a PRD line Pierre already reviewed, so
-  it's his call.
+** D2. Unknown callers — RESOLVED: do not answer; fail fast, release resources
+Pierre: "unknown callers should fail fast and release resources as quickly as
+possible." So: *no =ATA=* for a non-allowlisted caller — let it ring out (the
+existing =phone-call.el= human screen still lets him pick up manually). No connected
+call, no pre-auth answer cost, no decline clip, no modem-occupancy window, minimal
+liveness signal to a scanner. (Voicemail is already out of scope per the PRD, so
+there was never a product reason to speak to strangers.) §5/§8 updated: DECLINE
+becomes DO-NOT-ANSWER with zero detectors and immediate release.
 
-** D3. "Go back" to the receptionist: DTMF escape vs an interpretive tool
-The architect proposed a =back_to_receptionist()= tool injected into voice turns.
-Review split: agentic-fit endorsed tool-list construction as the right lever;
-simplicity + clean-interfaces showed (a) an interpretive tool needs a false-fire
-eval suite *because* the small model may misfire it, and (b) the =voice=True= flag
-as drawn can't even carry the session closure the tool needs.
-- Recommendation: *a deterministic DTMF escape* — pressing =*= in IN_THREAD returns
-  to ROUTER. It reuses the Goertzel detector already built for the PIN, *cannot*
-  false-fire, needs no =ThreadManager= change and no eval suite, and is exactly the
-  repo's "deterministic primitive over interpretive detection" layering. The PRD's
-  "conversational, never a menu" constraint governs thread *selection*, not the
-  escape hatch. (If Pierre wants a spoken "go back" too, it's added later as
-  =extra_tools= on =ThreadManager.get= — §4 — not a boolean flag.)
+** D3. "Go back" to the receptionist — RESOLVED: BOTH DTMF =*= and an agent tool
+Pierre: "support *both* a deterministic DTMF escape (=*=) and an agent-invoked
+'return to receptionist' tool. The DTMF path is the reliability guarantee; the
+agent path preserves conversational UX."
+- *DTMF =*= in IN_THREAD → ROUTER* is the reliability floor: reuses the Goertzel
+  detector, cannot false-fire, no model, no eval.
+- *=back_to_receptionist()= tool*, merged via =extra_tools= on the in-thread agent
+  (§4 — the clean shape; not a =voice=True= boolean), gives the natural spoken
+  "take me back." It *does* need a false-fire eval case (the small model can misfire
+  it) — accepted as the cost of conversational UX, with DTMF as the guaranteed
+  fallback when it misfires.
 
 * 1. Architecture overview
 
-** The hosting decision, stated honestly
-Voice turns execute *inside* the assist =manage.web= process (§0/D1). What that
-does and does not follow from:
-- *Does not follow from reuse.* #199 interjection callbacks are registered in the
-  web process (=manage/web/threads.py:1341=) and #198 continuation dispatch fires
-  there (=threads.py:1164=) *regardless of who submits the triggering turn*. An
-  external submitter reaches both through the shipped =POST /thread/{tid}/message=,
-  which journals to =MESSAGE_BACKLOG= when the thread is busy. Neither forces
-  in-process hosting.
-# FB: We need to move this one layer back so that it can be re-used between a new voice client and the existing web client. We should include in the implementation plan/sequence a specific milestone for testing this. Recommend that the production instance stays in this new state for at least a day of real-world testing before moving on/merging/deploying over it.
-# FB: reading a bit further, I think a reasonable cut point is to have a new "API" client that is then used by the web and the (new) voice clients.
-# FB: Note that this doesn't not mean we need two (or more) processes. Not saying that we can't have more, but I'm not suggesting multiple processes explicitly.
-- *Follows from surface + latency.* The web app exposes no machine-readable
-  turn-completion / reply-text endpoint (=post_message= is fire-and-forget → 303 →
-  HTML; =_process_message= returns =None=; reply text lives only in the checkpoint)
-  and no catalog endpoint. External hosting would add all three as public API and
-  poll them under a 1.5 s budget. In-process turns those into private in-process
-  calls.
+** The layering (Pierre's steer, §0/D1): one shared session API, thin clients
+Voice does *not* execute inside =manage.web='s request path. Instead:
+- *A shared, client-agnostic session/turn API* (working name =assist.session=) is
+  extracted from =manage.web= and owns the generic capabilities every client needs:
+  =submit_turn= (the busy/paused/idle routing, §5), the thread catalog (§3),
+  turn-completion observation (§7), and receptionist orchestration (§4). These are
+  the pieces #198/#199 already host in the web process — the extraction moves the
+  *boundary* one layer back so both clients call an API rather than the web reaching
+  into internals.
+- *The web client refactors onto this API first* and bakes ≥1 day in prod (§0/D1,
+  §10 P0.5) before voice layers on.
+- *The voice client is a thin client* over the same API, owning only voice-specific
+  concerns.
+- *Topology is deferred and reversible* (§0/D1.4): the API is an internal library
+  boundary; the voice client defaults to a module in the same uvicorn process
+  (so it reaches the API by direct call — no new public HTTP surface, no polling
+  latency), and may be split to its own process later if a reason emerges. The old
+  "in-process vs external-HTTP" fork is therefore moot — it was a false choice
+  created by *not* having the shared boundary.
 
-emacsos-server (=app.py=/=channel.py=) is *unchanged in v1*; the call never touches
-its =_STREAM_LOCK=. The precedent is the SMS forwarder: a phone-side daemon that
-talks directly to assist over WG/LAN. Residual (pre-existing, unchanged): an
-emacsos phone-chat turn and a call turn can still contend for the single llama slot
-across processes — single user, accepted, named.
+Because the boundary is now explicit, the earlier "in-process is forced by latency /
+private hooks" argument is *retired*: with a shared in-library API, a co-located
+client already gets synchronous turn execution and the private observer hook, and a
+future out-of-process client would get a deliberately-designed API rather than the
+web app's Form→303→HTML accident. The residual cross-process llama-slot contention
+(an emacsos phone-chat turn vs a call turn) is pre-existing, unchanged, single-user,
+named.
 
 ** Component map
 #+begin_example
@@ -118,6 +122,33 @@ The speech models load *in the session host* (lazily, on first use), on the sess
 worker thread — no separate process, venv, or =SPEECH_URL= (review consensus:
 silero already lands here, so exiling only whisper/piper cut the ML-dependency
 family down the middle for a theoretical crash-isolation benefit).
+
+(The component map above predates §0/D1: read the server-side =manage/voice/= boxes
+as *the voice client module* and the =threads.py=/=catalog.py=/=receptionist.py=
+boxes as *the shared session API* both clients consume. The file layout in §2–§9 is
+updated to the =assist.session= boundary below.)
+
+** Long-term ownership (Pierre: "document long-term ownership, not merely where it initially lands")
+For every responsibility, which of the three homes owns it — *EmacsOS (client)*,
+the *shared session API* (client-agnostic, in assist), or the *Assist harness*
+(the agent/turn/queue core) — and its target, not just its first landing:
+
+| Responsibility                                   | Initial landing        | Long-term home            | Notes |
+|--------------------------------------------------+------------------------+---------------------------+-------|
+| PCM bridge (AT, =ttyUSB4= pump, ring watch)      | emacsos =callbridge/=  | *EmacsOS client*          | device-owned; never moves |
+| VAD / endpointing / barge-in / DTMF (flow)       | assist =manage/voice/= | *Voice client*            | voice-specific; a thin-client concern |
+| Audio session state machine + STT/TTS            | assist =manage/voice/= | *Voice client*            | voice-specific |
+| =submit_turn= routing (busy/paused/idle)         | assist (extract §5)    | *Shared session API*      | web refactors onto it first (P0.5) |
+| Thread catalog (read-only list+metadata)         | assist =catalog.py=    | *Shared session API*      | web + voice share it |
+| Receptionist agent (vanilla LangChain)           | assist =receptionist.py= | *Shared session API*    | any client can front a router |
+| Turn-completion observer seam                    | assist =threads.py=    | *Assist harness*          | all clients benefit |
+| Async-subagent capability (continue_later + …)   | assist harness         | *Assist harness*          | direction: all subagents async (§7) |
+| Turn/queue/checkpoint/recovery core              | assist harness (exists)| *Assist harness*          | unchanged |
+| Web client (routes → the shared API)             | assist =manage/web/=   | *Web client* (thin)       | shrinks as the API is extracted |
+
+Placement principle (Pierre TD-E): each responsibility is continually re-evaluated
+against these three homes; anything generic enough for a second client belongs in
+the shared API, not in a client. The extraction (D1) is the first application.
 
 ** Deliverable → proven-piece trace (PRD review #12)
 | Deliverable                    | Built on (no parallel implementation)                                                                                                                                             |
@@ -204,9 +235,15 @@ scripted WAVs — so the entire server stack runs end-to-end with zero hardware.
 pump's balanced-write invariant vs. the whole server stack. They share the WAV
 corpus.)
 
-*Deploy:* =Makefile deploy-call-bridge= + =deploy/call-bridge.service.in= (mirror
-=deploy-sms-forward=). ttyUSB3 udev rule shipped; ttyUSB4 needs none.
-x# FB: make sure that this is a dependency of a higher-level deploy. I don't want to have to remember a bunch of separate deploy commands to get it all there.
+*Deploy (Pierre FB — one command, not many):* the call-bridge deploy
+(=deploy/call-bridge.service.in= + the udev rule) is a *dependency of the phone's
+top-level =make phone-install= / deploy target*, and the server-side voice bits
+(route registration, STT/TTS model provisioning) fold into assist's existing
+=make deploy= chain — *never a separate command to remember*. A single
+=make deploy= (assist) + =make phone-install= (emacsos) brings up everything;
+=deploy-call-bridge= exists only as an internal sub-target the top-level one calls
+(the =deploy-searxng= "folded into the deploy chain" precedent). ttyUSB3 udev rule
+shipped; ttyUSB4 needs none.
 
 *phone-call.el:* unchanged. When the bridge answers first, the existing
 =StateChanged= → 4 handler flips the UI to the in-progress screen with Hang-up —
@@ -272,7 +309,12 @@ message read, no path into =threads.db=.
   only retry layer (=ChatOpenAI= is built =max_retries=0=); =BadRequestRetry= covers
   the 400 class. Skills/memory/loop-detection/interjection middleware are rightly
   omitted.
-  # FB: Agree that this should be a vanilla langchain agent,  not a deepagent. Don't forget this during implementation.
+  *IMPLEMENTATION MUST (Pierre, confirmed):* the receptionist is a *vanilla LangChain
+  agent* (=langchain.agents.create_agent=), *never* a deepagent
+  (=create_deep_agent=). Carry this into the code — a deepagent would drag in the
+  filesystem/execute/task surface the router must not have, and the "physically
+  lacks content tools" guarantee (§4) depends on the vanilla loop. The P0 mechanical
+  test that asserts the exact 3-tool set is the enforcement.
 - *Model (agentic #8):* built via =model_manager._build_openai_chat_model= so it
   carries =enable_thinking=False= (a thinking router would burn its whole latency
   budget on =<think>= tokens the caller never hears) and the per-phase httpx
@@ -290,7 +332,18 @@ message read, no path into =threads.db=.
   the escalation trigger is "receptionist dead-air behind a background turn"
   (observable as =router_enter=→long gap in the call log), addressed by the §5
   silence watchdog in v1.
-# FB: Doesn't need to be in v1 but we need to provide something to reduce dead air. When the agent understands the request (starts to process) there should be a spoken acknowledgement ("on it", "OK", "let me think about that" - it should be *very* varied so that it sounds natural). Again, a follow-up once we have the entire flow working end-to-end on real hardware. Also, this applies to the entire experience, not just the receptionist.
+
+*Varied "processing" acknowledgement — named follow-up (Pierre FB), whole experience,
+post-hardware.* Distinct from the v1 *functional* acks (silence watchdog §5.1, honest
+busy-path ack §5.2, backchannel-after-STT §5.6): the moment the agent *understands a
+request and starts processing*, it should speak a short, *highly varied, natural*
+acknowledgement ("on it", "ok", "let me think about that", …) so the caller never
+sits in cold silence at the top of a turn. It must be varied enough not to sound
+canned, and it applies *everywhere* — receptionist and in-thread — not just the
+router. Not v1: land it once the whole flow runs end-to-end on real hardware (P3
+naturalness tuning), because tuning it needs live turn-latency feel. Tracked in §5's
+contract and §11.
+
 ** Eval suite: =edd/eval/test_receptionist.py=
 In-memory =FakeCatalog= + captured =on_open=/=on_new=, the =test_interjection.py=
 =_Journal= harness pattern; N=3→5→10. Cases:
@@ -330,14 +383,35 @@ construction.
   =no_speech_prob > 0.6= / empty-text discard at the session.
 - *Barge-in:* VAD-open while state=SPEAKING → emit =barge_in=. Guard against
   TTS-echo false triggers: raised VAD threshold + ≥300 ms sustained speech while
-  SPEAKING (echo behavior is a P4 tuning item — a fast "stop!" may not clear the
+  SPEAKING (echo behavior is a P3 tuning item — a fast "stop!" may not clear the
   guard; named).
 - *DTMF: in-band Goertzel here* (8 tone freqs, twist/duration checks). This *inverts*
   the PRD "DTMF on the SIM7600" open question into a by-construction, testable-today
   answer; the modem-URC detector becomes the hardware-gated *upgrade* if AMR mangles
   in-band tones (named risk). Both sit behind =DtmfDetector= (the one interface the
   PRD explicitly mandates as swappable).
-# FB: there should be a mechanism (can be very very simple to start) that allows the user to start speaking while the agent is speaking and the agent should stop speaking and let the user speak until done. Then acknowledge once ready to put into a new turn. This should leverage the same interjection mechanism and not necessarily cancel in-flight work. We'll need to play with this a lot to make it feel natural.
+
+*Barge-in semantics (Pierre FB — start simple, tune for naturalness):* the mechanism
+can be *very* simple to start, and its rule is precise —
+1. The caller starts speaking while the agent is SPEAKING → *stop the TTS
+   immediately* (§5.7: cancel synth/stream, then =flush_uplink=) so he isn't talked
+   over.
+2. *Let him finish* — capture the full utterance (normal endpointing); do not
+   cut in.
+3. *Do NOT necessarily cancel the in-flight work.* Barge-in stops the *speaking*,
+   not the running *turn/subagent*. The captured utterance is delivered as a #199
+   *interjection*: the running turn sees it at its next model boundary and decides
+   (incorporate / redirect / continue) — exactly the shipped interjection behavior,
+   never a hard kill. (Only an explicit "stop" from the caller ends work — and even
+   that is the model's decision inside the interjection, not a mechanical cancel.)
+4. *Acknowledge when ready and fold into a new turn* — the interjection path already
+   does this.
+This reuses the interjection mechanism end-to-end (no parallel voice mechanism, per
+Pierre's reuse rule). It is explicitly a *feel* problem: expect to iterate the VAD
+threshold, the sustained-speech guard, and the "let him finish vs. quick correction"
+timing a lot on live hardware (P3). Named as an early real-world-testing watch item
+(§11).
+
 ** session.py — per-call =VoiceSession=, the state machine
 One call at a time (one modem). *Threading (agentic #2):* the async WS handler only
 shuttles frames to/from thread-safe queues (event-loop liveness: no lock, no I/O, no
@@ -351,9 +425,10 @@ can't journal its own mid-turn steering.
 #+begin_example
 RING ──allowlisted──► GREETING_PIN ──pin ok──► ROUTER ──open_thread──► IN_THREAD
   │                     │   ▲                     ▲       ▲               │  │
-  │ unknown (D2)        │ wrong pin (<N)──────────┘       │ DTMF * (D3)   │  │
+  │ unknown (D2)        │ wrong pin (<N)──────────┘   DTMF * OR back-tool (D3) │
   ▼                     ▼ N strikes / global lockout      └───────────────┘  │
-DO-NOT-ANSWER (D2)     DECLINE (no detectors instantiated; clip? per D2)      │
+DO-NOT-ANSWER (D2:      PIN_FAIL (final-strike clip states recovery, hangup;
+ ring out, no ATA)       global lockout — §8; no detectors ran)               │
 Any state ──call_end / hangup──► ENDED (detaches immediately; in-flight turn
                                  continues as an ordinary queued turn; its
                                  observer routes to badge since the call is dead)
@@ -363,8 +438,20 @@ Per-turn audio sub-machine (in ROUTER and IN_THREAD):
 =LISTENING → CAPTURING → THINKING → SPEAKING → LISTENING=, with
 =SPEAKING --barge_in--> CAPTURING=.
 
+*Go-back to receptionist — BOTH mechanisms (§0/D3, resolved):*
+- *DTMF =*= in IN_THREAD → ROUTER* is the *reliability floor*: the Goertzel detector
+  (already running for the PIN), deterministic, cannot false-fire, no model, no eval.
+  It closes the bound session and re-enters ROUTER.
+- *=back_to_receptionist()= tool* on the in-thread agent gives the *conversational*
+  "take me back" — added via =extra_tools: tuple= merged into the thread agent's
+  spec (the clean shape; *not* a =voice=True= boolean, which can't carry the session
+  closure). When the model calls it, the session closes the tid and re-enters ROUTER,
+  same as DTMF. It gets a *false-fire eval case* (=test_receptionist.py=-style, on the
+  in-thread agent) — the accepted cost of the natural path; DTMF is the guaranteed
+  fallback whenever the model misfires or the caller doesn't want to talk.
+
 *Detector scoping by state (threat-model #3 — "no STT pre-auth" made precise):*
-- DO-NOT-ANSWER / DECLINE: *zero detectors instantiated* — no VAD, no capture, no
+- DO-NOT-ANSWER / PIN_FAIL: *zero STT detectors instantiated* — no VAD, no capture, no
   STT ever touches stranger audio.
 - GREETING_PIN: *only the DTMF detector runs*; the VAD→utterance→STT path is disabled
   until ROUTER. (In-band Goertzel *does* process pre-auth PCM — it's fixed-function
@@ -459,9 +546,65 @@ Folded into the session host per review — *not* a separate service/venv/unit:
 *Position (verified faithful to #198 as-built):* "async subagent" here *is* "a
 journaled continuation turn that performs the subagent's work" — the fast turn's
 spec swaps the synchronous research-agent for the background door → =continue_later=
-→ journal; the ready exit dispatches an ordinary queued turn. deepagents'
-=AsyncSubAgentMiddleware= stays rejected on the documented grounds (remote graph
-server, bypasses the =--parallel 1= slot, pull delivery) — adopted, not re-litigated.
+→ journal; the ready exit dispatches an ordinary queued turn.
+
+Pierre (FB) asked to review deepagents' *native* async-subagents thoroughly, to
+prioritize it earlier ("the difference between a good and horrible UX"), and to
+upgrade if needed. Done — §7.0. Bottom line: it is *already installed* (deepagents
+0.6.1 ships =AsyncSubAgent= + =AsyncSubAgentMiddleware=; *no upgrade needed*), its
+*steering interface* is the right target shape for voice, but its *concurrent
+execution model* collides with the single =--parallel 1= slot and its *pull*
+delivery collides with assist's *push* model — so the plan is to adopt the
+*interface/semantics* and back it with assist's serialized journaled-continuation
+execution + push delivery, and to run an *early spike* (P1) that decides empirically
+whether the middleware can be the vehicle rather than a bespoke re-implementation.
+The earlier flat "rejected" is *replaced* by this nuanced position.
+
+** 7.0 deepagents native async-subagents — reviewed (Pierre FB)
+*What it is* (=deepagents.middleware.async_subagents=): a supervisor launches a
+background subagent and gets a task id immediately, keeps talking, and later
+*steers* it — five tools =start_async_task / check_async_task / update_async_task /
+cancel_async_task / list_async_tasks=. It runs via any Agent-Protocol transport
+*including in-process (ASGI)* — a remote graph server is *not* required (correcting
+this doc's earlier "remote graph server" objection). Available as a preview since
+deepagents 0.5.0; assist is on *0.6.1* and both symbols import today — so "upgrade
+if we must" resolves to *we already have it*.
+
+*Why the interface is a great fit for voice.* The lifecycle launch → keep-talking →
+steer (=update=) → cancel → deliver maps 1:1 onto the call UX: kick off research,
+keep the conversation natural, let the caller redirect it ("actually only road
+bikes"), cancel on "never mind," speak the result when it lands. That is exactly
+what US-5 + barge-in want, and the tool surface is cleaner for the *supervisor's*
+view than a hand-rolled one.
+
+*Why the execution model can't be adopted wholesale on this hardware (honest):*
+- *Single slot.* The feature's value is the subagent making progress *concurrently*
+  with the main agent. assist has *one* =--parallel 1= llama slot serialized by
+  =THREAD_QUEUE=; two agents cannot use the model at once — concurrent dispatch
+  serializes or O(T²)-thrashes prefill. So "async" here can only mean *deferred and
+  serialized*, which is precisely what =continue_later= + the journal already are.
+  The concurrency the middleware assumes is physically unavailable until a second
+  slot exists (=--parallel 2=, the last-resort escalation below).
+- *Pull vs push.* The middleware delivers by the supervisor *polling* =check_async_task=;
+  voice needs *push* — the turn-completion observer (§7.1) speaking the result the
+  instant it's ready. Polling on a live call is dead air.
+- *State model.* Task state lives in a LangGraph state channel; assist's durability
+  and crash-recovery are the =MESSAGE_BACKLOG= journal + checkpoint (#197). Adopting
+  the state channel would fork the recovery story.
+
+*Synthesis / recommendation.* Adopt the *semantics and (where they fit) the tool
+surface* of async subagents as the harness-side interface the agent sees, but back
+execution with assist's serialized journaled-continuation model and *push* delivery.
+Whether the *actual =AsyncSubAgentMiddleware=* can be that vehicle — its five tools
+wired to enqueue continuation turns on =THREAD_QUEUE= (serialized) and deliver via
+the observer (push), reconciling its separate-thread/state-channel/pull assumptions
+with our single-slot/journal/push reality — is an *empirical* question, so it gets an
+*early spike (P1)*, not a paper verdict. If it reconciles, R2/R3 (the trajectory
+below) adopt it as the vehicle; if not, the bespoke =continue_later= path already
+speced is the fallback, presenting the *same* launch/steer/deliver interface. Either
+way the agent-facing shape is the async-subagent lifecycle, and the decision is made
+on evidence, early, because it sets the async architecture for *all* of assist —
+Pierre's point that it's UX-load-bearing is correct.
 ** v1 slice (this effort) — the harness pieces, all clients benefit
 1. *Turn-completion observer seam* (the one genuinely new hook):
    =register_turn_observer(cb)= in =manage/web/threads.py=, a *list* of observers
@@ -524,7 +667,14 @@ turn is one superstep (minutes). Worst case: a caller's mid-call ask waits for t
 in-flight subagent to return. Escalation ladder (only on live/eval evidence): (a) a
 breaker-mold subagent early-exit when an interactive waiter is pending; (b) a second
 llama slot for interactive turns (=--parallel 2=; halves KV cache — last resort).
-# FB: please review this thoroughly: https://docs.langchain.com/oss/python/deepagents/async-subagents . I haven't read it thoroughly myself, but it seems like this is something supported out of the box. I would like to get to this earlier than later because it will make the difference between a good and horrible user experience. If we need to upgrade to get this then we should.
+
+(Pierre's FB to review deepagents' native async-subagents thoroughly, get to it
+earlier, and upgrade if needed is *addressed in §7.0*: reviewed, already installed
+on 0.6.1 — no upgrade — interface adopted, execution backed by the serialized
+journal/push model, and an *early P1 spike* decides whether =AsyncSubAgentMiddleware=
+itself is the vehicle. That is the "get to it earlier": a cheap, load-bearing
+decision pulled forward, while the full default-flip stays in the follow-on doc.)
+
 * 8. Security design
 
 *Honest trust-root (threat-model #7, #9):* the bridge supplies *both* the caller-id
@@ -543,7 +693,7 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
 - *Do-not-answer unknowns (threat-model #2 → §0/D2):* pending Pierre's D2 call;
   recommended. Removes the answer cost + the single-modem self-DoS window.
 - *Detector scoping (threat-model #3, §5):* "no *model/STT* pre-auth" enforced by
-  state — DECLINE/DO-NOT-ANSWER instantiate zero detectors; GREETING_PIN runs only
+  state — DO-NOT-ANSWER / PIN_FAIL instantiate zero STT detectors; GREETING_PIN runs only
   DTMF.
 - *Encrypted transport (threat-model #4):* WSS or WG-only-encrypted mandatory; =dtmf=
   frames are PIN-bearing in transit; plain =ws://= forbidden. *Deploy gate:* the
@@ -596,28 +746,39 @@ no-digits/no-PCM rule. Reconstruction test: the fake-bridge scripted call's log
 replays into a coherent timeline (pytest asserts the boundary sequence). Not a
 metrics platform.
 
-* 10. Phasing (each phase independently testable — PRD review #10)
+* 10. Phasing (each phase independently *testable*, not necessarily usable — PRD review #10)
 
-Compresses to four phases once speech folds in-process (simplicity #9):
+Five phases now that D1 adds the shared-API extraction as its own de-risking
+milestone. Each has explicit validation so the next builds on verified behavior.
 
-| #  | Phase                                                                                                          | Repo             | Done =                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|----+----------------------------------------------------------------------------------------------------------------+------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| P0 | Thread-catalog + receptionist + eval suite                                                                     | assist           | =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval ≥ stable at N=10 incl. spoken-output filter (case 8); mechanical no-content-tool test; =state.py= delegating, zero render regressions                                                                                                                                                                                                                         |
-| P1 | Flow + wire + session + speech(in-proc) + PIN/decline + call log + conversational contract, vs the fake bridge | assist           | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame; Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DECLINE/GREETING_PIN); silence watchdog fires; observer double-speak filter; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise on the fixture corpus; =/tts= correct-rate PCM |
-| P2 | Async delivery + go-back (DTMF =*=, per D3) + (interactive queue *iff* observed)                               | assist           | observer-seam unit tests; fake-bridge scenario: continuation completes mid-call → =async_delivered{mode:spoken}=; after hangup → thread-only; ROUTER-state delivery mentions it; go-back returns to ROUTER cleanly; hang-up detaches, call-back binds a fresh session                                                                                                                                                                                                  |
-| P3 | Live bridge (hardware-gated)                                                                                   | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration recorded; DTMF in-band on real carrier (else URC probe + swap); barge-in echo behavior; e2e first-audio vs the 1.5 s budget; power-rail soak under a sustained call + STT/TTS                                                                                                                                                 |
+| #    | Phase                                                                                                    | Repo             | Done = |
+|------+----------------------------------------------------------------------------------------------------------+------------------+--------|
+| P0   | *Shared session API extraction + web refactor + PROD BAKE* (D1 milestone)                                | assist           | Extract =assist.session= (=submit_turn= routing §5 + the turn-completion observer seam §7.1 + the boundary); the *web client refactors onto it*; observer-seam unit tests; *deploy to prod and bake ≥1 day with web behavior byte-identical* (zero render/route regressions, the exactly-once routing unchanged) *before any voice code merges over it* — Pierre's explicit de-risk gate |
+| P0.5 | Thread-catalog + receptionist (vanilla LangChain) + eval + *async-subagent spike (§7.0)*                  | assist           | =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval stable at N=10 incl. spoken-output filter (case 8) + the go-back-tool false-fire case; mechanical exact-3-tool (no-content) test; =state.py= delegating; *async spike verdict recorded*: can =AsyncSubAgentMiddleware= (in-proc/ASGI, installed on 0.6.1) be wired to serialized =THREAD_QUEUE= + push-observer delivery, or is the bespoke =continue_later= path the vehicle |
+| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer double-speak filter; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; =/tts= correct-rate PCM |
+| P2   | Async delivery + go-back (*DTMF =*= AND =back_to_receptionist()= tool*, per D3) + (interactive queue *iff* observed) | assist | observer unit tests; fake-bridge: continuation completes mid-call → =async_delivered{mode:spoken}=; after hangup → thread-only; ROUTER-state delivery mentions it; *both* go-back paths return to ROUTER cleanly (DTMF deterministic; tool with its false-fire eval); hang-up detaches, call-back binds fresh |
+| P3   | Live bridge (hardware-gated) + naturalness tuning                                                        | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration; DTMF in-band on real carrier (else URC probe + swap); *barge-in feel + the varied "processing" ack (Pierre FB) tuned live*; e2e first-audio vs 1.5 s; power-rail soak under a sustained call + STT/TTS |
 
-P0–P2 are the hardware-independent ~80 %; only P3 needs the assembled phone. The
-async-subagents follow-on design doc (§7) is written before its R2 code, independent
-of all four phases.
-# FB: This is really good. I was going to suggest doing the async subagent thing earlier but maybe it's best to work through all of  these unknowns first. I'll leave it up to you.
+P0–P2 are the hardware-independent ~80 %; only P3 needs the assembled phone.
+*P0 is the load-bearing de-risk:* proving the shared-API extraction against the
+known-good web client, in production, before a second consumer exists (D1).
+The async-subagents follow-on design doc (§7) is written before its R2 code.
+
+*Async-subagent sequencing (Pierre FB — "I'll leave it up to you"):* I pulled the
+*decision spike* early (P0.5, cheap: the feature is installed) because it's
+UX-load-bearing and sets assist-wide direction — but kept the *full default-flip*
+(R3) in the follow-on doc, so P1's hard unknowns (flow, endpointing, barge-in) are
+worked first as you noted. Early *decision*, deferred *big-flip*.
 * 11. Risks & open questions
 
 1. *Dead air behind a long superstep* (single slot): the silence watchdog covers the
    caller experience; interactive waiters shorten the between-superstep case when
    observed; the in-superstep case is the named bound with the §7 escalation ladder.
-   Accept for v1.
-   # FB: See comment above. Agree it's acceptable for v1. No need to tweak the ux for this. But note that it's something that will be a problem with real-world testing quickly.
+   Accept for v1 — *Pierre confirmed:* acceptable, no v1 UX tweak; but flagged as
+   something *real-world testing will surface quickly*, so it's an *early-testing
+   watch item*: if live calls hit it often, that is the evidence that triggers the
+   §7 async-subagent work (the R3 flip dissolves this bound) and/or the interactive
+   waiter — i.e. this risk is the empirical driver for prioritizing §7.0.
 2. *In-band DTMF through AMR:* may be mangled. Ship Goertzel first (testable now); P3
    probes modem-URC as the swap. If both fail: spoken-digit PIN is *rejected*
    (Decision 1); fallback = allowlist-only + longer cooldowns — flag to Pierre.
@@ -635,19 +796,23 @@ of all four phases.
 
 * 12. Explicitly rejected alternatives
 
-- *External voice process (emacsos) over new HTTP routes* — documented as the D1
-  alternative, not silently dropped; recommendation is in-process for latency +
-  private hooks, at a named cost.
+- *In-process-in-=manage.web= hosting AND external-process-over-new-HTTP-routes* —
+  *both* superseded by §0/D1 (Pierre): the shared =assist.session= API dissolves the
+  fork. A co-located client calls the API directly (no new HTTP surface); the topology
+  is a later reversible detail.
 - *Separate speech service / venv / unit* — folded in-process; the dep-isolation
   boundary cut the ML family in half for a theoretical crash-isolation benefit.
-- *=back_to_receptionist()= interpretive tool* — replaced by the deterministic DTMF
-  =*= escape (D3); the tool needs a false-fire eval and a session closure a boolean
-  flag can't carry.
-- *=voice=True= flag on =ThreadManager.get=* — if a spoken go-back is ever wanted,
-  =extra_tools: tuple= (merged into the spec) is the clean shape, not a per-client
-  boolean.
+- *DTMF-only OR tool-only go-back* — §0/D3 (Pierre) takes *both*: DTMF =*= is the
+  deterministic reliability floor, =back_to_receptionist()= (via =extra_tools=) is the
+  conversational path with its false-fire eval. Neither alone.
+- *=voice=True= flag on =ThreadManager.get=* — the go-back tool is merged via
+  =extra_tools: tuple= (the clean shape), not a per-client boolean.
 - *=SpeechDetector= abstraction* — one implementation; swap by editing the call site.
-- *deepagents =AsyncSubAgentMiddleware=* — examined and rejected earlier; adopted.
+- *deepagents =AsyncSubAgentMiddleware= (flat reject)* — *reversed per Pierre (§7.0)*:
+  re-reviewed, already installed on 0.6.1 (no upgrade); its *interface* is adopted as
+  the async-subagent shape, its *concurrent-execution + pull-delivery* model is what
+  the single slot / push model can't take wholesale; the *P0.5 spike* decides whether
+  the middleware itself is the vehicle vs. the bespoke =continue_later= path.
 - *webrtcvad as primary* — weaker on US-7; not abstracted behind an interface.
 - *Phone-side VAD/endpointing (Decision 3 as written)* — splits the hard part across
   two hosts; VAD is interpretation, belongs server-side.
@@ -659,7 +824,7 @@ of all four phases.
 
 *Simplicity:* fold speech in-process (§6, §0/D1); DTMF go-back (D3); defer interactive
 waiters (§7.2); cut =SpeechDetector= (§5); 3–4 voice modules not 5 (§5); persistent
-cooldown → global in-memory lockout (§8); four phases (§10). Hosting-is-forced
+cooldown → global in-memory lockout (§8); five phases (§10). Hosting-is-forced
 argument corrected (§1). Central dissent (external hosting) → D1 fork, both documented.
 
 *Agentic/framework fit:* shared =submit_turn= dispatch helper (§5); dedicated
@@ -692,6 +857,43 @@ quantified WS caps (§8); second-call-at-bridge (§2/§8); honest =(secret ∧ P
 trust-root (§8); caller-id exact-match/json-encode/length-cap (§8); named residuals —
 ambient injection, DTMF replay, allowlist oracle, bridge mirror log, egress-un-approvable,
 web-UI-is-the-weaker-channel (§8).
+
+* 14. Round-2 review (Pierre) → where each note landed
+Mapping every PR comment + inline =# FB:= to its resolution (Pierre's "link these to
+the appropriate sections"). All inline markers are folded and removed.
+
+*PR "Review notes" — Technical design:*
+- Voice = *separate thin client*, generic functionality into a *shared layer above
+  the clients* → §0/D1 (resolved), §1 ("The layering"), §1 ownership table.
+- Unknown callers *fail fast, release resources* → §0/D2 (resolved: do-not-answer), §5, §8.
+- *Both* DTMF escape *and* a return-to-receptionist tool → §0/D3 (resolved), §4, §5.
+- Document *long-term ownership* per component → §1 ownership table.
+- Continually evaluate *EmacsOS / Assist / shared-layer* placement → §1 placement principle.
+
+*Inline =# FB:= (in doc order):*
+- §1 "move one layer back / a new API client used by web + voice / not necessarily
+  multiple processes / a milestone to test it + bake ≥1 day in prod" → §0/D1, §1, and
+  §10 *P0* (extraction + web refactor + prod-bake gate).
+- §2 "deploy is a dependency of a higher-level deploy" → §2 deploy (one =make deploy=
+  / =make phone-install=, no separate commands).
+- §4 "vanilla LangChain agent, not a deepagent" → §4 *IMPLEMENTATION MUST* + the P0.5
+  exact-3-tool test.
+- §4 "varied spoken processing ack to reduce dead air, whole experience, follow-up" →
+  §4 (named follow-up) + §10 P3 naturalness tuning + §11.
+- §5 "barge-in: stop speaking, let user finish, acknowledge, new turn; reuse
+  interjection; don't necessarily cancel in-flight work; tune for feel" → §5
+  *Barge-in semantics* + §10 P1/P3.
+- §7 "review deepagents async-subagents thoroughly; get to it earlier; upgrade if
+  needed" → §7.0 (reviewed; installed on 0.6.1, no upgrade; interface adopted;
+  execution stays serialized/push) + §10 *P0.5 early spike* + §12.
+- §10 "async earlier vs unknowns first — your call" → §10 note: *decision spike*
+  pulled to P0.5, *full flip* stays in the follow-on; hard unknowns still P1.
+- §11 "dead-air acceptable v1 but real-world testing surfaces it fast" → §11 risk #1
+  (early-testing watch item; the empirical driver for §7.0).
+
+*Not changed (already resolved in round 1 / correct as-is):* the 12 PRD recs
+(folded into the PRD, §13); the six-lens consensus (§13). D1/D2/D3 flipped from open
+to resolved per the above.
 
 * Outcome
 (Append the branches/PRs + shipped-vs-deferred once implementation lands.)
