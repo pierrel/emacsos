@@ -6,6 +6,51 @@ landed ones).  This file collects forward-looking work that
 doesn't fit any specific experiment yet — usability iteration,
 cross-cutting concerns, follow-ups discovered live on the phone.
 
+* IN FLIGHT: Voice-call assistant (phone the agent, talk to your threads)
+
+*The big current initiative* — dial the SIM and talk to assist by voice: a
+PIN-gated *receptionist* agent helps you reach a thread (or start one with a
+domain), then a natural voice conversation inside it. It sidesteps the iOS-Safari
+background-audio blocker entirely (a real call; the OS owns it) and builds on the
+*already-validated* SIM7600G-H telephony substrate.
+
+*Design (approved 2026-07-22, two review rounds — pick up here if paused):*
+- PRD: [[file:docs/2026-07-21-voice-call-assistant.org][docs/2026-07-21-voice-call-assistant.org]]
+- Tech design (six-lens-reviewed + Pierre round-2): [[file:docs/2026-07-21-voice-call-tech-design.org][docs/2026-07-21-voice-call-tech-design.org]]
+- Review + decisions on *GitHub PR #33* (=pierrel/emacsos#33=) — both docs live on
+  branch =voice-call-assistant-prd= until #33 merges.
+- Resolved decisions (tech-design §0/§14): *D1* — extract a shared client-agnostic
+  session API (=assist.session=) that web + voice both consume; voice is a *separate
+  thin client*; single process is fine (topology deferred). *D2* — do NOT answer
+  unknown callers (fail fast, ring out). *D3* — go-back via *both* DTMF =*= and a
+  =back_to_receptionist()= tool. Receptionist = *vanilla LangChain* agent (not a
+  deepagent). Async subagents reuse =continue_later= + interjection (#198/#199);
+  deepagents' native async-subagents reviewed — already on 0.6.1, interface adopted,
+  execution stays serialized+push (early P0.5 spike decides the vehicle).
+
+*Phasing (P0–P2 hardware-independent ~80%; only P3 needs the assembled phone).
+Each phase independently TESTABLE, not necessarily usable:*
+- *P0 — shared-session-API extraction + web refactor + PROD BAKE* [assist]. Extract
+  =assist.session= (submit-turn routing + turn-completion observer + the boundary);
+  refactor the *existing web client* onto it; deploy and *bake ≥1 day in prod,
+  byte-identical*, before any voice code merges over it. *This is the current step*
+  and the highest-blast-radius one (touches the load-bearing web path) — deliberate
+  de-risk by proving the extraction against the known-good web client first.
+- *P0.5 — thread-catalog + receptionist (vanilla LangChain) + eval + async spike* [assist].
+- *P1 — flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log +
+  conversational contract, vs the fake bridge* [assist].
+- *P2 — async delivery + go-back (DTMF =*= AND tool) + interactive queue iff observed* [assist].
+- *P3 — live bridge (hardware-gated) + naturalness tuning* [emacsos + assist].
+
+*Depends on / subsumes existing roadmap items:* the [[*TODO Real-time full-duplex call-audio bridge + uplink][full-duplex call-audio bridge]]
+(P3, the one hardware-gated piece), [[*TODO Speech to text][Speech to text]] (STT endpoint), and the shipped
+[[*TODO Phone calling][Phone calling]] / [[*TODO Phone answering][Phone answering]] primitives. Companion validated-on-device
+facts: [[file:docs/2026-06-18-call-audio.org][2026-06-18-call-audio.org]], [[file:docs/2026-06-18-inbound-answering.org][2026-06-18-inbound-answering.org]].
+
+*Status 2026-07-22:* design approved; starting *P0 in the assist repo* (a fresh
+branch off assist =main=). Follow-on: a dedicated =assist/docs/<date>-async-subagents.org=
+for the "all subagents eventually async" trajectory (tech-design §7).
+
 * Ergonomics iteration
 
 Live testing of PR #6 (assist-import) surfaced several rough edges
