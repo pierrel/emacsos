@@ -81,6 +81,9 @@ does and does not follow from:
   external submitter reaches both through the shipped =POST /thread/{tid}/message=,
   which journals to =MESSAGE_BACKLOG= when the thread is busy. Neither forces
   in-process hosting.
+# FB: We need to move this one layer back so that it can be re-used between a new voice client and the existing web client. We should include in the implementation plan/sequence a specific milestone for testing this. Recommend that the production instance stays in this new state for at least a day of real-world testing before moving on/merging/deploying over it.
+# FB: reading a bit further, I think a reasonable cut point is to have a new "API" client that is then used by the web and the (new) voice clients.
+# FB: Note that this doesn't not mean we need two (or more) processes. Not saying that we can't have more, but I'm not suggesting multiple processes explicitly.
 - *Follows from surface + latency.* The web app exposes no machine-readable
   turn-completion / reply-text endpoint (=post_message= is fire-and-forget → 303 →
   HTML; =_process_message= returns =None=; reply text lives only in the checkpoint)
@@ -117,22 +120,22 @@ silero already lands here, so exiling only whisper/piper cut the ML-dependency
 family down the middle for a theoretical crash-isolation benefit).
 
 ** Deliverable → proven-piece trace (PRD review #12)
-| Deliverable | Built on (no parallel implementation) |
-|-------------+---------------------------------------|
-| Ring detect + caller-id | D-Bus =Voice.CallAdded= + =Direction=/=Number= props (2026-06-18-inbound-answering.org); same subscription in Python |
-| Auto-answer / hang-up | =ATA= / =AT+CHUP= on freed ttyUSB3 (udev rule =deploy/99-emacos-free-ttyusb3.rules= shipped); =emacos-answer= (phone-call.el:199) stays the human path |
-| PCM bridge | 2026-06-18-call-audio.org: 16 kHz/16-bit/mono on ttyUSB4, =AT+CPCMREG=1=, balanced read/write at ~16.7 kHz, one process |
-| STT | faster-whisper base.en validated on a real call clip; =vad_filter=True=, =condition_on_previous_text=False= |
-| Turn execution / queueing | =_process_message= + =THREAD_QUEUE= + =_ResumeScheduler=; voice is one more submitter via the shared =submit_turn= helper (§7) |
-| Async work | =continue_later= (continuations.py:37) + the door-subagent tool-list lever + ready-exit dispatch (threads.py:1164) — #198 as shipped |
-| Barge-in / mid-turn input | =MESSAGE_BACKLOG= journal + =InterjectionMiddleware= (verified: voice owner turns are =sender=None,origin=None=, passing both gates at interjection.py:120-121) — #199 as shipped |
-| Async result delivery | new turn-completion observer seam (=_geo_on_complete=, threads.py:2222, as precedent) |
-| Thread catalog | =ThreadManager.list()= + =description.txt=/=status.json=/urgent-marker reads (state.py) — lifted, not duplicated |
-| Router construction | =langchain.agents.create_agent= (LangChain 1.x prebuilt loop) — *net-new wiring*, deliberately NOT assist's =create_agent= (§4) |
-| VAD / endpointing / DTMF / TTS | *net-new* per PRD (the feature's real new engineering) — no prior piece to trace |
-| Router eval | =edd/eval/= harness, =test_interjection.py= in-memory-callback pattern |
-| Call-event log | =append_event= O_APPEND/torn-line discipline (thread_log.py:32) |
-| Phone daemon deploy | =deploy-sms-forward= Makefile pattern |
+| Deliverable                    | Built on (no parallel implementation)                                                                                                                                             |
+|--------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Ring detect + caller-id        | D-Bus =Voice.CallAdded= + =Direction=/=Number= props (2026-06-18-inbound-answering.org); same subscription in Python                                                              |
+| Auto-answer / hang-up          | =ATA= / =AT+CHUP= on freed ttyUSB3 (udev rule =deploy/99-emacos-free-ttyusb3.rules= shipped); =emacos-answer= (phone-call.el:199) stays the human path                            |
+| PCM bridge                     | 2026-06-18-call-audio.org: 16 kHz/16-bit/mono on ttyUSB4, =AT+CPCMREG=1=, balanced read/write at ~16.7 kHz, one process                                                           |
+| STT                            | faster-whisper base.en validated on a real call clip; =vad_filter=True=, =condition_on_previous_text=False=                                                                       |
+| Turn execution / queueing      | =_process_message= + =THREAD_QUEUE= + =_ResumeScheduler=; voice is one more submitter via the shared =submit_turn= helper (§7)                                                    |
+| Async work                     | =continue_later= (continuations.py:37) + the door-subagent tool-list lever + ready-exit dispatch (threads.py:1164) — #198 as shipped                                              |
+| Barge-in / mid-turn input      | =MESSAGE_BACKLOG= journal + =InterjectionMiddleware= (verified: voice owner turns are =sender=None,origin=None=, passing both gates at interjection.py:120-121) — #199 as shipped |
+| Async result delivery          | new turn-completion observer seam (=_geo_on_complete=, threads.py:2222, as precedent)                                                                                             |
+| Thread catalog                 | =ThreadManager.list()= + =description.txt=/=status.json=/urgent-marker reads (state.py) — lifted, not duplicated                                                                  |
+| Router construction            | =langchain.agents.create_agent= (LangChain 1.x prebuilt loop) — *net-new wiring*, deliberately NOT assist's =create_agent= (§4)                                                   |
+| VAD / endpointing / DTMF / TTS | *net-new* per PRD (the feature's real new engineering) — no prior piece to trace                                                                                                  |
+| Router eval                    | =edd/eval/= harness, =test_interjection.py= in-memory-callback pattern                                                                                                            |
+| Call-event log                 | =append_event= O_APPEND/torn-line discipline (thread_log.py:32)                                                                                                                   |
+| Phone daemon deploy            | =deploy-sms-forward= Makefile pattern                                                                                                                                             |
 
 * 2. The PCM bridge (phone-side, hardware-gated core)
 
@@ -203,9 +206,10 @@ corpus.)
 
 *Deploy:* =Makefile deploy-call-bridge= + =deploy/call-bridge.service.in= (mirror
 =deploy-sms-forward=). ttyUSB3 udev rule shipped; ttyUSB4 needs none.
+x# FB: make sure that this is a dependency of a higher-level deploy. I don't want to have to remember a bunch of separate deploy commands to get it all there.
 
 *phone-call.el:* unchanged. When the bridge answers first, the existing
-=StateChanged=→4 handler flips the UI to the in-progress screen with Hang-up —
+=StateChanged= → 4 handler flips the UI to the in-progress screen with Hang-up —
 Pierre's escape hatch over an assistant call for free. Residual: a racing human
 Accept =ATA='s an active call → modem =ERROR= → harmless.
 
@@ -268,6 +272,7 @@ message read, no path into =threads.db=.
   only retry layer (=ChatOpenAI= is built =max_retries=0=); =BadRequestRetry= covers
   the 400 class. Skills/memory/loop-detection/interjection middleware are rightly
   omitted.
+  # FB: Agree that this should be a vanilla langchain agent,  not a deepagent. Don't forget this during implementation.
 - *Model (agentic #8):* built via =model_manager._build_openai_chat_model= so it
   carries =enable_thinking=False= (a thinking router would burn its whole latency
   budget on =<think>= tokens the caller never hears) and the per-phase httpx
@@ -285,7 +290,7 @@ message read, no path into =threads.db=.
   the escalation trigger is "receptionist dead-air behind a background turn"
   (observable as =router_enter=→long gap in the call log), addressed by the §5
   silence watchdog in v1.
-
+# FB: Doesn't need to be in v1 but we need to provide something to reduce dead air. When the agent understands the request (starts to process) there should be a spoken acknowledgement ("on it", "OK", "let me think about that" - it should be *very* varied so that it sounds natural). Again, a follow-up once we have the entire flow working end-to-end on real hardware. Also, this applies to the entire experience, not just the receptionist.
 ** Eval suite: =edd/eval/test_receptionist.py=
 In-memory =FakeCatalog= + captured =on_open=/=on_new=, the =test_interjection.py=
 =_Journal= harness pattern; N=3→5→10. Cases:
@@ -332,7 +337,7 @@ construction.
   answer; the modem-URC detector becomes the hardware-gated *upgrade* if AMR mangles
   in-band tones (named risk). Both sit behind =DtmfDetector= (the one interface the
   PRD explicitly mandates as swappable).
-
+# FB: there should be a mechanism (can be very very simple to start) that allows the user to start speaking while the agent is speaking and the agent should stop speaking and let the user speak until done. Then acknowledge once ready to put into a new turn. This should leverage the same interjection mechanism and not necessarily cancel in-flight work. We'll need to play with this a lot to make it feel natural.
 ** session.py — per-call =VoiceSession=, the state machine
 One call at a time (one modem). *Threading (agentic #2):* the async WS handler only
 shuttles frames to/from thread-safe queues (event-loop liveness: no lock, no I/O, no
@@ -457,7 +462,6 @@ spec swaps the synchronous research-agent for the background door → =continue_
 → journal; the ready exit dispatches an ordinary queued turn. deepagents'
 =AsyncSubAgentMiddleware= stays rejected on the documented grounds (remote graph
 server, bypasses the =--parallel 1= slot, pull delivery) — adopted, not re-litigated.
-
 ** v1 slice (this effort) — the harness pieces, all clients benefit
 1. *Turn-completion observer seam* (the one genuinely new hook):
    =register_turn_observer(cb)= in =manage/web/threads.py=, a *list* of observers
@@ -520,7 +524,7 @@ turn is one superstep (minutes). Worst case: a caller's mid-call ask waits for t
 in-flight subagent to return. Escalation ladder (only on live/eval evidence): (a) a
 breaker-mold subagent early-exit when an interactive waiter is pending; (b) a second
 llama slot for interactive turns (=--parallel 2=; halves KV cache — last resort).
-
+# FB: please review this thoroughly: https://docs.langchain.com/oss/python/deepagents/async-subagents . I haven't read it thoroughly myself, but it seems like this is something supported out of the box. I would like to get to this earlier than later because it will make the difference between a good and horrible user experience. If we need to upgrade to get this then we should.
 * 8. Security design
 
 *Honest trust-root (threat-model #7, #9):* the bridge supplies *both* the caller-id
@@ -596,23 +600,24 @@ metrics platform.
 
 Compresses to four phases once speech folds in-process (simplicity #9):
 
-| # | Phase | Repo | Done = |
-|---+-------+------+--------|
-| P0 | Thread-catalog + receptionist + eval suite | assist | =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval ≥ stable at N=10 incl. spoken-output filter (case 8); mechanical no-content-tool test; =state.py= delegating, zero render regressions |
-| P1 | Flow + wire + session + speech(in-proc) + PIN/decline + call log + conversational contract, vs the fake bridge | assist | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame; Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DECLINE/GREETING_PIN); silence watchdog fires; observer double-speak filter; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise on the fixture corpus; =/tts= correct-rate PCM |
-| P2 | Async delivery + go-back (DTMF =*=, per D3) + (interactive queue *iff* observed) | assist | observer-seam unit tests; fake-bridge scenario: continuation completes mid-call → =async_delivered{mode:spoken}=; after hangup → thread-only; ROUTER-state delivery mentions it; go-back returns to ROUTER cleanly; hang-up detaches, call-back binds a fresh session |
-| P3 | Live bridge (hardware-gated) | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration recorded; DTMF in-band on real carrier (else URC probe + swap); barge-in echo behavior; e2e first-audio vs the 1.5 s budget; power-rail soak under a sustained call + STT/TTS |
+| #  | Phase                                                                                                          | Repo             | Done =                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|----+----------------------------------------------------------------------------------------------------------------+------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| P0 | Thread-catalog + receptionist + eval suite                                                                     | assist           | =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval ≥ stable at N=10 incl. spoken-output filter (case 8); mechanical no-content-tool test; =state.py= delegating, zero render regressions                                                                                                                                                                                                                         |
+| P1 | Flow + wire + session + speech(in-proc) + PIN/decline + call log + conversational contract, vs the fake bridge | assist           | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame; Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DECLINE/GREETING_PIN); silence watchdog fires; observer double-speak filter; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise on the fixture corpus; =/tts= correct-rate PCM |
+| P2 | Async delivery + go-back (DTMF =*=, per D3) + (interactive queue *iff* observed)                               | assist           | observer-seam unit tests; fake-bridge scenario: continuation completes mid-call → =async_delivered{mode:spoken}=; after hangup → thread-only; ROUTER-state delivery mentions it; go-back returns to ROUTER cleanly; hang-up detaches, call-back binds a fresh session                                                                                                                                                                                                  |
+| P3 | Live bridge (hardware-gated)                                                                                   | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration recorded; DTMF in-band on real carrier (else URC probe + swap); barge-in echo behavior; e2e first-audio vs the 1.5 s budget; power-rail soak under a sustained call + STT/TTS                                                                                                                                                 |
 
 P0–P2 are the hardware-independent ~80 %; only P3 needs the assembled phone. The
 async-subagents follow-on design doc (§7) is written before its R2 code, independent
 of all four phases.
-
+# FB: This is really good. I was going to suggest doing the async subagent thing earlier but maybe it's best to work through all of  these unknowns first. I'll leave it up to you.
 * 11. Risks & open questions
 
 1. *Dead air behind a long superstep* (single slot): the silence watchdog covers the
    caller experience; interactive waiters shorten the between-superstep case when
    observed; the in-superstep case is the named bound with the §7 escalation ladder.
    Accept for v1.
+   # FB: See comment above. Agree it's acceptable for v1. No need to tweak the ux for this. But note that it's something that will be a problem with real-world testing quickly.
 2. *In-band DTMF through AMR:* may be mangled. Ship Goertzel first (testable now); P3
    probes modem-URC as the swap. If both fail: spoken-digit PIN is *rejected*
    (Decision 1); fallback = allowlist-only + longer cooldowns — flag to Pierre.
