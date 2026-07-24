@@ -1,6 +1,11 @@
 # CLAUDE.md
 
-Guidance for Claude Code working in this repository.
+Guidance for Claude Code working in this repository. The tool-agnostic guide (project
+overview, three-phase workflow, Layers model, phone-UX conventions, live infra) lives in
+`AGENTS.md`, imported here so it loads alongside this file and so Codex (which reads
+`AGENTS.md`) picks up the same guidance:
+
+@AGENTS.md
 
 EmacsOS is a malleable, agent-customizable, local-first operating system built on Emacs for small touchscreen devices.  Two surfaces matter most: the **phone client** (elisp — `os.el`, `chat.el`, friends, plus the dockerized phone simulator under `server/simulation/`) and **`emacsos-server`** (Python + FastAPI under `server/`, the HTTP gateway between the phone and the [`assist`](https://github.com/pierrel/assist) agent).
 

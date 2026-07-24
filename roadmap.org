@@ -30,26 +30,41 @@ background-audio blocker entirely (a real call; the OS owns it) and builds on th
 
 *Phasing (P0–P2 hardware-independent ~80%; only P3 needs the assembled phone).
 Each phase independently TESTABLE, not necessarily usable:*
-- *P0 — shared-session-API extraction + web refactor + PROD BAKE* [assist]. Extract
-  =assist.session= (submit-turn routing + turn-completion observer + the boundary);
-  refactor the *existing web client* onto it; deploy and *bake ≥1 day in prod,
-  byte-identical*, before any voice code merges over it. *This is the current step*
-  and the highest-blast-radius one (touches the load-bearing web path) — deliberate
-  de-risk by proving the extraction against the known-good web client first.
-- *P0.5 — thread-catalog + receptionist (vanilla LangChain) + eval + async spike* [assist].
-- *P1 — flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log +
-  conversational contract, vs the fake bridge* [assist].
+- *P0 — shared-session-API extraction + web refactor + PROD BAKE* [assist] — *DONE + DEPLOYED*
+  (=assist= PR #207, =shared-session-api=). Shipped as =plan_turn=/=route_turn= (the busy/paused/
+  idle submit routing) + =register_turn_observer= (turn-completion seam) in =manage/web/threads.py=;
+  the web client refactored onto them byte-identical; baked in prod. (Note: shipped as two calls,
+  not one =submit_turn=, because the durable-journal write sits between them.)
+- *P0.5 — thread-catalog + receptionist (vanilla LangChain) + eval + async spike* [assist] —
+  *DONE + DEPLOYED* (=assist= PR #208). =assist/catalog.py= (read-only =ThreadCatalog=, contents
+  unreachable by construction) + =assist/receptionist.py= (vanilla =create_agent=, no fs/execute/task
+  tools; list/open/new-thread tools). Eval N=10=80/80. Async spike verdict: deepagents'
+  =AsyncSubAgentMiddleware= needs a remote LangGraph server and still serializes on the one
+  =--parallel 1= slot → *serialized-journal + push is the vehicle* (adopt the interface, defer the
+  middleware).
+- *P1 — flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational
+  contract, vs the fake bridge* [assist] — *IN PROGRESS.* Build/state doc:
+  [[file:../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. Sliced into PRs:
+  - =flow.py= (hermetic frame-in/event-out engine: in-band Goertzel DTMF + silero-v5 ONNX VAD/
+    endpointing/barge-in; deterministic, no wall clock) — *DONE + DEPLOYED* (=assist= PR #209,
+    converged 6 Copilot rounds; committed model + =onnxruntime=). Unwired to any live path (groundwork).
+  - *NEXT: =speech.py=* (in-proc faster-whisper STT + piper TTS — deps installed + round-trip-verified,
+    torch-free). Then =wire.py= (WSS =/call= + §8 caps) → =session.py= (state machine; reuses
+    =route_turn= + the observer seam + the shipped interjection mechanism for barge-in) → security.
 - *P2 — async delivery + go-back (DTMF =*= AND tool) + interactive queue iff observed* [assist].
-- *P3 — live bridge (hardware-gated) + naturalness tuning* [emacsos + assist].
+- *P3 — live bridge (hardware-gated) + naturalness tuning* [emacsos + assist]. The phone-side PCM
+  bridge (=call_bridge.py=: D-Bus ring watch, ATA/CHUP, the CPCMREG PCM pump) is emacsos's part.
 
 *Depends on / subsumes existing roadmap items:* the [[*TODO Real-time full-duplex call-audio bridge + uplink][full-duplex call-audio bridge]]
 (P3, the one hardware-gated piece), [[*TODO Speech to text][Speech to text]] (STT endpoint), and the shipped
 [[*TODO Phone calling][Phone calling]] / [[*TODO Phone answering][Phone answering]] primitives. Companion validated-on-device
 facts: [[file:docs/2026-06-18-call-audio.org][2026-06-18-call-audio.org]], [[file:docs/2026-06-18-inbound-answering.org][2026-06-18-inbound-answering.org]].
 
-*Status 2026-07-22:* design approved; starting *P0 in the assist repo* (a fresh
-branch off assist =main=). Follow-on: a dedicated =assist/docs/<date>-async-subagents.org=
-for the "all subagents eventually async" trajectory (tech-design §7).
+*Status 2026-07-24:* P0 + P0.5 merged + deployed (assist #207, #208); P1 slice 1 (=flow.py=)
+merged + deployed (assist #209). *Currently at P1 PR2 — =speech.py=* (STT/TTS in-proc), then
+=wire.py= → =session.py= → security, all against the fake bridge; P3 (live phone) is
+hardware-gated. Follow-on: a dedicated =assist/docs/<date>-async-subagents.org= for the "all
+subagents eventually async" trajectory (tech-design §7).
 
 * Ergonomics iteration
 
