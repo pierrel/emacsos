@@ -118,10 +118,13 @@ PHONE (Pi Zero 2 W)                       HOME BOX (assist manage.web, one uvico
 └─────────────────────────┘              └───────────────────────────────────────────┘
 #+end_example
 
-The speech models load *in the session host* (lazily, on first use), on the session
-worker thread — no separate process, venv, or =SPEECH_URL= (review consensus:
-silero already lands here, so exiling only whisper/piper cut the ML-dependency
-family down the middle for a theoretical crash-isolation benefit).
+The speech models load *in the session host*, independently and lazily on their
+first respective off-event-loop consumer — no separate process, venv, or
+=SPEECH_URL= (review consensus: silero already lands here, so exiling only
+whisper/piper cut the ML-dependency family down the middle for a theoretical
+crash-isolation benefit). STT runs synchronously on the session loop. Blocking TTS
+generation runs on a serialized per-call producer so the session keeps draining
+inbound PCM and can detect barge-in while Piper synthesizes.
 
 (The component map above predates §0/D1: read the server-side =manage/voice/= boxes
 as *the voice client module* and the =threads.py=/=catalog.py=/=receptionist.py=
@@ -223,8 +226,9 @@ enforced WG-only-encrypted end-to-end. Plain =ws://= on the LAN is forbidden; th
 deploy gate (§8) states this.
 
 *Clock calibration:* measured modem rate is ~16.7 kHz, not 16.000; TTS at 16 kHz
-consumed at 16.7 kHz plays ~4 % fast. The speech layer resamples TTS by a
-measured-ratio constant calibrated in the hardware phase (=stats.rate_hz= feeds it).
+consumed at 16.7 kHz plays ~4 % fast. =speech.py= always emits protocol-rate 16 kHz.
+P3 uses =stats.rate_hz= to calibrate downstream bridge/session playback; the speech
+API does not encode the unverified hardware estimate.
 
 *Fake for everything above the bridge:* the modem side is one interface
 (=ModemAudio.read_chunk()/write_chunk()= + =AtPort=); =FakeModem= plays WAV fixtures
@@ -470,7 +474,7 @@ case (web's =BackgroundTasks= pool isn't available off-route). Reusing
 call on the turn-runner thread is fine (scheduled/geo/SMS turns already
 direct-dispatch); only the routing decision must be shared.
 
-- Utterance → =/stt= (in-proc) → text → =submit_turn=. Idle → the reply returns from
+- Utterance → =Speech.transcribe()= (in-proc) → text → =submit_turn=. Idle → the reply returns from
   the turn-runner; busy → the utterance lands as a #199 interjection with nothing
   voice-specific in the delivery path.
 
@@ -523,11 +527,11 @@ silence, and what each acknowledgment honestly means*:
 
 *wire.py:* WSS =/call= endpoint — secret-header auth, one concurrent call, frame
 codec, per-call queues, the resource caps of §8.
-*speech.py:* lazy in-process whisper (=/stt= equivalent) + piper (=/tts=), called only
-on the turn-runner/session thread. v1 TTS is per-reply batch with sentence-split
-streaming (piper synthesizes sentence 1 while 2+ queue); token-streaming TTS is a
-named post-v1 optimization. Piper output peak-normalized ~0.9 FS, resampled to the
-calibrated modem rate.
+*speech.py:* lazy in-process whisper + Piper, synchronous and called only off the
+event loop. STT runs on the session loop; a serialized per-call TTS producer emits
+sentence chunks while the session continues consuming inbound PCM. Token-streaming
+TTS is a named post-v1 optimization. Piper output is peak-normalized ~0.9 FS and
+resampled to the protocol's 16 kHz (hardware-calibrated rate remains P3).
 
 * 6. Speech (in-process, §0/D1 consensus)
 
@@ -536,10 +540,12 @@ Folded into the session host per review — *not* a separate service/venv/unit:
   optional =initial_prompt= vocab bias; batch per (short, endpointed) utterance —
   streaming STT is complexity v1 doesn't need. Exposes =no_speech_prob= for noise
   rejection.
-- TTS: piper, a 16 kHz-native voice where available; sentence-split streaming.
-- Models load lazily on first call, on the session thread (no event-loop liveness
-  issue). If a concrete pip resolution conflict with assist's deps materializes at
-  install time, split into a process *then* — not speculatively now.
+- TTS: pinned Piper =en_US-lessac-medium= (22.05 kHz native), resampled to the
+  protocol's 16 kHz; sentence-chunk streaming.
+- Models load independently and lazily on first use, off the event loop: Whisper
+  on the session loop and Piper on the serialized per-call TTS producer. If a
+  concrete pip resolution conflict with assist's deps materializes at install
+  time, split into a process *then* — not speculatively now.
 
 * 7. Harness-side async-subagent capability (PRD reviews #7–9)
 
@@ -755,7 +761,7 @@ milestone. Each has explicit validation so the next builds on verified behavior.
 |------+----------------------------------------------------------------------------------------------------------+------------------+--------|
 | P0   | *Shared session API extraction + web refactor + PROD BAKE* (D1 milestone)                                | assist           | Extract =assist.session= (=submit_turn= routing §5 + the turn-completion observer seam §7.1 + the boundary); the *web client refactors onto it*; observer-seam unit tests; *deploy to prod and bake ≥1 day with web behavior byte-identical* (zero render/route regressions, the exactly-once routing unchanged) *before any voice code merges over it* — Pierre's explicit de-risk gate |
 | P0.5 | Thread-catalog + receptionist (vanilla LangChain) + eval + *async-subagent spike (§7.0)*                  | assist           | =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval stable at N=10 incl. spoken-output filter (case 8) + the go-back-tool false-fire case; mechanical exact-3-tool (no-content) test; =state.py= delegating; *async spike verdict recorded*: can =AsyncSubAgentMiddleware= (in-proc/ASGI, installed on 0.6.1) be wired to serialized =THREAD_QUEUE= + push-observer delivery, or is the bespoke =continue_later= path the vehicle |
-| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer double-speak filter; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; =/tts= correct-rate PCM |
+| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer double-speak filter; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; in-process TTS API produces correct-rate PCM |
 | P2   | Async delivery + go-back (*DTMF =*= AND =back_to_receptionist()= tool*, per D3) + (interactive queue *iff* observed) | assist | observer unit tests; fake-bridge: continuation completes mid-call → =async_delivered{mode:spoken}=; after hangup → thread-only; ROUTER-state delivery mentions it; *both* go-back paths return to ROUTER cleanly (DTMF deterministic; tool with its false-fire eval); hang-up detaches, call-back binds fresh |
 | P3   | Live bridge (hardware-gated) + naturalness tuning                                                        | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration; DTMF in-band on real carrier (else URC probe + swap); *barge-in feel + the varied "processing" ack (Pierre FB) tuned live*; e2e first-audio vs 1.5 s; power-rail soak under a sustained call + STT/TTS |
 

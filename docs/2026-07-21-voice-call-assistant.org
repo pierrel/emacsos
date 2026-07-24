@@ -53,7 +53,8 @@ The load-bearing gaps (net-new, this feature's real engineering):
   and the far end hears "airplane static." Uplink has never been validated on
   hardware. This bridge is the core hardware-gated deliverable.
 - *No TTS anywhere.* Fully net-new.
-- *No STT HTTP endpoint.* Whisper was run by hand; the server endpoint is net-new.
+- *No in-process STT boundary.* Whisper was run by hand; the voice client's
+  speech wrapper and deploy-time model provisioning are net-new.
 - *No thread-list, domain, or auth surface in the emacsos embedding path.*
   =app.py= runs the assist agent against a single fixed thread (or ad-hoc
   file-backed threads) with =AgentSpec(tools=EMACS_TOOLS)= and *no* =interrupt_on=,
@@ -295,8 +296,8 @@ the tech design to own.
    a durable item, likely reusing the inbound-message path the SMS forwarder
    established) is a *follow-on feature designed independently* — pulled out of
    this effort's scope so v1 stays "authenticated voice access to assist."
-7. *STT = faster-whisper (validated), server HTTP endpoint net-new; TTS = piper*
-   (local, fast, CPU-fine), net-new. Both server-side per Decision 3.
+7. *STT = faster-whisper (validated); TTS = piper* (local, fast, CPU-fine),
+   both behind an in-process speech boundary in the session host per Decision 3.
 8. *Phasing — build the hardware-independent 80% now (Decision below), hardware-gate
    only the live-bridge / auto-answer / uplink / latency validation.*
 
@@ -307,7 +308,7 @@ test against loopback / recorded-audio fixtures; hardware-gate only what truly
 needs the live modem. *Each phase is independently TESTABLE — not necessarily
 independently usable (review #10)* — with explicit validation criteria, so the
 next phase builds on verified behavior rather than a usable-end-to-end slice.
-(E.g. the STT endpoint phase is "done" when it transcribes the fixture corpus at
+(E.g. the STT boundary is "done" when it transcribes the fixture corpus at
 target WER, even though nothing calls it yet; the router phase is "done" when its
 eval suite passes, before any audio exists.)
 
@@ -319,7 +320,8 @@ eval suite passes, before any audio exists.)
   machine) developed against a *WAV/loopback fixture* instead of live =ttyUSB4= —
   the bridge's read/write is an interface with a fake behind it. This is the hard
   part and it needs no modem.
-- *STT endpoint* (server whisper HTTP) and *TTS* (piper) — standalone, unit-tested.
+- *In-process speech boundary* (faster-whisper STT + Piper TTS), unit-tested with
+  locally provisioned models.
 - *PIN/auth + decline logic* with DTMF stubbed and the caller-ID allowlist —
   pytest-testable. (No voicemail — review #2.)
 - *Async voice-delivery adapter* over the existing continuation/event path.
