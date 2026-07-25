@@ -388,7 +388,7 @@ construction.
   guard; named).
 - *DTMF: in-band Goertzel here* (8 tone freqs, twist/duration checks). This *inverts*
   the PRD "DTMF on the SIM7600" open question into a by-construction, testable-today
-  answer; the modem-URC detector becomes the hardware-gated *upgrade* if AMR mangles
+  answer; the modem-URC detector becomes the hardware-gated *fallback* if AMR mangles
   in-band tones (named risk). Both sit behind =DtmfDetector= (the one interface the
   PRD explicitly mandates as swappable).
 

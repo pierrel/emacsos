@@ -273,8 +273,9 @@ PRD only requires the voice delivery adapter.
 1. *PIN via DTMF, not spoken; caller-ID allowlist gates the prompt.* DTMF is immune
    to STT error and room noise and doesn't make the security step depend on the
    hardest unsolved problem (prompt-vs-noise). Unknown numbers never get a PIN
-   prompt (→ no answer); N wrong tries → declined. (Open: confirm DTMF detection on
-   the SIM7600 — =AT+CDTMF=/URC support — on hardware.)
+   prompt (→ no answer); N wrong tries → declined. (Open: confirm the default
+   in-band Goertzel detector over a real AMR call; modem =AT+CDTMF= URCs are the
+   hardware-gated fallback if tones are mangled.)
 2. *Router = the shipped constrained assist receptionist (thread-list tools only).*
    Tools:
    =list_threads= (descriptions + status, NO contents), =open_thread(selector)=
@@ -344,8 +345,9 @@ eval suite passes, before any audio exists.)
 - The *real-time synchronized full-duplex bridge* on live =ttyUSB4= (exact clocking
   / chunk-matching only proves on hardware); *uplink* validation (never done yet).
 - *Server-triggered auto-answer* end-to-end on a live inbound call.
-- *DTMF detection* on this modem; *end-to-end latency* over real cellular; *power
-  rail* stability under a sustained call + STT/TTS load (the Pololu rail install).
+- *In-band Goertzel DTMF* over a real AMR call (then modem-URC fallback only if
+  mangled); *end-to-end latency* over real cellular; *power rail* stability under
+  a sustained call + STT/TTS load (the Pololu rail install).
 
 * Success measures
 
@@ -363,7 +365,8 @@ eval suite passes, before any audio exists.)
 
 * Open questions
 
-- *DTMF on the SIM7600* — command/URC support and reliability (hardware probe).
+- *DTMF over the real carrier* — validate in-band Goertzel first; probe modem URCs
+  only if AMR mangles the tones.
 - *Barge-in on a balanced full-duplex stream* — switching uplink from TTS to silence
   mid-stream without a modem-clock desync; the bridge must make this a clean swap.
 - *Phone bridge scheduling* — the phone remains a dumb PCM pump in the dedicated
