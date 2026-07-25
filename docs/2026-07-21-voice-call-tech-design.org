@@ -271,14 +271,15 @@ message read, no path into =threads.db=.
 
 * 4. Receptionist agent (the router)
 
-*New files: assist =assist/receptionist.py= + =assist/templates/receptionist_system.md.j2=.*
+*Shipped in P0.5: assist =assist/receptionist.py= +
+=assist/templates/receptionist_system.md.j2=.*
 
-- =receptionist_tools(catalog, on_open, on_new) -> list= (the
-  =notify_tools=/=continuation_tools= injected-callback mold):
+- =receptionist_tools(catalog, domains, on_open, on_new) -> list= (the
+  =notify_tools= injected-callback mold):
   - =list_threads()= → spoken-shaped lines from =catalog.entries()= (bounded ~20).
   - =open_thread(selector)= → accepts *number | id | description-substring* (the
-    small model keeps habitual arg shapes — agentic #6; instrument actual emitted
-    args in P0 before pinning); validates against the last listing (session-scoped
+    small model keeps habitual arg shapes — agentic #6, pinned by the shipped P0.5
+    eval); validates against the last listing (session-scoped
     closure state), calls =on_open(tid)=, returns a spoken directive that *names the
     thread* ("Connecting you to the bike-trip thread." — UX #13, the only mis-route
     catch the caller gets).
@@ -305,13 +306,13 @@ message read, no path into =threads.db=.
   only retry layer (=ChatOpenAI= is built =max_retries=0=); =BadRequestRetry= covers
   the 400 class. Skills/memory/loop-detection/interjection middleware are rightly
   omitted.
-  *IMPLEMENTATION MUST (Pierre, confirmed):* the receptionist is a *vanilla LangChain
+  *Shipped invariant (Pierre, confirmed):* the receptionist is a *vanilla LangChain
   agent* (=langchain.agents.create_agent=), *never* a deepagent
   (=create_deep_agent=). Carry this into the code — a deepagent would drag in the
   filesystem/execute/task surface the router must not have, and the "physically
-  lacks content tools" guarantee (§4) depends on the vanilla loop. The P0 mechanical
-  test that asserts the exact 3-tool set is the enforcement.
-- *Model (agentic #8):* built via =model_manager._build_openai_chat_model= so it
+  lacks content tools" guarantee (§4) depends on the vanilla loop. The P0.5 mechanical
+  test asserting the exact 3-tool set is the enforcement.
+- *Model (agentic #8):* built via =select_assistant_model(0.1)= so it
   carries =enable_thinking=False= (a thinking router would burn its whole latency
   budget on =<think>= tokens the caller never hears) and the per-phase httpx
   timeouts (a hung first token = unbounded dead air).
@@ -390,7 +391,8 @@ construction.
 *Barge-in semantics (Pierre FB — start simple, tune for naturalness):* the mechanism
 can be *very* simple to start, and its rule is precise —
 1. The caller starts speaking while the agent is SPEAKING → *stop the TTS
-   immediately* (§5.7: cancel synth/stream, then =flush_uplink=) so he isn't talked
+   immediately* (§5.7: invalidate/purge its audio generation and prioritize
+   =flush_uplink=) so he isn't talked
    over.
 2. *Let him finish* — capture the full utterance (normal endpointing); do not
    cut in.
@@ -410,8 +412,9 @@ timing a lot on live hardware (P3). Named as an early real-world-testing watch i
 
 ** session.py — per-call =VoiceSession=, the state machine
 One call at a time (one modem). *Threading (agentic #2):* the async WS handler only
-shuttles frames to/from thread-safe queues (event-loop liveness: no lock, no I/O, no
-model call on the loop thread). The session *loop* thread runs STT + commits Runs and
+shuttles frames to/from an inbound queue and a bounded generation-aware outbound
+buffer via nonblocking operations (event-loop liveness: no lock, no I/O, no model
+call on the loop thread). The session *loop* thread runs STT + commits Runs and
 stays free during THINKING; each *turn* runs on a dedicated turn-runner thread — so a
 caller steering mid-turn ("no, the other one") produces an utterance the session can
 commit *while its own turn is still running*, and =InterjectionMiddleware.before_model=
@@ -495,12 +498,14 @@ silence, and what each acknowledgment honestly means*:
    accepts (endpoint + ~300 ms STT still beats 1.5 s), so a =no_speech_prob=-discarded
    utterance never gets a false ack; on discard-after-listen, speak "sorry, say that
    again?".
-7. *Invalidate TTS at the flush boundary (UX #7):* producer chunks carry a TTS
-   generation into one serialized outbound accept boundary. On =barge_in= the
-   session atomically invalidates that generation and enqueues =flush_uplink= at the
-   same boundary, without waiting for an in-flight Piper =next()=. A later chunk from
-   the old generation is rejected, so speech cannot resume after the flush. Residual
-   audio = ~300 ms guard + one accepted 20 ms chunk + RTT.
+7. *Invalidate TTS at the flush boundary (UX #7):* the producer splits sentence
+   results into 20 ms PCM frames carrying a TTS generation. A bounded outbound buffer
+   owns one serialized accept/invalidate boundary. Producer backpressure waits on a
+   condition that releases its lock and rechecks generation on wake. On =barge_in=,
+   one nonblocking buffer operation invalidates the generation, purges its queued
+   frames, and inserts =flush_uplink= at the front, without waiting for Piper or
+   capacity. Later old-generation frames are rejected; only a frame the WS shuttle
+   already dequeued can escape. Residual audio = ~300 ms guard + one 20 ms frame + RTT.
 8. *"Next safe boundary" defined (UX #8):* a spoken async interjection lands only when
    state == LISTENING and VAD-silent ≥ ~1.5 s and no turn in flight — *never* during
    CAPTURING or SPEAKING (the agent must not interrupt *him*); queued behind the
@@ -518,8 +523,9 @@ silence, and what each acknowledgment honestly means*:
 *wire.py:* WSS =/call= endpoint — secret-header auth, one concurrent call, frame
 codec, per-call queues, the resource caps of §8.
 *speech.py:* lazy in-process whisper + Piper, synchronous and called only off the
-event loop. STT runs on the session loop; a serialized per-call TTS producer emits
-sentence chunks while the session continues consuming inbound PCM. Token-streaming
+event loop. STT runs on the session loop; a serialized per-call TTS producer splits
+sentence results into generation-tagged 20 ms frames while the session continues
+consuming inbound PCM. Token-streaming
 TTS is a named post-v1 optimization. Piper output is peak-normalized ~0.9 FS and
 resampled to the protocol's 16 kHz (hardware-calibrated rate remains P3).
 
@@ -531,7 +537,8 @@ Folded into the session host per review — *not* a separate service/venv/unit:
   streaming STT is complexity v1 doesn't need. Exposes =no_speech_prob= for noise
   rejection.
 - TTS: pinned Piper =en_US-lessac-medium= (22.05 kHz native), resampled to the
-  protocol's 16 kHz; sentence-chunk streaming.
+  protocol's 16 kHz; =Speech= streams sentence chunks and the TTS producer packetizes
+  them into 20 ms frames before outbound acceptance.
 - Models load independently and lazily on first use, off the event loop: Whisper
   on the session loop and Piper on the serialized per-call TTS producer. If a
   concrete pip resolution conflict with assist's deps materializes at install
@@ -674,6 +681,10 @@ reusing =append_event='s O_APPEND/torn-line discipline against
 =turn_submit{tid,busy}=, =turn_done{tid,ms,origin}=, =tts{ms,chars}=,
 =barge_in{at_ms}=, =async_delivered{delivery_run_id,mode}=,
 =handoff{tid}=, =router_return=, =bridge_stats{rate_hz,underruns}=, =hangup{by,call_ms}=.
+The call log records the voice-observable delivery Run id. Child task dispatch stays
+in PR #213's durable Run store; duplicating unavailable task/child identities here
+would require parsing agent prose or adding a second lifecycle hook. Correlate the
+two durable views when diagnosing the internal task lifecycle.
 The bridge keeps a minimal local mirror (same =call_id=) held to the same
 no-digits/no-PCM rule. Reconstruction test: the fake-bridge scripted call's log
 replays into a coherent timeline (pytest asserts the boundary sequence). Not a
@@ -688,7 +699,7 @@ milestone. Each has explicit validation so the next builds on verified behavior.
 |------+----------------------------------------------------------------------------------------------------------+------------------+--------|
 | P0   | *Durable Run service + observer seam + PROD BAKE* (D1 milestone)                                        | assist           | *DONE.* PR #213 is authoritative: every accepted turn persists before dispatch; ordinary and child Runs share queueing, interjection, terminal-state, and recovery semantics; the terminal observer carries =run_id=. |
 | P0.5 | Thread-catalog + receptionist (vanilla LangChain) + eval                                                 | assist           | *DONE.* =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval stable at N=10 incl. spoken-output filter and go-back false-fire cases. Async-subagent architecture subsequently shipped in PR #213. |
-| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in cancels-TTS-then-=flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer is the single reply source; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; in-process TTS API produces correct-rate PCM |
+| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in invalidates/purges TTS then enqueues =flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer is the single reply source; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; in-process TTS API produces correct-rate PCM |
 | P2   | Async delivery + go-back (*DTMF =*= AND =back_to_receptionist()= tool*, per D3) + (interactive queue *iff* observed) | assist | observer unit tests; fake-bridge: child task completes → its durable parent wake completes and the observer emits =async_delivered{mode:spoken}= mid-call; after hangup → thread-only; ROUTER-state delivery mentions it; *both* go-back paths return to ROUTER cleanly (DTMF deterministic; tool with its false-fire eval); hang-up detaches, call-back binds fresh |
 | P3   | Live bridge (hardware-gated) + naturalness tuning                                                        | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration; DTMF in-band on real carrier (else URC probe + swap); *barge-in feel + the varied "processing" ack (Pierre FB) tuned live*; e2e first-audio vs 1.5 s; power-rail soak under a sustained call + STT/TTS |
 
@@ -753,7 +764,7 @@ argument corrected (§1). Central dissent (external hosting) → D1 fork, both d
 
 *Agentic/framework fit:* shared durable Run path (§5); dedicated
 turn-runner thread for mid-own-turn steering (§5); protected receptionist middleware +
-=model_manager= build (§4); spoken-output eval case + runtime guard (§4); =open_thread=
+=select_assistant_model= build (§4); spoken-output eval case + runtime guard (§4); =open_thread=
 accepts number|id|substring (§4); durable child-Run semantics (§7); interjection
 gate math verified (trace table).
 

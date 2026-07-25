@@ -224,10 +224,11 @@ the tech design to own.
 - *Observability (review #6).* A lightweight requirement: emit *structured,
   machine-readable* logs for a call with clear *event boundaries and timestamps*
   (ring, answer, PIN-pass/fail, hand-off, each turn's VAD-open/endpoint/STT/
-  LLM/TTS spans, barge-in, async-dispatch/deliver, hang-up). Goal is not
-  dashboards/metrics — it's letting an agent (or Pierre) *reconstruct and
-  diagnose a problematic call* after the fact. This is a spec input for the tech
-  design, not a metrics platform.
+  LLM/TTS spans, barge-in, async-delivery, hang-up). Harness-internal child dispatch
+  remains in PR #213's durable Run store rather than being duplicated in the call
+  log; correlate the delivery Run when both views are needed. Goal is not dashboards/
+  metrics — it's letting an agent (or Pierre) *reconstruct and diagnose a problematic
+  call* after the fact. This is a spec input for the tech design, not a metrics platform.
 - *No secrets in audio you don't control:* the PIN is entered by the caller, never
   spoken by the agent; the greeting reveals nothing about which threads exist to an
   unauthenticated caller.
