@@ -99,13 +99,14 @@ named.
 #+begin_example
 PHONE (Pi Zero 2 W)                       HOME BOX (assist manage.web, one uvicorn)
 ┌─────────────────────────┐    WSS/WG    ┌───────────────────────────────────────────┐
-│ call_bridge.py (new)    │◄────────────►│ manage/voice/ (new)                        │
+│ emacsos_server/         │◄────────────►│ manage/voice/ (new)                        │
+│ call_bridge.py (new)    │              │                                            │
 │  - D-Bus ring watch     │  audio+ctl   │   wire.py     WSS /call endpoint           │
 │  - ATA / AT+CHUP        │  (encrypted) │   flow.py     VAD/endpoint/barge-in/DTMF   │
 │  - CPCMREG PCM pump     │              │   session.py  Gate→Router→InThread SM      │
 │    (balanced, one thread)│              │              + calllog + speech (in-proc) │
 │  - jitter buffer        │              │   speech.py   whisper+piper, lazy in-proc  │
-│  (ttyUSB3 + ttyUSB4)    │              │  assist/catalog.py    (read-only, Dec. 2)  │
+│  (ttyUSB3 + ttyUSB4)    │              │  assist/catalog.py (read-only, Decision 2) │
 ├─────────────────────────┤              │  assist/receptionist.py (protected router) │
 │ phone-call.el (shipped, │              │  threads.py: durable Runs + turn observer │
 │  unchanged: human UI)   │              │  thread_queue.py: interactive waiter (P3)  │
@@ -131,7 +132,7 @@ the *shared assist services* (client-agnostic), or the *Assist harness*
 
 | Responsibility                                   | Initial landing        | Long-term home            | Notes |
 |--------------------------------------------------+------------------------+---------------------------+-------|
-| PCM bridge (AT, =ttyUSB4= pump, ring watch)      | emacsos =callbridge/=  | *EmacsOS client*          | device-owned; never moves |
+| PCM bridge (AT, =ttyUSB4= pump, ring watch)      | emacsos =server/emacsos_server/call_bridge.py= | *EmacsOS client* | device-owned; never moves |
 | VAD / endpointing / barge-in / DTMF (flow)       | assist =manage/voice/= | *Voice client*            | voice-specific; a thin-client concern |
 | Audio session state machine + STT/TTS            | assist =manage/voice/= | *Voice client*            | voice-specific |
 | Durable ordinary-turn Runs                      | assist =threads.py=    | *Assist harness*          | persist before dispatch; PR #213 is authoritative |
@@ -167,7 +168,7 @@ application of that boundary.
 
 * 2. The PCM bridge (phone-side, hardware-gated core)
 
-*New file: emacsos =server/callbridge/bridge.py=* — one single-file daemon
+*New file: emacsos =server/emacsos_server/call_bridge.py=* — one single-file daemon
 (=sms_forward.py= mold), non-root (=dialout= group; everything is AT — =ATA=,
 =AT+CHUP=, =AT+CLCC=, =AT+CPCMREG=, gain commands — no =mmcli=, no sudo). Deps:
 =pyserial=, =websockets=, =dbus-fast= (pure-python).
@@ -796,7 +797,7 @@ forward-compat (§2); =CatalogEntry.urgent= (§3); callback contracts — sync, 
 =on_new= creates + binds as a side effect, caught failures (§4); observer contract — list, isolation,
 thread, =run_id= (§7); =extra_tools= not =voice=True= (§4/D3); flow.py purity
 restated (§5); third =description.txt= read site swept (§3); naming (receptionist,
-=bridge.py=).
+=call_bridge.py=).
 
 *Threat-model:* global lockout (BLOCKER, §8); do-not-answer unknowns (BLOCKER → D2);
 per-state detector scoping (BLOCKER, §5/§8); encrypted transport + PIN-on-wire (§2/§8);

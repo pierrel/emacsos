@@ -238,7 +238,8 @@ PRD only requires the voice delivery adapter.
   spoken by the agent; the greeting reveals nothing about which threads exist to an
   unauthenticated caller.
 - *Data hygiene:* real numbers/PINs never land in the repo — fixtures and this doc
-  use synthetic values (e.g. =+1XXX-…=, PIN =0000= as an illustrative placeholder).
+  use synthetic values (e.g. =+1XXX-…=, PIN =000000= as an illustrative placeholder
+  meeting the six-digit minimum).
 
 * Intersections with existing machinery (constraints, not design)
 
@@ -364,8 +365,8 @@ eval suite passes, before any audio exists.)
 - *Barge-in on a balanced full-duplex stream* — switching uplink from TTS to silence
   mid-stream without a modem-clock desync; the bridge must make this a clean swap.
 - *Phone bridge scheduling* — the phone remains a dumb PCM pump in the dedicated
-  =server/callbridge/bridge.py= daemon; confirm its scheduling priority. Flow/session
-  ownership is settled server-side.
+  =server/emacsos_server/call_bridge.py= daemon; confirm its scheduling priority.
+  Flow/session ownership is settled server-side.
 - *Latency of STT→LLM→TTS against the one llama slot* — router vs in-thread budgets;
   pre-warming; whether the call holds a dedicated slot vs contends with web turns
   (the =_STREAM_LOCK= interaction).
