@@ -1,0 +1,430 @@
+#+title: PRD — Voice-call assistant: phone the agent, talk to your threads
+#+date: 2026-07-21
+#+author: product requirements (for review)
+
+Companion hardware/telephony facts live in 2026-06-18-call-audio.org,
+2026-06-18-inbound-answering.org, and 2026-06-20-call-control-keyboard.org.
+
+* Problem
+
+The assist web UI is a list of threads you open and converse with. On mobile that
+UI dies the moment the phone is pocketed — iOS Safari suspends the page and mutes
+the mic within seconds of backgrounding (investigated 2026-07-21; it is Apple
+platform policy, not fixable in a web app). A real *phone call* sidesteps all of
+it: the OS owns the call, background/lock/pocket are non-issues, and no app needs
+to stay foreground. We already have the hardware for it.
+
+Goal: *dial a number and talk to assist* — a natural, spoken mirror of the web
+UI. A receptionist agent helps you reach the right thread (or start a new one);
+then you have a natural voice conversation inside it. The number is public, so a
+PIN gates the assistant; an unknown caller is never answered and a known caller
+who fails the PIN is declined. The device
+lives in the house for now (no mobility); the design does not depend on that
+staying true.
+
+*Scope narrowed (Pierre review #2, 2026-07-21):* voicemail is REMOVED from this
+effort. The primary goal is authenticated voice access to assist. Voicemail
+("a smarter answering machine for unauthenticated callers") is a valuable
+follow-on with its own product flow — designed independently once the core
+voice experience works. Everywhere v1 previously said "→ voicemail," an
+unknown caller is now left unanswered (no =ATA=, no audio); a known caller who
+fails the PIN hears a short "not available" before hang-up. No audio, voicemail,
+or conversation content is recorded; minimal security outcomes remain in the log.
+
+* What is already real (confirmed on-device — do not re-litigate)
+
+The telephony substrate is *validated on the SIM7600G-H*, and this PRD builds on
+it rather than inventing it (see the companion docs for the live traces):
+
+- *Voice calls work.* Outbound (=mmcli --voice-create-call=), inbound *detection*
+  (D-Bus =Voice.CallAdded=, caller number at ring time), *answer* (raw =ATA= on the
+  freed AT port =ttyUSB3=; =mmcli --accept= is broken on this modem), hang-up
+  (=mmcli --voice-hangup-all=). Implemented as deterministic elisp primitives in
+  =phone-call.el=.
+- *The agent can hear and speak with NO analog headset.* Call audio is a raw
+  *16 kHz / 16-bit / mono PCM stream* on =/dev/ttyUSB4=, gated by =AT+CPCMREG=1=
+  after connect. Downlink (agent hears caller) is validated end-to-end, including
+  a clean Whisper transcript. *This is the enabler:* for an AI callee, the
+  mic/speaker hardware problem that blocks human calling disappears — the agent's
+  "ear" is downlink PCM → STT, its "voice" is TTS → uplink PCM. No dongle, no jack.
+- *STT works.* faster-whisper =base.en= transcribed a real call clip on CPU.
+
+The load-bearing gaps (net-new, this feature's real engineering):
+
+- *The synchronized full-duplex bridge does not exist yet.* =AT+CPCMREG=1= is
+  balanced: you MUST write uplink (silence or TTS) while reading downlink, matched
+  chunks at the modem's ~16.7 kHz clock, in ONE process — two loose pipes desync
+  and the far end hears "airplane static." Uplink has never been validated on
+  hardware. This bridge is the core hardware-gated deliverable.
+- *TTS + the in-process STT boundary now exist in assist P1 PR2.* Whisper/Piper
+  are local, lazy, provisioned before calls, and verified together; wire/session
+  scheduling remains a later P1 slice.
+- *The shared thread catalog and receptionist now exist in assist P0.5.*
+  The separate emacsos =app.py= embedding path still runs the assist agent against
+  a single fixed thread (or ad-hoc
+  file-backed threads) with =AgentSpec(tools=EMACS_TOOLS)= and *no* =interrupt_on=,
+  *no* domain concept. Voice consumes the shipped shared catalog/receptionist;
+  =ASSIST_DOMAINS=, =DomainManager=, and create-thread/session adaptation remain
+  web-hosted integration points rather than code the phone reimplements.
+
+* Product behavior (the end-to-end flow)
+
+1. *Ring → classify.* Caller number is known at ring time. An allowlisted call is
+   answered by the server (not a human tapping Accept); an unknown call rings out
+   without =ATA=.
+2. *Gate.* Known/allowlisted number → a short greeting + "enter your PIN" (DTMF).
+   Wrong/no PIN → *declined* (short "not available", hang up). No audio or PIN
+   prompt is ever offered to an unknown number (no PIN-guessing oracle). Ring-out
+   still reveals allowlist membership; v1 accepts that caller-ID oracle.
+3. *Receptionist (conversational, never a spoken menu — reviews #3, #4).* Once
+   authenticated the caller is with the *router agent*: it sees only the *list* of
+   threads (one-line descriptions + status — never their contents). Thread
+   selection is *conversational*, not DTMF/menu-driven: a caller who already knows
+   what they want just says it ("get me into the trip planning one") and the router
+   routes — it must yield immediately to expressed intent. Only when the caller is
+   unsure does the router *proactively* offer a *small* set of relevant threads to
+   orient them (a few — urgent, recently updated, or newly created — never the whole
+   list read out, which would become a spoken menu): "You've got the bike-trip
+   thread and two others still working; which do you want?" Pick → hand off; or
+   "start a new one" → the router elicits a *domain* (which repo/project) and
+   creates the thread.
+4. *In-thread conversation.* The same call continues, now bound to that thread's
+   normal agent, voice-driven. Natural turn-taking: you can interrupt it
+   (barge-in); it waits for you to finish a thought without cutting you off; it
+   doesn't answer background noise. Long work (research) runs *async* — it says
+   "let me look into that" and either speaks the result when ready or hands it to
+   you as a thread update / text, never dead air.
+5. *Navigate / leave.* "Go back" → the router (pick another thread). Hang up ends
+   the call; any in-flight async work continues and surfaces in the thread.
+
+* User stories
+
+** US-1: Reach the assistant with a PIN
+As Pierre, I dial my number and prove it's me before the agent will do anything.
+- GIVEN I call from an allowlisted number
+- WHEN I hear the greeting and enter my PIN on the keypad
+- THEN I'm handed to the receptionist; a wrong PIN (N tries) is declined and hung up.
+
+** US-2: Pick an existing thread by voice
+As Pierre, I want to get into the right conversation without a screen.
+- GIVEN I'm with the receptionist and I have several threads
+- WHEN I say which one (by topic, not an id) — "the trip planning one"
+- THEN it disambiguates against thread descriptions, confirms, and hands me in.
+
+** US-3: Start a new thread with a domain
+As Pierre, starting fresh, I must say which project it belongs to.
+- GIVEN I say "start a new thread"
+- WHEN the receptionist asks which domain and I answer (or there's only one)
+- THEN it creates the thread against that domain and drops me into it.
+
+** US-4: A natural in-thread conversation
+As Pierre, the in-thread experience should feel like talking to a person.
+- GIVEN I'm in a thread, mid-sentence, and I pause to think
+- WHEN I stop briefly then keep going
+- THEN it does NOT cut me off or answer the half-sentence; it waits for the thought
+- AND if it's talking and I start, it stops and listens (barge-in).
+
+** US-5: Async work without dead air
+As Pierre, I don't want to sit in silence while it researches.
+- GIVEN I ask something that needs a multi-minute research subagent
+- WHEN it can't answer immediately
+- THEN it says so and keeps the call natural — speaks the result when ready if I'm
+  still on, or delivers it to the thread / texts me if I've hung up. Never silence.
+
+** US-6: The number is public → strangers are not answered
+As Pierre, strangers and robocallers must never reach the agent.
+- GIVEN an unknown caller
+- THEN the phone rings out without answering or emitting audio.
+- GIVEN an allowlisted caller who fails the PIN
+- THEN they hear a short "not available" and the call ends. No audio, voicemail,
+  or conversation content is recorded (voicemail is a follow-on, review #2).
+
+** US-7 (the hard one): prompt vs. background noise
+As Pierre, the agent must tell "I'm talking to you" from room noise and pauses.
+- GIVEN background noise, my own filler pauses, or someone else near me
+- WHEN sound reaches the mic that isn't a prompt to the agent
+- THEN it doesn't fire a turn on noise, and it doesn't endpoint me mid-thought.
+  (Telephony helps: a held phone is close-mic'd with carrier noise suppression, so
+  SNR is far better than a far-field smart speaker — see Decision 4.)
+
+* Non-goals (v1)
+
+- *True full-duplex overlap* (agent backchanneling while you talk). v1 is
+  *barge-in half-duplex*: one speaks, the other listens; either can interrupt.
+- *Voicemail / any capture of an unauthenticated caller* (review #2) — a
+  separate product flow, designed independently as a follow-on. v1 leaves unknown
+  callers unanswered and declines failed-PIN callers.
+- *Outbound* (the agent calling YOU). Inbound-first; the agent-initiates-a-call
+  case (urgent notify by phone) is a later story.
+- *Mobility / away-from-home.* Device stays in the house for v1. Nothing here
+  assumes it always will (the call model is location-independent already).
+- *Multi-call / call-waiting*, *multi-user / speaker-ID* (one authorized user via
+  PIN), and any *rich visual UI* (it's a phone call).
+
+* The hard part, designed: conversation flow (VAD / endpointing / barge-in)
+
+This is the substance of the feature; the telephony under it is solved.
+
+- *Streaming VAD on the downlink PCM* (silero-VAD or webrtcvad) decides speech vs
+  silence/noise in real time — distinct from whisper's =vad_filter= (which cleans
+  the transcription pass; mandatory, already known). VAD drives turn-taking.
+- *Endpointing:* an utterance ends after ~500-800 ms trailing silence (tunable) or
+  a max-utterance cap; then the buffered audio goes to STT. Tuning trailing-silence
+  is the whole "don't cut me off mid-thought" knob (US-4/US-7).
+- *Barge-in:* VAD firing during TTS playback = the caller interrupted. Stop writing
+  TTS uplink immediately (revert to silence without desyncing the modem clock — a
+  bridge requirement), capture the new utterance. *Barge-in is a mid-turn
+  interjection* — it reuses the interjection concept from assist #199.
+- *Noise / not-addressed-to-me rejection:* VAD energy + STT no-speech probability
+  discard "transcriptions" that are really noise. v1 leans on telephony's high SNR
+  (Decision 4) rather than a wake word; if false triggers appear in live testing,
+  the fallback is a re-engagement signal after long silence, never push-to-talk.
+- *Latency budget:* target < ~1.5 s to first audio. Router turns are short (fast
+  LLM). In-thread turns that need tools go *async* (US-5) so the single
+  =--parallel 1= llama slot never strands the call in silence. Backchannels
+  ("mm-hm", "one sec") and streamed TTS mask the rest.
+
+* Async-only subagents (shipped in assist PR #213)
+
+A live call cannot block on a multi-minute subagent, so subagents are async by
+construction here. Assist PR #213 supplies durable child Runs, task lifecycle
+tools, parent wake Runs, user-priority ordinary turns, and restart recovery.
+- The terminal observer + interjection path delivers completed work;
+  *the new piece is a voice-delivery adapter* — if the call is live, speak it
+  (as an interjection into the conversation); if not, it's a thread update /
+  =notify()= / SMS. Barge-in is the same interjection mechanism inbound.
+So "async-only subagents" is shared harness behavior + a delivery adapter, not new
+voice agent core.
+
+*Where the net-new async capability lives (reviews #7, #8, #9).* The voice
+client stays a *thin client over the existing assist architecture* — it
+introduces NO voice-specific threading or async execution semantics; it reuses
+assist's thread + execution model as-is. The additional async-subagent
+capability voice needs is implemented in the *agent harness itself*, never in the
+voice client, so every client benefits and there is no parallel implementation.
+PR #213 shipped the shared durable async capability and migrated the web/main path
+that voice reuses; legacy embedders may still retain synchronous subagents. This
+PRD only requires the voice delivery adapter.
+
+* Security (a public number)
+
+- *PIN is the gate, DTMF not voice* (Decision 1, review #1). Deterministic keypad
+  entry keeps auth independent of STT quality, noise, and recognition error — the
+  security step must not depend on the hardest unsolved problem (prompt-vs-noise).
+  Caller-ID allowlist decides who even hears a PIN prompt (unknown → no answer; no
+  PIN-guessing oracle). Ring-out reveals allowlist membership; v1 accepts that
+  caller-ID oracle. N-strike lockout → declined + optional cooldown. Caller ID is a
+  *convenience* reachability gate (spoofable), never sufficient authentication;
+  the PIN remains the authentication root.
+- *The router cannot read thread contents* (Decision 2) — it sees descriptions +
+  status only. A caller who somehow got past auth still can't have the receptionist
+  read out a thread; content access begins only after an explicit hand-off into a
+  thread the authenticated user chose. (Single authorized user in v1, so this is
+  defense-in-depth, but it keeps the switchboard role honest and future-proofs
+  multi-user.)
+- *Same permission model as every other client (review #11).* The voice client
+  inherits assist's *backend authentication and authorization model unchanged* —
+  it is not a reduced-permission client. "Constrained" refers only to the
+  *interaction surface* (the router's tool set is thread-list-only), NOT to a
+  weaker permission model. Once handed into a thread, the in-thread agent has
+  exactly the permissions any client's in-thread agent has.
+- *Observability (review #6).* A lightweight requirement: emit *structured,
+  machine-readable* logs for a call with clear *event boundaries and timestamps*
+  (ring, answer, PIN-pass/fail, hand-off, each turn's VAD-open/endpoint/STT/
+  LLM/TTS spans, barge-in, async-delivery, hang-up). Harness-internal child dispatch
+  remains in PR #213's durable Run store rather than being duplicated in the call
+  log; correlate the delivery Run when both views are needed. Goal is not dashboards/
+  metrics — it's letting an agent (or Pierre) *reconstruct and diagnose a problematic
+  call* after the fact. This is a spec input for the tech design, not a metrics platform.
+- *No secrets in audio you don't control:* the PIN is entered by the caller, never
+  spoken by the agent; the greeting reveals nothing about which threads exist to an
+  unauthenticated caller.
+- *Data hygiene:* real numbers/PINs never land in the repo — fixtures and this doc
+  use synthetic values (e.g. =+1XXX-…=, PIN =000000= as an illustrative placeholder
+  meeting the six-digit minimum).
+
+* Intersections with existing machinery (constraints, not design)
+
+- *Telephony primitives (=phone-call.el=, shipped):* answer/hang-up/detect exist;
+  what's missing is *server-triggered auto-answer* (today a human taps Accept) and
+  the *audio bridge* (answer connects the call; audio was explicitly deferred).
+- *The PCM bridge* must be ONE real-time process owning =ttyUSB4= + the freed AT
+  port, matched read/write at the modem clock. It lives *on the phone* (it owns the
+  serial port) — a new real-time component, not elisp (elisp drives call *control*;
+  audio is bytes).
+- *emacsos server (=app.py=/=channel.py=):* already embeds the assist agent via
+  =AgentSpec= with a persistent =SqliteSaver=. It has *no thread-list, domain, or
+  =interrupt_on=*; the voice client uses the shipped shared catalog/receptionist
+  rather than extending this embedding. The single-flight
+  =_STREAM_LOCK= (one stream server-wide) interacts with a live call holding a
+  stream — confirm the call's turn loop and any concurrent web turn don't contend.
+- *assist thread/domain surfaces:* the read-only =ThreadCatalog= and constrained
+  receptionist are shipped shared services. =ASSIST_DOMAINS= + =DomainManager= and
+  =create_thread_with_message= remain web-hosted integration points that PR4 adapts.
+- *Validation asymmetry:* emacsos has *no small-model eval harness* (ERT + pytest +
+  =make smoke= + live phone). BUT the *router agent is an assist-side agent running
+  assist's model* — so its behavior (thread disambiguation, domain elicitation, the
+  four-way turn choices) CAN and SHOULD be evaled in assist's =edd/eval/= (N=3→10),
+  exactly like the interjection/progressive-responses suites. The audio/flow layer
+  validates the emacsos way (fixtures + live phone).
+
+* Decisions (opinionated — push back on any)
+
+1. *PIN via DTMF, not spoken; caller-ID allowlist gates the prompt.* DTMF is immune
+   to STT error and room noise and doesn't make the security step depend on the
+   hardest unsolved problem (prompt-vs-noise). Unknown numbers never get a PIN
+   prompt (→ no answer); N wrong tries → declined. (Open: confirm the default
+   in-band Goertzel detector over a real AMR call; modem =AT+CDTMF= URCs are the
+   hardware-gated fallback if tones are mangled.)
+2. *Router = the shipped constrained assist receptionist (thread-list tools only).*
+   Tools:
+   =list_threads= (descriptions + status, NO contents), =open_thread(selector)=
+   (number, id, or topic substring; handoff), and =new_thread(domain,
+   first_message)= (domain required, with atomic initial turn). Its shipped
+   =ThreadCatalog= provides read-only descriptions/status without thread contents;
+   voice reuses it instead of reaching into =manage/web/=.
+3. *The phone bridge is a dumb full-duplex PCM pump; VAD/endpointing/barge-in +
+   STT/LLM/TTS run on the server.* This keeps one flow owner and puts interpretation
+   and compute on the home box. The phone streams continuous framed PCM up and
+   TTS/control frames down over the home LAN.
+   (Alternative, as a latency optimization: on-Pi whisper/piper — validated feasible
+   on the Zero 2 W — flagged, not v1.)
+4. *v1 is barge-in half-duplex.* One speaks, the other listens, either can
+   interrupt. "Natural enough," and it's how good voice assistants already feel.
+   True full-duplex overlap (backchannels while you talk) is a stretch goal. Lean on
+   telephony's high SNR for noise rejection before reaching for a wake word.
+5. *Reuse existing interaction mechanisms — do not build a parallel one (review
+   #5).* Async subagents and ordinary turns reuse PR #213's durable Run service,
+   task lifecycle, interjection path, and terminal observer; the
+   only additions are a *voice-delivery adapter* (speak-when-ready if on-call, else
+   thread-update/notify) and treating *barge-in as an inbound interjection*. The
+   *receptionist itself* builds on the same interjection/event model (its
+   turn-taking, hand-off, and async-result delivery are that machinery extended
+   where necessary), not a new voice-specific conversation mechanism. New
+   async-subagent capability shipped in the harness via PR #213, not the voice
+   client. Do not build new agent core.
+6. *Unauthorized path = no answer or decline, not voicemail (review #2).* Unknown
+   callers ring out; a known caller who fails the PIN hears "not available" before
+   hang-up. Nothing is captured. Voicemail (capture → STT →
+   a durable item, likely reusing the inbound-message path the SMS forwarder
+   established) is a *follow-on feature designed independently* — pulled out of
+   this effort's scope so v1 stays "authenticated voice access to assist."
+7. *STT = faster-whisper (validated); TTS = piper* (local, fast, CPU-fine),
+   both behind an in-process speech boundary in the session host per Decision 3.
+8. *Phasing — build the hardware-independent 80% now (Decision below), hardware-gate
+   only the live-bridge / auto-answer / uplink / latency validation.*
+
+* Phasing — a lot we can build WITHOUT the assembled phone
+
+The Pi/power/bridge aren't ready, but most of this doesn't need them. Build and
+test against loopback / recorded-audio fixtures; hardware-gate only what truly
+needs the live modem. *Each phase is independently TESTABLE — not necessarily
+independently usable (review #10)* — with explicit validation criteria, so the
+next phase builds on verified behavior rather than a usable-end-to-end slice.
+(E.g. the STT boundary is "done" when it transcribes the fixture corpus at
+target WER, even though nothing calls it yet; the router phase is "done" when its
+eval suite passes, before any audio exists.)
+
+** Buildable + testable now (no phone hardware)
+- *Shipped foundation:* the receptionist and read-only thread catalog (Decision 2)
+  already passed assist evals. Voice-specific work adapts their handoff callbacks
+  to create/select a session; it does not rebuild their tools or prompt.
+- *Conversation-flow engine* (VAD + endpointing + barge-in + turn-taking state
+  machine) developed against a *WAV/loopback fixture* instead of live =ttyUSB4= —
+  the bridge's read/write is an interface with a fake behind it. This is the hard
+  part and it needs no modem.
+- *In-process speech boundary* (faster-whisper STT + Piper TTS), unit-tested with
+  locally provisioned models.
+- *PIN/auth + decline logic* with DTMF stubbed and the caller-ID allowlist —
+  pytest-testable. (No voicemail — review #2.)
+- *Async voice-delivery adapter* over the durable Run/terminal-observer path.
+- *Structured call-event logging* (review #6) — testable against a scripted
+  call trace independent of hardware.
+
+** Hardware-gated (needs the assembled, powered phone)
+- The *real-time synchronized full-duplex bridge* on live =ttyUSB4= (exact clocking
+  / chunk-matching only proves on hardware); *uplink* validation (never done yet).
+- *Server-triggered auto-answer* end-to-end on a live inbound call.
+- *In-band Goertzel DTMF* over a real AMR call (then modem-URC fallback only if
+  mangled); *end-to-end latency* over real cellular; *power rail* stability under
+  a sustained call + STT/TTS load (the Pololu rail install).
+
+* Success measures
+
+- *Auth:* authorized-in works; unknown callers are not answered; failed-PIN callers
+  are reliably declined; nothing is captured and no PIN oracle is exposed;
+  brute-force is locked out. Same backend
+  permission model as every client (review #11).
+- *Router:* thread pick-by-topic and new-thread-with-domain succeed at a stable
+  rate in the assist eval harness; *zero* thread-content leakage from the router.
+- *Naturalness:* endpointing doesn't clip mid-thought and doesn't fire on noise
+  (measured false-trigger + premature-cutoff rates on a fixture corpus and live);
+  barge-in stops TTS promptly; time-to-first-audio bounded.
+- *Async:* no dead air — every long turn either speaks-when-ready or delivers out
+  of band; nothing is silently dropped.
+
+* Open questions
+
+- *DTMF over the real carrier* — validate in-band Goertzel first; probe modem URCs
+  only if AMR mangles the tones.
+- *Barge-in on a balanced full-duplex stream* — switching uplink from TTS to silence
+  mid-stream without a modem-clock desync; the bridge must make this a clean swap.
+- *Phone bridge scheduling* — the phone remains a dumb PCM pump in the dedicated
+  =server/emacsos_server/call_bridge.py= daemon; confirm its scheduling priority.
+  Flow/session ownership is settled server-side.
+- *Latency of STT→LLM→TTS against the one llama slot* — router vs in-thread budgets;
+  pre-warming; whether the call holds a dedicated slot vs contends with web turns
+  (the =_STREAM_LOCK= interaction).
+
+* Out of scope / next experiments
+- True full-duplex overlap + backchannels; outbound agent-initiated calls; multi-
+  user speaker-ID; mobility/away-from-home; multi-call/call-waiting; smarter
+  voicemail triage (summarize/route/auto-reply).
+
+* Review resolutions (Pierre, 2026-07-21) — each recommendation → section
+
+Every numbered recommendation from the PR review, linked to where it now lives
+(review #1's "link recommendations to sections" request):
+
+1. *DTMF PIN, deterministic* → Decision 1 + Security (already the design; made
+   explicit — auth must not depend on STT/noise).
+2. *Remove voicemail from scope* → Goal (scope note), US-6, Decision 6,
+   Non-goals, Security, Success. v1 leaves unknown callers unanswered and declines
+   failed-PIN callers; voicemail is a follow-on designed independently.
+3. *Conversational thread selection (not menu/DTMF); yield to expressed intent*
+   → Product-behavior step 3 + US-2 + Decision 2.
+4. *Receptionist proactively summarizes a FEW relevant threads, yields on intent*
+   → Product-behavior step 3 (urgent/recent/new, a few only, never a spoken menu).
+5. *Reuse existing interaction mechanisms; receptionist on the interjection/event
+   model, no parallel mechanism* → Decision 5 + the async section.
+6. *Observability: structured, machine-readable logs, event boundaries +
+   timestamps, agent-reconstructable* → new Security/Observability bullet +
+   Phasing (buildable-now).
+7. *Thin voice client over existing assist arch; reuse thread + execution model*
+   → async section (net-new-capability paragraph) + Decision 5.
+8. *Additional async-subagent capability lives in the HARNESS, not the voice
+   client; call out for the tech design* → async section + tech design §7, reconciled
+   to shipped assist PR #213.
+9. *Long-term direction: ALL subagents execute asynchronously — an assist-wide
+   architectural direction planned in the tech design* → PR #213 shipped durable
+   child Runs and migrated the web/main path voice reuses while retaining legacy
+   compatibility; async section + tech design §7 record the shipped shape.
+10. *Each phase independently TESTABLE (not necessarily usable), clear validation
+    criteria* → Phasing intro (+ examples).
+11. *Voice client inherits the same backend auth/authz model; "constrained" =
+    interaction surface, not reduced permissions* → new Security bullet + Success.
+12. *Build on the existing validated voice/telephony work; connect the plan to it,
+    no parallel implementation* → "What is already real" + Companion docs; the
+    companion technical design traces each deliverable to the proven pieces
+    (=phone-call.el=, the PCM-bridge facts, the streaming/thread-model docs).
+
+* Companion docs
+- emacsos: =2026-06-18-call-audio.org= (PCM bridge facts), =2026-06-18-inbound-
+  answering.org= (detect/answer), =2026-06-20-call-control-keyboard.org=,
+  =2026-05-17-streaming-responses.org= (NDJSON events), =2026-05-27-file-backed-
+  chat.org= (thread model), =hardware-build.org= (the power rail / assembly).
+- assist: the progressive-responses + mid-turn-interjection PRDs/design docs
+  (async delivery + barge-in reuse) and the blank-slate assessment (event log).
+
+* Outcome
+(Append the branch/PR + what shipped vs deferred once implementation lands.)
