@@ -1,7 +1,9 @@
 #+title: PRD — Voice-call assistant: phone the agent, talk to your threads
 #+date: 2026-07-21
-#+author: product requirements (for review). Companion hardware/telephony facts live in
-#+author: 2026-06-18-call-audio.org, 2026-06-18-inbound-answering.org, 2026-06-20-call-control-keyboard.org.
+#+author: product requirements (for review)
+
+Companion hardware/telephony facts live in 2026-06-18-call-audio.org,
+2026-06-18-inbound-answering.org, and 2026-06-20-call-control-keyboard.org.
 
 * Problem
 

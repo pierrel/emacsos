@@ -1,13 +1,16 @@
 #+title: Tech design — Voice-call assistant
 #+date: 2026-07-21
-#+author: technical design (for review). Implements the PRD 2026-07-21-voice-call-assistant.org.
-#+author: Companion facts: 2026-06-18-call-audio.org, 2026-06-18-inbound-answering.org, 2026-05-17-streaming-responses.org, 2026-05-27-file-backed-chat.org.
+#+author: technical design (for review)
+
+Implements the PRD 2026-07-21-voice-call-assistant.org. Companion facts:
+2026-06-18-call-audio.org, 2026-06-18-inbound-answering.org,
+2026-05-17-streaming-responses.org, and 2026-05-27-file-backed-chat.org.
 
 This design was produced by an architect pass and hardened by a six-lens design
 review (simplicity, agentic/framework fit, user-intention, user-experience,
 clean-interfaces, threat-model). The *Review resolutions* section at the end maps
-every finding to where it now lives. Three items are deliberately left as
-*decisions for Pierre* (§0) rather than silently resolved.
+every finding to where it now lives. Section 0 records Pierre's resolutions to the
+three design forks rather than leaving their outcome implicit.
 
 * 0. Decisions — RESOLVED (Pierre, review round 2)
 
