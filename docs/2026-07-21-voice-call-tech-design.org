@@ -442,7 +442,7 @@ RING ──allowlisted──► GREETING_PIN ──pin ok──► ROUTER ──
   │ unknown (D2)        │ wrong pin (<N)──────────┘   DTMF * OR back-tool (D3) │
   ▼                     ▼ N strikes / global lockout      └───────────────┘  │
 DO-NOT-ANSWER (D2:      PIN_FAIL (final-strike clip states recovery, hangup;
- ring out, no ATA)       global lockout — §8; no detectors ran)               │
+ ring out, no ATA)       global lockout — §8; no STT/VAD ran)                  │
 Any state ──call_end / hangup──► ENDED (detaches immediately; in-flight turn
                                  continues as an ordinary queued turn; its
                                  observer routes to badge since the call is dead)
