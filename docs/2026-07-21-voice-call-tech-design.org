@@ -45,14 +45,16 @@ Resolution, updated for authoritative assist PR #213:
    EmacsOS-client / shared-service / Assist-harness placement is re-evaluated for every
    responsibility (§1).
 
-** D2. Unknown callers — RESOLVED: do not answer; fail fast, release resources
+** D2. Unknown callers — RESOLVED: do not answer; avoid session allocation
 Pierre: "unknown callers should fail fast and release resources as quickly as
 possible." So: *no =ATA=* for a non-allowlisted caller — let it ring out (the
 existing =phone-call.el= human screen still lets him pick up manually). No connected
-call, no pre-auth answer cost, no decline clip, no modem-occupancy window, minimal
-liveness signal to a scanner. (Voicemail is already out of scope per the PRD, so
-there was never a product reason to speak to strangers.) §5/§8 updated: DECLINE
-becomes DO-NOT-ANSWER with zero detectors and immediate release.
+call, no pre-auth answer cost, no decline clip, and minimal liveness signal to a
+scanner. The unanswered ring still occupies the sole modem until carrier timeout;
+repeated unknown calls can deny authorized calls during that window. v1 accepts
+that residual to preserve manual pickup. (Voicemail is already out of scope per the
+PRD, so there was never a product reason to speak to strangers.) §5/§8 updated:
+DECLINE becomes DO-NOT-ANSWER with zero detectors and no server session allocation.
 
 ** D3. "Go back" to the receptionist — RESOLVED: BOTH DTMF =*= and an agent tool
 Pierre: "support *both* a deterministic DTMF escape (=*=) and an agent-invoked
@@ -156,9 +158,9 @@ application of that boundary.
 | Async work                     | durable child Runs + parent wake-up + task lifecycle tools — PR #213                                                                                                               |
 | Barge-in / mid-turn input      | pending durable Runs + =InterjectionMiddleware=; voice owner turns use the same ordinary-turn path as web input — PR #213                                                    |
 | Async result delivery          | turn-completion observer seam (=_geo_on_complete= as precedent)                                                                                                                     |
-| Thread catalog                 | =ThreadManager.list()= + =description.txt=/=status.json=/urgent-marker reads (state.py) — lifted, not duplicated                                                                  |
+| Thread catalog                 | shipped read-only =assist/catalog.py= mirrors the web-owned metadata reads without exposing contents; web migration remains later work                                                                          |
 | Router construction            | =langchain.agents.create_agent= (LangChain 1.x prebuilt loop) — *net-new wiring*, deliberately NOT assist's =create_agent= (§4)                                                   |
-| VAD / endpointing / DTMF / TTS | *net-new* per PRD (the feature's real new engineering) — no prior piece to trace                                                                                                  |
+| Voice flow + speech            | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF) + =speech.py= (STT/TTS); remaining work is wire/session reuse and the phone PCM bridge                                                            |
 | Router eval                    | =edd/eval/= harness, =test_interjection.py= in-memory-callback pattern                                                                                                            |
 | Call-event log                 | =append_event= O_APPEND/torn-line discipline (=thread_log.py=)                                                                                                                     |
 | Phone daemon deploy            | =deploy-sms-forward= Makefile pattern                                                                                                                                             |
@@ -248,7 +250,7 @@ Accept =ATA='s an active call → modem =ERROR= → harmless.
 
 * 3. Thread-catalog API (Decision 2)
 
-*New file: assist =assist/catalog.py=* (~100 lines, read-only, no model calls, no
+*Shipped file: assist =assist/catalog.py=* (~100 lines, read-only, no model calls, no
 =Thread= construction):
 - =@dataclass CatalogEntry: id, description, status, updated_at, urgent: bool=
   (=urgent= added per clean-interfaces #4 — the receptionist ranks urgent>recent>new
@@ -256,15 +258,13 @@ Accept =ATA='s an active call → modem =ERROR= → harmless.
 - =ThreadCatalog(manager: ThreadManager)= (takes the manager — one dir scan, one
   tid-validation path) with =entries() -> list[CatalogEntry]= and
   =get(tid) -> CatalogEntry | None=.
-- Lifts the *file-reading halves* of: =ThreadManager.list()='s scan + =.deleted=
-  filter + mtime sort; =description.txt= read; =status.json= read; urgent-marker
-  read in =state.py=. Missing description → ="New thread"= (never
-  generates one — generation needs a model, stays web-side).
-- *What moves from =manage/web=:* only the reads. =DESCRIPTION_CACHE=,
-  =set_description=, generate-on-miss, status *writes* stay in =state.py=. All *three*
-  =description.txt= read sites (=get_cached_description=, =_thread_title=
-  cache-miss, and the status path) become thin wrappers over the catalog, so
-  web + voice share one surface (clean-interfaces #12).
+- Mirrors the web-owned file reads: =ThreadManager.list()='s scan + =.deleted=
+  filter + mtime sort; =description.txt=; =status.json=; urgent marker. Missing
+  description → ="New thread"= (never generates one — generation needs a model,
+  stays web-side).
+- The shipped P0.5 slice deliberately does not migrate =manage/web=: its caches,
+  reads, generation, and writes remain there. The catalog is the shared read-only
+  voice surface; consolidating web readers is a later increment.
 
 Contents are unreachable by construction: the module has no checkpoint access, no
 message read, no path into =threads.db=.
@@ -279,15 +279,15 @@ message read, no path into =threads.db=.
   - =list_threads()= → spoken-shaped lines from =catalog.entries()= (bounded ~20).
   - =open_thread(selector)= → accepts *number | id | description-substring* (the
     small model keeps habitual arg shapes — agentic #6, pinned by the shipped P0.5
-    eval); validates against the last listing (session-scoped
-    closure state), calls =on_open(tid)=, returns a spoken directive that *names the
-    thread* ("Connecting you to the bike-trip thread." — UX #13, the only mis-route
-    catch the caller gets).
+    eval); numeric selectors resolve against the last listing, while ids and topic
+    substrings resolve against the full catalog. It calls =on_open(tid)= and returns
+    a spoken directive that *names the thread* ("Connecting you to the bike-trip
+    thread." — UX #13, the only mis-route catch the caller gets).
   - =new_thread(domain, first_message)= → validates =domain= against the injected
     =ASSIST_DOMAINS= labels, calls =on_new(domain, first_message)= which wraps
-    =create_thread_with_message= (manage/web) and *returns the new tid* so the
-    session can bind (clean-interfaces #5; the PRD's Intersections named this
-    surface). Single-domain fixture → docstring says pass it without asking (US-3).
+    =create_thread_with_message= (manage/web) and creates + binds the session as a
+    callback side effect; the tool ignores its return value. Single-domain fixture →
+    docstring says pass it without asking (US-3).
 - *Callback contracts (clean-interfaces #5):* =on_open=/=on_new= are synchronous, run
   on the session worker thread; failures (thread deleted between listing and open,
   domain-creation error) are *caught inside the tool* and returned as a spoken
@@ -640,8 +640,9 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
   unlimited 3-strike windows. The lockout is *global*: total PIN failures per rolling
   window across all callers → the line stops offering the PIN prompt for a cooldown.
   PIN is *≥6 digits* (it is the crypto root).
-- *Do-not-answer unknowns (threat-model #2 → §0/D2):* pending Pierre's D2 call;
-  recommended. Removes the answer cost + the single-modem self-DoS window.
+- *Do-not-answer unknowns (threat-model #2 → §0/D2):* required. It removes answer
+  and server-session cost, but the sole modem remains occupied until carrier ring
+  timeout; v1 accepts that residual to preserve manual pickup.
 - *Detector scoping (threat-model #3, §5):* "no *model/STT* pre-auth" enforced by
   state — DO-NOT-ANSWER / PIN_FAIL instantiate zero STT detectors; GREETING_PIN runs only
   DTMF.
@@ -729,7 +730,8 @@ flow, speech, wire, session, and security work.
    ordinary-Run scheduling and/or the interactive waiter.
 2. *In-band DTMF through AMR:* may be mangled. Ship Goertzel first (testable now); P3
    probes modem-URC as the swap. If both fail: spoken-digit PIN is *rejected*
-   (Decision 1); fallback = allowlist-only + longer cooldowns — flag to Pierre.
+   (Decision 1), caller ID is insufficient authentication, and the milestone remains
+   hardware-blocked rather than weakening the gate.
 3. *TTS echo triggering barge-in:* raised in-SPEAKING thresholds; truth in P3;
    escalation = energy-correlation echo suppression in flow.py.
 4. *Modem clock drift* (~16.7 kHz): calibration constant from =bridge_stats=; P3.
@@ -791,7 +793,7 @@ hand-off names the thread, backchannel variety.
 *Clean-interfaces:* hosting argument rewritten (§1/D1); durable Run reuse (§5);
 WS lifecycle pinned — per-call, bridge mints =call_id=, binary-frame rules,
 forward-compat (§2); =CatalogEntry.urgent= (§3); callback contracts — sync, thread,
-=on_new= returns tid, caught failures (§4); observer contract — list, isolation,
+=on_new= creates + binds as a side effect, caught failures (§4); observer contract — list, isolation,
 thread, =run_id= (§7); =extra_tools= not =voice=True= (§4/D3); flow.py purity
 restated (§5); third =description.txt= read site swept (§3); naming (receptionist,
 =bridge.py=).
