@@ -107,7 +107,7 @@ PHONE (Pi Zero 2 W)                       HOME BOX (assist manage.web, one uvico
 │  - D-Bus ring watch     │  audio+ctl   │   wire.py     WSS /call endpoint           │
 │  - ATA / AT+CHUP        │  (encrypted) │   flow.py     VAD/endpoint/barge-in/DTMF   │
 │  - CPCMREG PCM pump     │              │   session.py  Gate→Router→InThread SM      │
-│    (balanced, one thread)│              │              + calllog + speech (in-proc) │
+│    (balanced pump)       │              │              + calllog + speech (in-proc) │
 │  - jitter buffer        │              │   speech.py   whisper+piper, lazy in-proc  │
 │  (ttyUSB3 + ttyUSB4)    │              │  assist/catalog.py (read-only, Decision 2) │
 ├─────────────────────────┤              │  assist/receptionist.py (protected router) │
@@ -189,9 +189,10 @@ Internal structure (all one file):
 - =AtPort= — opens ttyUSB3 exclusive (=TIOCEXCL=) for the call's duration only;
   released at hangup so =phone-call.el='s per-call open/close human path coexists.
 - =PcmPump= — the load-bearing invariant, *balanced by construction*: one thread,
-  blocking-read one 20 ms chunk (640 B) from ttyUSB4, then immediately write one
-  same-size chunk from =JitterBuffer.pop() or SILENCE=. *The modem read is the
-  clock*; the pump never sleeps on a timer, so read/write cannot diverge. Barge-in's
+  blocking-read one 320-sample chunk (640 B, nominally 20 ms at the 16 kHz protocol
+  rate) from ttyUSB4, then immediately write one same-size chunk from
+  =JitterBuffer.pop() or SILENCE=. *The modem read is the clock*; the pump never
+  sleeps on a timer, so read/write cannot diverge. Barge-in's
   "clean swap without desync" therefore dissolves: TTS→silence is just the buffer
   clearing; the write cadence never changes.
 - =JitterBuffer= — TTS PCM from the WS, target depth ~240 ms, underrun → silence,
@@ -218,10 +219,10 @@ Internal structure (all one file):
 - binary: raw s16le 16 kHz mono; phone→server = downlink (continuous once
   =CPCMREG=1=), server→phone = TTS. Bound to the call by the connection.
 
-*Transport security (threat-model #4):* the =dtmf= frames carry the PIN
-digit-by-digit, and the PCM carries the caller's voice — so the WS *must* be WSS or
-enforced WG-only-encrypted end-to-end. Plain =ws://= on the LAN is forbidden; the
-deploy gate (§8) states this.
+*Transport security (threat-model #4):* the PCM carries the caller's voice and the
+in-band PIN tones; the modem-URC fallback also duplicates PIN digits into =dtmf=
+frames. The WS therefore *must* be WSS or enforced WG-only-encrypted end-to-end.
+Plain =ws://= on the LAN is forbidden; the deploy gate (§8) states this.
 
 *Clock calibration:* measured modem rate is ~16.7 kHz, not 16.000; TTS at 16 kHz
 consumed at 16.7 kHz plays ~4 % fast. =speech.py= always emits protocol-rate 16 kHz.
@@ -650,8 +651,9 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
 - *Detector scoping (threat-model #3, §5):* "no *model/STT* pre-auth" enforced by
   state — DO-NOT-ANSWER / PIN_FAIL instantiate zero STT detectors; GREETING_PIN runs only
   DTMF.
-- *Encrypted transport (threat-model #4):* WSS or WG-only-encrypted mandatory; =dtmf=
-  frames are PIN-bearing in transit; plain =ws://= forbidden. *Deploy gate:* the
+- *Encrypted transport (threat-model #4):* WSS or WG-only-encrypted mandatory; PCM
+  carries the in-band PIN and optional fallback =dtmf= frames also carry its digits.
+  Plain =ws://= is forbidden. *Deploy gate:* the
   =0.0.0.0= bind means "WG-only" depends on a host firewall the deploy must assert (or
   bind the voice route to the WG interface explicitly).
 - *WS resource caps, quantified (threat-model #5 — the class the SMS daemon missed):*
