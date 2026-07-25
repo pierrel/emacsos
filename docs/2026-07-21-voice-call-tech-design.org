@@ -411,10 +411,12 @@ timing a lot on live hardware (P3). Named as an early real-world-testing watch i
 (§11).
 
 ** session.py — per-call =VoiceSession=, the state machine
-One call at a time (one modem). *Threading (agentic #2):* the async WS handler only
-shuttles frames to/from an inbound queue and a bounded generation-aware outbound
-buffer via nonblocking operations (event-loop liveness: no lock, no I/O, no model
-call on the loop thread). The session *loop* thread runs STT + commits Runs and
+One call at a time (one modem). *Threading (agentic #2):* the async WS receive/send
+tasks shuttle frames to/from an inbound queue and a bounded generation-aware outbound
+buffer, but every queue/buffer operation crosses through =run_in_threadpool=. Thus
+no queue mutex, file I/O, or model call runs on the event-loop thread. One outbound
+=get= may be in flight off-loop; that is the one frame allowed by the §5.7 residual
+bound. The session *loop* thread runs STT + commits Runs and
 stays free during THINKING; each *turn* runs on a dedicated turn-runner thread — so a
 caller steering mid-turn ("no, the other one") produces an utterance the session can
 commit *while its own turn is still running*, and =InterjectionMiddleware.before_model=
