@@ -412,11 +412,14 @@ timing a lot on live hardware (P3). Named as an early real-world-testing watch i
 
 ** session.py — per-call =VoiceSession=, the state machine
 One call at a time (one modem). *Threading (agentic #2):* the async WS receive/send
-tasks shuttle frames to/from an inbound queue and a bounded generation-aware outbound
-buffer, but every queue/buffer operation crosses through =run_in_threadpool=. Thus
+tasks shuttle frames through bounded closeable inbound/outbound buffers (outbound is
+also generation-aware), but every buffer operation crosses through =run_in_threadpool=. Thus
 no queue mutex, file I/O, or model call runs on the event-loop thread. One outbound
 =get= may be in flight off-loop; that is the one frame allowed by the §5.7 residual
-bound. The session *loop* thread runs STT + commits Runs and
+bound. Each buffer's idempotent =close()= atomically marks closed, discards call-local
+backlog, and wakes every blocked getter/putter. Every WS/session teardown path closes
+both buffers in =finally=; coroutine cancellation alone cannot stop an already-running
+worker call. The session *loop* thread runs STT + commits Runs and
 stays free during THINKING; each *turn* runs on a dedicated turn-runner thread — so a
 caller steering mid-turn ("no, the other one") produces an utterance the session can
 commit *while its own turn is still running*, and =InterjectionMiddleware.before_model=
@@ -701,7 +704,7 @@ milestone. Each has explicit validation so the next builds on verified behavior.
 |------+----------------------------------------------------------------------------------------------------------+------------------+--------|
 | P0   | *Durable Run service + observer seam + PROD BAKE* (D1 milestone)                                        | assist           | *DONE.* PR #213 is authoritative: every accepted turn persists before dispatch; ordinary and child Runs share queueing, interjection, terminal-state, and recovery semantics; the terminal observer carries =run_id=. |
 | P0.5 | Thread-catalog + receptionist (vanilla LangChain) + eval                                                 | assist           | *DONE.* =test_catalog.py= (read-only, =.deleted= filter, urgent read, missing-file fallbacks); receptionist eval stable at N=10 incl. spoken-output filter and go-back false-fire cases. Async-subagent architecture subsequently shipped in PR #213. |
-| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in invalidates/purges TTS then enqueues =flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer is the single reply source; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; in-process TTS API produces correct-rate PCM |
+| P1   | Flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational contract, vs the fake bridge | assist  | scripted-call pytest: endpointing premature-cutoff + false-trigger rates within targets; barge-in invalidates/purges TTS then enqueues =flush_uplink= within 1 frame *without cancelling the in-flight turn* (§5, Pierre FB); Goertzel DTMF on synth tones incl. noise; global lockout; per-state detector scoping (no STT in DO-NOT-ANSWER/GREETING_PIN); silence watchdog fires; observer is the single reply source; event log reconstructs the call; STT WER ≤ target + =no_speech_prob= discriminates noise; in-process TTS API produces correct-rate PCM; disconnect wakes empty-outbound and full-inbound buffer waiters |
 | P2   | Async delivery + go-back (*DTMF =*= AND =back_to_receptionist()= tool*, per D3) + (interactive queue *iff* observed) | assist | observer unit tests; fake-bridge: child task completes → its durable parent wake completes and the observer emits =async_delivered{mode:spoken}= mid-call; after hangup → thread-only; ROUTER-state delivery mentions it; *both* go-back paths return to ROUTER cleanly (DTMF deterministic; tool with its false-fire eval); hang-up detaches, call-back binds fresh |
 | P3   | Live bridge (hardware-gated) + naturalness tuning                                                        | emacsos + assist | uplink validated first time (far end hears TTS cleanly, no "airplane static"); auto-answer e2e on a live inbound call; clock calibration; DTMF in-band on real carrier (else URC probe + swap); *barge-in feel + the varied "processing" ack (Pierre FB) tuned live*; e2e first-audio vs 1.5 s; power-rail soak under a sustained call + STT/TTS |
 
