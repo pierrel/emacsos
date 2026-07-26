@@ -56,9 +56,10 @@ The load-bearing gaps (net-new, this feature's real engineering):
   chunks at the modem's ~16.7 kHz clock, in ONE process — two loose pipes desync
   and the far end hears "airplane static." Uplink has never been validated on
   hardware. This bridge is the core hardware-gated deliverable.
-- *TTS + the in-process STT boundary now exist in assist P1 PR2.* Whisper/Piper
-  are local, lazy, provisioned before calls, and verified together; wire/session
-  scheduling remains a later P1 slice.
+- *Flow, speech, and the bounded wire transport now exist in assist P1 PR1–PR3.*
+  Whisper/Piper are local, lazy, provisioned before calls, and verified together;
+  =flow.py= owns VAD/endpointing/barge-in/DTMF; =wire.py= owns authenticated bounded
+  WSS =/call=. The per-call =session.py= integration/scheduling remains P1 PR4.
 - *The shared thread catalog and receptionist now exist in assist P0.5.*
   The separate emacsos =app.py= embedding path still runs the assist agent against
   a single fixed thread (or ad-hoc
@@ -326,15 +327,14 @@ target WER, even though nothing calls it yet; the router phase is "done" when it
 eval suite passes, before any audio exists.)
 
 ** Buildable + testable now (no phone hardware)
-- *Shipped foundation:* the receptionist and read-only thread catalog (Decision 2)
-  already passed assist evals. Voice-specific work adapts their handoff callbacks
-  to create/select a session; it does not rebuild their tools or prompt.
-- *Conversation-flow engine* (VAD + endpointing + barge-in + turn-taking state
-  machine) developed against a *WAV/loopback fixture* instead of live =ttyUSB4= —
-  the bridge's read/write is an interface with a fake behind it. This is the hard
-  part and it needs no modem.
-- *In-process speech boundary* (faster-whisper STT + Piper TTS), unit-tested with
-  locally provisioned models.
+- *Shipped foundation:* the receptionist/read-only catalog plus Flow, Speech, and
+  bounded Wire layers are merged and deployed in assist (PRs #208/#209/#211/#214).
+  Voice-specific session work consumes them; it does not rebuild their tools,
+  prompt, audio detectors, speech wrappers, codec, or transport bounds.
+- *NEXT: the conversation session state machine* against the shipped fake bridge:
+  bind the receptionist handoff, Flow, Speech, Wire, durable Run/observer path,
+  serialized TTS/barge-in, and call-event log. The hard stateful integration needs
+  no modem and is assist P1 PR4.
 - *PIN/auth + decline logic* with DTMF stubbed and the caller-ID allowlist —
   pytest-testable. (No voicemail — review #2.)
 - *Async voice-delivery adapter* over the durable Run/terminal-observer path.
@@ -427,4 +427,8 @@ Every numbered recommendation from the PR review, linked to where it now lives
   (async delivery + barge-in reuse) and the blank-slate assessment (event log).
 
 * Outcome
-(Append the branch/PR + what shipped vs deferred once implementation lands.)
+Design merged in emacsos PR #33. Hardware-independent implementation lives in
+assist; live status is [[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. As of 2026-07-26,
+P1 PR1–PR3 (Flow/Speech/Wire) are merged and deployed; PR4 =session.py= is next,
+then PR5 security/reconstruction. The synchronized PCM bridge and live-phone
+validation remain deferred to hardware-gated P3 in emacsos.

@@ -12,6 +12,12 @@ clean-interfaces, threat-model). The *Review resolutions* section at the end map
 every finding to where it now lives. Section 0 records Pierre's resolutions to the
 three design forks rather than leaving their outcome implicit.
 
+*Implementation status (2026-07-26):* this design merged in emacsos PR #33.
+Assist P1 PR1–PR3 are merged and deployed: Flow (#209), Speech (#211), and bounded
+Wire =/call= (#214). They remain intentionally unwired end-to-end. *NEXT is assist
+PR4 =session.py=*, then PR5 security/reconstruction; the phone PCM bridge is P3.
+Live slice status: [[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]].
+
 * 0. Decisions — RESOLVED (Pierre, review round 2)
 
 The three forks this design left open are now settled by Pierre's review. Recorded
@@ -164,7 +170,7 @@ application of that boundary.
 | Async result delivery          | turn-completion observer seam (=_geo_on_complete= as precedent)                                                                                                                     |
 | Thread catalog                 | shipped read-only =assist/catalog.py= mirrors the web-owned metadata reads without exposing contents; web migration remains later work                                                                          |
 | Router construction            | =langchain.agents.create_agent= (LangChain 1.x prebuilt loop) — *net-new wiring*, deliberately NOT assist's =create_agent= (§4)                                                   |
-| Voice flow + speech            | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF) + =speech.py= (STT/TTS); remaining work is wire/session reuse and the phone PCM bridge                                                            |
+| Voice flow + speech + wire     | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF), =speech.py= (STT/TTS), and bounded =wire.py= WSS transport; remaining work is session/security integration, then the phone PCM bridge             |
 | Router eval                    | =edd/eval/= harness, =test_interjection.py= in-memory-callback pattern                                                                                                            |
 | Call-event log                 | =append_event= O_APPEND/torn-line discipline (=thread_log.py=)                                                                                                                     |
 | Phone daemon deploy            | =deploy-sms-forward= Makefile pattern                                                                                                                                             |
@@ -363,17 +369,17 @@ In-memory =FakeCatalog= + captured =on_open=/=on_new=, the =test_interjection.py
 
 * 5. Conversation-flow engine + state machine (server-side)
 
-*New files: assist =manage/voice/flow.py=, =manage/voice/session.py=,
-=manage/voice/wire.py=, =manage/voice/speech.py=* (3–4 modules — =calllog= folds into
-=session.py=; =speech.py= is the in-proc whisper/piper wrapper). Route registered on
-the existing =app= via lifespan.
+*Assist voice modules:* =manage/voice/flow.py=, =wire.py=, and =speech.py= are
+shipped (PRs #209/#214/#211); the =/call= route is registered on the existing app.
+=manage/voice/session.py= is the next planned module (=calllog= folds into it) and
+will configure Wire's synchronous runner seam.
 
 ** flow.py — hermetic frame-in / event-out engine (clean-interfaces #9)
 Contract: consumes 20 ms PCM frames, emits events; *no web imports, no network, no
 threads, no wall clock* (time is derived from frame count — this is what makes
-fixture tests deterministic); the *only* I/O is loading the silero onnx model at
-construction.
-- *VAD: silero-vad* (onnxruntime CPU) over webrtcvad — US-7 (prompt-vs-noise) is the
+fixture tests deterministic); the *only* I/O is loading the silero ONNX model at
+the first VAD window (lazy, so pre-auth DTMF-only scope never loads it).
+- *VAD: silero v5 ONNX via onnxruntime CPU* over webrtcvad — US-7 (prompt-vs-noise) is the
   stated hard requirement and webrtcvad's GMM detector is the trigger-happy one;
   server placement makes silero's cost irrelevant. (No =SpeechDetector= abstraction
   — one implementation, no contracted second; swap by editing the call site if
@@ -535,9 +541,9 @@ silence, and what each acknowledgment honestly means*:
     statement → "mm-hm"; sub-second turn → silence); count the 240 ms jitter-buffer
     fill in the first-audio budget (~540 ms perceived — within 1.5 s).
 
-*wire.py:* WSS =/call= endpoint — secret-header auth, one concurrent call, frame
-codec, per-call queues, the resource caps of §8.
-*speech.py:* lazy in-process whisper + Piper, synchronous and called only off the
+*wire.py (shipped PR #214):* WSS =/call= endpoint — secret-header auth, one
+concurrent call, frame codec, per-call queues, the resource caps of §8.
+*speech.py (shipped PR #211):* lazy in-process whisper + Piper, synchronous and called only off the
 event loop. STT runs on the session loop; a serialized per-call TTS producer splits
 sentence results into generation-tagged 20 ms frames while the session continues
 consuming inbound PCM. Token-streaming
@@ -723,8 +729,11 @@ milestone. Each has explicit validation so the next builds on verified behavior.
 P0–P2 are the hardware-independent ~80 %; only P3 needs the assembled phone.
 *P0 is the load-bearing de-risk:* the durable Run path is proven by the web client
 before voice becomes its second consumer (D1).
-The async-subagent dependency is complete; P1 remains limited to the voice-specific
-flow, speech, wire, session, and security work.
+The async-subagent dependency is complete; remaining P1 work is the voice-specific
+session and security integration.
+*Current P1 subphase:* PR1 Flow, PR2 Speech, and PR3 Wire are DONE/MERGED/DEPLOYED.
+PR4 =session.py= is NEXT; PR5 closes security and scripted-call reconstruction.
+The composite P1 row remains open until those fake-bridge criteria pass.
 * 11. Risks & open questions
 
 1. *Dead air behind a long superstep* (single slot): the silence watchdog covers the
@@ -734,8 +743,8 @@ flow, speech, wire, session, and security work.
    something *real-world testing will surface quickly*, so it's an *early-testing
    watch item*: if live calls hit it often, that is the evidence that triggers the
    ordinary-Run scheduling and/or the interactive waiter.
-2. *In-band DTMF through AMR:* may be mangled. Ship Goertzel first (testable now); P3
-   probes modem-URC as the swap. If both fail: spoken-digit PIN is *rejected*
+2. *In-band DTMF through AMR:* may be mangled. Goertzel shipped in assist PR #209;
+   P3 validates it on the carrier, then probes modem-URC as the swap if needed. If both fail: spoken-digit PIN is *rejected*
    (Decision 1), caller ID is insufficient authentication, and the milestone remains
    hardware-blocked rather than weakening the gate.
 3. *TTS echo triggering barge-in:* raised in-SPEAKING thresholds; truth in P3;
@@ -848,4 +857,7 @@ the appropriate sections"). All inline markers are folded and removed.
 to resolved per the above.
 
 * Outcome
-(Append the branches/PRs + shipped-vs-deferred once implementation lands.)
+Design merged in emacsos PR #33. Assist implementation status is maintained in
+[[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. As of 2026-07-26, assist PRs #209, #211,
+and #214 shipped Flow, Speech, and bounded Wire; PR4 Session and PR5 security/
+reconstruction remain. Phone-side =call_bridge.py= and live validation remain P3.

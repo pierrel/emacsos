@@ -89,6 +89,9 @@ boot too).
   `ConfigRepo.current().body` (committed config = next-restart source of truth) so the agent can read
   config after conversation memory is wiped; the skill mandates a `get_config` read before `apply_config`.
 - **Voice-call assistant:** emacsos owns the **phone-side PCM bridge** (P3, hardware-gated — the
-  `call_bridge.py` daemon: D-Bus ring watch, ATA/CHUP, the CPCMREG PCM pump). The receptionist/catalog/
-  session/speech all live in **assist** (see the meta `AGENTS.md` "Current state"); emacsos is the thin
-  device client. The current in-flight work is all assist-side (P1); emacsos's part is P3.
+  `call_bridge.py` daemon: D-Bus ring watch, ATA/CHUP, the CPCMREG PCM pump). The receptionist,
+  catalog, and all server-side voice/session responsibilities live in **assist** (see the meta
+  `AGENTS.md` "Current state"); emacsos is the thin device client. Assist P1 Flow, Speech, and
+  bounded Wire are merged/deployed (PRs #209/#211/#214);
+  `session.py` is next, then the security/reconstruction gate. The current in-flight work remains
+  assist-side; emacsos's implementation begins at P3 only after the fake-bridge contract is complete.
