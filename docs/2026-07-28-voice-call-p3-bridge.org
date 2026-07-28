@@ -1,0 +1,51 @@
+#+TITLE: Voice-call assistant P3 — phone bridge
+#+DATE: 2026-07-28
+
+* Scope
+
+Implement the EmacsOS client half of P3: the non-root daemon that owns one
+incoming SIM7600 call, connects it to Assist's existing WSS =/call= endpoint,
+and keeps serial PCM read/write balanced.  This slice stops before deployment
+or a real call; Pierre will start the live validation.
+
+* Fixed boundaries
+
+1. The bridge is a deterministic device client.  Assist retains authentication,
+   PIN, VAD, STT, TTS, and conversation state.
+2. One pump reads exactly one 640-byte modem PCM frame and immediately writes
+   exactly one 640-byte queued TTS frame or silence.  The modem read is the
+   clock; no independent reader, writer, or timer is allowed.
+3. The WSS client is per call.  Its secret comes only from a 0600 environment
+   file, and the bridge refuses a non-=wss://= URL or absent secret.
+4. Until Assist sends =answer=, no modem answer or PCM pump starts.  A second
+   inbound call is hung up locally while the first owns the bridge.
+5. Hardware adapters are narrow interfaces.  Tests use a fake modem and fake
+   link to prove control ordering, fixed PCM sizing, silence-on-underrun, and
+   =flush_uplink= without a modem, network, or secret.
+
+* Planned files
+
+1. =server/emacsos_server/call_bridge.py=: AT, ModemManager ring subscription,
+   WSS controls, jitter buffer, and the balanced pump.
+2. =server/tests/test_call_bridge.py=: fakes for the modem and link plus the
+   pump/control tests above.
+3. =server/pyproject.toml= and =Makefile=/=deploy/= wiring: install the daemon
+   and its dependencies but leave it disabled until explicitly configured.
+
+* Threat and liveness checks
+
+- The bridge adds no listener and never shells out.  Caller ID and D-Bus data
+  are serialized as JSON, bounded before logging, and never used as paths or
+  commands.
+- Only WSS is accepted.  The shared secret never appears in argv or logs.
+- Queue depth is bounded and drops stale downlink, while the pump always writes
+  a complete frame.  A stalled network sender cannot block modem PCM.
+- Every exit closes the WSS client, stops PCM, releases ttyUSB3, and sends the
+  modem hangup only for the bridge-owned call.
+
+* Live-test hold point
+
+Do not install the service, write its real environment file, enable PCM, or
+answer a call until Pierre asks to begin live testing.  That test first proves
+uplink audio is clean, then auto-answer, carrier DTMF, barge-in, and clock-rate
+calibration.

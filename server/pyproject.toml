@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.23",
     "pydantic>=2",
     "requests>=2.28",  # sms_forward daemon (inbound POST to assist)
+    "pyserial>=3.5",   # call_bridge daemon (SIM7600 AT + serial PCM)
+    "websockets>=14",  # call_bridge daemon (authenticated WSS PCM transport)
 ]
 
 [project.optional-dependencies]
