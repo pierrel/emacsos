@@ -17,8 +17,9 @@ or a real call; Pierre will start the live validation.
    clock; no independent reader, writer, or timer is allowed.
 3. The WSS client is per call.  Its secret comes only from a 0600 environment
    file, and the bridge refuses a non-=wss://= URL or absent secret.
-4. Until Assist sends =answer=, no modem answer or PCM pump starts.  A second
-   inbound call is hung up locally while the first owns the bridge.
+4. Until Assist sends =answer=, no modem answer or PCM pump starts.  Once modem
+   audio is ready, the bridge sends =answered= before Assist begins its PIN
+   flow.  A second inbound call is ignored while the first owns the bridge.
 5. Hardware adapters are narrow interfaces.  Tests use a fake modem and fake
    link to prove control ordering, fixed PCM sizing, silence-on-underrun, and
    =flush_uplink= without a modem, network, or secret.

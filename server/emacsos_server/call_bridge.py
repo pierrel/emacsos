@@ -206,10 +206,12 @@ class PcmPump:
     """Read one modem frame, queue it, then immediately write one uplink frame."""
 
     def __init__(self, modem: ModemAudio, uplink: JitterBuffer,
-                 downlink: DownlinkQueue) -> None:
+                 downlink: DownlinkQueue,
+                 on_failure: Callable[[], None] | None = None) -> None:
         self._modem = modem
         self._uplink = uplink
         self._downlink = downlink
+        self._on_failure = on_failure
         self._stopped = threading.Event()
         self._stats = PumpStats()
 
@@ -234,8 +236,13 @@ class PcmPump:
         )
 
     def run(self) -> None:
-        while not self._stopped.is_set():
-            self.run_once()
+        try:
+            while not self._stopped.is_set():
+                self.run_once()
+        except Exception:
+            logger.exception("SIM7600 PCM pump failed")
+            if self._on_failure is not None:
+                self._on_failure()
 
 
 class WsLink:
@@ -263,6 +270,9 @@ class WsLink:
     def open(self, call_id: str, caller: str) -> None:
         self._socket = self._connect(self._config)
         self._send_control({"type": "ring", "call_id": call_id, "caller": caller})
+
+    def answered(self, call_id: str) -> None:
+        self._send_control({"type": "answered", "call_id": call_id})
 
     def _send_control(self, control: dict[str, Any]) -> None:
         assert self._socket is not None
@@ -310,6 +320,8 @@ class WsLink:
             return
         try:
             self._send_control({"type": "call_end", "cause": cause})
+        except Exception:
+            logger.debug("WSS call_end failed", exc_info=True)
         finally:
             self._stopped.set()
             try:
@@ -337,6 +349,7 @@ class BridgeSession:
         sender.start()
         pump: PcmPump | None = None
         pump_thread: threading.Thread | None = None
+        answered = False
         cause = "server"
         try:
             while True:
@@ -344,9 +357,14 @@ class BridgeSession:
                 if control["type"] == "hangup":
                     return cause
                 self._control.answer()
-                pump = PcmPump(self._control.start_pcm(), self._uplink, self._downlink)
+                answered = True
+                pump = PcmPump(
+                    self._control.start_pcm(), self._uplink, self._downlink,
+                    lambda: self._link.controls().put({"type": "hangup"}),
+                )
                 pump_thread = threading.Thread(target=pump.run, daemon=True)
                 pump_thread.start()
+                self._link.answered(call_id)
                 break
             while True:
                 control = self._link.controls().get()
@@ -357,11 +375,22 @@ class BridgeSession:
                 pump.stop()
             if pump_thread is not None:
                 pump_thread.join(timeout=2)
-            if pump is not None:
-                self._control.stop_pcm()
-                self._control.hangup()
-            self._control.close()
-            self._link.close(cause)
+            try:
+                if answered:
+                    try:
+                        self._control.stop_pcm()
+                    except Exception:
+                        logger.exception("SIM7600 PCM stop failed")
+                    try:
+                        self._control.hangup()
+                    except Exception:
+                        logger.exception("SIM7600 hangup failed")
+            finally:
+                try:
+                    self._control.close()
+                except Exception:
+                    logger.exception("SIM7600 close failed")
+                self._link.close(cause)
 
 
 class RingWatcher:
@@ -379,21 +408,21 @@ class RingWatcher:
         if self._active.locked():
             logger.warning("ignoring second incoming call while bridge is active")
             return
-        intro = await bus.introspect("org.freedesktop.ModemManager1", path)
-        call = bus.get_proxy_object("org.freedesktop.ModemManager1", path, intro)
-        props = call.get_interface("org.freedesktop.DBus.Properties")
-        values = await props.call_get_all("org.freedesktop.ModemManager1.Call")
-        direction = values.get("Direction")
-        number = values.get("Number")
-        # ModemManager's MMCallDirection is 1 for incoming, as the existing
-        # phone-call.el watcher already proves on this modem.
-        if direction is None or direction.value != 1:
-            return
-        caller = number.value if number is not None else None
-        if not isinstance(caller, str) or len(caller) > 32:
-            logger.warning("ignoring incoming call with invalid caller id")
-            return
         async with self._active:
+            intro = await bus.introspect("org.freedesktop.ModemManager1", path)
+            call = bus.get_proxy_object("org.freedesktop.ModemManager1", path, intro)
+            props = call.get_interface("org.freedesktop.DBus.Properties")
+            values = await props.call_get_all("org.freedesktop.ModemManager1.Call")
+            direction = values.get("Direction")
+            number = values.get("Number")
+            # ModemManager's MMCallDirection is 1 for incoming, as the existing
+            # phone-call.el watcher already proves on this modem.
+            if direction is None or direction.value != 1:
+                return
+            caller = number.value if number is not None else None
+            if not isinstance(caller, str) or len(caller) > 32:
+                logger.warning("ignoring incoming call with invalid caller id")
+                return
             self._calls += 1
             call_id = f"{self._boot_id}-{self._calls}"
             uplink, downlink = JitterBuffer(), DownlinkQueue()

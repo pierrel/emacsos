@@ -1,11 +1,14 @@
 """Deterministic tests for the phone-side voice PCM core."""
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 from emacsos_server.call_bridge import (
     FRAME_BYTES, SILENCE, BridgeSession, DownlinkQueue, JitterBuffer, PcmPump,
-    SerialCallControl, VoiceConfig,
+    RingWatcher, SerialCallControl, VoiceConfig, WsLink,
 )
 
 
@@ -126,6 +129,207 @@ def test_session_never_answers_when_server_hangs_up_at_ring():
     assert link.opened == ("call-1", "+15555550100")
     assert link.closed == "server"
     assert closed == [True]
+
+
+def test_session_notifies_assist_only_after_modem_audio_is_ready():
+    class Control:
+        def __init__(self):
+            self.calls = []
+
+        def answer(self):
+            self.calls.append("answer")
+
+        def start_pcm(self):
+            self.calls.append("start_pcm")
+            return FakeModem([b"m" * FRAME_BYTES])
+
+        def stop_pcm(self):
+            self.calls.append("stop_pcm")
+
+        def hangup(self):
+            self.calls.append("hangup")
+
+        def close(self):
+            self.calls.append("close")
+
+    class Link:
+        def __init__(self):
+            import queue
+            self.events = queue.Queue()
+            self.events.put({"type": "answer"})
+            self.answered_call = None
+
+        def open(self, call_id, caller):
+            pass
+
+        def answered(self, call_id):
+            self.answered_call = call_id
+            self.events.put({"type": "hangup"})
+
+        def controls(self):
+            return self.events
+
+        def run_receiver(self):
+            pass
+
+        def run_sender(self):
+            pass
+
+        def close(self, cause):
+            pass
+
+    control, link = Control(), Link()
+
+    assert BridgeSession(control, link, JitterBuffer(), DownlinkQueue()).run(
+        "call-1", "+15555550100") == "server"
+    assert link.answered_call == "call-1"
+    assert control.calls == ["answer", "start_pcm", "stop_pcm", "hangup", "close"]
+
+
+def test_pump_failure_requests_session_hangup():
+    class FailingModem:
+        def read_frame(self):
+            raise RuntimeError("lost PCM")
+
+        def write_frame(self, frame):
+            raise AssertionError("no uplink write after a failed read")
+
+    failed = []
+    PcmPump(FailingModem(), JitterBuffer(), DownlinkQueue(),
+            lambda: failed.append(True)).run()
+
+    assert failed == [True]
+
+
+def test_link_sends_answered_after_the_server_admits_the_call():
+    class Socket:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, message):
+            self.sent.append(message)
+
+        def recv(self):
+            raise AssertionError("receiver is not part of this contract")
+
+        def close(self):
+            pass
+
+    socket = Socket()
+    config = VoiceConfig("wss://assist/call", "secret")
+    link = WsLink(config, JitterBuffer(), DownlinkQueue(), lambda _config: socket)
+
+    link.open("call-1", "+15555550100")
+    link.answered("call-1")
+    link.close("remote")
+
+    assert [json.loads(message) for message in socket.sent] == [
+        {"type": "ring", "call_id": "call-1", "caller": "+15555550100"},
+        {"type": "answered", "call_id": "call-1"},
+        {"type": "call_end", "cause": "remote"},
+    ]
+
+
+def test_ring_watcher_ignores_a_second_call_before_dbus_io():
+    class Variant:
+        def __init__(self, value):
+            self.value = value
+
+    class Props:
+        async def call_get_all(self, _interface):
+            return {"Direction": Variant(1), "Number": Variant("+15555550100")}
+
+    class Call:
+        def get_interface(self, _name):
+            return Props()
+
+    class Bus:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.introspections = 0
+
+        async def introspect(self, _service, _path):
+            self.introspections += 1
+            self.started.set()
+            await self.release.wait()
+            return object()
+
+        def get_proxy_object(self, _service, _path, _intro):
+            return Call()
+
+    async def exercise():
+        watcher = RingWatcher(VoiceConfig("wss://assist/call", "secret"))
+        sessions = []
+        watcher._run_session = lambda *args: sessions.append(args[-2:])
+        bus = Bus()
+        first = asyncio.create_task(watcher._handle_call(bus, "/call/first"))
+        await bus.started.wait()
+        await watcher._handle_call(bus, "/call/second")
+        bus.release.set()
+        await first
+        return bus.introspections, sessions
+
+    introspections, sessions = asyncio.run(exercise())
+
+    assert introspections == 1
+    assert len(sessions) == 1
+
+
+def test_session_continues_teardown_after_pcm_stop_failure():
+    class Control:
+        def __init__(self):
+            self.calls = []
+
+        def answer(self):
+            self.calls.append("answer")
+
+        def start_pcm(self):
+            self.calls.append("start_pcm")
+            return FakeModem([b"m" * FRAME_BYTES])
+
+        def stop_pcm(self):
+            self.calls.append("stop_pcm")
+            raise RuntimeError("modem already ended")
+
+        def hangup(self):
+            self.calls.append("hangup")
+
+        def close(self):
+            self.calls.append("close")
+
+    class Link:
+        def __init__(self):
+            import queue
+            self.events = queue.Queue()
+            self.events.put({"type": "answer"})
+            self.closed = None
+
+        def open(self, call_id, caller):
+            pass
+
+        def answered(self, call_id):
+            self.events.put({"type": "hangup"})
+
+        def controls(self):
+            return self.events
+
+        def run_receiver(self):
+            pass
+
+        def run_sender(self):
+            pass
+
+        def close(self, cause):
+            self.closed = cause
+
+    control, link = Control(), Link()
+
+    BridgeSession(control, link, JitterBuffer(), DownlinkQueue()).run(
+        "call-1", "+15555550100")
+
+    assert control.calls == ["answer", "start_pcm", "stop_pcm", "hangup", "close"]
+    assert link.closed == "server"
 
 
 def test_serial_control_owns_at_then_pcm_in_the_validated_order():
