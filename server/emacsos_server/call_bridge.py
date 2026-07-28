@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import asyncio
 import json
+import logging
 import os
 import queue
 import threading
 import time
+import uuid
 from typing import Any, Callable, Protocol
 
 
@@ -23,6 +26,7 @@ FRAME_BYTES = SAMPLES_PER_FRAME * 2
 SILENCE = b"\0" * FRAME_BYTES
 UPLINK_DEPTH = 12
 DOWNLINK_DEPTH = 12
+logger = logging.getLogger(__name__)
 
 
 class ModemAudio(Protocol):
@@ -346,3 +350,65 @@ class BridgeSession:
                 self._control.stop_pcm()
                 self._control.hangup()
             self._link.close(cause)
+
+
+class RingWatcher:
+    """ModemManager's incoming-call signal, with one bridge session at a time."""
+
+    def __init__(self, config: VoiceConfig,
+                 control_factory: Callable[[], CallControl] = SerialCallControl) -> None:
+        self._config = config
+        self._control_factory = control_factory
+        self._active = asyncio.Lock()
+        self._boot_id = uuid.uuid4().hex
+        self._calls = 0
+
+    async def _handle_call(self, bus: Any, path: str) -> None:
+        if self._active.locked():
+            logger.warning("ignoring second incoming call while bridge is active")
+            return
+        intro = await bus.introspect("org.freedesktop.ModemManager1", path)
+        call = bus.get_proxy_object("org.freedesktop.ModemManager1", path, intro)
+        props = call.get_interface("org.freedesktop.DBus.Properties")
+        values = await props.call_get_all("org.freedesktop.ModemManager1.Call")
+        direction = values.get("Direction")
+        number = values.get("Number")
+        # ModemManager's MMCallDirection is 1 for incoming, as the existing
+        # phone-call.el watcher already proves on this modem.
+        if direction is None or direction.value != 1:
+            return
+        caller = number.value if number is not None else None
+        if not isinstance(caller, str) or len(caller) > 32:
+            logger.warning("ignoring incoming call with invalid caller id")
+            return
+        async with self._active:
+            self._calls += 1
+            call_id = f"{self._boot_id}-{self._calls}"
+            uplink, downlink = JitterBuffer(), DownlinkQueue()
+            link = WsLink(self._config, uplink, downlink)
+            await asyncio.to_thread(
+                BridgeSession(self._control_factory(), link, uplink, downlink).run,
+                call_id, caller,
+            )
+
+    async def run(self) -> None:
+        from dbus_fast import BusType
+        from dbus_fast.aio import MessageBus
+
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        path = "/org/freedesktop/ModemManager1/Modem/0"
+        intro = await bus.introspect("org.freedesktop.ModemManager1", path)
+        modem = bus.get_proxy_object("org.freedesktop.ModemManager1", path, intro)
+        voice = modem.get_interface("org.freedesktop.ModemManager1.Modem.Voice")
+        voice.on_call_added(lambda call: asyncio.create_task(self._handle_call(bus, call)))
+        await asyncio.Future()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    asyncio.run(RingWatcher(VoiceConfig.from_environ()).run())
+
+
+if __name__ == "__main__":
+    main()

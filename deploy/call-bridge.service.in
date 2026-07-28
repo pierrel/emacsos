@@ -1,0 +1,16 @@
+[Unit]
+Description=EmacsOS Assist voice call bridge
+After=network-online.target ModemManager.service
+Wants=network-online.target ModemManager.service
+
+[Service]
+Type=exec
+User=@@USER@@
+SupplementaryGroups=dialout
+EnvironmentFile=@@ENV_FILE@@
+ExecStart=@@VENV@@/bin/python @@SCRIPT_PATH@@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

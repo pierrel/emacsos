@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward deploy-call-bridge
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -233,6 +233,32 @@ deploy-sms-forward:
 	   | ssh $(SMS_FWD_HOST) "sudo tee /etc/systemd/system/sms-forward.service >/dev/null"
 	ssh $(SMS_FWD_HOST) "sudo systemctl daemon-reload && sudo systemctl enable sms-forward.service && sudo systemctl restart sms-forward.service"
 	@echo "✓ sms-forward deployed to $(SMS_FWD_HOST) on :$(EMACSOS_SMS_FORWARD_PORT)"
+
+# Installs but does not run during development. The shared secret is read from
+# a local 0600 file and written directly to the phone's 0600 environment file;
+# it never appears in a Make argument, process list, or tracked file.
+VOICE_BRIDGE_HOST ?= phone-wg
+VOICE_BRIDGE_DIR ?= .local/call-bridge
+VOICE_BRIDGE_ENV ?= .config/call-bridge.env
+ASSIST_VOICE_URL ?=
+ASSIST_VOICE_SECRET_FILE ?=
+
+deploy-call-bridge:
+	@[ -n "$(ASSIST_VOICE_URL)" ] || { echo "error: ASSIST_VOICE_URL is required"; exit 1; }
+	@[ -n "$(ASSIST_VOICE_SECRET_FILE)" ] || { echo "error: ASSIST_VOICE_SECRET_FILE is required"; exit 1; }
+	@test -r "$(ASSIST_VOICE_SECRET_FILE)" || { echo "error: secret file is unreadable"; exit 1; }
+	ssh $(VOICE_BRIDGE_HOST) "mkdir -p $(VOICE_BRIDGE_DIR) .config && python3 -m venv $(VOICE_BRIDGE_DIR)/venv && $(VOICE_BRIDGE_DIR)/venv/bin/pip install pyserial websockets dbus-fast"
+	scp server/emacsos_server/call_bridge.py $(VOICE_BRIDGE_HOST):$(VOICE_BRIDGE_DIR)/call_bridge.py
+	@{ printf 'ASSIST_VOICE_URL=%s\n' '$(ASSIST_VOICE_URL)'; \
+	   printf 'ASSIST_VOICE_SECRET='; cat "$(ASSIST_VOICE_SECRET_FILE)"; printf '\n'; \
+	 } | ssh $(VOICE_BRIDGE_HOST) "umask 077; cat > $(VOICE_BRIDGE_ENV)"
+	@H=$$(ssh $(VOICE_BRIDGE_HOST) 'echo $$HOME'); U=$$(ssh $(VOICE_BRIDGE_HOST) 'id -un'); \
+	 sed -e "s|@@USER@@|$$U|g" -e "s|@@ENV_FILE@@|$$H/$(VOICE_BRIDGE_ENV)|g" \
+	     -e "s|@@VENV@@|$$H/$(VOICE_BRIDGE_DIR)/venv|g" \
+	     -e "s|@@SCRIPT_PATH@@|$$H/$(VOICE_BRIDGE_DIR)/call_bridge.py|g" \
+	     deploy/call-bridge.service.in | ssh $(VOICE_BRIDGE_HOST) "sudo tee /etc/systemd/system/call-bridge.service >/dev/null"
+	ssh $(VOICE_BRIDGE_HOST) "sudo systemctl daemon-reload && sudo systemctl enable --now call-bridge.service"
+	@echo "✓ call bridge deployed to $(VOICE_BRIDGE_HOST)"
 
 test-server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m pytest tests/ -v
