@@ -93,6 +93,9 @@ def test_session_never_answers_when_server_hangs_up_at_ring():
         def hangup(self):
             raise AssertionError("server declined before bridge ownership")
 
+        def close(self):
+            closed.append(True)
+
     class Link:
         def __init__(self):
             import queue
@@ -115,12 +118,14 @@ def test_session_never_answers_when_server_hangs_up_at_ring():
         def close(self, cause):
             self.closed = cause
 
+    closed = []
     link = Link()
     session = BridgeSession(Control(), link, JitterBuffer(), DownlinkQueue())
 
     assert session.run("call-1", "+15555550100") == "server"
     assert link.opened == ("call-1", "+15555550100")
     assert link.closed == "server"
+    assert closed == [True]
 
 
 def test_serial_control_owns_at_then_pcm_in_the_validated_order():

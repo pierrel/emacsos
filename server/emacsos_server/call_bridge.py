@@ -77,6 +77,8 @@ class CallControl(Protocol):
 
     def hangup(self) -> None: ...
 
+    def close(self) -> None: ...
+
 
 class SerialCallControl:
     """SIM7600 raw-AT control plus its exact-frame serial PCM endpoint."""
@@ -272,30 +274,36 @@ class WsLink:
     def run_receiver(self) -> None:
         """Receive server control/TTS; this is the only producer of uplink audio."""
         assert self._socket is not None
-        while not self._stopped.is_set():
-            message = self._socket.recv()
-            if isinstance(message, bytes):
-                self._uplink.push(message)
-                continue
-            try:
-                control = json.loads(message)
-            except json.JSONDecodeError:
-                continue
-            if type(control) is dict and type(control.get("type")) is str:
-                if control["type"] == "flush_uplink":
-                    self._uplink.clear()
-                elif control["type"] in {"answer", "hangup"}:
-                    self._controls.put(control)
+        try:
+            while not self._stopped.is_set():
+                message = self._socket.recv()
+                if isinstance(message, bytes):
+                    self._uplink.push(message)
+                    continue
+                try:
+                    control = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if type(control) is dict and type(control.get("type")) is str:
+                    if control["type"] == "flush_uplink":
+                        self._uplink.clear()
+                    elif control["type"] in {"answer", "hangup"}:
+                        self._controls.put(control)
+        except Exception:
+            self._controls.put({"type": "hangup"})
 
     def run_sender(self) -> None:
         """Drain modem audio separately so a stalled WSS write cannot block PCM."""
         assert self._socket is not None
-        while not self._stopped.is_set():
-            try:
-                frame = self._downlink.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            self._socket.send(frame)
+        try:
+            while not self._stopped.is_set():
+                try:
+                    frame = self._downlink.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                self._socket.send(frame)
+        except Exception:
+            self._controls.put({"type": "hangup"})
 
     def close(self, cause: str) -> None:
         if self._socket is None:
@@ -304,7 +312,10 @@ class WsLink:
             self._send_control({"type": "call_end", "cause": cause})
         finally:
             self._stopped.set()
-            self._socket.close()
+            try:
+                self._socket.close()
+            except Exception:
+                logger.debug("WSS close failed", exc_info=True)
 
 
 class BridgeSession:
@@ -349,6 +360,7 @@ class BridgeSession:
             if pump is not None:
                 self._control.stop_pcm()
                 self._control.hangup()
+            self._control.close()
             self._link.close(cause)
 
 
@@ -386,10 +398,13 @@ class RingWatcher:
             call_id = f"{self._boot_id}-{self._calls}"
             uplink, downlink = JitterBuffer(), DownlinkQueue()
             link = WsLink(self._config, uplink, downlink)
-            await asyncio.to_thread(
-                BridgeSession(self._control_factory(), link, uplink, downlink).run,
-                call_id, caller,
-            )
+            await asyncio.to_thread(self._run_session, link, uplink, downlink,
+                                    call_id, caller)
+
+    def _run_session(self, link: WsLink, uplink: JitterBuffer,
+                     downlink: DownlinkQueue, call_id: str, caller: str) -> None:
+        BridgeSession(self._control_factory(), link, uplink, downlink).run(
+            call_id, caller)
 
     async def run(self) -> None:
         from dbus_fast import BusType
