@@ -457,7 +457,7 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
     at = Port([
         b"\r\nOK\r\n",
         b"\r\n+CLCC: 1,1,0,0,0\r\n\r\nOK\r\n",
-        *[b"\r\nOK\r\n"] * 5,
+        *[b"\r\nOK\r\n"] * 3,
     ])
     pcm = Port([b"p" * 100, b"p" * (FRAME_BYTES - 100)])
     ports = iter([at, pcm])
@@ -472,7 +472,7 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
     control.close()
 
     assert at.writes == [
-        b"ATA\r", b"AT+CLCC\r", b"AT+CLVL=5\r", b"AT+COUTGAIN=8\r", b"AT+CPCMREG=1\r",
+        b"ATA\r", b"AT+CLCC\r", b"AT+CPCMREG=1\r",
         b"AT+CPCMREG=0,1\r", b"AT+CHUP\r",
     ]
     assert pcm.writes == [SILENCE]
@@ -509,6 +509,5 @@ def test_serial_control_disables_pcm_if_its_device_cannot_open():
         control.start_pcm()
 
     assert at.writes == [
-        b"AT+CLVL=5\r", b"AT+COUTGAIN=8\r", b"AT+CPCMREG=1\r",
-        b"AT+CPCMREG=0,1\r",
+        b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r",
     ]

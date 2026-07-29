@@ -120,8 +120,6 @@ class SerialCallControl:
         raise RuntimeError("SIM7600 did not activate answered call")
 
     def start_pcm(self) -> ModemAudio:
-        self._command("AT+CLVL=5")
-        self._command("AT+COUTGAIN=8")
         self._command("AT+CPCMREG=1")
         try:
             self._pcm = self._serial_factory(
