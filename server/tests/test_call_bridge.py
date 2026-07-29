@@ -6,7 +6,6 @@ import json
 
 import pytest
 
-import emacsos_server.call_bridge as call_bridge
 from emacsos_server.call_bridge import (
     FRAME_BYTES, SILENCE, BridgeSession, DownlinkQueue, JitterBuffer, PcmPump,
     RingWatcher, SerialCallControl, VoiceConfig, WsLink,
@@ -513,7 +512,7 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
 
     at = Port([
         b"\r\nOK\r\n",
-        b"\r\n+CLCC: 1,1,0,0,0\r\n\r\nOK\r\n",
+        b"\r\nVOICE CALL: BEGIN\r\n",
         *[b"\r\nOK\r\n"] * 3,
     ])
     pcm = Port([b"p" * 100, b"p" * (FRAME_BYTES - 100)])
@@ -529,7 +528,7 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
     control.close()
 
     assert at.writes == [
-        b"ATA\r", b"AT+CLCC\r", b"AT+CPCMREG=1\r",
+        b"ATA\r", b"AT+CPCMREG=1\r",
         b"AT+CPCMREG=0,1\r", b"AT+CHUP\r",
     ]
     assert pcm.writes == [SILENCE]
@@ -568,56 +567,3 @@ def test_serial_control_disables_pcm_if_its_device_cannot_open():
     assert at.writes == [
         b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r",
     ]
-
-
-def test_serial_control_retries_pcm_enable_until_the_modem_accepts_it():
-    class Port:
-        def __init__(self):
-            self.writes = []
-
-        def write(self, value):
-            self.writes.append(value)
-
-        def read(self, _size):
-            return responses.pop(0)
-
-        def close(self):
-            pass
-
-    responses = [b"\r\nERROR\r\n", b"\r\nOK\r\n", b"\r\nOK\r\n"]
-    at = Port()
-    pcm = Port()
-    ports = iter([at, pcm])
-    control = SerialCallControl(serial_factory=lambda *_args, **_kwargs: next(ports))
-
-    assert control.start_pcm() is control
-    control.stop_pcm()
-
-    assert at.writes == [
-        b"AT+CPCMREG=1\r", b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r",
-    ]
-
-
-def test_serial_control_rejects_pcm_enabled_after_its_ready_window(monkeypatch):
-    class Port:
-        def __init__(self):
-            self.writes = []
-
-        def write(self, value):
-            self.writes.append(value)
-
-        def read(self, _size):
-            return b"\r\nOK\r\n"
-
-        def close(self):
-            pass
-
-    at = Port()
-    clock = iter([0, 0, 0, 0, 3.1, 3.1, 3.1, 3.1])
-    monkeypatch.setattr(call_bridge.time, "monotonic", lambda: next(clock))
-    control = SerialCallControl(serial_factory=lambda *_args, **_kwargs: at)
-
-    with pytest.raises(RuntimeError, match="before deadline"):
-        control.start_pcm()
-
-    assert at.writes == [b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r"]

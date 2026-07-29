@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import queue
-import re
 import threading
 import time
 import uuid
@@ -28,7 +27,7 @@ SILENCE = b"\0" * FRAME_BYTES
 UPLINK_DEPTH = 12
 DOWNLINK_DEPTH = 12
 logger = logging.getLogger(__name__)
-_ACTIVE_CALL = re.compile(rb"^\+CLCC:\s*\d+\s*,\s*\d+\s*,\s*0\s*,", re.MULTILINE)
+_VOICE_CALL_BEGIN = b"\r\nVOICE CALL: BEGIN\r\n"
 
 
 class ModemAudio(Protocol):
@@ -110,32 +109,16 @@ class SerialCallControl:
         raise RuntimeError(f"SIM7600 rejected {command}")
 
     def answer(self) -> None:
-        self._command("ATA")
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            response = self._command("AT+CLCC", timeout=0.5)
-            if _ACTIVE_CALL.search(response):
+        response = bytearray(self._command("ATA"))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(response) < 4096:
+            if _VOICE_CALL_BEGIN in response:
                 return
-            time.sleep(0.05)
-        raise RuntimeError("SIM7600 did not activate answered call")
+            response.extend(self._at.read(256))
+        raise RuntimeError("SIM7600 did not begin answered voice call")
 
     def start_pcm(self) -> ModemAudio:
-        deadline = time.monotonic() + 3
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RuntimeError("SIM7600 did not enable PCM before deadline")
-            try:
-                self._command("AT+CPCMREG=1", timeout=min(0.5, remaining))
-                if time.monotonic() > deadline:
-                    self._command("AT+CPCMREG=0,1")
-                    raise RuntimeError("SIM7600 enabled PCM after deadline")
-                break
-            except RuntimeError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError("SIM7600 did not enable PCM before deadline")
-                time.sleep(min(0.05, remaining))
+        self._command("AT+CPCMREG=1")
         try:
             self._pcm = self._serial_factory(
                 self._pcm_path, 115200, timeout=None, write_timeout=1,

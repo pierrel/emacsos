@@ -53,7 +53,8 @@ except the proper noun "emacs" -> "e-max" — see the gotchas below.)
 
 ** The validated recipe
 1. Place the call (=mmcli= voice API, or raw =ATD…;= on a free AT port).
-2. Wait for connect: =AT+CLCC= state =0= (active) or the =VOICE CALL: BEGIN= URC.
+2. Wait for connect: the =VOICE CALL: BEGIN= URC.  =AT+CLCC= state =0= can
+   appear before USB audio is ready on an incoming call and is not a substitute.
 3. =AT+CLVL=5= and =AT+COUTGAIN=8= (boost the downlink level).
 4. =AT+CPCMREG=1= to start the PCM stream.
 5. Read raw bytes from =/dev/ttyUSB4= (non-blocking + select).

@@ -15,7 +15,7 @@ validation on Pierre's phone.
 2. One pump reads exactly one 640-byte modem PCM frame and immediately writes
    exactly one 640-byte queued TTS frame or silence.  The modem read is the
    clock; no independent reader, writer, or timer is allowed.
-   After =ATA=, the bridge waits for =AT+CLCC= to report an active call before
+   After =ATA=, the bridge waits for the modem's =VOICE CALL: BEGIN= event before
    enabling PCM.  The live modem rejects the optional gain commands on this
    path, so the bridge uses the proven =AT+CPCMREG=1= minimum.
 3. The WSS client is per call.  Its secret comes only from a 0600 environment
@@ -52,7 +52,9 @@ validation on Pierre's phone.
 The phone now trusts Assist's local CA and the bridge reaches the server.  The
 first answered call showed that =AT+COUTGAIN=8= was issued while the SIM7600 was
 still connecting, so it was rejected before PCM started.  A later call showed
-the gain commands remain unsupported on the automatic-answer path.  The bridge
-now waits for =AT+CLCC= state 0 and retries only =AT+CPCMREG=1= for its bounded
-ready window.  It sends =answered= only after that command succeeds; the next
-call tests the PIN prompt and carrier DTMF.
+the gain commands remain unsupported on the automatic-answer path.  Retrying
+=AT+CPCMREG=1= after =AT+CLCC= state 0 still failed: state 0 precedes the modem's
+audio-ready event.  The validated hardware recipe and SIMCom's MT-call flow both
+require =VOICE CALL: BEGIN= first.  The bridge now waits for that exact event,
+then enables PCM once and sends =answered= only after it succeeds.  The next call
+tests the PIN prompt and carrier DTMF.
