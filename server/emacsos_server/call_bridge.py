@@ -463,6 +463,19 @@ class RingWatcher:
         BridgeSession(self._control_factory(), link, uplink, downlink).run(
             call_id, caller)
 
+    @staticmethod
+    def _log_call_failure(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("call bridge session failed")
+
+    def _start_call(self, bus: Any, path: str) -> None:
+        task = asyncio.create_task(self._handle_call(bus, path))
+        task.add_done_callback(self._log_call_failure)
+
     async def run(self) -> None:
         from dbus_fast import BusType
         from dbus_fast.aio import MessageBus
@@ -472,7 +485,7 @@ class RingWatcher:
         intro = await bus.introspect("org.freedesktop.ModemManager1", path)
         modem = bus.get_proxy_object("org.freedesktop.ModemManager1", path, intro)
         voice = modem.get_interface("org.freedesktop.ModemManager1.Modem.Voice")
-        voice.on_call_added(lambda call: asyncio.create_task(self._handle_call(bus, call)))
+        voice.on_call_added(lambda call: self._start_call(bus, call))
         await asyncio.Future()
 
 

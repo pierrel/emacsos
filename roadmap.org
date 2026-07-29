@@ -22,9 +22,9 @@ background-audio blocker entirely (a real call; the OS owns it) and builds on th
   assist PR #208 and later landed on =main=; assist PRs #209/#211/#214/#219/#220
   merged and deployed Flow, Speech, Wire, Session/ordinary-Run integration,
   PIN/caller security, and scripted reconstruction.
-- Emacsos PR #34 implements the locally reviewed, pushed, and deployed phone-side
-  bridge.  It owns primary ttyUSB2 for AT/audio and ttyUSB4 for PCM; ttyUSB3 stays
-  with the human UI and ModemManager keeps QMI call detection/data.
+- Emacsos PR #34 is the landed and deployed phone-side bridge.  It owns primary
+  ttyUSB2 for AT/audio and ttyUSB4 for PCM; ttyUSB3 stays with the human UI and
+  ModemManager keeps QMI call detection/data.
 
 *Phasing:*
 - *P0/P0.5/P1* [assist] — *DONE + DEPLOYED.* Durable ordinary/child Runs and
@@ -49,10 +49,10 @@ background-audio blocker entirely (a real call; the OS owns it) and builds on th
 [[*DONE Phone calling][Phone calling]] / [[*DONE Phone answering][Phone answering]] primitives. Companion validated-on-device
 facts: [[file:docs/2026-06-18-call-audio.org][2026-06-18-call-audio.org]], [[file:docs/2026-06-18-inbound-answering.org][2026-06-18-inbound-answering.org]].
 
-*Status 2026-07-29:* the basic P0/P1 live-call server path is complete and
-deployed; P2 remains after basic live validation.  Emacsos PR #34 is the current
-phone bridge.  The next action is the physical power fix and stable-power live
-checklist in its state doc, not another software slice.
+*Status 2026-07-29:* the basic P0/P1 live-call server path and Emacsos PR #34's
+phone bridge are merged and deployed; P2 remains after basic live validation.
+The next action is the physical power fix and stable-power live checklist in its
+state doc, not another software slice.
 
 * Ergonomics iteration
 

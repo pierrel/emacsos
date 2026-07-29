@@ -361,6 +361,36 @@ def test_ring_watcher_ignores_a_second_call_before_dbus_io():
     assert len(sessions) == 1
 
 
+def test_ring_watcher_logs_a_call_task_failure(caplog):
+    async def exercise():
+        watcher = RingWatcher(VoiceConfig("wss://assist/call", "secret"))
+
+        async def fail(_bus, _path):
+            raise RuntimeError("handshake failed")
+
+        watcher._handle_call = fail
+        watcher._start_call(object(), "/call/failed")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert "call bridge session failed" in caplog.text
+    assert "handshake failed" in caplog.text
+
+
+def test_ring_watcher_ignores_a_cancelled_call_task(caplog):
+    async def exercise():
+        task = asyncio.create_task(asyncio.sleep(1))
+        task.cancel()
+        await asyncio.sleep(0)
+        RingWatcher._log_call_failure(task)
+
+    asyncio.run(exercise())
+
+    assert "call bridge session failed" not in caplog.text
+
+
 def test_session_continues_teardown_after_pcm_stop_failure():
     class Control:
         def __init__(self):

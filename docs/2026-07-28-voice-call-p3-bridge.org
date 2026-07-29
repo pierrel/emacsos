@@ -19,7 +19,8 @@ validation on Pierre's phone.
    enabling PCM.  The live modem rejects the optional gain commands on this
    path, so the bridge uses the proven =AT+CPCMREG=1= minimum.
 3. The WSS client is per call.  Its secret comes only from a 0600 environment
-   file, and the bridge refuses a non-=wss://= URL or absent secret.
+   file installed by atomic replacement, and the bridge refuses a non-=wss://=
+   URL or absent secret.
 4. Until Assist sends =answer=, no modem answer or PCM pump starts.  Once modem
    audio is ready, the bridge sends =answered= before Assist begins its PIN
    flow.  A second inbound call is ignored while the first owns the bridge.
@@ -42,8 +43,13 @@ validation on Pierre's phone.
   are serialized as JSON, bounded before logging, and never used as paths or
   commands.
 - Only WSS is accepted.  The shared secret never appears in argv or logs.
+  Every deploy verifies a terminal transfer marker before atomically replacing
+  its environment file with mode 0600, so an interrupted upload keeps the last
+  complete credential file.
 - Queue depth is bounded and drops stale downlink, while the pump always writes
   a complete frame.  A stalled network sender cannot block modem PCM.
+- Every per-call task result is retrieved; failures are logged, while normal
+  task cancellation during service shutdown stays quiet.
 - Every exit closes the WSS client, stops PCM, releases ttyUSB2, and sends the
   modem hangup only for the bridge-owned call.
 

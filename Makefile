@@ -237,8 +237,9 @@ deploy-sms-forward:
 	@echo "✓ sms-forward deployed to $(SMS_FWD_HOST) on :$(EMACSOS_SMS_FORWARD_PORT)"
 
 # Installs and restarts the configured bridge. The shared secret is read from a
-# local 0600 file and written directly to the phone's 0600 environment file; it
-# never appears in a Make argument, process list, or tracked file.
+# local 0600 file, streamed over stdin, and atomically installed as the phone's
+# 0600 environment file; it never appears in a Make argument, process list, or
+# tracked file.
 VOICE_BRIDGE_HOST ?= phone-wg
 VOICE_BRIDGE_DIR ?= .local/call-bridge
 VOICE_BRIDGE_ENV ?= .config/call-bridge.env
@@ -252,8 +253,9 @@ deploy-call-bridge:
 	ssh $(VOICE_BRIDGE_HOST) "mkdir -p $(VOICE_BRIDGE_DIR) .config && python3 -m venv $(VOICE_BRIDGE_DIR)/venv && $(VOICE_BRIDGE_DIR)/venv/bin/pip install pyserial websockets dbus-fast"
 	scp server/emacsos_server/call_bridge.py $(VOICE_BRIDGE_HOST):$(VOICE_BRIDGE_DIR)/call_bridge.py
 	@{ printf 'ASSIST_VOICE_URL=%s\n' '$(ASSIST_VOICE_URL)'; \
-	   printf 'ASSIST_VOICE_SECRET='; cat "$(ASSIST_VOICE_SECRET_FILE)"; printf '\n'; \
-	 } | ssh $(VOICE_BRIDGE_HOST) "umask 077; cat > $(VOICE_BRIDGE_ENV)"
+	   printf 'ASSIST_VOICE_SECRET='; cat "$(ASSIST_VOICE_SECRET_FILE)" || exit 1; printf '\n'; \
+	   printf '%s\n' '__ASSIST_VOICE_ENV_COMPLETE__'; \
+	 } | ssh $(VOICE_BRIDGE_HOST) 'set -eu; umask 077; wire=$$(mktemp "$(VOICE_BRIDGE_ENV).wire.XXXXXX"); tmp=$$(mktemp "$(VOICE_BRIDGE_ENV).tmp.XXXXXX") || { rm -f "$$wire"; exit 1; }; cleanup() { rm -f "$$wire" "$$tmp"; }; trap cleanup 0 1 2 15; cat > "$$wire"; [ "$$(tail -n 1 "$$wire")" = __ASSIST_VOICE_ENV_COMPLETE__ ]; head -n -1 "$$wire" > "$$tmp"; chmod 600 "$$tmp"; mv -f "$$tmp" "$(VOICE_BRIDGE_ENV)"; rm -f "$$wire"; trap - 0 1 2 15'
 	@H=$$(ssh $(VOICE_BRIDGE_HOST) 'echo $$HOME'); U=$$(ssh $(VOICE_BRIDGE_HOST) 'id -un'); \
 	 sed -e "s|@@USER@@|$$U|g" -e "s|@@ENV_FILE@@|$$H/$(VOICE_BRIDGE_ENV)|g" \
 	     -e "s|@@VENV@@|$$H/$(VOICE_BRIDGE_DIR)/venv|g" \

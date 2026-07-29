@@ -207,8 +207,10 @@ Internal structure (all one file):
   hang up if the WS dies mid-call (>5 s).
 - =RingWatcher= — dbus-fast =Voice.CallAdded=, reads =Direction=/=Number=, forwards
   =ring{call_id, caller}=, answers *only* on the server's =answer=. *Second inbound
-  while a session is active → the bridge =CHUP='s it and never round-trips the
-  server* (single-session enforced where the modem is owned — threat-model #6).
+  while a session is active → the bridge ignores it before any call D-Bus I/O and
+  never round-trips the server.* Raw =AT+CHUP= cannot selectively reject the second
+  call without risking the active bridge-owned call (single-session remains
+  enforced where the modem is owned — threat-model #6).
   Server unreachable at ring ⇒ do nothing (the human incoming screen still works).
 - =WsLink= — =websockets= client to =ASSIST_VOICE_URL=; shared-secret header; a
   dedicated sender thread drains an outbound queue so a WS stall never blocks the
@@ -245,15 +247,13 @@ scripted WAVs — so the entire server stack runs end-to-end with zero hardware.
 pump's balanced-write invariant vs. the whole server stack. They share the WAV
 corpus.)
 
-*Deploy (Pierre FB — one command, not many):* the call-bridge deploy
-(=deploy/call-bridge.service.in= + the udev rule) is a *dependency of the phone's
-top-level =make phone-install= / deploy target*, and the server-side voice bits
-(route registration, STT/TTS model provisioning) fold into assist's existing
-=make deploy= chain — *never a separate command to remember*. A single
-=make deploy= (assist) + =make phone-install= (emacsos) brings up everything;
-=deploy-call-bridge= exists only as an internal sub-target the top-level one calls
-(the =deploy-searxng= "folded into the deploy chain" precedent). AT-port udev rule
-shipped; ttyUSB4 needs none.
+*Deploy (as built):* server-side voice bits fold into Assist's existing =make
+deploy= chain.  The phone bridge remains the explicit =make deploy-call-bridge=
+target because it requires a WSS URL and a local secret file that the Elisp-only
+=phone-install= target does not own.  The target installs the daemon, dependencies,
+0600 environment, and service restart together; there are no separate bridge
+substeps to remember.  AT-port udev rules ship through =install-modem-at-ports=;
+ttyUSB4 needs none.
 
 *phone-call.el:* unchanged. When the bridge answers first, the existing
 =StateChanged= → 4 handler flips the UI to the in-progress screen with Hang-up —
@@ -668,9 +668,10 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
   (=ring=/=dtmf= flood), *exactly one* WS connection, handshake/idle timeout (the
   slowloris analog: connect, send the secret, dribble → holds the single-call slot),
   max session duration 30 min. Accept/handshake stays off the loop thread.
-- *Second call rejected at the bridge (threat-model #6, §2):* the bridge owns the
-  modem; a second inbound during an active session is =CHUP='d there, no server
-  round-trip — no concurrent brute-force channel.
+- *Second call contained at the bridge (threat-model #6, §2):* the bridge owns the
+  modem; a second inbound during an active session is ignored before call D-Bus I/O
+  and never reaches the server.  Raw =AT+CHUP= is not selective enough to reject it
+  without risking the active call.  There is no concurrent brute-force channel.
 - *Caller-id handling (threat-model #8):* allowlist compare is *exact equality on
   normalized E.164*; the string is =json.dumps=-encoded into =events.jsonl= (no
   log-forging via embedded newlines); length-capped (reject a 10 KB caller-id).
@@ -689,9 +690,11 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
   approve egress* — a containment-by-accident + a UX dead-end to note; and the
   existing web UI has *no PIN at all*, so voice-with-PIN *raises* the owner-access bar
   relative to web, not lowers it.
-- *Secrets/config:* =ASSIST_VOICE_PIN_HASH= (salted), =ASSIST_VOICE_ALLOWLIST=,
-  =ASSIST_VOICE_SECRET= via =.deploy.env=; no real numbers/PINs tracked (fixtures
-  =+1XXX…= / =000000=).
+- *Secrets/config:* =ASSIST_VOICE_PIN_HASH= (salted) and
+  =ASSIST_VOICE_ALLOWLIST= live in Assist's ignored =.deploy.env=.
+  =ASSIST_VOICE_SECRET= lives there server-side and in the phone's ignored 0600
+  bridge environment, atomically installed from a separate local 0600 file; no
+  real numbers/PINs tracked (fixtures =+1XXX…= / =000000=).
 
 * 9. Structured call-event log (PRD review #6)
 
@@ -840,8 +843,9 @@ the appropriate sections"). All inline markers are folded and removed.
 - §1 "move one layer back / a new API client used by web + voice / not necessarily
   multiple processes / a milestone to test it + bake ≥1 day in prod" → §0/D1, §1, and
   §10 *P0* (durable Run migration + web bake gate).
-- §2 "deploy is a dependency of a higher-level deploy" → §2 deploy (one =make deploy=
-  / =make phone-install=, no separate commands).
+- §2 "deploy is a dependency of a higher-level deploy" → §2 deploy.  Assist voice
+  stays in =make deploy=; the credential-bearing phone bridge is one explicit,
+  atomic target rather than a hidden dependency of the Elisp-only =phone-install=.
 - §4 "vanilla LangChain agent, not a deepagent" → §4 *IMPLEMENTATION MUST* + the P0.5
   exact-3-tool test.
 - §4 "varied spoken processing ack to reduce dead air, whole experience, follow-up" →
