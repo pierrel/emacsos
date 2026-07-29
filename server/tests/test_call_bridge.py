@@ -332,6 +332,112 @@ def test_session_continues_teardown_after_pcm_stop_failure():
     assert link.closed == "server"
 
 
+def test_session_hangs_up_cleanly_when_pcm_setup_fails():
+    class Control:
+        def __init__(self):
+            self.calls = []
+
+        def answer(self):
+            self.calls.append("answer")
+
+        def start_pcm(self):
+            self.calls.append("start_pcm")
+            raise RuntimeError("gain rejected")
+
+        def stop_pcm(self):
+            raise AssertionError("PCM never started")
+
+        def hangup(self):
+            self.calls.append("hangup")
+
+        def close(self):
+            self.calls.append("close")
+
+    class Link:
+        def __init__(self):
+            import queue
+            self.events = queue.Queue()
+            self.events.put({"type": "answer"})
+            self.closed = None
+
+        def open(self, call_id, caller):
+            pass
+
+        def answered(self, call_id):
+            raise AssertionError("Assist must not start PIN flow without PCM")
+
+        def controls(self):
+            return self.events
+
+        def run_receiver(self):
+            pass
+
+        def run_sender(self):
+            pass
+
+        def close(self, cause):
+            self.closed = cause
+
+    control, link = Control(), Link()
+
+    assert BridgeSession(control, link, JitterBuffer(), DownlinkQueue()).run(
+        "call-1", "+15555550100") == "pcm_setup"
+    assert control.calls == ["answer", "start_pcm", "hangup", "close"]
+    assert link.closed == "pcm_setup"
+
+
+def test_session_hangs_up_when_modem_answer_fails_after_server_admission():
+    class Control:
+        def __init__(self):
+            self.calls = []
+
+        def answer(self):
+            self.calls.append("answer")
+            raise RuntimeError("call never became active")
+
+        def start_pcm(self):
+            raise AssertionError("PCM must not start")
+
+        def stop_pcm(self):
+            raise AssertionError("PCM must not stop")
+
+        def hangup(self):
+            self.calls.append("hangup")
+
+        def close(self):
+            self.calls.append("close")
+
+    class Link:
+        def __init__(self):
+            import queue
+            self.events = queue.Queue()
+            self.events.put({"type": "answer"})
+            self.closed = None
+
+        def open(self, call_id, caller):
+            pass
+
+        def controls(self):
+            return self.events
+
+        def run_receiver(self):
+            pass
+
+        def run_sender(self):
+            pass
+
+        def close(self, cause):
+            self.closed = cause
+
+    control, link = Control(), Link()
+
+    with pytest.raises(RuntimeError, match="never became active"):
+        BridgeSession(control, link, JitterBuffer(), DownlinkQueue()).run(
+            "call-1", "+15555550100")
+    assert control.calls == ["answer", "hangup", "close"]
+    assert link.closed == "server"
+
+
 def test_serial_control_owns_at_then_pcm_in_the_validated_order():
     class Port:
         def __init__(self, reads=()):
@@ -348,7 +454,11 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
         def close(self):
             self.closed = True
 
-    at = Port([b"\r\nOK\r\n"] * 6)
+    at = Port([
+        b"\r\nOK\r\n",
+        b"\r\n+CLCC: 1,1,0,0,0\r\n\r\nOK\r\n",
+        *[b"\r\nOK\r\n"] * 5,
+    ])
     pcm = Port([b"p" * 100, b"p" * (FRAME_BYTES - 100)])
     ports = iter([at, pcm])
     control = SerialCallControl(serial_factory=lambda *args, **kwargs: next(ports))
@@ -362,8 +472,43 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
     control.close()
 
     assert at.writes == [
-        b"ATA\r", b"AT+CLVL=5\r", b"AT+COUTGAIN=8\r", b"AT+CPCMREG=1\r",
+        b"ATA\r", b"AT+CLCC\r", b"AT+CLVL=5\r", b"AT+COUTGAIN=8\r", b"AT+CPCMREG=1\r",
         b"AT+CPCMREG=0,1\r", b"AT+CHUP\r",
     ]
     assert pcm.writes == [SILENCE]
     assert at.closed and pcm.closed
+
+
+def test_serial_control_disables_pcm_if_its_device_cannot_open():
+    class Port:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        def read(self, _size):
+            return b"\r\nOK\r\n"
+
+        def close(self):
+            pass
+
+    at = Port()
+    calls = 0
+
+    def serial_factory(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return at
+        raise OSError("ttyUSB4 unavailable")
+
+    control = SerialCallControl(serial_factory=serial_factory)
+
+    with pytest.raises(OSError, match="ttyUSB4"):
+        control.start_pcm()
+
+    assert at.writes == [
+        b"AT+CLVL=5\r", b"AT+COUTGAIN=8\r", b"AT+CPCMREG=1\r",
+        b"AT+CPCMREG=0,1\r",
+    ]

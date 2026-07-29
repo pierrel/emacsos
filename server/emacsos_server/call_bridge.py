@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -27,6 +28,7 @@ SILENCE = b"\0" * FRAME_BYTES
 UPLINK_DEPTH = 12
 DOWNLINK_DEPTH = 12
 logger = logging.getLogger(__name__)
+_ACTIVE_CALL = re.compile(rb"^\+CLCC:\s*\d+\s*,\s*\d+\s*,\s*0\s*,", re.MULTILINE)
 
 
 class ModemAudio(Protocol):
@@ -95,27 +97,39 @@ class SerialCallControl:
         self._pcm_path = pcm_path
         self._pcm: Any | None = None
 
-    def _command(self, command: str) -> None:
+    def _command(self, command: str, timeout: float = 2) -> bytes:
         self._at.write((command + "\r").encode("ascii"))
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + timeout
         response = bytearray()
         while time.monotonic() < deadline and len(response) < 4096:
             response.extend(self._at.read(256))
             if b"\r\nOK\r\n" in response:
-                return
+                return bytes(response)
             if b"\r\nERROR\r\n" in response:
                 break
         raise RuntimeError(f"SIM7600 rejected {command}")
 
     def answer(self) -> None:
         self._command("ATA")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            response = self._command("AT+CLCC", timeout=0.5)
+            if _ACTIVE_CALL.search(response):
+                return
+            time.sleep(0.05)
+        raise RuntimeError("SIM7600 did not activate answered call")
 
     def start_pcm(self) -> ModemAudio:
         self._command("AT+CLVL=5")
         self._command("AT+COUTGAIN=8")
         self._command("AT+CPCMREG=1")
-        self._pcm = self._serial_factory(self._pcm_path, 115200, timeout=None,
-                                         write_timeout=1, exclusive=True)
+        try:
+            self._pcm = self._serial_factory(
+                self._pcm_path, 115200, timeout=None, write_timeout=1,
+                exclusive=True)
+        except Exception:
+            self._command("AT+CPCMREG=0,1")
+            raise
         return self
 
     def read_frame(self) -> bytes:
@@ -350,18 +364,25 @@ class BridgeSession:
         pump: PcmPump | None = None
         pump_thread: threading.Thread | None = None
         answered = False
+        pcm_started = False
         cause = "server"
         try:
             while True:
                 control = self._link.controls().get()
                 if control["type"] == "hangup":
                     return cause
-                self._control.answer()
                 answered = True
-                pump = PcmPump(
-                    self._control.start_pcm(), self._uplink, self._downlink,
-                    lambda: self._link.controls().put({"type": "hangup"}),
-                )
+                self._control.answer()
+                try:
+                    pump = PcmPump(
+                        self._control.start_pcm(), self._uplink, self._downlink,
+                        lambda: self._link.controls().put({"type": "hangup"}),
+                    )
+                    pcm_started = True
+                except Exception:
+                    cause = "pcm_setup"
+                    logger.exception("SIM7600 PCM setup failed")
+                    return cause
                 pump_thread = threading.Thread(target=pump.run, daemon=True)
                 pump_thread.start()
                 self._link.answered(call_id)
@@ -376,11 +397,12 @@ class BridgeSession:
             if pump_thread is not None:
                 pump_thread.join(timeout=2)
             try:
-                if answered:
+                if pcm_started:
                     try:
                         self._control.stop_pcm()
                     except Exception:
                         logger.exception("SIM7600 PCM stop failed")
+                if answered:
                     try:
                         self._control.hangup()
                     except Exception:
