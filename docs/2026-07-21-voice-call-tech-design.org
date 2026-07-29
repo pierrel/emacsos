@@ -12,11 +12,12 @@ clean-interfaces, threat-model). The *Review resolutions* section at the end map
 every finding to where it now lives. Section 0 records Pierre's resolutions to the
 three design forks rather than leaving their outcome implicit.
 
-*Implementation status (2026-07-26):* this design merged in emacsos PR #33.
-Assist P1 PR1–PR3 are merged and deployed: Flow (#209), Speech (#211), and bounded
-Wire =/call= (#214). They remain intentionally unwired end-to-end. *NEXT is assist
-PR4 =session.py=*, then PR5 security/reconstruction; the phone PCM bridge is P3.
-Live slice status: [[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]].
+*Implementation status (2026-07-29):* this design merged in emacsos PR #33.
+Assist P1 is merged and deployed: Flow (#209), Speech (#211), bounded Wire =/call=
+(#214), Session/ordinary-Run integration (#219), and PIN/caller security plus
+scripted reconstruction (#220).  Emacsos PR #34 implements and deploys the phone
+PCM bridge.  Live validation is paused at an observed Pi undervoltage gate; exact
+evidence and resume steps live in [[file:2026-07-28-voice-call-p3-bridge.org][the P3 bridge state doc]].
 
 * 0. Decisions — RESOLVED (Pierre, review round 2)
 
@@ -115,7 +116,7 @@ PHONE (Pi Zero 2 W)                       HOME BOX (assist manage.web, one uvico
 │  - CPCMREG PCM pump     │              │   session.py  Gate→Router→InThread SM      │
 │    (balanced pump)       │              │              + calllog + speech (in-proc) │
 │  - jitter buffer        │              │   speech.py   whisper+piper, lazy in-proc  │
-│  (ttyUSB3 + ttyUSB4)    │              │  assist/catalog.py (read-only, Decision 2) │
+│  (ttyUSB2 + ttyUSB4)    │              │  assist/catalog.py (read-only, Decision 2) │
 ├─────────────────────────┤              │  assist/receptionist.py (protected router) │
 │ phone-call.el (shipped, │              │  threads.py: durable Runs + turn observer │
 │  unchanged: human UI)   │              │  thread_queue.py: interactive waiter (P3)  │
@@ -161,7 +162,7 @@ application of that boundary.
 | Deliverable                    | Built on (no parallel implementation)                                                                                                                                             |
 |--------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Ring detect + caller-id        | D-Bus =Voice.CallAdded= + =Direction=/=Number= props (2026-06-18-inbound-answering.org); same subscription in Python                                                              |
-| Auto-answer / hang-up          | new bridge uses =ATA= / =AT+CHUP= on freed ttyUSB3 (udev rule =deploy/99-emacos-free-ttyusb3.rules= shipped); human UI stays unchanged: =emacos-answer= uses =ATA= and =emacos-hang-up= uses =mmcli --voice-hangup-all= |
+| Auto-answer / hang-up          | bridge uses =ATA= / =AT+CHUP= on primary ttyUSB2; human UI stays on secondary ttyUSB3; both are freed by =deploy/99-emacos-free-at-ports.rules= while MM retains QMI call detection/data |
 | PCM bridge                     | 2026-06-18-call-audio.org: 16 kHz/16-bit/mono on ttyUSB4, =AT+CPCMREG=1=, balanced read/write at ~16.7 kHz, one process                                                           |
 | STT                            | faster-whisper base.en validated on a real call clip; =vad_filter=True=, =condition_on_previous_text=False=                                                                       |
 | Turn execution / queueing      | =_create_run= + =_execute_run= + =THREAD_QUEUE= + =_ResumeScheduler=; voice commits an ordinary Run and carries its id across the turn-runner boundary (§5)                         |
@@ -170,7 +171,7 @@ application of that boundary.
 | Async result delivery          | turn-completion observer seam (=_geo_on_complete= as precedent)                                                                                                                     |
 | Thread catalog                 | shipped read-only =assist/catalog.py= mirrors the web-owned metadata reads without exposing contents; web migration remains later work                                                                          |
 | Router construction            | =langchain.agents.create_agent= (LangChain 1.x prebuilt loop) — *net-new wiring*, deliberately NOT assist's =create_agent= (§4)                                                   |
-| Voice flow + speech + wire     | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF), =speech.py= (STT/TTS), and bounded =wire.py= WSS transport; remaining work is session/security integration, then the phone PCM bridge             |
+| Voice flow + speech + wire     | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF), =speech.py= (STT/TTS), bounded =wire.py= WSS transport, =session.py= integration, and PR #220 security/reconstruction; P3 live validation is power-blocked |
 | Router eval                    | =edd/eval/= harness, =test_interjection.py= in-memory-callback pattern                                                                                                            |
 | Call-event log                 | =append_event= O_APPEND/torn-line discipline (=thread_log.py=)                                                                                                                     |
 | Phone daemon deploy            | =deploy-sms-forward= Makefile pattern                                                                                                                                             |
@@ -192,8 +193,8 @@ Pi" leg was *dropped* — the PRD records on-Pi whisper/piper as feasible and si
 is lighter; the amendment stands on the other legs.)
 
 Internal structure (all one file):
-- =AtPort= — opens ttyUSB3 exclusive (=TIOCEXCL=) for the call's duration only;
-  released at hangup so =phone-call.el='s per-call open/close human path coexists.
+- =AtPort= — opens primary ttyUSB2 exclusive (=TIOCEXCL=) for the call's duration
+  only; =phone-call.el='s human path independently retains secondary ttyUSB3.
 - =PcmPump= — the load-bearing invariant, *balanced by construction*: one thread,
   blocking-read one 320-sample chunk (640 B, nominally 20 ms at the 16 kHz protocol
   rate) from ttyUSB4, then immediately write one same-size chunk from
@@ -206,8 +207,10 @@ Internal structure (all one file):
   hang up if the WS dies mid-call (>5 s).
 - =RingWatcher= — dbus-fast =Voice.CallAdded=, reads =Direction=/=Number=, forwards
   =ring{call_id, caller}=, answers *only* on the server's =answer=. *Second inbound
-  while a session is active → the bridge =CHUP='s it and never round-trips the
-  server* (single-session enforced where the modem is owned — threat-model #6).
+  while a session is active → the bridge ignores it before any call D-Bus I/O and
+  never round-trips the server.* Raw =AT+CHUP= cannot selectively reject the second
+  call without risking the active bridge-owned call (single-session remains
+  enforced where the modem is owned — threat-model #6).
   Server unreachable at ring ⇒ do nothing (the human incoming screen still works).
 - =WsLink= — =websockets= client to =ASSIST_VOICE_URL=; shared-secret header; a
   dedicated sender thread drains an outbound queue so a WS stall never blocks the
@@ -244,15 +247,13 @@ scripted WAVs — so the entire server stack runs end-to-end with zero hardware.
 pump's balanced-write invariant vs. the whole server stack. They share the WAV
 corpus.)
 
-*Deploy (Pierre FB — one command, not many):* the call-bridge deploy
-(=deploy/call-bridge.service.in= + the udev rule) is a *dependency of the phone's
-top-level =make phone-install= / deploy target*, and the server-side voice bits
-(route registration, STT/TTS model provisioning) fold into assist's existing
-=make deploy= chain — *never a separate command to remember*. A single
-=make deploy= (assist) + =make phone-install= (emacsos) brings up everything;
-=deploy-call-bridge= exists only as an internal sub-target the top-level one calls
-(the =deploy-searxng= "folded into the deploy chain" precedent). ttyUSB3 udev rule
-shipped; ttyUSB4 needs none.
+*Deploy (as built):* server-side voice bits fold into Assist's existing =make
+deploy= chain.  The phone bridge remains the explicit =make deploy-call-bridge=
+target because it requires a WSS URL and a local secret file that the Elisp-only
+=phone-install= target does not own.  The target installs the daemon, dependencies,
+0600 environment, and service restart together; there are no separate bridge
+substeps to remember.  AT-port udev rules ship through =install-modem-at-ports=;
+ttyUSB4 needs none.
 
 *phone-call.el:* unchanged. When the bridge answers first, the existing
 =StateChanged= → 4 handler flips the UI to the in-progress screen with Hang-up —
@@ -369,10 +370,10 @@ In-memory =FakeCatalog= + captured =on_open=/=on_new=, the =test_interjection.py
 
 * 5. Conversation-flow engine + state machine (server-side)
 
-*Assist voice modules:* =manage/voice/flow.py=, =wire.py=, and =speech.py= are
-shipped (PRs #209/#214/#211); the =/call= route is registered on the existing app.
-=manage/voice/session.py= is the next planned module (=calllog= folds into it) and
-will configure Wire's synchronous runner seam.
+*Assist voice modules:* =manage/voice/flow.py=, =wire.py=, =speech.py=, and
+=session.py= are shipped (PRs #209/#214/#211/#219); the =/call= route is
+registered on the existing app and Session configures Wire's synchronous runner
+seam.  Security and scripted reconstruction shipped in PR #220.
 
 ** flow.py — hermetic frame-in / event-out engine (clean-interfaces #9)
 Contract: consumes 20 ms PCM frames, emits events; *no web imports, no network, no
@@ -667,9 +668,10 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
   (=ring=/=dtmf= flood), *exactly one* WS connection, handshake/idle timeout (the
   slowloris analog: connect, send the secret, dribble → holds the single-call slot),
   max session duration 30 min. Accept/handshake stays off the loop thread.
-- *Second call rejected at the bridge (threat-model #6, §2):* the bridge owns the
-  modem; a second inbound during an active session is =CHUP='d there, no server
-  round-trip — no concurrent brute-force channel.
+- *Second call contained at the bridge (threat-model #6, §2):* the bridge owns the
+  modem; a second inbound during an active session is ignored before call D-Bus I/O
+  and never reaches the server.  Raw =AT+CHUP= is not selective enough to reject it
+  without risking the active call.  There is no concurrent brute-force channel.
 - *Caller-id handling (threat-model #8):* allowlist compare is *exact equality on
   normalized E.164*; the string is =json.dumps=-encoded into =events.jsonl= (no
   log-forging via embedded newlines); length-capped (reject a 10 KB caller-id).
@@ -688,9 +690,11 @@ secret-holder. Accepted for a single-user home system — *because it is named*.
   approve egress* — a containment-by-accident + a UX dead-end to note; and the
   existing web UI has *no PIN at all*, so voice-with-PIN *raises* the owner-access bar
   relative to web, not lowers it.
-- *Secrets/config:* =ASSIST_VOICE_PIN_HASH= (salted), =ASSIST_VOICE_ALLOWLIST=,
-  =ASSIST_VOICE_SECRET= via =.deploy.env=; no real numbers/PINs tracked (fixtures
-  =+1XXX…= / =000000=).
+- *Secrets/config:* =ASSIST_VOICE_PIN_HASH= (salted) and
+  =ASSIST_VOICE_ALLOWLIST= live in Assist's ignored =.deploy.env=.
+  =ASSIST_VOICE_SECRET= lives there server-side and in the phone's ignored 0600
+  bridge environment, atomically installed from a separate local 0600 file; no
+  real numbers/PINs tracked (fixtures =+1XXX…= / =000000=).
 
 * 9. Structured call-event log (PRD review #6)
 
@@ -729,11 +733,14 @@ milestone. Each has explicit validation so the next builds on verified behavior.
 P0–P2 are the hardware-independent ~80 %; only P3 needs the assembled phone.
 *P0 is the load-bearing de-risk:* the durable Run path is proven by the web client
 before voice becomes its second consumer (D1).
-The async-subagent dependency is complete; remaining P1 work is the voice-specific
-session and security integration.
-*Current P1 subphase:* PR1 Flow, PR2 Speech, and PR3 Wire are DONE/MERGED/DEPLOYED.
-PR4 =session.py= is NEXT; PR5 closes security and scripted-call reconstruction.
-The composite P1 row remains open until those fake-bridge criteria pass.
+The async-subagent dependency and voice-specific P1 work are complete.
+*Current P1 subphase:* PR1 Flow, PR2 Speech, PR3 Wire, PR4 Session, and PR5
+security/reconstruction are DONE/MERGED/DEPLOYED.  P3 live validation is paused
+at the power gate recorded in the P3 bridge state doc.
+*Observed implementation order:* basic stable-power P3 validation now comes before
+P2.  P2 async child-result delivery and both receptionist go-back paths remain
+unimplemented follow-ups after the basic live call is proven; the phase table's
+P0–P2 hardware-independence does not make P2 a prerequisite for that first call.
 * 11. Risks & open questions
 
 1. *Dead air behind a long superstep* (single slot): the silence watchdog covers the
@@ -836,8 +843,9 @@ the appropriate sections"). All inline markers are folded and removed.
 - §1 "move one layer back / a new API client used by web + voice / not necessarily
   multiple processes / a milestone to test it + bake ≥1 day in prod" → §0/D1, §1, and
   §10 *P0* (durable Run migration + web bake gate).
-- §2 "deploy is a dependency of a higher-level deploy" → §2 deploy (one =make deploy=
-  / =make phone-install=, no separate commands).
+- §2 "deploy is a dependency of a higher-level deploy" → §2 deploy.  Assist voice
+  stays in =make deploy=; the credential-bearing phone bridge is one explicit,
+  atomic target rather than a hidden dependency of the Elisp-only =phone-install=.
 - §4 "vanilla LangChain agent, not a deepagent" → §4 *IMPLEMENTATION MUST* + the P0.5
   exact-3-tool test.
 - §4 "varied spoken processing ack to reduce dead air, whole experience, follow-up" →
@@ -857,7 +865,8 @@ the appropriate sections"). All inline markers are folded and removed.
 to resolved per the above.
 
 * Outcome
-Design merged in emacsos PR #33. Assist implementation status is maintained in
-[[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. As of 2026-07-26, assist PRs #209, #211,
-and #214 shipped Flow, Speech, and bounded Wire; PR4 Session and PR5 security/
-reconstruction remain. Phone-side =call_bridge.py= and live validation remain P3.
+Design merged in emacsos PR #33. The historical P1 build record is
+[[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. As of 2026-07-29, assist PRs #209, #211,
+#214, #219, and #220 shipped Flow, Speech, bounded Wire, Session, and security/
+reconstruction.  Emacsos PR #34 implements and deploys =call_bridge.py=; remaining
+P3 live validation waits on the documented phone power fix.

@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward deploy-call-bridge
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -72,17 +72,19 @@ cellular-bringup:
 	   if [ -n '$(APN_AUTH_FILE)' ]; then cat '$(APN_AUTH_FILE)'; fi; \
 	 } | ssh phone "sudo bash $(PHONE_DEPLOY_TMP); rc=\$$?; rm -f $(PHONE_DEPLOY_TMP); exit \$$rc"
 
-# One-time: hand the SIM7600 secondary AT port (ttyUSB3) to emacsos for raw-AT
-# voice (incoming answer + later call audio).  ModemManager keeps QMI + GPS +
-# the primary AT port, so detection and data are unaffected.  Re-run only if
-# the rule changes.  See docs/2026-06-18-inbound-answering.org.
-install-modem-at-port:
-	scp deploy/99-emacos-free-ttyusb3.rules phone:/tmp/99-emacos-free-ttyusb3.rules
-	ssh phone "sudo mv /tmp/99-emacos-free-ttyusb3.rules /etc/udev/rules.d/ \
+# One-time: hand both SIM7600 AT ports to emacsos.  The call bridge uses the
+# primary ttyUSB2 because that is the hardware-validated CPCMREG path; the human
+# call UI keeps ttyUSB3.  ModemManager keeps QMI + GPS, so call detection and
+# data remain on cdc-wdm0.  Re-run only if the rule changes.
+MODEM_AT_HOST ?= phone
+install-modem-at-ports:
+	scp deploy/99-emacos-free-at-ports.rules $(MODEM_AT_HOST):/tmp/99-emacos-free-at-ports.rules
+	ssh $(MODEM_AT_HOST) "sudo mv /tmp/99-emacos-free-at-ports.rules /etc/udev/rules.d/ \
+	  && sudo rm -f /etc/udev/rules.d/99-emacos-free-ttyusb3.rules \
 	  && sudo udevadm control --reload-rules \
-	  && sudo udevadm trigger --action=change /dev/ttyUSB3 \
+	  && sudo udevadm trigger --action=change /dev/ttyUSB2 /dev/ttyUSB3 \
 	  && sudo systemctl restart ModemManager"
-	@echo "✓ ttyUSB3 freed for emacsos AT voice; ModemManager restarted"
+	@echo "✓ ttyUSB2 + ttyUSB3 freed for emacsos AT voice; ModemManager restarted"
 
 # === WireGuard for the away phone ===
 # See docs/2026-05-31-wireguard-away-phone.org for the full setup runbook.
@@ -233,6 +235,34 @@ deploy-sms-forward:
 	   | ssh $(SMS_FWD_HOST) "sudo tee /etc/systemd/system/sms-forward.service >/dev/null"
 	ssh $(SMS_FWD_HOST) "sudo systemctl daemon-reload && sudo systemctl enable sms-forward.service && sudo systemctl restart sms-forward.service"
 	@echo "✓ sms-forward deployed to $(SMS_FWD_HOST) on :$(EMACSOS_SMS_FORWARD_PORT)"
+
+# Installs and restarts the configured bridge. The shared secret is read from a
+# local 0600 file, streamed over stdin, and atomically installed as the phone's
+# 0600 environment file; it never appears in a Make argument, process list, or
+# tracked file.
+VOICE_BRIDGE_HOST ?= phone-wg
+VOICE_BRIDGE_DIR ?= .local/call-bridge
+VOICE_BRIDGE_ENV ?= .config/call-bridge.env
+ASSIST_VOICE_URL ?=
+ASSIST_VOICE_SECRET_FILE ?=
+
+deploy-call-bridge:
+	@[ -n "$(ASSIST_VOICE_URL)" ] || { echo "error: ASSIST_VOICE_URL is required"; exit 1; }
+	@[ -n "$(ASSIST_VOICE_SECRET_FILE)" ] || { echo "error: ASSIST_VOICE_SECRET_FILE is required"; exit 1; }
+	@test -r "$(ASSIST_VOICE_SECRET_FILE)" || { echo "error: secret file is unreadable"; exit 1; }
+	ssh $(VOICE_BRIDGE_HOST) "mkdir -p $(VOICE_BRIDGE_DIR) .config && python3 -m venv $(VOICE_BRIDGE_DIR)/venv && $(VOICE_BRIDGE_DIR)/venv/bin/pip install pyserial websockets dbus-fast"
+	scp server/emacsos_server/call_bridge.py $(VOICE_BRIDGE_HOST):$(VOICE_BRIDGE_DIR)/call_bridge.py
+	@{ printf 'ASSIST_VOICE_URL=%s\n' '$(ASSIST_VOICE_URL)'; \
+	   printf 'ASSIST_VOICE_SECRET='; cat "$(ASSIST_VOICE_SECRET_FILE)" || exit 1; printf '\n'; \
+	   printf '%s\n' '__ASSIST_VOICE_ENV_COMPLETE__'; \
+	 } | ssh $(VOICE_BRIDGE_HOST) 'set -eu; umask 077; wire=$$(mktemp "$(VOICE_BRIDGE_ENV).wire.XXXXXX"); tmp=$$(mktemp "$(VOICE_BRIDGE_ENV).tmp.XXXXXX") || { rm -f "$$wire"; exit 1; }; cleanup() { rm -f "$$wire" "$$tmp"; }; trap cleanup 0 1 2 15; cat > "$$wire"; [ "$$(tail -n 1 "$$wire")" = __ASSIST_VOICE_ENV_COMPLETE__ ]; head -n -1 "$$wire" > "$$tmp"; chmod 600 "$$tmp"; mv -f "$$tmp" "$(VOICE_BRIDGE_ENV)"; rm -f "$$wire"; trap - 0 1 2 15'
+	@H=$$(ssh $(VOICE_BRIDGE_HOST) 'echo $$HOME'); U=$$(ssh $(VOICE_BRIDGE_HOST) 'id -un'); \
+	 sed -e "s|@@USER@@|$$U|g" -e "s|@@ENV_FILE@@|$$H/$(VOICE_BRIDGE_ENV)|g" \
+	     -e "s|@@VENV@@|$$H/$(VOICE_BRIDGE_DIR)/venv|g" \
+	     -e "s|@@SCRIPT_PATH@@|$$H/$(VOICE_BRIDGE_DIR)/call_bridge.py|g" \
+	     deploy/call-bridge.service.in | ssh $(VOICE_BRIDGE_HOST) "sudo tee /etc/systemd/system/call-bridge.service >/dev/null"
+	ssh $(VOICE_BRIDGE_HOST) "sudo systemctl daemon-reload && sudo systemctl enable call-bridge.service && sudo systemctl restart call-bridge.service"
+	@echo "✓ call bridge deployed to $(VOICE_BRIDGE_HOST)"
 
 test-server: $(SERVER_STAMP)
 	cd server && .venv/bin/python -m pytest tests/ -v

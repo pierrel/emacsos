@@ -55,12 +55,13 @@ axis.
 - Outside the repo: confirm Mobian/postmarketOS brings the DRM panel up before
   Emacs starts (standard package config; no SPI framebuffer, no =dtoverlay=).
 
-** 2. Modem AT port + udev rule (low — but see the *simplification* below)
-The SIM7600 path frees a *secondary* AT port from ModemManager to drive raw-AT
-voice, because QMI call-accept is broken on that modem:
+** 2. Modem AT ports + udev rule (low — but see the *simplification* below)
+The SIM7600 path frees both AT ports from ModemManager: the bridge needs primary
+=ttyUSB2= for PCM control, and the human UI drives raw-AT voice on secondary
+=ttyUSB3= because QMI call-accept is broken on that modem:
 - =phone-call.el:141= — =emacos-call-at-port "/dev/ttyUSB3"= (hardcoded).
-- =deploy/99-emacos-free-ttyusb3.rules= — matches =ID_VENDOR_ID=="1e0e"=,
-  =ID_MODEL_ID=="9001"=, =ID_USB_INTERFACE_NUM=="03"= (SIM7600 USB IDs).
+- =deploy/99-emacos-free-at-ports.rules= — matches =ID_VENDOR_ID=="1e0e"=,
+  =ID_MODEL_ID=="9001"= and interfaces =02=/=03= (SIM7600 USB IDs).
 The EG25-G enumerates differently (Quectel USB IDs, different interface
 numbering), so *if* the raw-AT path is still needed, both the port and the udev
 matcher must be re-derived from the EG25-G's =lsusb= / =ls /dev/ttyUSB*=.

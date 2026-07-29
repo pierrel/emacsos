@@ -6,7 +6,7 @@ landed ones).  This file collects forward-looking work that
 doesn't fit any specific experiment yet — usability iteration,
 cross-cutting concerns, follow-ups discovered live on the phone.
 
-* IN FLIGHT: Voice-call assistant (phone the agent, talk to your threads)
+* IN FLIGHT: Voice-call assistant (paused at P3 power gate)
 
 *The big current initiative* — dial the SIM and talk to assist by voice: a
 PIN-gated *receptionist* agent helps you reach a thread (or start one with a
@@ -14,57 +14,45 @@ domain), then a natural voice conversation inside it. It sidesteps the iOS-Safar
 background-audio blocker entirely (a real call; the OS owns it) and builds on the
 *already-validated* SIM7600G-H telephony substrate.
 
-*Design (approved 2026-07-22, two review rounds — pick up here if paused):*
+*Design and live handoff:*
 - PRD: [[file:docs/2026-07-21-voice-call-assistant.org][docs/2026-07-21-voice-call-assistant.org]]
 - Tech design (six-lens-reviewed + Pierre round-2): [[file:docs/2026-07-21-voice-call-tech-design.org][docs/2026-07-21-voice-call-tech-design.org]]
-- Review + decisions on *GitHub PR #33* (=pierrel/emacsos#33=) — both docs live on
-  branch =voice-call-assistant-prd= until #33 merges.
-- Resolved decisions (tech-design §0/§14): *D1* — extract a shared client-agnostic
-  session API (=assist.session=) that web + voice both consume; voice is a *separate
-  thin client*; single process is fine (topology deferred). *D2* — do NOT answer
-  unknown callers (fail fast, ring out). *D3* — go-back via *both* DTMF =*= and a
-  =back_to_receptionist()= tool. Receptionist = *vanilla LangChain* agent (not a
-  deepagent). Async subagents reuse =continue_later= + interjection (#198/#199);
-  deepagents' native async-subagents reviewed — already on 0.6.1, interface adopted,
-  execution stays serialized+push (early P0.5 spike decides the vehicle).
+- P3 implementation and stopping point: [[file:docs/2026-07-28-voice-call-p3-bridge.org][docs/2026-07-28-voice-call-p3-bridge.org]]
+- PR #33 merged the design.  The receptionist/catalog was reviewed in closed
+  assist PR #208 and later landed on =main=; assist PRs #209/#211/#214/#219/#220
+  merged and deployed Flow, Speech, Wire, Session/ordinary-Run integration,
+  PIN/caller security, and scripted reconstruction.
+- Emacsos PR #34 is the landed and deployed phone-side bridge.  It owns primary
+  ttyUSB2 for AT/audio and ttyUSB4 for PCM; ttyUSB3 stays with the human UI and
+  ModemManager keeps QMI call detection/data.
 
-*Phasing (P0–P2 hardware-independent ~80%; only P3 needs the assembled phone).
-Each phase independently TESTABLE, not necessarily usable:*
-- *P0 — shared-session-API extraction + web refactor + PROD BAKE* [assist] — *DONE + DEPLOYED*
-  (=assist= PR #207, =shared-session-api=). Shipped as =plan_turn=/=route_turn= (the busy/paused/
-  idle submit routing) + =register_turn_observer= (turn-completion seam) in =manage/web/threads.py=;
-  the web client refactored onto them byte-identical; baked in prod. (Note: shipped as two calls,
-  not one =submit_turn=, because the durable-journal write sits between them.)
-- *P0.5 — thread-catalog + receptionist (vanilla LangChain) + eval + async spike* [assist] —
-  *DONE + DEPLOYED* (=assist= PR #208). =assist/catalog.py= (read-only =ThreadCatalog=, contents
-  unreachable by construction) + =assist/receptionist.py= (vanilla =create_agent=, no fs/execute/task
-  tools; list/open/new-thread tools). Eval N=10=80/80. Async spike verdict: deepagents'
-  =AsyncSubAgentMiddleware= needs a remote LangGraph server and still serializes on the one
-  =--parallel 1= slot → *serialized-journal + push is the vehicle* (adopt the interface, defer the
-  middleware).
-- *P1 — flow + wire + session + speech(in-proc) + PIN/do-not-answer + call log + conversational
-  contract, vs the fake bridge* [assist] — *IN PROGRESS.* Build/state doc:
-  [[file:../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. Sliced into PRs:
-  - =flow.py= (hermetic frame-in/event-out engine: in-band Goertzel DTMF + silero-v5 ONNX VAD/
-    endpointing/barge-in; deterministic, no wall clock) — *DONE + DEPLOYED* (=assist= PR #209,
-    converged 6 Copilot rounds; committed model + =onnxruntime=). Unwired to any live path (groundwork).
-  - *NEXT: =speech.py=* (in-proc faster-whisper STT + piper TTS — deps installed + round-trip-verified,
-    torch-free). Then =wire.py= (WSS =/call= + §8 caps) → =session.py= (state machine; reuses
-    =route_turn= + the observer seam + the shipped interjection mechanism for barge-in) → security.
-- *P2 — async delivery + go-back (DTMF =*= AND tool) + interactive queue iff observed* [assist].
-- *P3 — live bridge (hardware-gated) + naturalness tuning* [emacsos + assist]. The phone-side PCM
-  bridge (=call_bridge.py=: D-Bus ring watch, ATA/CHUP, the CPCMREG PCM pump) is emacsos's part.
+*Phasing:*
+- *P0/P0.5/P1* [assist] — *DONE + DEPLOYED.* Durable ordinary/child Runs and
+  terminal observers are authoritative; do not revive the removed
+  =plan_turn=/=route_turn= or backlog submission paths.  The complete fake-bridge
+  path includes receptionist, audio detectors, speech, transport, Session,
+  ordinary-Run delivery, global PIN lockout, caller normalization, detector
+  scoping, and reconstructable call logs.
+- *P2* [assist] — async delivery and both go-back paths remain a follow-up after
+  the basic live call is proven.  They are not part of the immediate restart
+  checklist.
+- *P3* [emacsos + assist] — *IMPLEMENTED; LIVE VALIDATION PAUSED ON POWER.* The
+  bridge sees inbound calls and reaches Assist when voltage is stable.  Each recent
+  ring coincided with Pi undervoltage; on 2026-07-29 it lasted through both WSS
+  attempts and, on an earlier call, through the picked-up-but-silent interval.
+  Resume only after replacing the power path and proving no undervoltage during an
+  actual ring and sustained call.  Then validate PIN audio/DTMF, TTS downlink,
+  caller uplink/STT, clock rate, and barge-in.  Pierre initiates every live call.
 
-*Depends on / subsumes existing roadmap items:* the [[*TODO Real-time full-duplex call-audio bridge + uplink][full-duplex call-audio bridge]]
+*Depends on / subsumes existing roadmap items:* the [[*TODO Finish stable-power live validation of full-duplex call-audio bridge][full-duplex call-audio bridge]]
 (P3, the one hardware-gated piece), [[*TODO Speech to text][Speech to text]] (STT endpoint), and the shipped
-[[*TODO Phone calling][Phone calling]] / [[*TODO Phone answering][Phone answering]] primitives. Companion validated-on-device
+[[*DONE Phone calling][Phone calling]] / [[*DONE Phone answering][Phone answering]] primitives. Companion validated-on-device
 facts: [[file:docs/2026-06-18-call-audio.org][2026-06-18-call-audio.org]], [[file:docs/2026-06-18-inbound-answering.org][2026-06-18-inbound-answering.org]].
 
-*Status 2026-07-24:* P0 + P0.5 merged + deployed (assist #207, #208); P1 slice 1 (=flow.py=)
-merged + deployed (assist #209). *Currently at P1 PR2 — =speech.py=* (STT/TTS in-proc), then
-=wire.py= → =session.py= → security, all against the fake bridge; P3 (live phone) is
-hardware-gated. Follow-on: a dedicated =assist/docs/<date>-async-subagents.org= for the "all
-subagents eventually async" trajectory (tech-design §7).
+*Status 2026-07-29:* the basic P0/P1 live-call server path and Emacsos PR #34's
+phone bridge are merged and deployed; P2 remains after basic live validation.
+The next action is the physical power fix and stable-power live checklist in its
+state doc, not another software slice.
 
 * Ergonomics iteration
 
@@ -498,35 +486,17 @@ point.  Reuses the existing phone↔server channel shape.  Depends on the audio 
 (mic) and the server endpoint; big enough to want its own design doc.  Done when
 hold-speak-release drops accurate text into the current buffer.
 
-** TODO Phone calling
-Needs "3G antenna" and "Headphone jack".
+** DONE Phone calling
+Shipped in PRs #25/#26/#29/#30 (2026-06-18..20): deterministic dial/hang-up,
+contact resolution through the skill, visible call state, and keyboard controls.
+Pierre confirmed the phone can place real calls.  Agent-assistant audio is tracked
+separately under the P3 full-duplex validation item.
 
-*VOICE CONFIRMED on hardware (2026-06-18)* —
-[[file:docs/2026-06-18-call-audio.org][docs/2026-06-18-call-audio.org]]: a test
-call placed via =mmcli --voice= rang + connected on T-Mobile (=dialing →
-ringing-out → active=); no =NO CARRIER= / VoLTE dead end.  Call audio is *not* a
-USB sound card — it's a raw 16 kHz/16-bit/mono PCM stream on =/dev/ttyUSB4=
-gated by =AT+CPCMREG=1=.  In-call *recording* + transcription is proven; two-way
-*talking* is pending the headset/dongle.  Remaining build work: the
-AT-port-ownership udev rule and a call-audio bridge daemon (see the doc).
-
-A command + call buffer: enter a number (needs *Numbers*), dial via the modem
-(=mmcli --voice= or =AT D=), and show call state (dialing / ringing / connected /
-ended) with a Hang-up command.  The blocker is voice support + in-call audio routing
-(see the modem and audio items) — if the modem is data-only, calling is off the
-table.  Depends on: Cellular modem (voice-capable), Audio I/O (speaker + mic),
-Numbers.  Done when you can dial a real number and hold a two-way call.
-
-** TODO Phone answering
-Needs "3G antenna".
-
-Surface incoming calls.  A background watcher on the modem's unsolicited events
-(=ModemManager= D-Bus signal, or an =AT= notification reader) bridges a RING into the
-emacs daemon via =emacsclient= eval — the same external-event→daemon pattern the chat
-back-channel already uses — popping an Answer / Decline buffer and routing audio on
-Answer.  Shares that watcher process with Text messaging (incoming SMS), so build the
-bridge once.  Depends on: Cellular modem, Audio I/O, the shared modem-watcher.  Done
-when the phone rings, you can answer, and audio works.
+** DONE Phone answering
+Shipped in PR #28 (2026-06-19): ModemManager D-Bus ring detection, incoming-call
+screen, raw-AT answer, and call-state dismissal.  Pierre confirmed the phone can
+receive and answer real calls.  PR #34 intentionally adds a separate headless
+voice-assistant watcher/bridge; SMS forwarding remains separate and unchanged.
 
 ** TODO Text messaging
 Needs "3G antenna".
@@ -589,17 +559,13 @@ OURS used an [[https://www.communica.co.za/products/hkd-gsm-antenna-on-ipex-13-c
 version (not GSM-only) so it covers the carrier's LTE bands. ~$3-8. Confirm the
 connector matches the modem's MAIN antenna port (u.FL). Not urgent.
 
-** TODO Real-time full-duplex call-audio bridge + uplink
-Downlink is validated end-to-end (capture → USB dongle → headphones) on the
-stable rail — see [[file:docs/2026-06-18-call-audio.org][the call-audio doc, 2026-06-20 update]]. Two pieces remain for a
-real two-way call:
-- *One synchronized bridge process* — read =ttyUSB4= downlink + write uplink in
-  *matched chunks clocked off the modem* (16.7 kHz), NOT two loose =cat=s (which
-  desync → silent downlink + "airplane" static uplink). =AT+CPCMREG=1= is
-  full-duplex; you can't run one direction alone.
-- *Uplink needs a real mic* — the *single-TRRS dongle* (one combined jack);
-  EarPods in the 2-jack dongle's pink (TRS) port is a false-negative.
-Then build it as a daemon and wire it to the call UI. Blocked on the TRRS dongle.
+** TODO Finish stable-power live validation of full-duplex call-audio bridge
+The synchronized bridge daemon now exists in PR #34.  Its single balanced pump
+reads ttyUSB4 downlink and writes matched uplink frames clocked by the modem; it
+uses digital PCM, so a TRRS microphone is not part of this path.  The remaining
+blocker is repeatable Pi undervoltage under incoming-call modem load.  After the
+power path is fixed, complete the ordered live checks in
+[[file:docs/2026-07-28-voice-call-p3-bridge.org][the P3 bridge state doc]].
 
 ** TODO Cellular modem ("3G antenna")
 I have an antenna, just need to connect it and ensure I can connect to a cell network (reliably, with some options around it).
