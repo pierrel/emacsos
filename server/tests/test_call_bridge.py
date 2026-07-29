@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+import emacsos_server.call_bridge as call_bridge
 from emacsos_server.call_bridge import (
     FRAME_BYTES, SILENCE, BridgeSession, DownlinkQueue, JitterBuffer, PcmPump,
     RingWatcher, SerialCallControl, VoiceConfig, WsLink,
@@ -183,6 +184,62 @@ def test_session_notifies_assist_only_after_modem_audio_is_ready():
     assert BridgeSession(control, link, JitterBuffer(), DownlinkQueue()).run(
         "call-1", "+15555550100") == "server"
     assert link.answered_call == "call-1"
+    assert control.calls == ["answer", "start_pcm", "stop_pcm", "hangup", "close"]
+
+
+def test_session_does_not_notify_assist_when_it_hangs_up_during_pcm_setup():
+    class Control:
+        def __init__(self):
+            self.calls = []
+
+        def answer(self):
+            self.calls.append("answer")
+
+        def start_pcm(self):
+            self.calls.append("start_pcm")
+            link.events.put({"type": "hangup"})
+            return FakeModem([b"m" * FRAME_BYTES])
+
+        def stop_pcm(self):
+            self.calls.append("stop_pcm")
+
+        def hangup(self):
+            self.calls.append("hangup")
+
+        def close(self):
+            self.calls.append("close")
+
+    class Link:
+        def __init__(self):
+            import queue
+            self.events = queue.Queue()
+            self.events.put({"type": "answer"})
+            self.answered_call = None
+
+        def open(self, call_id, caller):
+            pass
+
+        def answered(self, call_id):
+            self.answered_call = call_id
+
+        def controls(self):
+            return self.events
+
+        def run_receiver(self):
+            pass
+
+        def run_sender(self):
+            pass
+
+        def close(self, cause):
+            pass
+
+    link = Link()
+    control = Control()
+
+    assert BridgeSession(control, link, JitterBuffer(), DownlinkQueue()).run(
+        "call-1", "+15555550100") == "server"
+    assert link.answered_call is None
     assert control.calls == ["answer", "start_pcm", "stop_pcm", "hangup", "close"]
 
 
@@ -511,3 +568,56 @@ def test_serial_control_disables_pcm_if_its_device_cannot_open():
     assert at.writes == [
         b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r",
     ]
+
+
+def test_serial_control_retries_pcm_enable_until_the_modem_accepts_it():
+    class Port:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        def read(self, _size):
+            return responses.pop(0)
+
+        def close(self):
+            pass
+
+    responses = [b"\r\nERROR\r\n", b"\r\nOK\r\n", b"\r\nOK\r\n"]
+    at = Port()
+    pcm = Port()
+    ports = iter([at, pcm])
+    control = SerialCallControl(serial_factory=lambda *_args, **_kwargs: next(ports))
+
+    assert control.start_pcm() is control
+    control.stop_pcm()
+
+    assert at.writes == [
+        b"AT+CPCMREG=1\r", b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r",
+    ]
+
+
+def test_serial_control_rejects_pcm_enabled_after_its_ready_window(monkeypatch):
+    class Port:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        def read(self, _size):
+            return b"\r\nOK\r\n"
+
+        def close(self):
+            pass
+
+    at = Port()
+    clock = iter([0, 0, 0, 0, 3.1, 3.1, 3.1, 3.1])
+    monkeypatch.setattr(call_bridge.time, "monotonic", lambda: next(clock))
+    control = SerialCallControl(serial_factory=lambda *_args, **_kwargs: at)
+
+    with pytest.raises(RuntimeError, match="before deadline"):
+        control.start_pcm()
+
+    assert at.writes == [b"AT+CPCMREG=1\r", b"AT+CPCMREG=0,1\r"]

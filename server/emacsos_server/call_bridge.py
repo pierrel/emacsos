@@ -120,7 +120,22 @@ class SerialCallControl:
         raise RuntimeError("SIM7600 did not activate answered call")
 
     def start_pcm(self) -> ModemAudio:
-        self._command("AT+CPCMREG=1")
+        deadline = time.monotonic() + 3
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("SIM7600 did not enable PCM before deadline")
+            try:
+                self._command("AT+CPCMREG=1", timeout=min(0.5, remaining))
+                if time.monotonic() > deadline:
+                    self._command("AT+CPCMREG=0,1")
+                    raise RuntimeError("SIM7600 enabled PCM after deadline")
+                break
+            except RuntimeError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("SIM7600 did not enable PCM before deadline")
+                time.sleep(min(0.05, remaining))
         try:
             self._pcm = self._serial_factory(
                 self._pcm_path, 115200, timeout=None, write_timeout=1,
@@ -381,6 +396,13 @@ class BridgeSession:
                     cause = "pcm_setup"
                     logger.exception("SIM7600 PCM setup failed")
                     return cause
+                try:
+                    control = self._link.controls().get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    if control["type"] == "hangup":
+                        return cause
                 pump_thread = threading.Thread(target=pump.run, daemon=True)
                 pump_thread.start()
                 self._link.answered(call_id)
