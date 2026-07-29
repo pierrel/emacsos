@@ -286,6 +286,35 @@ def test_link_sends_answered_after_the_server_admits_the_call():
     ]
 
 
+def test_link_retries_one_timed_out_handshake_while_the_call_is_ringing():
+    class Socket:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, message):
+            self.sent.append(message)
+
+    socket = Socket()
+    attempts = 0
+
+    def connect(_config):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("handshake timed out")
+        return socket
+
+    link = WsLink(VoiceConfig("wss://assist/call", "secret"),
+                  JitterBuffer(), DownlinkQueue(), connect)
+
+    link.open("call-1", "+15555550100")
+
+    assert attempts == 2
+    assert json.loads(socket.sent[0]) == {
+        "type": "ring", "call_id": "call-1", "caller": "+15555550100",
+    }
+
+
 def test_ring_watcher_ignores_a_second_call_before_dbus_io():
     class Variant:
         def __init__(self, value):

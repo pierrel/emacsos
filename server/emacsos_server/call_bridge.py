@@ -278,7 +278,10 @@ class WsLink:
         }, max_size=4096)
 
     def open(self, call_id: str, caller: str) -> None:
-        self._socket = self._connect(self._config)
+        try:
+            self._socket = self._connect(self._config)
+        except TimeoutError:
+            self._socket = self._connect(self._config)
         self._send_control({"type": "ring", "call_id": call_id, "caller": caller})
 
     def answered(self, call_id: str) -> None:

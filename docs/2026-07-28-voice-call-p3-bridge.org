@@ -57,4 +57,7 @@ the gain commands remain unsupported on the automatic-answer path.  Retrying
 audio-ready event.  The validated hardware recipe and SIMCom's MT-call flow both
 require =VOICE CALL: BEGIN= first.  The bridge now waits for that exact event,
 then enables PCM once and sends =answered= only after it succeeds.  The next call
-tests the PIN prompt and carrier DTMF.
+failed earlier: its initial WSS handshake timed out before Assist saw the ring,
+although the authenticated path was healthy immediately afterward.  The bridge
+now makes one bounded second handshake attempt while the call is still ringing.
+The next call tests the PIN prompt and carrier DTMF.
