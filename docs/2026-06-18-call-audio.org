@@ -151,9 +151,11 @@ headphones), on a modem that finally holds a call.
   C-Media dongle is a *two-jack* type (green out / pink mic, separate); *TRRS
   earbuds in the pink jack do NOT map a mic* (3-pole jack vs 4-pole plug) — that
   was the "mic path" false-negative.
-- *Uplink still pending the right hardware:* a *single-TRRS dongle* (one
-  combined jack → a real mic) plus the *synchronized full-duplex bridge* above.
-  Tested with EarPods-in-pink = false-negative, as expected.
+- *Analog-loopback uplink still needs the right hardware:* a *single-TRRS
+  dongle* (one combined jack → a real mic).  Tested with EarPods-in-pink =
+  false-negative, as expected.  The voice assistant does not depend on this
+  analog loopback: emacsos PR #34 implements the synchronized digital PCM/WSS
+  bridge, with the far-end caller as its microphone.
 - *Ops note:* WireGuard flakiness can SIGHUP a backgrounded =ssh= dial script
   mid-run (log stalls at "start", no process left). A *detached* remote process
   (=setsid=/=nohup=) survives the tunnel hiccup; poll a logfile.
@@ -162,11 +164,12 @@ headphones), on a modem that finally holds a call.
   Reinforces the *smaller-but-better antenna* roadmap item (the bundled whip is
   bulky; an FPC/u.FL multiband LTE antenna placed well would help marginal spots).
 
-* Next steps
-1. *Build the real-time full-duplex call-audio bridge* — one process, matched
-   read/write chunks clocked off =ttyUSB4=, at 16.7 kHz (not two loose =cat=s).
-2. *Uplink test with the single-TRRS dongle* (real mic) once it arrives.
-3. Swap the wall charger for the *Pololu U3V70F5* on the same 5V/GND posts when
-   it lands (permanent rail; data-only USB handling revisited then).
-4. Implement the udev AT-port-ownership rule and confirm MM still manages data.
-5. Build the "call X" contacts skill — *done* (PRs #26/#29, 2026-06-18..20).
+* Next steps (updated 2026-07-29)
+1. *Fix the power path first.* Incoming modem load now provably triggers Pi
+   undervoltage.  Follow the shutdown, supply, and stable-ring checklist in
+   [[file:2026-07-28-voice-call-p3-bridge.org][the P3 bridge state doc]].
+2. Finish live validation of PR #34's balanced digital PCM/WSS bridge: PIN audio
+   and DTMF, TTS downlink, caller uplink/STT, clock rate, and barge-in.
+3. A single-TRRS dongle remains useful only for the separate analog-loopback
+   experiment; it does not block the voice assistant.
+4. Build the "call X" contacts skill — *done* (PRs #26/#29, 2026-06-18..20).

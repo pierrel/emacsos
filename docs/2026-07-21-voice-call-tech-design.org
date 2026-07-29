@@ -12,11 +12,12 @@ clean-interfaces, threat-model). The *Review resolutions* section at the end map
 every finding to where it now lives. Section 0 records Pierre's resolutions to the
 three design forks rather than leaving their outcome implicit.
 
-*Implementation status (2026-07-26):* this design merged in emacsos PR #33.
-Assist P1 PR1–PR3 are merged and deployed: Flow (#209), Speech (#211), and bounded
-Wire =/call= (#214). They remain intentionally unwired end-to-end. *NEXT is assist
-PR4 =session.py=*, then PR5 security/reconstruction; the phone PCM bridge is P3.
-Live slice status: [[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]].
+*Implementation status (2026-07-29):* this design merged in emacsos PR #33.
+Assist P1 is merged and deployed: Flow (#209), Speech (#211), bounded Wire =/call=
+(#214), Session/ordinary-Run integration (#219), and PIN/caller security plus
+scripted reconstruction (#220).  Emacsos PR #34 implements and deploys the phone
+PCM bridge.  Live validation is paused at an observed Pi undervoltage gate; exact
+evidence and resume steps live in [[file:2026-07-28-voice-call-p3-bridge.org][the P3 bridge state doc]].
 
 * 0. Decisions — RESOLVED (Pierre, review round 2)
 
@@ -115,7 +116,7 @@ PHONE (Pi Zero 2 W)                       HOME BOX (assist manage.web, one uvico
 │  - CPCMREG PCM pump     │              │   session.py  Gate→Router→InThread SM      │
 │    (balanced pump)       │              │              + calllog + speech (in-proc) │
 │  - jitter buffer        │              │   speech.py   whisper+piper, lazy in-proc  │
-│  (ttyUSB3 + ttyUSB4)    │              │  assist/catalog.py (read-only, Decision 2) │
+│  (ttyUSB2 + ttyUSB4)    │              │  assist/catalog.py (read-only, Decision 2) │
 ├─────────────────────────┤              │  assist/receptionist.py (protected router) │
 │ phone-call.el (shipped, │              │  threads.py: durable Runs + turn observer │
 │  unchanged: human UI)   │              │  thread_queue.py: interactive waiter (P3)  │
@@ -170,7 +171,7 @@ application of that boundary.
 | Async result delivery          | turn-completion observer seam (=_geo_on_complete= as precedent)                                                                                                                     |
 | Thread catalog                 | shipped read-only =assist/catalog.py= mirrors the web-owned metadata reads without exposing contents; web migration remains later work                                                                          |
 | Router construction            | =langchain.agents.create_agent= (LangChain 1.x prebuilt loop) — *net-new wiring*, deliberately NOT assist's =create_agent= (§4)                                                   |
-| Voice flow + speech + wire     | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF), =speech.py= (STT/TTS), and bounded =wire.py= WSS transport; remaining work is session/security integration, then the phone PCM bridge             |
+| Voice flow + speech + wire     | shipped assist P1 =flow.py= (VAD/endpointing/barge-in/DTMF), =speech.py= (STT/TTS), bounded =wire.py= WSS transport, =session.py= integration, and PR #220 security/reconstruction; P3 live validation is power-blocked |
 | Router eval                    | =edd/eval/= harness, =test_interjection.py= in-memory-callback pattern                                                                                                            |
 | Call-event log                 | =append_event= O_APPEND/torn-line discipline (=thread_log.py=)                                                                                                                     |
 | Phone daemon deploy            | =deploy-sms-forward= Makefile pattern                                                                                                                                             |
@@ -369,10 +370,10 @@ In-memory =FakeCatalog= + captured =on_open=/=on_new=, the =test_interjection.py
 
 * 5. Conversation-flow engine + state machine (server-side)
 
-*Assist voice modules:* =manage/voice/flow.py=, =wire.py=, and =speech.py= are
-shipped (PRs #209/#214/#211); the =/call= route is registered on the existing app.
-=manage/voice/session.py= is the next planned module (=calllog= folds into it) and
-will configure Wire's synchronous runner seam.
+*Assist voice modules:* =manage/voice/flow.py=, =wire.py=, =speech.py=, and
+=session.py= are shipped (PRs #209/#214/#211/#219); the =/call= route is
+registered on the existing app and Session configures Wire's synchronous runner
+seam.  Security and scripted reconstruction shipped in PR #220.
 
 ** flow.py — hermetic frame-in / event-out engine (clean-interfaces #9)
 Contract: consumes 20 ms PCM frames, emits events; *no web imports, no network, no
@@ -729,11 +730,14 @@ milestone. Each has explicit validation so the next builds on verified behavior.
 P0–P2 are the hardware-independent ~80 %; only P3 needs the assembled phone.
 *P0 is the load-bearing de-risk:* the durable Run path is proven by the web client
 before voice becomes its second consumer (D1).
-The async-subagent dependency is complete; remaining P1 work is the voice-specific
-session and security integration.
-*Current P1 subphase:* PR1 Flow, PR2 Speech, and PR3 Wire are DONE/MERGED/DEPLOYED.
-PR4 =session.py= is NEXT; PR5 closes security and scripted-call reconstruction.
-The composite P1 row remains open until those fake-bridge criteria pass.
+The async-subagent dependency and voice-specific P1 work are complete.
+*Current P1 subphase:* PR1 Flow, PR2 Speech, PR3 Wire, PR4 Session, and PR5
+security/reconstruction are DONE/MERGED/DEPLOYED.  P3 live validation is paused
+at the power gate recorded in the P3 bridge state doc.
+*Observed implementation order:* basic stable-power P3 validation now comes before
+P2.  P2 async child-result delivery and both receptionist go-back paths remain
+unimplemented follow-ups after the basic live call is proven; the phase table's
+P0–P2 hardware-independence does not make P2 a prerequisite for that first call.
 * 11. Risks & open questions
 
 1. *Dead air behind a long superstep* (single slot): the silence watchdog covers the
@@ -857,7 +861,8 @@ the appropriate sections"). All inline markers are folded and removed.
 to resolved per the above.
 
 * Outcome
-Design merged in emacsos PR #33. Assist implementation status is maintained in
-[[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. As of 2026-07-26, assist PRs #209, #211,
-and #214 shipped Flow, Speech, and bounded Wire; PR4 Session and PR5 security/
-reconstruction remain. Phone-side =call_bridge.py= and live validation remain P3.
+Design merged in emacsos PR #33. The historical P1 build record is
+[[file:../../assist/docs/2026-07-23-voice-p1.org][assist/docs/2026-07-23-voice-p1.org]]. As of 2026-07-29, assist PRs #209, #211,
+#214, #219, and #220 shipped Flow, Speech, bounded Wire, Session, and security/
+reconstruction.  Emacsos PR #34 implements and deploys =call_bridge.py=; remaining
+P3 live validation waits on the documented phone power fix.

@@ -81,18 +81,21 @@ boot too).
   phone wg **MTU=1280** is mandatory; use `wg-quick down/up` (not `syncconf`) when the endpoint family
   changes; phone wg `AllowedIPs` includes `<server-lan-ip>/32` (so LAN ssh to the phone is broken by
   design when wg is up — use `ssh phone-wg`); rfkill persists across reboots.
-- **SIM7600G-H telephony (validated, the voice-call P3 hardware path).** Voice calls work; 16 kHz PCM
-  on `/dev/ttyUSB4` via `AT+CPCMREG=1`; the bridge owns primary `ttyUSB2` for raw AT/audio while the
-  human UI retains secondary `ttyUSB3`; ModemManager keeps QMI call detection/data. Downlink validated;
-  uplink + the audio bridge are net-new for P3. The board is a quad-core
-  A53 (64-bit) — the "too weak for whisper" assumption was wrong.
+- **SIM7600G-H telephony (validated, but P3 is paused at a hardware power gate).** Voice calls work;
+  16 kHz PCM is on `/dev/ttyUSB4` via `AT+CPCMREG=1`; the bridge owns primary `ttyUSB2` for raw
+  AT/audio while the human UI retains secondary `ttyUSB3`; ModemManager keeps QMI call detection/data.
+  Live bridge calls exposed repeatable Pi undervoltage exactly when the modem received a call, including
+  the full picked-up-but-silent interval. Do not tune voice code or resume live calls until the supply
+  path is upgraded and a ring plus sustained call produces no new undervoltage event. The exact evidence
+  and resume checklist live in `docs/2026-07-28-voice-call-p3-bridge.org`. The board is a quad-core A53
+  (64-bit); the earlier "too weak for whisper" assumption was wrong.
 - **Config-apply after `/clear`:** a `get_config()` tool (`channel.py`) returns
   `ConfigRepo.current().body` (committed config = next-restart source of truth) so the agent can read
   config after conversation memory is wiped; the skill mandates a `get_config` read before `apply_config`.
-- **Voice-call assistant:** emacsos owns the **phone-side PCM bridge** (P3, hardware-gated — the
-  `call_bridge.py` daemon: D-Bus ring watch, ATA/CHUP, the CPCMREG PCM pump). The receptionist,
-  catalog, and all server-side voice/session responsibilities live in **assist** (see the meta
-  `AGENTS.md` "Current state"); emacsos is the thin device client. Assist P1 Flow, Speech, and
-  bounded Wire are merged/deployed (PRs #209/#211/#214);
-  `session.py` is next, then the security/reconstruction gate. The current in-flight work remains
-  assist-side; emacsos's implementation begins at P3 only after the fake-bridge contract is complete.
+- **Voice-call assistant:** emacsos owns the **phone-side PCM bridge** (P3, hardware-gated: the
+  `call_bridge.py` daemon, D-Bus ring watch, ATA/CHUP, and balanced CPCMREG PCM pump). The receptionist,
+  catalog, Flow, Speech, Wire, Session, PIN security, and call reconstruction are merged and deployed
+  in **assist** (the catalog/receptionist was reviewed in closed #208 and later landed; shipped PRs
+  #209/#211/#214/#219/#220 cover the remaining P1 slices). Emacsos PR #34 is deployed and awaits only a safe
+  power path and the remaining live validation. See the meta `AGENTS.md` "Current state" and the P3
+  state doc before resuming; Pierre must initiate each live call.

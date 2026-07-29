@@ -63,5 +63,77 @@ now makes one bounded second handshake attempt while the call is still ringing.
 The following call reached =VOICE CALL: BEGIN= but =AT+CPCMREG=1= still failed
 on secondary ttyUSB3.  The successful hardware capture used primary ttyUSB2;
 the bridge now owns that proven port while the human call UI retains ttyUSB3
-and ModemManager remains on QMI.  The next call tests the PIN prompt and carrier
-DTMF.
+and ModemManager remains on QMI.
+
+* Stopping point: 2026-07-29 hardware power gate
+
+Further live validation is paused until Pierre can change the phone's power
+path, expected in roughly two weeks.  This is the handoff point for a new
+session when Pierre says “let's continue working on voice.”
+
+The last failures are power-correlated, not evidence for another bridge retry
+or audio-code change:
+
+1. ModemManager and the bridge saw the inbound calls.  On the 07:16 call, both
+   bounded WSS handshakes timed out and Assist saw neither request before the
+   call reached voicemail.  An earlier voicemail call had one handshake timeout
+   before the retry existed.  The authenticated WSS path recovered afterward.
+2. The kernel logged =Undervoltage detected!= at the exact arrival of the
+   07:16:47 call and =Voltage normalised= only at 07:17:34, after voicemail.
+   The 06:52 and 07:00 attempts showed the same correlation; undervoltage spans
+   the 07:00 picked-up-but-silent call.
+3. =vcgencmd get_throttled= returned =0x50000=: historical undervoltage and
+   throttling, with no current low-voltage bit once the modem was idle.  After
+   normalization, =call-bridge.service= was active and an authenticated WSS
+   probe completed in 0.12 seconds.
+
+The next work is therefore physical and then observational:
+
+1. The deployed test host is a Raspberry Pi 3 Model B Rev 1.2;
+   =docs/hardware-build.org= “Power & wiring” describes the portable Pi Zero 2 W
+   build.  Inspect and document its actual power and USB-VBUS wiring before
+   changing it; do not copy the portable battery topology verbatim.  Then shut
+   down the Pi cleanly and disconnect every power source.  While the hardware is
+   unpowered, apply the runbook's relevant modem constraint: a stiff ≥3 A modem
+   rail through the SIM7600 HAT's dedicated 5 V/GND posts, with Pi↔modem USB
+   made data-only so VBUS cannot fight that rail, plus an independently adequate
+   Pi 3 supply.  If the Pi still browns out, fully isolate the Pi and modem
+   supplies.  Do not use a passive Y-splitter or join regulated 5 V outputs.
+2. In a new session, run =tools/agentic status --json=, claim the existing
+   =voice-live-bridge= lane, inspect PR #34 and the current phone deployment,
+   and redeploy through the deployment transaction if another branch has
+   replaced it.
+3. Reboot after changing the power path so the sticky throttle-history bits
+   clear.  Before calling, require =vcgencmd get_throttled= to report =0x0=,
+   =call-bridge.service= to be active, and the secret-safe authenticated WSS
+   probe below to connect.  Run the probe on the phone through the shared phone
+   resource; it reads the ignored 0600 environment file and prints no secret:
+
+   #+begin_src sh
+   set -a
+   . "$HOME/.config/call-bridge.env"
+   set +a
+   "$HOME/.local/call-bridge/venv/bin/python" - <<'PY'
+   import os
+   import time
+   from websockets.sync.client import connect
+
+   started = time.monotonic()
+   connection = connect(
+       os.environ["ASSIST_VOICE_URL"],
+       additional_headers={
+           "Authorization": "Bearer " + os.environ["ASSIST_VOICE_SECRET"],
+       },
+       open_timeout=10,
+   )
+   print(f"authenticated WSS connected in {time.monotonic() - started:.2f}s")
+   connection.close()
+   PY
+   #+end_src
+4. Watch the kernel log during the first ring and sustained call.  Any new
+   undervoltage event means stop and fix power; idle voltage alone is not a
+   sufficient test.
+5. With stable power, validate in order: automatic answer on ttyUSB2;
+   =VOICE CALL: BEGIN= followed by successful =AT+CPCMREG=1=; audible PIN
+   prompt; carrier DTMF; clean TTS downlink; caller uplink/STT; measured modem
+   clock rate; then barge-in.  Pierre initiates every live call.
