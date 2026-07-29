@@ -234,9 +234,9 @@ deploy-sms-forward:
 	ssh $(SMS_FWD_HOST) "sudo systemctl daemon-reload && sudo systemctl enable sms-forward.service && sudo systemctl restart sms-forward.service"
 	@echo "✓ sms-forward deployed to $(SMS_FWD_HOST) on :$(EMACSOS_SMS_FORWARD_PORT)"
 
-# Installs but does not run during development. The shared secret is read from
-# a local 0600 file and written directly to the phone's 0600 environment file;
-# it never appears in a Make argument, process list, or tracked file.
+# Installs and restarts the configured bridge. The shared secret is read from a
+# local 0600 file and written directly to the phone's 0600 environment file; it
+# never appears in a Make argument, process list, or tracked file.
 VOICE_BRIDGE_HOST ?= phone-wg
 VOICE_BRIDGE_DIR ?= .local/call-bridge
 VOICE_BRIDGE_ENV ?= .config/call-bridge.env
@@ -257,7 +257,7 @@ deploy-call-bridge:
 	     -e "s|@@VENV@@|$$H/$(VOICE_BRIDGE_DIR)/venv|g" \
 	     -e "s|@@SCRIPT_PATH@@|$$H/$(VOICE_BRIDGE_DIR)/call_bridge.py|g" \
 	     deploy/call-bridge.service.in | ssh $(VOICE_BRIDGE_HOST) "sudo tee /etc/systemd/system/call-bridge.service >/dev/null"
-	ssh $(VOICE_BRIDGE_HOST) "sudo systemctl daemon-reload && sudo systemctl enable --now call-bridge.service"
+	ssh $(VOICE_BRIDGE_HOST) "sudo systemctl daemon-reload && sudo systemctl enable call-bridge.service && sudo systemctl restart call-bridge.service"
 	@echo "✓ call bridge deployed to $(VOICE_BRIDGE_HOST)"
 
 test-server: $(SERVER_STAMP)
