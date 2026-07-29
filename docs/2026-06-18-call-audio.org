@@ -98,16 +98,13 @@ ALSA card for media/TTS/STT). They do not natively unify.
   for calls; reliable, near-zero code, but two separate endpoints and the agent
   can't touch call audio. Keep as the known-good fallback.
 
-** Open design fork: AT-port ownership
-To send =AT+CPCMREG= we need an AT port. =ttyUSB2= is owned by ModemManager. For
-the validation we *stopped MM* (safe here because access is over wifi), which
-drops cellular data for the call's duration and needs a restart afterward — *not*
-acceptable for a real feature. Production should instead free just the AT port
-with a udev =ID_MM_PORT_IGNORE= rule on =ttyUSB2= (match vendor =1e0e= product
-=9001= interface =02=) so the call/audio bridge owns AT + =ttyUSB4= while MM
-keeps managing the data bearer over QMI (=cdc-wdm0=). MM managed data fine via
-QMI throughout testing, which is encouraging for this split — but confirm MM
-still drives the modem with its AT port ignored before committing.
+** AT-port ownership
+The successful PCM capture issued =AT+CPCMREG= on the primary =ttyUSB2=.  Live
+P3 calls later proved the secondary =ttyUSB3= accepts capability queries but
+rejects =AT+CPCMREG=1= during an answered call, even after =VOICE CALL: BEGIN=.
+The production udev rule therefore frees both AT ports: the call bridge owns
+=ttyUSB2=, while the human call UI retains =ttyUSB3=.  ModemManager keeps call
+detection and data on QMI (=cdc-wdm0=), plus GPS on =ttyUSB1=.
 
 * Speech-to-text
 Validated with =faster-whisper= =base.en= on *CPU* (the RTX 3090 is occupied by

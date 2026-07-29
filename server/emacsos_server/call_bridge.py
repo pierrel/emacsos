@@ -84,7 +84,7 @@ class CallControl(Protocol):
 class SerialCallControl:
     """SIM7600 raw-AT control plus its exact-frame serial PCM endpoint."""
 
-    def __init__(self, at_path: str = "/dev/ttyUSB3",
+    def __init__(self, at_path: str = "/dev/ttyUSB2",
                  pcm_path: str = "/dev/ttyUSB4",
                  serial_factory: Callable[..., Any] | None = None) -> None:
         if serial_factory is None:

@@ -1,0 +1,8 @@
+# Free both SIM7600 AT ports from ModemManager.  The call bridge uses the
+# primary port (ttyUSB2, interface 02) because CPCMREG activation is supported
+# there; the human call UI keeps using the secondary port (ttyUSB3, interface
+# 03).  ModemManager retains QMI call detection and data on cdc-wdm0.
+#
+# See docs/2026-06-18-call-audio.org and docs/2026-06-18-inbound-answering.org.
+ACTION=="add|change|bind", SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1e0e", ENV{ID_MODEL_ID}=="9001", ENV{ID_USB_INTERFACE_NUM}=="02", ENV{ID_MM_PORT_IGNORE}="1"
+ACTION=="add|change|bind", SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1e0e", ENV{ID_MODEL_ID}=="9001", ENV{ID_USB_INTERFACE_NUM}=="03", ENV{ID_MM_PORT_IGNORE}="1"

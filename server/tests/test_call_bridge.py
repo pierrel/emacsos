@@ -546,7 +546,13 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
     ])
     pcm = Port([b"p" * 100, b"p" * (FRAME_BYTES - 100)])
     ports = iter([at, pcm])
-    control = SerialCallControl(serial_factory=lambda *args, **kwargs: next(ports))
+    opened = []
+
+    def serial_factory(path, *args, **kwargs):
+        opened.append(path)
+        return next(ports)
+
+    control = SerialCallControl(serial_factory=serial_factory)
 
     control.answer()
     audio = control.start_pcm()
@@ -561,6 +567,7 @@ def test_serial_control_owns_at_then_pcm_in_the_validated_order():
         b"AT+CPCMREG=0,1\r", b"AT+CHUP\r",
     ]
     assert pcm.writes == [SILENCE]
+    assert opened == ["/dev/ttyUSB2", "/dev/ttyUSB4"]
     assert at.closed and pcm.closed
 
 

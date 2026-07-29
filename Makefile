@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-port wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward deploy-call-bridge
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward deploy-call-bridge
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
@@ -72,17 +72,19 @@ cellular-bringup:
 	   if [ -n '$(APN_AUTH_FILE)' ]; then cat '$(APN_AUTH_FILE)'; fi; \
 	 } | ssh phone "sudo bash $(PHONE_DEPLOY_TMP); rc=\$$?; rm -f $(PHONE_DEPLOY_TMP); exit \$$rc"
 
-# One-time: hand the SIM7600 secondary AT port (ttyUSB3) to emacsos for raw-AT
-# voice (incoming answer + later call audio).  ModemManager keeps QMI + GPS +
-# the primary AT port, so detection and data are unaffected.  Re-run only if
-# the rule changes.  See docs/2026-06-18-inbound-answering.org.
-install-modem-at-port:
-	scp deploy/99-emacos-free-ttyusb3.rules phone:/tmp/99-emacos-free-ttyusb3.rules
-	ssh phone "sudo mv /tmp/99-emacos-free-ttyusb3.rules /etc/udev/rules.d/ \
+# One-time: hand both SIM7600 AT ports to emacsos.  The call bridge uses the
+# primary ttyUSB2 because that is the hardware-validated CPCMREG path; the human
+# call UI keeps ttyUSB3.  ModemManager keeps QMI + GPS, so call detection and
+# data remain on cdc-wdm0.  Re-run only if the rule changes.
+MODEM_AT_HOST ?= phone
+install-modem-at-ports:
+	scp deploy/99-emacos-free-at-ports.rules $(MODEM_AT_HOST):/tmp/99-emacos-free-at-ports.rules
+	ssh $(MODEM_AT_HOST) "sudo mv /tmp/99-emacos-free-at-ports.rules /etc/udev/rules.d/ \
+	  && sudo rm -f /etc/udev/rules.d/99-emacos-free-ttyusb3.rules \
 	  && sudo udevadm control --reload-rules \
-	  && sudo udevadm trigger --action=change /dev/ttyUSB3 \
+	  && sudo udevadm trigger --action=change /dev/ttyUSB2 /dev/ttyUSB3 \
 	  && sudo systemctl restart ModemManager"
-	@echo "✓ ttyUSB3 freed for emacsos AT voice; ModemManager restarted"
+	@echo "✓ ttyUSB2 + ttyUSB3 freed for emacsos AT voice; ModemManager restarted"
 
 # === WireGuard for the away phone ===
 # See docs/2026-05-31-wireguard-away-phone.org for the full setup runbook.

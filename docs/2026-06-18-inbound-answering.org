@@ -30,12 +30,11 @@ The whole design hinges on facts the spikes established on this SIM7600G-H:
    =VOICE CALL: BEGIN=, =+CLCC= state →0 (active), and ModemManager's own QMI
    view flips to =state: active=. Verified end-to-end: a real 12-second
    connected call (=VOICE CALL: END: 000012=).
-4. *Freeing an AT port is the enabler.* MM owns both AT ports (=ttyUSB2= primary,
-   =ttyUSB3= secondary). A udev rule tags =ttyUSB3= (USB iface 03, vid 1e0e pid
-   9001) =ID_MM_PORT_IGNORE=1=; after =udevadm reload + MM restart=, MM keeps
-   QMI + GPS + =ttyUSB2= (so detection + data are intact) and =ttyUSB3= is ours
-   for AT (=ATA= / =AT+CHUP= / later =AT+CSDVC= audio). This same freed port is
-   what the call-audio two-way work needs — one rule, both features.
+4. *Freeing the AT ports is the enabler.* MM sees both AT ports (=ttyUSB2=
+   primary, =ttyUSB3= secondary).  The udev rule tags both as
+   =ID_MM_PORT_IGNORE=1=: the P3 call bridge uses primary =ttyUSB2= for the
+   validated =ATA=/=AT+CPCMREG=/=AT+CHUP= path, and the human UI retains
+   secondary =ttyUSB3=.  MM keeps QMI call detection + data and GPS.
 5. *emacs can drive both halves.* =dbus.el= registers the =CallAdded= signal on
    the system bus (=:registered t=); =make-serial-process= drives =ttyUSB3=.
 
@@ -84,8 +83,9 @@ poll+dbus belt-and-suspenders.
 ** os.el
 - Arm =emacos-call--watcher-ensure= in =emacos--init=.
 ** Deploy
-- =deploy/99-emacos-free-ttyusb3.rules= committed; =phone-install= installs it +
-  =udevadm reload= + restart ModemManager (one-time; idempotent).
+- =deploy/99-emacos-free-at-ports.rules= committed;
+  =make install-modem-at-ports= installs it + =udevadm reload= + restart
+  ModemManager (one-time; idempotent).
 ** Tests (tests/test-call.el, mmcli + serial stubbed)
 - =emacos-answer= sends =ATA=, returns "answered:" on a BEGIN/OK response;
   surfaces "error:" on a failed/empty response.

@@ -44,7 +44,7 @@ validation on Pierre's phone.
 - Only WSS is accepted.  The shared secret never appears in argv or logs.
 - Queue depth is bounded and drops stale downlink, while the pump always writes
   a complete frame.  A stalled network sender cannot block modem PCM.
-- Every exit closes the WSS client, stops PCM, releases ttyUSB3, and sends the
+- Every exit closes the WSS client, stops PCM, releases ttyUSB2, and sends the
   modem hangup only for the bridge-owned call.
 
 * Live validation
@@ -60,4 +60,8 @@ then enables PCM once and sends =answered= only after it succeeds.  The next cal
 failed earlier: its initial WSS handshake timed out before Assist saw the ring,
 although the authenticated path was healthy immediately afterward.  The bridge
 now makes one bounded second handshake attempt while the call is still ringing.
-The next call tests the PIN prompt and carrier DTMF.
+The following call reached =VOICE CALL: BEGIN= but =AT+CPCMREG=1= still failed
+on secondary ttyUSB3.  The successful hardware capture used primary ttyUSB2;
+the bridge now owns that proven port while the human call UI retains ttyUSB3
+and ModemManager remains on QMI.  The next call tests the PIN prompt and carrier
+DTMF.

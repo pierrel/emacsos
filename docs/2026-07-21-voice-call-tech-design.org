@@ -161,7 +161,7 @@ application of that boundary.
 | Deliverable                    | Built on (no parallel implementation)                                                                                                                                             |
 |--------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Ring detect + caller-id        | D-Bus =Voice.CallAdded= + =Direction=/=Number= props (2026-06-18-inbound-answering.org); same subscription in Python                                                              |
-| Auto-answer / hang-up          | new bridge uses =ATA= / =AT+CHUP= on freed ttyUSB3 (udev rule =deploy/99-emacos-free-ttyusb3.rules= shipped); human UI stays unchanged: =emacos-answer= uses =ATA= and =emacos-hang-up= uses =mmcli --voice-hangup-all= |
+| Auto-answer / hang-up          | bridge uses =ATA= / =AT+CHUP= on primary ttyUSB2; human UI stays on secondary ttyUSB3; both are freed by =deploy/99-emacos-free-at-ports.rules= while MM retains QMI call detection/data |
 | PCM bridge                     | 2026-06-18-call-audio.org: 16 kHz/16-bit/mono on ttyUSB4, =AT+CPCMREG=1=, balanced read/write at ~16.7 kHz, one process                                                           |
 | STT                            | faster-whisper base.en validated on a real call clip; =vad_filter=True=, =condition_on_previous_text=False=                                                                       |
 | Turn execution / queueing      | =_create_run= + =_execute_run= + =THREAD_QUEUE= + =_ResumeScheduler=; voice commits an ordinary Run and carries its id across the turn-runner boundary (§5)                         |
@@ -192,8 +192,8 @@ Pi" leg was *dropped* — the PRD records on-Pi whisper/piper as feasible and si
 is lighter; the amendment stands on the other legs.)
 
 Internal structure (all one file):
-- =AtPort= — opens ttyUSB3 exclusive (=TIOCEXCL=) for the call's duration only;
-  released at hangup so =phone-call.el='s per-call open/close human path coexists.
+- =AtPort= — opens primary ttyUSB2 exclusive (=TIOCEXCL=) for the call's duration
+  only; =phone-call.el='s human path independently retains secondary ttyUSB3.
 - =PcmPump= — the load-bearing invariant, *balanced by construction*: one thread,
   blocking-read one 320-sample chunk (640 B, nominally 20 ms at the 16 kHz protocol
   rate) from ttyUSB4, then immediately write one same-size chunk from
@@ -251,7 +251,7 @@ top-level =make phone-install= / deploy target*, and the server-side voice bits
 =make deploy= chain — *never a separate command to remember*. A single
 =make deploy= (assist) + =make phone-install= (emacsos) brings up everything;
 =deploy-call-bridge= exists only as an internal sub-target the top-level one calls
-(the =deploy-searxng= "folded into the deploy chain" precedent). ttyUSB3 udev rule
+(the =deploy-searxng= "folded into the deploy chain" precedent). AT-port udev rule
 shipped; ttyUSB4 needs none.
 
 *phone-call.el:* unchanged. When the bridge answers first, the existing

@@ -82,8 +82,9 @@ boot too).
   changes; phone wg `AllowedIPs` includes `<server-lan-ip>/32` (so LAN ssh to the phone is broken by
   design when wg is up — use `ssh phone-wg`); rfkill persists across reboots.
 - **SIM7600G-H telephony (validated, the voice-call P3 hardware path).** Voice calls work; 16 kHz PCM
-  on `/dev/ttyUSB4` via `AT+CPCMREG=1`; auto-answer `ATA`/`AT+CHUP` on the freed `ttyUSB3` (udev rule
-  shipped). Downlink validated; uplink + the audio bridge are net-new for P3. The board is a quad-core
+  on `/dev/ttyUSB4` via `AT+CPCMREG=1`; the bridge owns primary `ttyUSB2` for raw AT/audio while the
+  human UI retains secondary `ttyUSB3`; ModemManager keeps QMI call detection/data. Downlink validated;
+  uplink + the audio bridge are net-new for P3. The board is a quad-core
   A53 (64-bit) — the "too weak for whisper" assumption was wrong.
 - **Config-apply after `/clear`:** a `get_config()` tool (`channel.py`) returns
   `ConfigRepo.current().body` (committed config = next-restart source of truth) so the agent can read
