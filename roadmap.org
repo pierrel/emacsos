@@ -54,6 +54,43 @@ phone bridge are merged and deployed; P2 remains after basic live validation.
 The next action is the physical power fix and stable-power live checklist in its
 state doc, not another software slice.
 
+* TODO PinePhone minimal client with reliable deep sleep
+
+Use the PinePhone as the first integrated Assist smartphone testbed, but replace
+the general-purpose Phosh desktop with the smallest useful awake surface: Emacs
+plus a framebuffer keyboard, phone primitives, and the Assist client.  Removing
+the compositor and desktop stack should improve responsiveness and reduce awake
+overhead, but it is explicitly *not* the battery strategy by itself.
+
+Battery life depends on making Crust deep suspend reliable.  The intended power
+model is:
+- while awake, run only the minimal Emacs UI and services required for phone
+  operation;
+- turn the display off automatically and enter deep suspend when idle;
+- leave the cellular modem registered, with its ring indicator able to wake the
+  application processor for incoming calls and SMS;
+- keep canonical Assist execution on the always-on server, then reconnect the
+  phone client after wake instead of keeping the phone CPU and a network socket
+  awake continuously;
+- treat calls, SMS, and alarms as wake-capable.  Ordinary internet notifications
+  are not assumed to arrive during deep sleep; any Assist-initiated urgent wake
+  needs an explicit call/SMS path or must wait for the next wake.
+
+Field evidence from postmarketOS edge on the PinePhone 1.2 (2026-08-30): with
+automatic display blanking disabled for diagnosis and the phone kept awake, the
+battery reported about 1.04 A at 3.87 V (roughly 4 W), consistent with only a few
+hours of runtime.  A separate failure occurred after Phoc turned the display off:
+the phone stopped logging and became unreachable, with no recorded suspend,
+power-key event, kernel panic, GPU error, OOM, or clean shutdown.  Do not paper
+over that failure with a lighter UI; prove the new display-off and suspend/resume
+path directly.
+
+Acceptance is repeated unplugged display-off/deep-suspend/resume cycles with
+working calls and SMS wake, clean modem and network recovery, Assist reconnection,
+and materially lower measured standby drain.  Also test the charging case
+separately because PinePhone USB-C/display interactions have already produced
+different behavior in live use.
+
 * Ergonomics iteration
 
 Live testing of PR #6 (assist-import) surfaced several rough edges
