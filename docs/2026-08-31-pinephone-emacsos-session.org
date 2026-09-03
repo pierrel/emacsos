@@ -471,6 +471,8 @@ for session startup and controlled recovery only; a future non-input modem-wake
 path must also define how it rearms the idle timer.  Promotion still requires a
 real touch-operable lock, repeated automatic blank/suspend/physical-wake runs,
 duration and battery results, and modem wake/registration/call/SMS checks.
+The RTC-resume input event is bound to a silent no-op in the lab Emacs map so a
+successful wake does not leave a misleading =<WakeUp> is undefined= message.
 
 During this implementation, the three OpenRC Docker tests were found to omit
 =docker run -i=.  Docker therefore closed stdin and never executed their

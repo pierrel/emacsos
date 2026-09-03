@@ -9,7 +9,7 @@ export PATH
 stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=2336c1b2f22fdea6e852f86ba3a1720d16bf3eead6f50ac20d6cf83cbc3e1c15
+manifest_hash=985557d3c6ad7fb08102456f0dd55905c682c0a7cf844d5c455fa061ec6471d0
 committed=0
 mutating=0
 lab_group_created=0

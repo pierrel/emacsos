@@ -44,6 +44,9 @@
           (should (search-forward "[synthetic-input]" nil t)))
       (kill-buffer buffer))))
 
+(ert-deftest emacsos-openrc-wakeup-event-is-silent ()
+  (should (eq (lookup-key global-map [WakeUp]) #'ignore)))
+
 (ert-deftest emacsos-openrc-firefox-nonterminal-sentinel-keeps-tracking ()
   (let ((buffer (emacsos-pinephone-openrc-home))
         (emacsos-pinephone-firefox-process 'tracked))

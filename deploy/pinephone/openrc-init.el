@@ -211,6 +211,7 @@
   (insert "[synthetic-input]\n"))
 
 (global-set-key [f12] #'emacsos-pinephone-record-synthetic-input)
+(global-set-key [WakeUp] #'ignore)
 
 (add-to-list 'default-frame-alist '(fullscreen . maximized))
 (add-to-list 'default-frame-alist '(font . "Monospace-14"))
