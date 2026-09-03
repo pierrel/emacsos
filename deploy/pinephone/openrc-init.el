@@ -220,6 +220,36 @@
 (add-to-list 'default-frame-alist '(fullscreen . maximized))
 (add-to-list 'default-frame-alist '(font . "Monospace-14"))
 
+(defun emacsos-pinephone-enforce-frame-layout ()
+  "Keep the Emacs frame inside the space reserved above wvkbd.
+Agent config is shared with devices that legitimately use `fullboth'.  On the
+PinePhone that frame state hides the Emacs control pane behind the external
+layer-shell keyboard, so the platform restores its maximized layout after
+every agent-config load."
+  (set-frame-parameter nil 'fullscreen 'maximized))
+
+(defvar emacos-agent-config-applied-function
+  (symbol-function 'emacsos-pinephone-enforce-frame-layout)
+  "Platform function run after each persistent agent-config load attempt.")
+
+(defun emacsos-pinephone-load-agent-config (file)
+  "Attempt to load agent config FILE, then restore the PinePhone layout."
+  (let ((finalizer emacos-agent-config-applied-function))
+    (unwind-protect
+        (when (file-readable-p file)
+          (condition-case err
+              (load file nil 'nomessage)
+            (t (message "emacsos: saved agent config failed: %s"
+                        (error-message-string err)))))
+      (condition-case err
+          (funcall finalizer)
+        (t (message "emacsos: platform config finalizer failed: %s"
+                    (error-message-string err))))
+      (condition-case err
+          (setq emacos-agent-config-applied-function finalizer)
+        (t (message "emacsos: platform finalizer restore failed: %s"
+                    (error-message-string err)))))))
+
 (defun emacsos-pinephone-call-finished (process _event operation)
   "Report terminal PROCESS output for OPERATION and restore audio on failure."
   (when (memq (process-status process) '(exit signal))
@@ -358,11 +388,7 @@
                   ("Stop Android" . emacsos-pinephone-stop-waydroid)
                   ("Lab home" . emacsos-pinephone-openrc-home))
                 emacos-global-commands))
-  (when (file-readable-p emacos-agent-file)
-    (condition-case err
-        (load emacos-agent-file nil 'nomessage)
-      (error (message "emacsos: saved agent config failed: %s"
-                      (error-message-string err))))))
+  (emacsos-pinephone-load-agent-config emacos-agent-file))
 
 (provide 'emacsos-pinephone-openrc-init)
 ;;; openrc-init.el ends here

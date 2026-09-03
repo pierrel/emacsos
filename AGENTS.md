@@ -90,8 +90,9 @@ boot too).
   and resume checklist live in `docs/2026-07-28-voice-call-p3-bridge.org`. The board is a quad-core A53
   (64-bit); the earlier "too weak for whisper" assumption was wrong.
 - **Config-apply after `/clear`:** a `get_config()` tool (`channel.py`) returns
-  `ConfigRepo.current().body` (committed config = next-restart source of truth) so the agent can read
-  config after conversation memory is wiped; the skill mandates a `get_config` read before `apply_config`.
+  `ConfigRepo.current().body`, the last server-recorded config, so the agent can read config after
+  conversation memory is wiped; the skill mandates a `get_config` read before `apply_config` and stops
+  persistent config work for reconciliation after any unconfirmed operation or unrecorded phone write.
 - **Voice-call assistant:** emacsos owns the **phone-side PCM bridge** (P3, hardware-gated: the
   `call_bridge.py` daemon, D-Bus ring watch, ATA/CHUP, and balanced CPCMREG PCM pump). The receptionist,
   catalog, Flow, Speech, Wire, Session, PIN security, and call reconstruction are merged and deployed

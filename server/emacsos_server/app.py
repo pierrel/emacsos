@@ -495,9 +495,9 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             # seen-set de-dupes if it shows up in both.
             #
             # Only the two COMMITTED outcomes (`applied:` clean,
-            # `applied-but-broken:` loaded-with-error) get the event —
+            # `applied-but-broken:` written but not fully activated) get the event —
             # both have a git commit the user can revert.  NOT
-            # `applied-but-unrecorded:` (loaded but the commit failed):
+            # `applied-but-unrecorded:` (written but the commit failed):
             # there's nothing in history to roll back to, so offering
             # ROLLBACK there would revert to the *wrong* state.  The
             # colon-terminated prefixes are mutually exclusive, so this
@@ -583,16 +583,16 @@ async def chat(req: ChatRequest, request: Request):
 
 
 def _do_rollback(phone_ctx: PhoneContext) -> dict:
-    """Sync rollback (run on the executor): git-revert the config repo's
-    HEAD, then load the resulting config on the phone.  Returns a small
+    """Sync rollback (run on the executor): preview the prior config, write
+    it to the phone, then git-revert HEAD.  Returns a small
     status dict for the JSON response.  Any git/repo failure is caught
     and returned as a structured error — never a bare 500 (apply_to_phone
     already returns structured results, but ConfigRepo can raise on a
     revert conflict / corrupted repo)."""
     try:
         repo = ConfigRepo(config.config_dir)
-        # Shared with the revert_config tool (channel.py) so the revert-then-apply
-        # path lives in one place; rollback() ensure()s the repo itself.
+        # Shared with the revert_config tool (channel.py), including its
+        # apply-before-commit ordering.
         status, detail = revert_head_and_apply(phone_ctx, repo)
         return {"status": status, "detail": detail}
     except Exception as e:  # noqa: BLE001 — structured error, never a 500
@@ -602,8 +602,8 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
 
 @app.post("/rollback")
 async def rollback(req: RollbackRequest, request: Request):
-    """Roll the phone config back one version: `git revert` the config
-    repo's HEAD and load the result on the phone.  Not a stream — it's a
+    """Roll the phone config back one version: load the prior config on the
+    phone, then `git revert` the repo's HEAD.  Not a stream — it's a
     fast git op + one emacsclient apply — so it returns plain JSON.
     Serialized behind the same `_STREAM_LOCK` as /chat so it can't race
     a stream's phone access."""

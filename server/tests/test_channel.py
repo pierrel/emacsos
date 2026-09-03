@@ -220,6 +220,14 @@ def test_apply_config_unreachable_does_not_commit(tmp_path):
     assert repo.current().body == ""
 
 
+def test_apply_config_apply_error_does_not_commit(tmp_path):
+    out, repo = _apply(
+        "(setq x 1)", "set x", tmp_path,
+        apply_result=ApplyResult("apply_error", "apply-error: file-error"))
+    assert out.startswith("error: config application unconfirmed:")
+    assert repo.current().body == ""
+
+
 def test_apply_config_too_large_does_not_commit(tmp_path):
     out, repo = _apply(
         "(setq x 1)", "set x", tmp_path,
@@ -244,6 +252,43 @@ def test_apply_config_commit_failure_is_unrecorded(tmp_path):
     assert "disk full" in out
     # Must NOT masquerade as a clean apply (which would offer a bad rollback).
     assert not out.startswith("applied:")
+
+
+def test_apply_config_recorded_without_readable_sha_is_still_applied(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    real_write = repo.write_and_commit
+
+    def record_without_sha(body, summary):
+        real_write(body, summary)
+        return None
+
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch.object(repo, "write_and_commit", side_effect=record_without_sha):
+        out = apply_config.invoke({"elisp": "(setq x 1)", "summary": "s"},
+                                  config=cfg)
+    assert out.startswith("applied: s —")
+    assert repo.current().body == "(setq x 1)"
+
+
+def test_apply_config_preserves_load_failure_when_commit_also_fails(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    detail = "load-error: platform-finalizer: (error broken)"
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", detail)), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch.object(repo, "write_and_commit", side_effect=OSError("disk full")):
+        out = apply_config.invoke({"elisp": "(setq x 1)", "summary": "s"},
+                                  config=cfg)
+    assert out.startswith("applied-but-unrecorded:")
+    assert "activation failed" in out
+    assert "platform-finalizer" in out
+    assert "disk full" in out
 
 
 def test_apply_config_missing_context_is_server_bug_error(tmp_path):
@@ -360,6 +405,24 @@ def test_revert_config_noop_when_nothing_applied(tmp_path):
     m.assert_not_called()
 
 
+def test_revert_config_undo_apply_error_leaves_same_target(tmp_path):
+    out, repo = _revert(
+        "", tmp_path,
+        seed=lambda r: r.write_and_commit("(setq x 1)", "set x"),
+        apply_result=ApplyResult("apply_error", "apply-error: denied"))
+    assert out.startswith("error: config application unconfirmed:")
+    assert repo.current().body == "(setq x 1)"
+
+
+def test_revert_config_undo_unreachable_leaves_same_target(tmp_path):
+    out, repo = _revert(
+        "", tmp_path,
+        seed=lambda r: r.write_and_commit("(setq x 1)", "set x"),
+        apply_result=ApplyResult("unreachable", "refused"))
+    assert out.startswith("error: phone unreachable")
+    assert repo.current().body == "(setq x 1)"
+
+
 def test_revert_config_restore_to_version_reapplies_old_body(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.ensure()
@@ -404,6 +467,38 @@ def test_revert_config_restore_unreachable_does_not_commit(tmp_path):
         out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
     assert out.startswith("error: phone unreachable")
     assert repo.current().body == "(setq x 2)"  # restore commits only if reached
+
+
+def test_revert_config_restore_apply_error_does_not_commit(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    sha1 = repo.write_and_commit("(setq x 1)", "v1")
+    repo.write_and_commit("(setq x 2)", "v2")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("apply_error", "apply-error: denied")), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
+    assert out.startswith("error: config application unconfirmed:")
+    assert repo.current().body == "(setq x 2)"
+
+
+def test_revert_config_preserves_load_failure_when_commit_also_fails(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    sha1 = repo.write_and_commit("(setq x 1)", "v1")
+    repo.write_and_commit("(setq x 2)", "v2")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    detail = "load-error: config-load: (void-function broken)"
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", detail)), \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo), \
+         patch.object(repo, "write_and_commit", side_effect=OSError("disk full")):
+        out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
+    assert out.startswith("restored-but-unrecorded:")
+    assert "activation failed" in out
+    assert "config-load" in out
+    assert "disk full" in out
 
 
 # --- config_history ---------------------------------------------------------

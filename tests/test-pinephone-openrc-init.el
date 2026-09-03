@@ -47,6 +47,50 @@
 (ert-deftest emacsos-openrc-wakeup-event-is-silent ()
   (should (eq (lookup-key global-map [WakeUp]) #'ignore)))
 
+(ert-deftest emacsos-openrc-frame-layout-finalizer-maximizes-frame ()
+  (let (seen)
+    (cl-letf (((symbol-function 'set-frame-parameter)
+               (lambda (frame parameter value)
+                 (setq seen (list frame parameter value)))))
+      (emacsos-pinephone-enforce-frame-layout)
+      (should (equal seen '(nil fullscreen maximized))))))
+
+(ert-deftest emacsos-openrc-registers-frame-layout-finalizer ()
+  (should (eq (symbol-function 'emacsos-pinephone-enforce-frame-layout)
+              emacos-agent-config-applied-function)))
+
+(ert-deftest emacsos-openrc-agent-config-finalizer-survives-config-mutation ()
+  (let ((file (make-temp-file "emacsos-agent-" nil ".el"))
+        (emacos-agent-config-applied-function
+         (symbol-function 'emacsos-pinephone-enforce-frame-layout))
+        seen)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "(setq emacos-agent-config-applied-function #'ignore)\n"))
+          (cl-letf (((symbol-function 'set-frame-parameter)
+                     (lambda (frame parameter value)
+                       (setq seen (list frame parameter value)))))
+            (emacsos-pinephone-load-agent-config file))
+          (should (equal seen '(nil fullscreen maximized)))
+          (should (eq emacos-agent-config-applied-function
+                      (symbol-function
+                       'emacsos-pinephone-enforce-frame-layout))))
+      (delete-file file))))
+
+(ert-deftest emacsos-openrc-agent-config-finalizer-runs-after-quit ()
+  (let ((file (make-temp-file "emacsos-agent-" nil ".el"))
+        finalized)
+    (let ((emacos-agent-config-applied-function
+           (lambda () (setq finalized t))))
+      (unwind-protect
+          (progn
+            (with-temp-file file
+              (insert "(signal 'quit nil)\n"))
+            (emacsos-pinephone-load-agent-config file)
+            (should finalized))
+        (delete-file file)))))
+
 (ert-deftest emacsos-openrc-call-operation-uses-only-fixed-helper ()
   (let (seen)
     (cl-letf (((symbol-function 'make-process)

@@ -129,6 +129,33 @@ streaming chat buffer preserves rendered content on transport failure.  This
 phase does not invent a second message queue or cached server response store;
 offline message submission reports failure and can be retried by the user.
 
+** Persistent config and platform layout
+
+This extends the load-only config-apply contract in
+[[file:2026-05-21-config-apply-rollback.org][2026-05-21-config-apply-rollback.org]]:
+the shared server still writes and loads one rendered file, but may now invoke
+one phone-registered platform finalizer after that load attempt.
+
+The existing saved =agent.el= is shared with another EmacsOS device and sets
+its frame to =fullboth=.  On the PinePhone, that state extends Emacs beneath
+the external layer-shell keyboard and hides the control pane.  The PinePhone
+therefore registers one platform finalizer that restores =maximized= after
+every saved-config load attempt, both at boot and during a live
+=apply_config= or =revert_config= operation.  Each loader captures the actual
+function before loading full-trust =agent.el=, invokes it from
+=unwind-protect= even when loading signals =quit= or another error, then
+restores the function variable.  Runtime results tag =config-load= and
+=platform-finalizer= failures separately while retaining the existing
+=load_error= / =applied-but-broken= protocol classification.  An operation
+without proof of atomic phone-side replacement is a distinct =apply_error= and
+never enters the server's commit-after-receipt path.  Undo likewise previews
+and writes the prior body before committing its git revert, so a failed or
+unconfirmed write leaves the same rollback target available.  If activation
+and git recording both fail, the unrecorded result preserves both facts.
+In either unconfirmed or unrecorded state, =get_config= is explicitly only the
+last server-recorded body and further persistent config work stops until the
+phone file and history are reconciled.
+
 * Threat model
 
 New attack surfaces are the LAN chat transport, the TCP Emacs callback server,
@@ -231,6 +258,13 @@ A synthetic incoming-call screenshot initially exposed that the old Pi-sized
 three-line control gap pushed Accept below the PinePhone pane.  The
 platform-specific one-line gap now keeps both Decline and Accept visible while
 retaining their separation and the two-tap answer guard.
+
+Loading the actual shared saved config exposed a second cross-device layout
+conflict: its =fullboth= frame setting placed the PinePhone controls behind
+wvkbd.  Restoring =maximized= recovered the expected layout immediately.  A
+single captured platform finalizer now makes that recovery part of both boot
+and live config apply, including failed-load paths, instead of modifying the
+user's valid configuration for the other device.
 
 After validating the complete update payload, the updater monotonically removes
 the former =emacsos-openrc-suspend= root helper and its =doas= rule.  A later UI

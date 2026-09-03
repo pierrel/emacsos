@@ -441,7 +441,9 @@ share one host:port."
    (list :type "applied" :detail "x (vabc123)" :broken t))
   (should emacos--chat-can-rollback)
   (with-current-buffer emacos--chat-buffer-name
-    (should (string-match-p "BROKEN" (buffer-string)))))
+    (should (string-match-p "BROKEN" (buffer-string)))
+    (should (string-match-p "inspect failure" (buffer-string)))
+    (should-not (string-match-p "consider rolling back" (buffer-string)))))
 
 
 (ert-deftest chat-test-rollback-in-command-set-gated-on-can-rollback ()
