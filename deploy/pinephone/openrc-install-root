@@ -9,7 +9,7 @@ export PATH
 stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=85f1d6c726a5e2f6044b9ebe69acc4edeb714feac67de4170313cecb881a4c85
+manifest_hash=e410c00b800c020436303766b797cd94977852bde05054043fd68fc834e62ea6
 committed=0
 mutating=0
 lab_group_created=0
@@ -113,7 +113,7 @@ cleanup() {
             rm -rf -- /var/lib/emacsos-openrc-state
             if [ "$payload_started" -eq 1 ]; then
                 [ "$doas_rule_created" -eq 0 ] ||
-                    rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
+                    rm -f -- /etc/doas.d/95-emacsos-ui.conf
                 if [ "$nft_rule_created" -eq 1 ]; then
                     rm -f -- /etc/nftables.d/49-emacsos-callback.nft
                     /usr/sbin/nft -f /etc/nftables.nft >/dev/null 2>&1 || true
@@ -124,7 +124,6 @@ cleanup() {
                     /usr/local/libexec/emacsos-waydroid-container \
                     /usr/local/sbin/emacsos-openrc-call \
                     /usr/local/sbin/emacsos-openrc-network \
-                    /usr/local/sbin/emacsos-openrc-suspend \
                     /usr/local/sbin/emacsos-openrc-boot-mode
                 rm -rf -- /etc/emacsos-openrc
                 rm -rf -- /usr/local/share/emacsos-openrc
@@ -169,7 +168,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-emacs-server.nft) ;;
+        openrc-manifest.sha256|openrc-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-emacs-server.nft) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -178,13 +177,13 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ "$(stat -c '%s' "$path")" -le 1048576 ] || fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 21 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 20 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 openrc-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session openrc-session-power openrc-process-group \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper \
     os.el chat.el emacos-assist.el network.el phone-call.el openrc-call-root \
@@ -216,7 +215,8 @@ render_client_ip_template "$snapshot/openrc-emacs-server.nft"
 [ ! -e /usr/local/sbin/emacsos-openrc-boot-mode ] &&
     [ ! -L /usr/local/sbin/emacsos-openrc-boot-mode ] || fail 'boot selector already exists'
 [ ! -e /usr/local/sbin/emacsos-openrc-suspend ] &&
-    [ ! -L /usr/local/sbin/emacsos-openrc-suspend ] || fail 'suspend helper already exists'
+    [ ! -L /usr/local/sbin/emacsos-openrc-suspend ] ||
+    fail 'legacy suspend helper already exists'
 [ ! -e /usr/local/sbin/emacsos-openrc-call ] &&
     [ ! -L /usr/local/sbin/emacsos-openrc-call ] || fail 'call helper already exists'
 [ ! -e /usr/local/sbin/emacsos-openrc-network ] &&
@@ -238,9 +238,11 @@ render_client_ip_template "$snapshot/openrc-emacs-server.nft"
     fail 'local Waydroid manager wrapper already exists'
 [ ! -e /var/lib/emacsos-lab ] && [ ! -L /var/lib/emacsos-lab ] ||
     fail 'lab home already exists'
+[ ! -e /etc/doas.d/95-emacsos-ui.conf ] &&
+    [ ! -L /etc/doas.d/95-emacsos-ui.conf ] || fail 'UI privilege rule already exists'
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ] ||
-    fail 'UI suspend rule already exists'
+    fail 'legacy suspend privilege rule already exists'
 [ -f /etc/inittab ] && [ ! -L /etc/inittab ] || fail 'unsafe inittab'
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/inittab)" = \
     'root:root:644:1:regular file' ] || fail 'unsafe inittab owner, mode, or links'
@@ -312,14 +314,13 @@ case $password in '!'*|'*'*) ;; *) fail 'lab account password is not locked' ;; 
 
 payload_started=1
 install -o root -g root -m 0600 /dev/null \
-    /etc/doas.d/95-emacsos-ui-suspend.conf
+    /etc/doas.d/95-emacsos-ui.conf
 doas_rule_created=1
 printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
-    >/etc/doas.d/95-emacsos-ui-suspend.conf
-/usr/bin/doas -C /etc/doas.d/95-emacsos-ui-suspend.conf >/dev/null
+    >/etc/doas.d/95-emacsos-ui.conf
+/usr/bin/doas -C /etc/doas.d/95-emacsos-ui.conf >/dev/null
 install -d -o root -g root -m 0755 /usr/local/share/emacsos-openrc
 for module in os.el chat.el emacos-assist.el network.el phone-call.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
@@ -335,8 +336,6 @@ install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
     /usr/local/share/emacsos-openrc/process-group
-install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
-    /usr/local/sbin/emacsos-openrc-suspend
 install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
 install -o root -g root -m 0755 "$snapshot/openrc-network-root" \
@@ -376,7 +375,6 @@ cmp -s "$snapshot/openrc-sway.config" /usr/local/share/emacsos-openrc/sway.confi
 cmp -s "$snapshot/openrc-session" /usr/local/share/emacsos-openrc/session
 cmp -s "$snapshot/openrc-session-power" /usr/local/share/emacsos-openrc/session-power
 cmp -s "$snapshot/openrc-process-group" /usr/local/share/emacsos-openrc/process-group
-cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
 cmp -s "$snapshot/openrc-chat-url" /etc/emacsos-openrc/chat-url

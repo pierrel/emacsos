@@ -9,6 +9,7 @@ export PATH
 inittab=/etc/inittab
 state=/var/lib/emacsos-openrc-state
 lock=/run/emacsos-openrc-boot-mode.lock
+install_lock=/run/emacsos-openrc-install.lock
 line='tty1::respawn:/sbin/getty 38400 tty1'
 marker='# emacsos-openrc owns tty1'
 tmp=
@@ -34,7 +35,7 @@ cleanup() {
             if rollback_inittab "$state/inittab.installed"; then
                 rc-update add emacsos-ui default >/dev/null 2>&1 || true
                 [ "$restart_ui_on_rollback" -eq 0 ] ||
-                    rc-service emacsos-ui start >/dev/null 2>&1 || true
+                    rc-service emacsos-ui start 8>&- 9>&- >/dev/null 2>&1 || true
             fi
             ;;
     esac
@@ -47,6 +48,13 @@ trap 'exit 1' HUP INT TERM
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
 [ "$#" -eq 1 ] || fail 'one action is required'
 case $1 in initialize|ui|console|status) ;; *) fail 'unknown action' ;; esac
+if [ "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != "$install_lock" ]; then
+    touch "$install_lock"
+    chown root:root "$install_lock"
+    chmod 0600 "$install_lock"
+    exec 8>"$install_lock"
+    flock -n -x 8 || fail 'install or update is busy'
+fi
 touch "$lock"
 chown root:root "$lock"
 chmod 0600 "$lock"
@@ -106,13 +114,20 @@ ui_enabled() {
 
 check_service() {
     check_root_file /etc/init.d/emacsos-ui 755
-    check_root_file /usr/local/sbin/emacsos-openrc-suspend 755
-    check_root_file /etc/doas.d/95-emacsos-ui-suspend.conf 600
+    check_root_file /etc/doas.d/95-emacsos-ui.conf 600
+    [ ! -e /usr/local/sbin/emacsos-openrc-suspend ] &&
+        [ ! -L /usr/local/sbin/emacsos-openrc-suspend ] ||
+        fail 'legacy suspend helper is installed'
+    [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
+        [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ] ||
+        fail 'legacy suspend authority is installed'
     [ -x /usr/local/share/emacsos-openrc/process-group ] ||
         fail 'process-group owner is absent'
-    [ "$(sed -n '1p' /etc/doas.d/95-emacsos-ui-suspend.conf)" = \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' ] ||
-        fail 'suspend authority is invalid'
+    [ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
+        "$(printf '%s\n' \
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ] ||
+        fail 'UI authority is invalid'
     [ -x /usr/local/share/emacsos-openrc/session ] ||
         fail 'session payload is absent'
     [ "$(id -un emacsos-lab)" = emacsos-lab ] || fail 'lab account is absent'

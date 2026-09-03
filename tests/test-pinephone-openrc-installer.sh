@@ -15,7 +15,7 @@ adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session openrc-session-power openrc-process-group \
     openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
@@ -172,7 +172,7 @@ fi
 [ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
 [ ! -e /etc/dbus-1/system.d/99-emacsos-waydroid.conf ]
 [ ! -e /usr/local/libexec/emacsos-waydroid-container ]
-[ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
+[ ! -e /etc/doas.d/95-emacsos-ui.conf ]
 [ ! -e /var/lib/emacsos-openrc-state ]
 if getent passwd emacsos-lab >/dev/null; then
     printf '%s\n' 'failed install retained the lab user' >&2
@@ -196,14 +196,14 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
     /tmp/stuck-error >/dev/null
 [ -x /etc/init.d/emacsos-ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
-[ -x /usr/local/sbin/emacsos-openrc-suspend ]
+[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /usr/local/sbin/emacsos-openrc-call ]
 [ -x /usr/local/sbin/emacsos-openrc-network ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
 [ -f /usr/local/share/emacsos-openrc/os.el ]
 [ -f /usr/local/share/emacsos-openrc/chat.el ]
-[ -f /etc/doas.d/95-emacsos-ui-suspend.conf ]
+[ -f /etc/doas.d/95-emacsos-ui.conf ]
 getent passwd emacsos-lab >/dev/null
 pgrep -u "$(id -u emacsos-lab)" >/dev/null
 
@@ -218,10 +218,9 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/libexec/emacsos-waydroid-container \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-network \
-    /usr/local/sbin/emacsos-openrc-suspend \
     /usr/local/sbin/emacsos-openrc-boot-mode \
     /etc/nftables.d/49-emacsos-callback.nft \
-    /etc/doas.d/95-emacsos-ui-suspend.conf
+    /etc/doas.d/95-emacsos-ui.conf
 deluser emacsos-lab
 delgroup emacsos-lab 2>/dev/null || true
 
@@ -255,7 +254,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/share/emacsos-openrc/process-group ]
-[ -x /usr/local/sbin/emacsos-openrc-suspend ]
+[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
 grep -F 'apk add --simulate sway swayidle emacs-pgtk grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
@@ -274,17 +273,16 @@ fi
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/share/emacsos-openrc/process-group ]
-[ -x /usr/local/sbin/emacsos-openrc-suspend ]
+[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /etc/init.d/emacsos-ui ]
 [ -f /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
 [ -f /etc/dbus-1/system.d/99-emacsos-waydroid.conf ]
 [ -x /usr/local/libexec/emacsos-waydroid-container ]
-[ "$(cat /etc/doas.d/95-emacsos-ui-suspend.conf)" = \
+[ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
     "$(printf '%s\n' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ]
-[ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui-suspend.conf)" = \
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
     'root:root:600:1:regular file' ]
 [ "$(cat /etc/emacsos-openrc/chat-url)" = \
     'http://198.51.100.10:8765/chat' ]
@@ -302,6 +300,13 @@ fi
 
 cp -a /home/user/.cache/emacsos-openrc-stage \
     /home/user/.cache/emacsos-openrc-update
+install -o root -g root -m 0755 /bin/true \
+    /usr/local/sbin/emacsos-openrc-suspend
+printf '%s\n' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+    >/etc/doas.d/95-emacsos-ui-suspend.conf
+chown root:root /etc/doas.d/95-emacsos-ui-suspend.conf
+chmod 0600 /etc/doas.d/95-emacsos-ui-suspend.conf
 printf '%s\n' old-sway >/usr/local/share/emacsos-openrc/sway.config
 printf '%s\n' old-power >/usr/local/share/emacsos-openrc/session-power
 chmod 0755 /usr/local/share/emacsos-openrc/session-power
@@ -315,6 +320,17 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-network
+touch /tmp/fail-ui-once
+if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+    /bin/sh /source/openrc-update-root >/dev/null 2>&1; then
+    printf '%s\n' 'injected legacy migration failure was accepted' >&2
+    exit 1
+fi
+[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
+[ -f /etc/doas.d/95-emacsos-ui.conf ]
+[ -f /run/emacsos-ui/ready ]
+
 DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
     /bin/sh /source/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
@@ -327,6 +343,8 @@ cmp -s /source/openrc-session-power \
 grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 [ ! -e /etc/nftables.d/95-emacsos-callback.nft ]
+[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config

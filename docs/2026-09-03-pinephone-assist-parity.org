@@ -10,10 +10,10 @@ and Firefox and Waydroid remain launchable.  Reuse the existing EmacsOS UI and
 server protocol.  Keep the PinePhone-specific hardware and privilege boundary
 small.
 
-This is an unattended development configuration.  Automatic suspend is
-disabled so a failed resume cannot strand the phone while Pierre is away.
-The display still blanks after 60 seconds.  Suspend durability remains a
-separate acceptance gate before daily-driver use.
+This is an unattended development configuration.  No kernel-suspend helper or
+UI suspend privilege is installed, so a failed resume cannot strand the phone
+while Pierre is away.  The display still blanks after 60 seconds.  Suspend
+durability remains a separate acceptance gate before daily-driver use.
 
 An explicit wake, including an incoming-call wake, emits an F24 key through
 the session's virtual keyboard.  Sway consumes that key as a no-op, while its
@@ -205,8 +205,8 @@ acceptance checks have passed on the handset:
 
 - boot and update readiness with Sway, Emacs, wvkbd, PipeWire, WirePlumber,
   and the authenticated TCP Emacs server alive;
-- no automatic suspend action, with Sway DPMS off after 60 seconds and SSH
-  remaining available;
+- no suspend action or UI suspend privilege, with Sway DPMS off after 60
+  seconds and SSH remaining available;
 - the Assist-first frame and mobile keyboard, checked from captured handset
   screenshots and synthetic keyboard input;
 - a real streamed Assist reply, followed by a real =eval_elisp= callback that
@@ -231,6 +231,13 @@ A synthetic incoming-call screenshot initially exposed that the old Pi-sized
 three-line control gap pushed Accept below the PinePhone pane.  The
 platform-specific one-line gap now keeps both Decline and Accept visible while
 retaining their separation and the two-tap answer guard.
+
+After validating the complete update payload, the updater monotonically removes
+the former =emacsos-openrc-suspend= root helper and its =doas= rule.  A later UI
+update failure cannot restore that authority.  Fresh installs never stage or
+install either artifact.  This makes accidental kernel suspend unreachable
+from the UI during the unattended soak instead of relying only on the absence
+of an idle command.
 
 WireGuard tools and a new root-only phone identity are staged but deliberately
 not enabled.  The deployment host's root-owned configuration still maps the

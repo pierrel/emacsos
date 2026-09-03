@@ -35,8 +35,8 @@ cleanup() {
         sleep 0.1
     done
     group_has_process && kill -KILL "-$leader" 2>/dev/null || true
-    # A privileged suspend writer cannot be signalled by this account.  Do not
-    # let the service respawn until it has returned and left the old group.
+    # A privileged helper cannot be signalled by this account.  Do not let the
+    # service respawn until it has returned and left the old group.
     while group_has_process; do
         sleep 0.1
     done

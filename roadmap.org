@@ -94,7 +94,8 @@ Firefox, on-demand Waydroid, repeated DPMS, and intentional UI failure recovery.
 Pierre's first unplugged hands-on run, physical display-off/wake, and an
 RTC-driven deep suspend passed with the same Sway and Emacs processes.  During
 unattended integration, only the reviewed 60-second display blank is installed;
-automatic suspend is disabled so the phone remains remotely recoverable.  Four
+the kernel-suspend helper and UI suspend privilege are removed so the phone
+remains remotely recoverable.  Four
 plugged automatic RTC-wake cycles passed under the former suspend policy.  The
 three post-fix captures were clean, including a 23-minute-33-second unreachable
 interval between kernel suspend entry and RTC wake, followed by visible Firefox

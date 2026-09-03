@@ -8,7 +8,6 @@ deploy_dir=$repo_dir/deploy/pinephone
 sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-process-group" \
-    "$deploy_dir/openrc-suspend-root" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-boot-mode" \
@@ -23,7 +22,7 @@ sh -n "$deploy_dir/openrc-session" \
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in openrc-init.el openrc-sway.config openrc-session \
-    openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session-power openrc-process-group \
     openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper; do
@@ -37,6 +36,7 @@ cp -- "$deploy_dir/openrc-manifest.sha256" "$manifest_stage/"
 manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
+grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
 expected='chat.el
 emacos-assist.el
 emacsos-ui.initd
@@ -50,7 +50,6 @@ openrc-network-root
 openrc-process-group
 openrc-session
 openrc-session-power
-openrc-suspend-root
 openrc-sway.config
 os.el
 phone-call.el
@@ -153,29 +152,18 @@ grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
-if grep -F 'session-power suspend' "$deploy_dir/openrc-session" >/dev/null; then
-    printf '%s\n' 'automatic deep suspend is enabled during unattended development' >&2
+if grep -E 'session-power suspend|/sys/power/(state|mem_sleep)|openrc-suspend' \
+        "$deploy_dir/openrc-session" \
+        "$deploy_dir/openrc-session-power" >/dev/null; then
+    printf '%s\n' 'the unattended session retains a suspend path' >&2
     exit 1
 fi
-grep -F 'press|idle-blank|resume|wake|suspend' \
+grep -F 'press|idle-blank|resume|wake)' \
     "$deploy_dir/openrc-session-power" >/dev/null
-grep -F 'flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'idle-blank) flock -n -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \
     "$deploy_dir/openrc-session-power" >/dev/null
-grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
-    "$deploy_dir/openrc-session-power" >/dev/null
-grep -F 'power=/sys/power' "$deploy_dir/openrc-suspend-root" >/dev/null
-grep -F "grep -F '[deep]' \"\$power/mem_sleep\"" \
-    "$deploy_dir/openrc-suspend-root" >/dev/null
-grep -F 'printf '\''%s\n'\'' "$wakeup_count" >"$power/wakeup_count"' \
-    "$deploy_dir/openrc-suspend-root" >/dev/null
-grep -F 'printf '\''%s\n'\'' mem >"$power/state"' \
-    "$deploy_dir/openrc-suspend-root" >/dev/null
-if grep -F '${POWER' "$deploy_dir/openrc-suspend-root" >/dev/null; then
-    printf '%s\n' 'root suspend helper accepts a power-path override' >&2
-    exit 1
-fi
+[ ! -e "$deploy_dir/openrc-suspend-root" ]
 if grep -E 'after-resume|before-sleep' \
         "$deploy_dir/openrc-session" >/dev/null; then
     printf '%s\n' 'swayidle has a competing wake callback' >&2
@@ -190,6 +178,8 @@ grep -F 'rc-service emacsos-ui stop' "$deploy_dir/openrc-boot-mode" >/dev/null
 grep -F 'rc-update del emacsos-ui default' "$deploy_dir/openrc-boot-mode" >/dev/null
 grep -F 'replace_inittab "$state/inittab.original"' "$deploy_dir/openrc-boot-mode" >/dev/null
 grep -F 'restart_ui_on_rollback=1' "$deploy_dir/openrc-boot-mode" >/dev/null
+grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
+    "$deploy_dir/openrc-boot-mode" >/dev/null
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
@@ -211,8 +201,6 @@ grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager start' \
 grep -F 'timeout -s TERM -k 2 30 rc-service eg25-manager stop' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager stop' \
-    "$deploy_dir/openrc-install-root" >/dev/null
-grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     "$deploy_dir/openrc-install-root" >/dev/null
@@ -283,7 +271,6 @@ if grep -Eq '/home/|192\.168\.' \
         "$deploy_dir/openrc-session" \
         "$deploy_dir/openrc-session-power" \
         "$deploy_dir/openrc-process-group" \
-        "$deploy_dir/openrc-suspend-root" \
         "$deploy_dir/openrc-sway.config" \
         "$deploy_dir/openrc-chat-url" \
         "$deploy_dir/openrc-emacs-server.nft" \
@@ -294,10 +281,10 @@ fi
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'rc-service emacsos-ui start 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui stop 9>&-' \
+grep -F 'rc-service emacsos-ui start 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui stop 8>&- 9>&-' \
     "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui start 9>&-' \
+grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui start 8>&- 9>&-' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "grep -Fx 'populated 0'" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'pgrep -u "$lab_uid"' "$deploy_dir/openrc-update-root" >/dev/null
@@ -312,5 +299,26 @@ grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/nu
 grep -F 'updated UI did not become ready: $detail' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file openrc-session' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'sync -f /etc/doas.d' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'sync -f /usr/local/sbin' "$deploy_dir/openrc-update-root" >/dev/null
+rule_remove_line=$(grep -nF \
+    'rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf' \
+    "$deploy_dir/openrc-update-root" | tail -1)
+rule_remove_line=${rule_remove_line%%:*}
+helper_remove_line=$(grep -nF \
+    'rm -f -- /usr/local/sbin/emacsos-openrc-suspend' \
+    "$deploy_dir/openrc-update-root" | tail -1)
+helper_remove_line=${helper_remove_line%%:*}
+doas_install_line=$(grep -nF \
+    'mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf' \
+    "$deploy_dir/openrc-update-root")
+doas_install_line=${doas_install_line%%:*}
+boot_install_line=$(grep -nF \
+    'mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode' \
+    "$deploy_dir/openrc-update-root")
+boot_install_line=${boot_install_line%%:*}
+[ "$rule_remove_line" -lt "$helper_remove_line" ]
+[ "$helper_remove_line" -lt "$doas_install_line" ]
+[ "$doas_install_line" -lt "$boot_install_line" ]
 grep -F '/usr/sbin/nft -f /etc/nftables.nft' \
     "$deploy_dir/openrc-update-root" >/dev/null

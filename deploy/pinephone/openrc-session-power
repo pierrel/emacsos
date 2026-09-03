@@ -1,5 +1,5 @@
 #!/bin/sh
-# Serialize display and suspend state for the minimal OpenRC session.
+# Serialize display state for the minimal OpenRC session.
 
 set -eu
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
@@ -25,7 +25,7 @@ trap 'exit 1' HUP INT TERM
 
 [ "$#" -eq 1 ] || fail 'one action is required'
 case $1 in
-    press|idle-blank|resume|wake|suspend) ;;
+    press|idle-blank|resume|wake) ;;
     *) fail 'unknown action' ;;
 esac
 
@@ -59,7 +59,6 @@ exec 9>"$lock"
 case $1 in
     press|resume|wake) flock -x 9 || fail 'power transition lock failed' ;;
     idle-blank) flock -n -x 9 || fail 'power transition is busy' ;;
-    *) flock -w 2 -x 9 || fail 'power transition is busy' ;;
 esac
 
 publish_state() {
@@ -153,22 +152,5 @@ case $1 in
     wake)
         restore_active
         rm -f -- "$idle_origin"
-        ;;
-    suspend)
-        [ "$current" = blank ] || exit 0
-        set +e
-        doas -n /usr/local/sbin/emacsos-openrc-suspend
-        suspend_status=$?
-        set -e
-        case $suspend_status in
-        0|75)
-            exit 0
-            ;;
-        *)
-            restore_active || true
-            rm -f -- "$idle_origin"
-            exit "$suspend_status"
-            ;;
-        esac
         ;;
 esac
