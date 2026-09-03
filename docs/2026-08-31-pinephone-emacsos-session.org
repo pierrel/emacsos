@@ -537,6 +537,13 @@ boot.  Ordinary calls must not be silently auto-answered.  Promotion still
 requires a locked, visible Answer/Decline/Hang-up surface whose own event path
 defines whether and when a carrier wake lights the panel.
 
+During the unattended Assist-parity port, automatic deep suspend is disabled
+so loss of a physical wake cannot strand the development session.  =swayidle=
+still blanks the DSI panel and disables touch after 60 seconds, but it has no
+suspend callback.  The already-tested fixed root suspend helper remains
+installed but inactive; restoring automatic deep suspend is a promotion gate,
+not part of the unattended development configuration.
+
 During this implementation, the three OpenRC Docker tests were found to omit
 =docker run -i=.  Docker therefore closed stdin and never executed their
 here-document test bodies, yielding false green results.  The harness now

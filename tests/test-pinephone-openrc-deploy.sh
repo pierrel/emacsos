@@ -116,7 +116,10 @@ grep -F '/usr/bin/setsid "$@" &' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'timeout 180 "$root/session-power suspend"' "$deploy_dir/openrc-session" >/dev/null
+if grep -F 'session-power suspend' "$deploy_dir/openrc-session" >/dev/null; then
+    printf '%s\n' 'automatic deep suspend is enabled during unattended development' >&2
+    exit 1
+fi
 grep -F 'press|idle-blank|wake|suspend' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \

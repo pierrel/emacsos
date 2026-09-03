@@ -203,8 +203,7 @@ done
 
 "$root/session-power" wake
 "$root/process-group" /usr/bin/swayidle -w \
-    timeout 60 "$root/session-power idle-blank" \
-    timeout 180 "$root/session-power suspend" &
+    timeout 60 "$root/session-power idle-blank" &
 idle_pid=$!
 sleep 0.2
 kill -0 "$idle_pid" 2>/dev/null || fail 'swayidle exited during startup'
