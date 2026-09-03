@@ -9,12 +9,12 @@ v25.06 phone passed its plugged console baseline, expanded its ext4 root to the
 full card, and booted a new minimal OpenRC Sway + PGTK Emacs session.  The
 session is now the phone's boot UI.  Firefox and an on-demand vanilla Waydroid
 instance are installed and have passed their plugged-in feasibility smokes.
-Pierre's first unplugged hands-on UI run, physical panel off/on, and an
-RTC-driven deep-suspend cycle now pass.  It remains a synthetic lab, not a
-daily-driver result: repeated physical-key wake under the new automatic idle
-policy, duration and battery gates, the electrically disabled modem, and
-telephony still await their staged checks.  The prior edge/Phosh card remains
-preserved as rollback.
+Pierre's first unplugged hands-on UI run and physical panel off/on pass, as do
+repeated plugged automatic RTC-driven deep-suspend cycles.  It remains a
+synthetic lab, not a daily-driver result: repeated physical-key wake under the
+new automatic idle policy, duration and battery gates, the electrically
+disabled modem, and telephony still await their staged checks.  The prior
+edge/Phosh card remains preserved as rollback.
 
 Do not build the polished PinePhone Emacs UI until the remaining power, Android,
 and recovery gates in this document pass.  Do not make an always-awake phone or
@@ -413,6 +413,23 @@ touch, and Emacs were responsive when Pierre checked them.  A second deep
 suspend woke from Pierre's physical power-button press in roughly one second;
 the same Sway and Emacs processes survived, the panel was active, and Wi-Fi
 returned without rebuilding the session.
+
+After the 60/180-second policy was deployed, four complete automatic cycles
+also passed while plugged in.  In each, the state became =blank= with DSI off
+at the first deadline, the phone entered kernel =deep= sleep at the second,
+and a prearmed RTC alarm returned the same Sway, Emacs, and =swayidle=
+processes.  Wi-Fi and SSH returned without intervention roughly 30--45 seconds
+after the RTC alarm.  Remote display recovery produced a real-screen capture
+of the intact Emacs home and touch keyboard.  The first capture exposed only a
+misleading unbound =<WakeUp>= echo-area event; an exact no-op binding removed
+it, and the next three full suspend/resume captures were clean.  The third cycle
+kept the phone continuously unreachable for 5 minutes 58 seconds before RTC
+wake, and an SSH command already in flight resumed on the same connection.  A
+fourth cycle extended continuous network unreachability between kernel
+deep-suspend entry and RTC wake to 23 minutes 33 seconds.  After that resume,
+native Firefox visibly rendered its mobile new-tab page, then vanilla Waydroid
+started and Jelly visibly loaded =https://example.com=.  Firefox exited and
+Waydroid subsequently reported =Session: STOPPED=.
 
 Battery measurement remains mixed.  Active use initially drew roughly
 0.8--1.0 A with Firefox open and capacity fell from 93 to 80 percent in about

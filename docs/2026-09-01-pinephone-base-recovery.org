@@ -187,9 +187,13 @@ With the modem electrically off it booted the console, expanded the root
 filesystem, installed the minimum Sway/PGTK Emacs/wvkbd stack, and rebooted
 into that OpenRC-supervised UI.  The plugged session passed real display and
 touch input, whole-session recovery, native Firefox, Wi-Fi, and repeated DPMS
-tests without a kernel warning.  Keep building on it while the plugged soak
-continues.  The remaining base discriminator is the deferred unplugged run;
-do not advance to DanctNIX unless that fails.
+tests without a kernel warning.  Its first unplugged hands-on run, physical
+panel off/wake, and RTC deep suspend also passed.  Four later automatic
+plugged RTC-wake cycles returned the same graphical processes, including a
+23-minute-33-second continuously unreachable interval between kernel deep
+suspend and RTC wake.  Keep building on v25.06 while the duration, battery,
+repeated physical-wake, and modem gates continue; do not advance to DanctNIX
+unless this base regresses.
 Thinky's prepared aliases are =phoney-diag-v2506= and =phoney-diag-v2606= so
 the images keep separate SSH host-key records.
 
