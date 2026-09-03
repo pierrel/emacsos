@@ -79,6 +79,16 @@ grep -F 'timeout -s TERM -k 1 3 emacsclient' "$deploy_dir/openrc-session" >/dev/
 grep -F 'Goodix Capacitive TouchScreen' "$deploy_dir/openrc-session" >/dev/null
 grep -F '/usr/bin/wvkbd-mobintl -H 300 -L 300' "$deploy_dir/openrc-session" >/dev/null
 grep -F '/usr/bin/pipewire-pulse &' "$deploy_dir/openrc-session" >/dev/null
+grep -F '/usr/bin/alsaucm -c PinePhone set _fboot ""' \
+    "$deploy_dir/openrc-session" >/dev/null
+grep -F '/usr/bin/alsaucm -c PinePhone set _boot ""' \
+    "$deploy_dir/openrc-session" >/dev/null
+ucm_line=$(grep -nF '/usr/bin/alsaucm -c PinePhone set _boot ""' \
+    "$deploy_dir/openrc-session")
+ucm_line=${ucm_line%%:*}
+pipewire_line=$(grep -nF '/usr/bin/pipewire &' "$deploy_dir/openrc-session")
+pipewire_line=${pipewire_line%%:*}
+[ "$ucm_line" -lt "$pipewire_line" ]
 grep -F -- '--dest=org.freedesktop.DBus /org/freedesktop/DBus' \
     "$deploy_dir/openrc-session" >/dev/null
 grep -F 'org.freedesktop.DBus.NameHasOwner string:id.waydro.Container' \
@@ -144,6 +154,20 @@ grep -F 'mutating=1' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F '/run/emacsos-openrc-proof' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'apk add --simulate "$@"' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'pinephone-callaudiod alsa-utils' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'rc-update add eg25-manager default' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'rc-update add modemmanager default' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'timeout -s TERM -k 2 30 rc-service eg25-manager start' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager start' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'timeout -s TERM -k 2 30 rc-service eg25-manager stop' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager stop' \
+    "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'rc-service emacsos-ui start' "$deploy_dir/openrc-install-root" >/dev/null

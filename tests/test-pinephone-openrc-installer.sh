@@ -26,7 +26,28 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "apk $*" >>/tmp/apk-log' 'exit 0' \
     >/usr/bin/apk
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "rc-service $*" >>/tmp/rc-service-log' \
-    'if [ "$1 $2" = "emacsos-ui start" ]; then' \
+    'if [ "$1 $2" = "seatd status" ]; then' \
+    '  [ -e /tmp/seatd-running ]; exit $?' \
+    'elif [ "$1 $2" = "seatd start" ]; then' \
+    '  touch /tmp/seatd-running' \
+    'elif [ "$1 $2" = "seatd stop" ]; then' \
+    '  rm -f /tmp/seatd-running' \
+    'elif [ "$1 $2" = "eg25-manager status" ]; then' \
+    '  [ -e /tmp/eg25-manager-running ]; exit $?' \
+    'elif [ "$1 $2" = "eg25-manager start" ]; then' \
+    '  touch /tmp/eg25-manager-running' \
+    'elif [ "$1 $2" = "eg25-manager stop" ]; then' \
+    '  rm -f /tmp/eg25-manager-running' \
+    'elif [ "$1 $2" = "modemmanager status" ]; then' \
+    '  [ -e /tmp/modemmanager-running ]; exit $?' \
+    'elif [ "$1 $2" = "modemmanager start" ]; then' \
+    '  [ ! -e /tmp/fail-modemmanager ] || exit 1' \
+    '  touch /tmp/modemmanager-running' \
+    'elif [ "$1 $2" = "modemmanager stop" ]; then' \
+    '  rm -f /tmp/modemmanager-running' \
+    'elif [ "$1 $2" = "emacsos-ui status" ]; then' \
+    '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
+    'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
     '  if [ -e /tmp/fail-ui-stuck ]; then' \
     "    su emacsos-lab -s /bin/sh -c 'exec sleep 300' &" \
@@ -36,17 +57,30 @@ printf '%s\n' '#!/bin/sh' \
     '  install -d -o emacsos-lab -g emacsos-lab -m 0700 /run/emacsos-ui' \
     '  install -o emacsos-lab -g emacsos-lab -m 0600 /dev/null /run/emacsos-ui/ready' \
     '  printf "%s\\n" ready >/run/emacsos-ui/ready' \
+    '  touch /tmp/emacsos-ui-running' \
     'elif [ "$1 $2" = "emacsos-ui stop" ]; then' \
     '  [ ! -e /tmp/fail-ui-stuck ] || exit 1' \
     '  rm -rf /run/emacsos-ui' \
+    '  rm -f /tmp/emacsos-ui-running' \
     'fi' \
     'exit 0' >/usr/bin/rc-service
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "rc-update $*" >>/tmp/rc-update-log' \
     'case "$1 $2 $3" in' \
-    '  "add emacsos-ui default") touch /tmp/ui-enabled ;;' \
-    '  "del emacsos-ui default") rm -f /tmp/ui-enabled ;;' \
-    '  "show default ") [ ! -e /tmp/ui-enabled ] || printf "%s\\n" " emacsos-ui | default" ;;' \
+    '  "add seatd default") touch /tmp/seatd-enabled ;;' \
+    '  "del seatd default") rm -f /tmp/seatd-enabled ;;' \
+    '  "add emacsos-ui default") touch /tmp/emacsos-ui-enabled ;;' \
+    '  "del emacsos-ui default") rm -f /tmp/emacsos-ui-enabled ;;' \
+    '  "add eg25-manager default") touch /tmp/eg25-manager-enabled ;;' \
+    '  "del eg25-manager default") rm -f /tmp/eg25-manager-enabled ;;' \
+    '  "add modemmanager default") touch /tmp/modemmanager-enabled ;;' \
+    '  "del modemmanager default") rm -f /tmp/modemmanager-enabled ;;' \
+    '  "show default ")' \
+    '    for service in seatd emacsos-ui eg25-manager modemmanager; do' \
+    '      [ ! -e "/tmp/$service-enabled" ] ||' \
+    '        printf "%s\\n" " $service | default"' \
+    '    done' \
+    '    ;;' \
     'esac' \
     'exit 0' >/usr/bin/rc-update
 printf '%s\n' '#!/bin/sh' \
@@ -69,7 +103,8 @@ chmod 0755 /usr/bin/timeout
 for group in seat video audio; do
     getent group "$group" >/dev/null || addgroup -S "$group"
 done
-for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid; do
+for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid \
+    alsaucm callaudiocli mmcli; do
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 install -d -o root -g root -m 0750 /etc/doas.d
@@ -141,6 +176,25 @@ rm -f /etc/init.d/emacsos-ui \
 deluser emacsos-lab
 delgroup emacsos-lab 2>/dev/null || true
 
+touch /tmp/fail-modemmanager
+if SUDO_USER=user /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
+    printf '%s\n' 'injected modem failure was accepted' >&2
+    exit 1
+fi
+[ ! -e /tmp/eg25-manager-enabled ]
+[ ! -e /tmp/eg25-manager-running ]
+[ ! -e /tmp/modemmanager-enabled ]
+[ ! -e /tmp/modemmanager-running ]
+[ ! -e /etc/init.d/emacsos-ui ]
+[ ! -e /usr/local/share/emacsos-openrc ]
+[ ! -e /var/lib/emacsos-openrc-state ]
+[ "$(grep -Fxc 'tty1::respawn:/sbin/getty 38400 tty1' /etc/inittab)" -eq 1 ]
+if getent passwd emacsos-lab >/dev/null; then
+    printf '%s\n' 'failed modem install retained the lab user' >&2
+    exit 1
+fi
+rm -f /tmp/fail-modemmanager
+
 SUDO_USER=user /bin/sh /source/openrc-install-root
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
@@ -148,10 +202,14 @@ SUDO_USER=user /bin/sh /source/openrc-install-root
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
-grep -F 'apk add --simulate sway swayidle emacs-pgtk grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc' \
+grep -F 'apk add --simulate sway swayidle emacs-pgtk grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
     /tmp/apk-log >/dev/null
 grep -F 'rc-service emacsos-ui start' /tmp/rc-service-log >/dev/null
+grep -F 'rc-service eg25-manager start' /tmp/rc-service-log >/dev/null
+grep -F 'rc-service modemmanager start' /tmp/rc-service-log >/dev/null
 grep -F 'rc-update add emacsos-ui default' /tmp/rc-update-log >/dev/null
+grep -F 'rc-update add eg25-manager default' /tmp/rc-update-log >/dev/null
+grep -F 'rc-update add modemmanager default' /tmp/rc-update-log >/dev/null
 if SUDO_USER=user /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
     printf '%s\n' 'second fresh-only install was accepted' >&2
     exit 1

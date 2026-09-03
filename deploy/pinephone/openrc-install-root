@@ -9,7 +9,7 @@ export PATH
 stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=985557d3c6ad7fb08102456f0dd55905c682c0a7cf844d5c455fa061ec6471d0
+manifest_hash=dd0775fbbadbb22e46b4f970c00395b246e613982efdca10640bca23a06c6f96
 committed=0
 mutating=0
 lab_group_created=0
@@ -19,6 +19,10 @@ doas_rule_created=0
 ui_started=0
 seatd_was_enabled=0
 seatd_was_running=0
+eg25_was_enabled=0
+eg25_was_running=0
+modemmanager_was_enabled=0
+modemmanager_was_running=0
 
 fail() {
     printf 'emacsos-openrc-install: %s\n' "$1" >&2
@@ -62,6 +66,16 @@ cleanup() {
             install -o root -g root -m 0644 \
                 /var/lib/emacsos-openrc-state/inittab.original /etc/inittab || true
         fi
+        [ "$modemmanager_was_enabled" -eq 1 ] ||
+            rc-update del modemmanager default >/dev/null 2>&1 || true
+        [ "$modemmanager_was_running" -eq 1 ] ||
+            timeout -s TERM -k 2 30 rc-service modemmanager stop \
+                >/dev/null 2>&1 || true
+        [ "$eg25_was_enabled" -eq 1 ] ||
+            rc-update del eg25-manager default >/dev/null 2>&1 || true
+        [ "$eg25_was_running" -eq 1 ] ||
+            timeout -s TERM -k 2 30 rc-service eg25-manager stop \
+                >/dev/null 2>&1 || true
         if [ "$ui_quiescent" -eq 1 ]; then
             rm -rf -- /var/lib/emacsos-openrc-state
             if [ "$payload_started" -eq 1 ]; then
@@ -184,11 +198,20 @@ rc-update show default 2>/dev/null |
     grep -Eq '^[[:space:]]*seatd[[:space:]]*\|[[:space:]]*default[[:space:]]*$' &&
     seatd_was_enabled=1
 rc-service seatd status >/dev/null 2>&1 && seatd_was_running=1
+rc-update show default 2>/dev/null |
+    grep -Eq '^[[:space:]]*eg25-manager[[:space:]]*\|[[:space:]]*default[[:space:]]*$' &&
+    eg25_was_enabled=1
+rc-service eg25-manager status >/dev/null 2>&1 && eg25_was_running=1
+rc-update show default 2>/dev/null |
+    grep -Eq '^[[:space:]]*modemmanager[[:space:]]*\|[[:space:]]*default[[:space:]]*$' &&
+    modemmanager_was_enabled=1
+rc-service modemmanager status >/dev/null 2>&1 && modemmanager_was_running=1
 mutating=1
 
 set -- sway swayidle emacs-pgtk grim wtype wvkbd seatd seatd-openrc firefox \
     mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils \
-    doas flock util-linux-misc
+    doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc \
+    mobile-broadband-provider-info pinephone-callaudiod alsa-utils
 apk add --simulate "$@"
 apk add "$@"
 for package do
@@ -196,7 +219,8 @@ for package do
 done
 for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     /usr/bin/pipewire-pulse /usr/bin/wireplumber /usr/bin/waydroid \
-    /usr/bin/swayidle /usr/bin/doas /usr/bin/flock /usr/bin/setsid; do
+    /usr/bin/swayidle /usr/bin/doas /usr/bin/flock /usr/bin/setsid \
+    /usr/bin/alsaucm /usr/bin/callaudiocli /usr/bin/mmcli; do
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
 [ -d /etc/doas.d ] && [ ! -L /etc/doas.d ] || fail 'unsafe doas directory'
@@ -311,6 +335,10 @@ done
 [ "$ready" -eq 1 ] || fail 'OpenRC UI proof did not become ready'
 
 /usr/local/sbin/emacsos-openrc-boot-mode initialize
+rc-update add eg25-manager default
+timeout -s TERM -k 2 30 rc-service eg25-manager start
+rc-update add modemmanager default
+timeout -s TERM -k 2 30 rc-service modemmanager start
 rm -f -- /run/emacsos-openrc-proof
 committed=1
 printf '%s\n' 'OpenRC UI installed and selected; reboot the phone'

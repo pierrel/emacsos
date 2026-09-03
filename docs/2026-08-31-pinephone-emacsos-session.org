@@ -9,12 +9,16 @@ v25.06 phone passed its plugged console baseline, expanded its ext4 root to the
 full card, and booted a new minimal OpenRC Sway + PGTK Emacs session.  The
 session is now the phone's boot UI.  Firefox and an on-demand vanilla Waydroid
 instance are installed and have passed their plugged-in feasibility smokes.
-Pierre's first unplugged hands-on UI run and physical panel off/on pass, as do
-repeated plugged automatic RTC-driven deep-suspend cycles.  It remains a
-synthetic lab, not a daily-driver result: repeated physical-key wake under the
-new automatic idle policy, duration and battery gates, the electrically
-disabled modem, and telephony still await their staged checks.  The prior
-edge/Phosh card remains preserved as rollback.
+Pierre's unplugged hands-on UI and physical panel off/on checks pass.  Automatic
+deep-suspend cycles pass plugged and unplugged, including a multi-hour run.  The modem
+is registered on LTE, cellular data and bidirectional SMS pass, an outgoing
+call carried bidirectional audio, and an incoming call auto-answer carried
+live audio.  A real incoming call also
+woke the suspended system and was accepted by an exact-caller test listener;
+the display remained dark.  It remains a synthetic lab, not yet
+a daily driver: duration and battery gates, a real lock/call surface, and
+ordinary-use soak still remain.  The prior edge/Phosh card remains preserved
+as rollback.
 
 Do not build the polished PinePhone Emacs UI until the remaining power, Android,
 and recovery gates in this document pass.  Do not make an always-awake phone or
@@ -486,10 +490,52 @@ The 60/180-second policy intentionally provides no screen lock yet.  This
 remains a non-personal synthetic lab.  The explicit =wake= action is currently
 for session startup and controlled recovery only; a future non-input modem-wake
 path must also define how it rearms the idle timer.  Promotion still requires a
-real touch-operable lock, repeated automatic blank/suspend/physical-wake runs,
-duration and battery results, and modem wake/registration/call/SMS checks.
+real touch-operable lock, repeated physical-key wake, automatic locked recovery,
+ordinary-use soak, and duration and battery results.  Automatic blank/suspend,
+one physical-key wake, and modem wake/registration/call/SMS gates now pass.
 The RTC-resume input event is bound to a silent no-op in the lab Emacs map so a
 successful wake does not leave a misleading =<WakeUp> is undefined= message.
+
+** 2026-09-03 modem, messaging, and call result
+
+The modem gate passed on the same v25.06/OpenRC installation.  Enabling
+=eg25-manager= and =modemmanager= in the default runlevel made ModemManager
+discover =/org/freedesktop/ModemManager1/Modem/0= automatically after reboot.
+The SIM registered on the home LTE network with packet service attached.
+NetworkManager's =wholesale= GSM profile passed interface-bound IPv4 and IPv6
+Internet probes on =wwan0=; Wi-Fi retains the preferred route while present.
+An inbound SMS woke the suspended phone and arrived intact, and an outbound
+reply reached the sending phone.
+
+The first outgoing call exposed an audio-initialization defect rather than a
+modem defect: the PinePhone UCM boot sequences had not run, leaving the AIF2
+voice path muted.  Running =alsaucm -c PinePhone set _fboot ""= followed by
+=set _boot ""=, then selecting call mode through =callaudiocli=, produced
+bidirectional handset audio on repeated calls.  Pierre reported substantial
+microphone background noise on one call and much better audio on the next.
+Noise suppression and gain tuning are deferred quality work, not a failure of
+the call path.  The reproducible session now runs those bounded UCM boot
+sequences before PipeWire starts; fresh installation includes
+=pinephone-callaudiod= and the complete modem package/service set.
+
+For the inbound suspend gate, a root-owned one-call listener subscribed to the
+live ModemManager =CallAdded(o path)= signal.  It accepted only a syntactically
+valid incoming call whose exact number matched a root-owned SHA-256
+digest, initialized UCM and call audio, and passed the fixed D-Bus object path
+to =mmcli --accept= without shell interpolation.  The first attempt used a
+two-field signal shape and crashed; live D-Bus introspection proved the active
+interface has the one-field signature, which the corrected test used.  After
+the kernel recorded deep-suspend entry and the network remained continuously
+unreachable, the next real call resumed the system, restored Wi-Fi, passed
+caller validation, auto-answered, carried live audio, and terminated cleanly.  The DSI
+panel did not turn on during this modem-triggered system resume.  That is
+acceptable for the headless gate but is not evidence of a visible incoming
+call experience.
+
+The one-call listener remains test-only and is not installed or enabled at
+boot.  Ordinary calls must not be silently auto-answered.  Promotion still
+requires a locked, visible Answer/Decline/Hang-up surface whose own event path
+defines whether and when a carrier wake lights the panel.
 
 During this implementation, the three OpenRC Docker tests were found to omit
 =docker run -i=.  Docker therefore closed stdin and never executed their
@@ -540,6 +586,20 @@ documentation process reached the 150-second backstop while searching the long
 historical record, so the live OpenRC section, its deferred findings, the
 roadmap summary, and every changed OpenRC comment were checked separately as a
 bounded documentation-alignment pass; no drift was found.
+
+The modem/audio persistence follow-up received three further bounded review
+rounds.  They found and fixed rollback of newly enabled modem services being
+incorrectly coupled to UI cleanup, missing injected-failure coverage for that
+rollback, unbounded service start/stop calls, and several claims that were
+broader than the live evidence.  The installer test now models prior runlevel
+and running state and exercises a failed ModemManager start.  The adversarial
+security pass found no installed listener, automatic-answer path, caller input,
+or secret exposure: the exact-caller listener remains only a documented live
+test.  Two final broad reviewers reached their backstops while traversing the
+full historical document and returned no usable verdict; a bounded manual diff
+audit then checked the privileged service transitions, failure restoration,
+time bounds, payload contents, and current-result wording without finding a
+further defect.
 
 Deterministic verification passes the PinePhone script suite, both OpenRC
 transaction containers, eleven PinePhone ERT tests, strict ShellCheck with only
@@ -1268,10 +1328,11 @@ producers is not sufficient.  Those results stopped further work on v26.06 and
 triggered the known-stable-kernel comparison.  They are not instructions for
 the current v25.06/OpenRC image.
 
-The v25.06 image now has a stable plugged-in minimal UI, real touch keyboard,
-native Firefox, on-demand vanilla Android, and handset audio devices.  Pierre's
-hands-on plugged test is next.  When he returns, run the unplugged awake-idle
-and suspend/resume gates, then turn on and validate the modem only with him
-present.  Third-party Android APKs remain blocked on a restrictive guest
-network policy; telephony and the polished Assist home remain deferred until
-the physical acceptance gates pass.
+The v25.06 image now has a stable minimal UI, real touch keyboard, native
+Firefox, on-demand vanilla Android, working cellular data and SMS, an outgoing
+call with bidirectional audio, and an incoming auto-answer that resumed the
+system from deep suspend.  The remaining gates are repeated physical-key wake,
+an absolute battery-duration result, ordinary-use soak, automatic locked
+recovery/fallback, and a secure visible lock/call surface.  Third-party Android
+APKs remain blocked until the guest network policy is restrictive.  The
+polished Assist home remains deferred until those daily-driver boundaries pass.

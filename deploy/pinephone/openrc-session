@@ -104,6 +104,9 @@ IFS= read -r DBUS_SESSION_BUS_ADDRESS <"$dbus_address_file"
 [ -n "$DBUS_SESSION_BUS_ADDRESS" ] || fail 'session D-Bus address is empty'
 export DBUS_SESSION_BUS_ADDRESS
 
+timeout -s TERM -k 1 15 /usr/bin/alsaucm -c PinePhone set _fboot ""
+timeout -s TERM -k 1 15 /usr/bin/alsaucm -c PinePhone set _boot ""
+
 /usr/bin/pipewire &
 pipewire_pid=$!
 /usr/bin/wireplumber &
