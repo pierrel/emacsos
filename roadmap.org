@@ -92,14 +92,14 @@ so it is rejected for this experiment.  The active v25.06/OpenRC/6.13.8 image
 has passed a multi-hour plugged run with Sway, PGTK Emacs, wvkbd, handset audio,
 Firefox, on-demand Waydroid, repeated DPMS, and intentional UI failure recovery.
 Pierre's first unplugged hands-on run, physical display-off/wake, and an
-RTC-driven deep suspend now pass with the same Sway and Emacs processes.  The
-reviewed 60-second blank/180-second deep-suspend policy is installed, and four
-plugged automatic RTC-wake cycles returned the same graphical processes; the
-three post-fix captures were clean, including a 23-minute-33-second
-continuously unreachable interval between kernel suspend entry and RTC wake,
-followed by visible Firefox and Android browser smokes.  The next gates are
-repeated physical-key wake under that automatic policy and duration/battery
-runs, followed by modem validation with him present.
+RTC-driven deep suspend passed with the same Sway and Emacs processes.  During
+unattended integration, only the reviewed 60-second display blank is installed;
+automatic suspend is disabled so the phone remains remotely recoverable.  Four
+plugged automatic RTC-wake cycles passed under the former suspend policy.  The
+three post-fix captures were clean, including a 23-minute-33-second unreachable
+interval between kernel suspend entry and RTC wake, followed by visible Firefox
+and Android browser smokes.  The next gates are duration and battery runs,
+followed by modem validation with Pierre present.
 Firefox/Android authority
 separation and restrictive guest networking remain gates before untrusted
 Android apps.  Detailed evidence and rejected

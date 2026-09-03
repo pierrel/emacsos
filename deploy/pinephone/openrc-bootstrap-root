@@ -30,4 +30,4 @@ timeout -s TERM -k 1 10 sh -c \
 [ "$(stat -c '%s' "$copy")" -le 1048576 ]
 chmod 0700 "$copy"
 [ "$(sha256sum "$copy")" = "$expected  $copy" ]
-SUDO_USER=user /bin/sh "$copy"
+DEPLOY_CLIENT_IP=${DEPLOY_CLIENT_IP-} SUDO_USER=user /bin/sh "$copy"

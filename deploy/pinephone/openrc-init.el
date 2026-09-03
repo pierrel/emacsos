@@ -1,6 +1,6 @@
-;;; openrc-init.el --- Minimal editable PinePhone home  -*- lexical-binding: t; -*-
+;;; openrc-init.el --- PinePhone EmacsOS bootstrap  -*- lexical-binding: t; -*-
 
-;; This is a synthetic lab home.  It deliberately loads no personal state.
+;; Assist-first PinePhone session with an optional synthetic lab status page.
 
 (setq inhibit-startup-screen t
       inhibit-startup-message t
@@ -16,16 +16,16 @@
     (funcall mode -1)))
 
 (defconst emacsos-pinephone-openrc-buffer "*EmacsOS*"
-  "Editable buffer shown by the minimal PinePhone session.")
+  "Editable PinePhone lab status buffer.")
 
 (defvar emacsos-pinephone-firefox-process nil
-  "Firefox process started from the minimal PinePhone home.")
+  "Firefox process started from the PinePhone EmacsOS session.")
 
 (defvar emacsos-pinephone-firefox-status-marker nil
   "Marker at the start of the Firefox status shown on the home screen.")
 
 (defvar emacsos-pinephone-waydroid-process nil
-  "Waydroid process started from the minimal PinePhone home.")
+  "Waydroid process started from the PinePhone EmacsOS session.")
 
 (defvar emacsos-pinephone-waydroid-status-marker nil
   "Marker at the start of the Waydroid status shown on the home screen.")
@@ -33,7 +33,11 @@
 (defconst emacsos-pinephone-waydroid-config "/var/lib/waydroid/waydroid.cfg"
   "File created when the Android images have been initialized.")
 
+(defconst emacsos-pinephone-cell-connection "emacsos-cellular"
+  "NetworkManager profile managed by the PinePhone network helper.")
+
 (require 'button)
+(require 'subr-x)
 
 (defvar emacsos-pinephone-button-map
   (let ((map (make-sparse-keymap)))
@@ -216,12 +220,149 @@
 (add-to-list 'default-frame-alist '(fullscreen . maximized))
 (add-to-list 'default-frame-alist '(font . "Monospace-14"))
 
+(defun emacsos-pinephone-call-finished (process _event operation)
+  "Report terminal PROCESS output for OPERATION and restore audio on failure."
+  (when (memq (process-status process) '(exit signal))
+    (let* ((buffer (process-buffer process))
+           (status (if (buffer-live-p buffer)
+                       (with-current-buffer buffer (string-trim (buffer-string)))
+                     "")))
+      (unwind-protect
+          (if (zerop (process-exit-status process))
+              (message "%s" (if (string-empty-p status)
+                                 (format "%s completed" operation)
+                               status))
+            (when (memq operation '(dial answer))
+              (emacos-call--audio nil))
+            (when (eq operation 'answer)
+              (emacos-call--dismiss))
+            (message "emacos-call: %s"
+                     (if (string-empty-p status)
+                         (format "%s helper failed" operation)
+                       status)))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(defun emacsos-pinephone-call-operation (operation value)
+  "Start validated PinePhone call OPERATION for VALUE without blocking Emacs."
+  (let* ((buffer (generate-new-buffer " *emacsos-call*"))
+         (args (append (list "-n" "/usr/local/sbin/emacsos-openrc-call"
+                             (symbol-name operation))
+                       (and value (list value)))))
+    (condition-case err
+        (progn
+          (make-process
+           :name (format "emacsos-call-%s" operation)
+           :buffer buffer
+           :command (cons "/usr/bin/doas" args)
+           :noquery t
+           :sentinel (lambda (proc event)
+                       (emacsos-pinephone-call-finished
+                        proc event operation)))
+          (pcase operation
+            ('dial "dialing: requested")
+            ('answer "answered: requested")
+            ('hangup "hung-up: requested")
+            (_ "error: unsupported call operation")))
+      (error
+       (when (buffer-live-p buffer) (kill-buffer buffer))
+       (format "error: call helper failed: %s" (error-message-string err))))))
+
+(defun emacsos-pinephone-call-audio-finished (process _event)
+  "Report a terminal call-audio PROCESS failure and release its buffer."
+  (when (memq (process-status process) '(exit signal))
+    (let ((buffer (process-buffer process)))
+      (unwind-protect
+          (unless (zerop (process-exit-status process))
+            (message "emacos-call: audio routing failed: %s"
+                     (if (buffer-live-p buffer)
+                         (with-current-buffer buffer
+                           (string-trim (buffer-string)))
+                       "no diagnostic output")))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(defun emacsos-pinephone-call-audio (active)
+  "Select call audio when ACTIVE without blocking the Emacs event loop."
+  (let ((buffer (generate-new-buffer " *emacsos-call-audio*")))
+    (condition-case err
+        (make-process
+         :name "emacsos-call-audio"
+         :buffer buffer
+         :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "5"
+                        "/usr/bin/callaudiocli" "-m" (if active "1" "0"))
+         :noquery t
+         :sentinel #'emacsos-pinephone-call-audio-finished)
+      (error
+       (when (buffer-live-p buffer) (kill-buffer buffer))
+       (signal (car err) (cdr err))))))
+
+(defun emacsos-pinephone-wake-display ()
+  "Wake the display and re-arm idle blanking without blocking ModemManager."
+  (let ((process
+         (start-process "emacsos-call-wake" nil
+                        "/usr/local/share/emacsos-openrc/session-power" "wake")))
+    (set-process-query-on-exit-flag process nil)))
+
+(defun emacsos-pinephone-network-command (arguments)
+  "Translate NetworkManager ARGUMENTS into the fixed root-helper command."
+  (let ((prefix '("/usr/bin/doas" "-n"
+                  "/usr/local/sbin/emacsos-openrc-network")))
+    (pcase arguments
+      (`("radio" "wifi" ,state)
+       (unless (member state '("on" "off"))
+         (error "invalid Wi-Fi state"))
+       (append prefix (list "wifi" state)))
+      (`("con" ,state ,name)
+       (cond
+        ((and (member state '("up" "down"))
+              (string= name emacsos-pinephone-cell-connection))
+         (append prefix (list "cell" state)))
+        ((string= state "up") (append prefix (list "saved" name)))
+        (t (error "unsupported connection action"))))
+      (`("dev" "wifi" "connect" ,ssid)
+       (append prefix (list "open" ssid)))
+      (_ (error "unsupported network action")))))
+
 (when (display-graphic-p)
+  (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
+  (setq emacos-use-internal-keyboard nil
+        emacos-control-window-percent 35
+        emacos-initial-buffer-function #'emacos--chat-buffer
+        emacos-net-cell-connection emacsos-pinephone-cell-connection
+        emacos-net-command-function #'emacsos-pinephone-network-command
+        emacos-chat-auth-file
+        "/var/lib/emacsos-lab/.emacs.d/server/emacsos-openrc"
+        emacos-call-operation-function #'emacsos-pinephone-call-operation
+        emacos-call-audio-function #'emacsos-pinephone-call-audio
+        emacos-call-wake-function #'emacsos-pinephone-wake-display
+        emacos-call-control-gap-lines 1)
+  (let ((url-file "/etc/emacsos-openrc/chat-url"))
+    (setq emacos-chat-server-url
+          (if (file-readable-p url-file)
+              (with-temp-buffer
+                (insert-file-contents url-file)
+                (string-trim (buffer-string)))
+            "http://localhost:8765/chat")))
+  (defvar emacos-agent-file "/var/lib/emacsos-lab/.emacs.d/emacsos/agent.el"
+    "Persistent agent configuration applied by Assist.")
   (require 'server)
-  (setq server-name "emacsos-openrc")
+  (setq server-use-tcp t
+        server-host "0.0.0.0"
+        server-port 8766
+        server-name "emacsos-openrc")
   (server-start)
   (set-face-attribute 'default nil :height 140)
-  (emacsos-pinephone-openrc-home))
+  (require 'os)
+  (setq emacos-global-commands
+        (append '(("Firefox" . emacsos-pinephone-open-firefox)
+                  ("Android" . emacsos-pinephone-open-waydroid)
+                  ("Stop Android" . emacsos-pinephone-stop-waydroid)
+                  ("Lab home" . emacsos-pinephone-openrc-home))
+                emacos-global-commands))
+  (when (file-readable-p emacos-agent-file)
+    (condition-case err
+        (load emacos-agent-file nil 'nomessage)
+      (error (message "emacsos: saved agent config failed: %s"
+                      (error-message-string err))))))
 
 (provide 'emacsos-pinephone-openrc-init)
 ;;; openrc-init.el ends here

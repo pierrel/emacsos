@@ -3,6 +3,12 @@
 
 * Status
 
+*Update 2026-09-03:* [[file:2026-09-03-pinephone-assist-parity.org][PinePhone Assist parity]] supersedes this phase's
+prohibition on an always-awake test configuration and its deferral of the
+Assist home.  Automatic suspend is disabled only while unattended integration
+work needs reliable remote access; suspend and battery duration remain gates
+before daily-driver use.
+
 Implementation has resumed on the v25.06/OpenRC recovery image after the
 v26.06 comparison captured an intermittent CPU 2 RCU stall.  On 2026-09-02 the
 v25.06 phone passed its plugged console baseline, expanded its ext4 root to the
@@ -1342,4 +1348,5 @@ system from deep suspend.  The remaining gates are repeated physical-key wake,
 an absolute battery-duration result, ordinary-use soak, automatic locked
 recovery/fallback, and a secure visible lock/call surface.  Third-party Android
 APKs remain blocked until the guest network policy is restrictive.  The
-polished Assist home remains deferred until those daily-driver boundaries pass.
+Assist-first home is now the active 2026-09-03 integration phase.  These power
+and recovery boundaries remain its daily-driver acceptance gates.

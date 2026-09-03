@@ -77,6 +77,19 @@
     (should (emacos-net-state-cell-provisioned st))
     (should (= (length (emacos-net-state-wifi-list st)) 3))))
 
+(ert-deftest test-net-cell-profile-is-configurable ()
+  (let ((emacos-net-cell-connection "carrier-profile"))
+    (should
+     (emacos-net-state-cell-provisioned
+      (emacos-net--parse
+       (concat "@@RADIO\nenabled\n@@ROUTE\n@@CONS\n"
+               "carrier-profile:gsm\n@@WIFI\n@@CELL\n@@END\n"))))))
+
+(ert-deftest test-net-reader-route-command-is-busybox-compatible ()
+  (let ((script (emacos-net--reader-script)))
+    (should (string-match-p "ip -4 route show default" script))
+    (should-not (string-match-p "ip -o -4" script))))
+
 (ert-deftest test-net-parse-cell-active ()
   (let ((st (emacos-net--parse test-net--blob-cell)))
     (should (eq (emacos-net-state-active-iface st) 'cell))
@@ -154,7 +167,7 @@ so each must be `commandp' or the keyboard band errors on tap."
           (should (string-match-p "HomeNet" s))     ; the active network
           (should (string-match-p "OpenNet" s))     ; an open network
           ;; a new secured network present -> the deferral note shows
-          (should (string-match-p "number keyboard" s)))
+          (should (string-match-p "credential entry" s)))
       (when (get-buffer emacos-net--buffer-name)
         (kill-buffer emacos-net--buffer-name)))))
 
@@ -176,6 +189,12 @@ so each must be `commandp' or the keyboard band errors on tap."
                (lambda (&rest _) (setq spawned t) 'p)))
       (emacos-net--refresh)
       (should-not spawned))))
+
+(ert-deftest test-net-action-translator-failure-does-not-leak-buffer ()
+  (let ((before (buffer-list))
+        (emacos-net-command-function (lambda (_) (error "rejected"))))
+    (emacos-net--action '("unsupported"))
+    (should (equal (buffer-list) before))))
 
 (provide 'test-network)
 ;;; test-network.el ends here

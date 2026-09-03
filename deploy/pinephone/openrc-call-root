@@ -1,0 +1,121 @@
+#!/bin/sh
+# Fixed EG25 call mutations for the unprivileged EmacsOS session.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+ulimit -f 128
+export PATH
+
+lock=/run/emacsos-openrc-call.lock
+output=
+
+fail() {
+    printf 'error: %s\n' "$1"
+    exit 1
+}
+
+cleanup() {
+    [ -z "$output" ] || rm -f -- "$output"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'call helper must run as root'
+[ "$#" -ge 1 ] || fail 'missing operation'
+[ -x /usr/bin/mmcli ] || fail 'mmcli is unavailable'
+
+touch "$lock"
+chown root:root "$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+flock -n -x 9 || fail 'another call operation is running'
+
+run_mmcli() {
+    output=$(mktemp /run/emacsos-call.XXXXXX)
+    if timeout -s TERM -k 1 12 /usr/bin/mmcli "$@" >"$output" 2>&1; then
+        return 0
+    else
+        status=$?
+        return "$status"
+    fi
+}
+
+mmcli_failure() {
+    status=$1
+    detail=$(head -c 4096 "$output" | tr '\n' ' ')
+    rm -f -- "$output"
+    output=
+    [ -n "$detail" ] || detail="mmcli exited $status"
+    fail "$detail"
+}
+
+modem_index() {
+    if run_mmcli -L; then :; else mmcli_failure "$?"; fi
+    modem=$(sed -n 's|.*Modem/\([0-9][0-9]*\).*|\1|p' "$output" | sed -n '1p')
+    rm -f -- "$output"
+    output=
+    [ -n "$modem" ] || fail 'no modem found'
+    printf '%s\n' "$modem"
+}
+
+operation=$1
+shift
+case $operation in
+    dial)
+        [ "$#" -eq 1 ] || fail 'dial requires one number'
+        number=$1
+        case $number in +*) digits=${number#+} ;; *) digits=$number ;; esac
+        case $digits in ''|*[!0-9]*) fail 'invalid phone number' ;; esac
+        [ "${#digits}" -ge 5 ] && [ "${#digits}" -le 15 ] ||
+            fail 'invalid phone number'
+        modem=$(modem_index)
+        if run_mmcli -m "$modem" "--voice-create-call=number=$number"; then
+            :
+        else
+            mmcli_failure "$?"
+        fi
+        call_path=$(sed -n \
+            's|.*\(/org/freedesktop/ModemManager1/Call/[0-9][0-9]*\).*|\1|p' \
+            "$output" | sed -n '1p')
+        rm -f -- "$output"
+        output=
+        [ -n "$call_path" ] || fail 'could not create call'
+        if run_mmcli -o "$call_path" --start; then
+            :
+        else
+            start_status=$?
+            start_detail=$(head -c 4096 "$output" | tr '\n' ' ')
+            rm -f -- "$output"
+            output=
+            run_mmcli -o "$call_path" --hangup || :
+            rm -f -- "$output"
+            output=
+            [ -n "$start_detail" ] || start_detail="mmcli exited $start_status"
+            fail "could not start call: $start_detail"
+        fi
+        printf 'dialing: %s\n' "$call_path"
+        ;;
+    answer)
+        [ "$#" -eq 1 ] || fail 'answer requires one call path'
+        call_path=$1
+        prefix=/org/freedesktop/ModemManager1/Call/
+        case $call_path in "$prefix"*) call_id=${call_path#"$prefix"} ;;
+            *) fail 'invalid call path' ;;
+        esac
+        case $call_id in ''|*[!0-9]*) fail 'invalid call path' ;; esac
+        if run_mmcli -o "$call_path" --accept; then :; else mmcli_failure "$?"; fi
+        printf 'answered: call active\n'
+        ;;
+    hangup)
+        [ "$#" -eq 0 ] || fail 'hangup accepts no arguments'
+        modem=$(modem_index)
+        if run_mmcli -m "$modem" --voice-hangup-all; then
+            :
+        else
+            mmcli_failure "$?"
+        fi
+        printf 'hung-up: all calls ended\n'
+        ;;
+    *) fail 'unknown operation' ;;
+esac

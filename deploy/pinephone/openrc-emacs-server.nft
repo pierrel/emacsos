@@ -1,0 +1,3 @@
+add rule inet filter input iifname "wlan*" ip saddr @DEPLOY_CLIENT_IP@ tcp dport 8766 accept comment "EmacsOS callback from deployment host WiFi"
+add rule inet filter input iifname "wg0" tcp dport 8766 accept comment "Authenticated EmacsOS callback over WireGuard"
+add rule inet filter input tcp dport 8766 drop comment "Reject other EmacsOS callback sources"

@@ -1,0 +1,277 @@
+#+title: PinePhone Assist parity
+#+date: 2026-09-03
+
+* Objective
+
+Make the v25.06 postmarketOS PinePhone session behave like the existing
+EmacsOS phone: Assist chat is the home screen, file-backed threads and live
+configuration remain available, network and call controls work from Emacs,
+and Firefox and Waydroid remain launchable.  Reuse the existing EmacsOS UI and
+server protocol.  Keep the PinePhone-specific hardware and privilege boundary
+small.
+
+This is an unattended development configuration.  Automatic suspend is
+disabled so a failed resume cannot strand the phone while Pierre is away.
+The display still blanks after 60 seconds.  Suspend durability remains a
+separate acceptance gate before daily-driver use.
+
+An explicit wake, including an incoming-call wake, emits an F24 key through
+the session's virtual keyboard.  Sway consumes that key as a no-op, while its
+seat activity restarts the idle countdown.  Swayidle's matching resume callback
+runs the same serialized state machine, so even a timeout callback scheduled
+just before the activity cannot be the final display transition.  An
+idle-origin marker makes resume and the power-key callback commute regardless
+of which acquires the lock first.  Explicit call wake clears that marker, as do
+the PinePhone's two volume-key bindings when either is the activity source.
+Without the activity event, waking an output while the seat was already idle
+left the display on indefinitely after a missed call.
+
+* User flow and parity contract
+
+1. Boot directly into Sway, Emacs, the external mobile keyboard, and the
+   Assist =*chat*= buffer.  There is no greeter or Phosh process.
+2. Type into the chat input with wvkbd and tap =SEND= in the persistent Emacs
+   control pane.  Streaming status and the response appear in the same chat
+   buffer.  A failed or unreachable server leaves the existing transcript and
+   file-backed threads intact and shows the failure in place.
+3. Open existing =.assist= files, create/forget threads, inspect history, and
+   apply or roll back agent configuration through the same commands and server
+   protocol as the original EmacsOS.
+4. Use the network page and modeline for Wi-Fi and mobile-data status.  The
+   shared UI accepts a configurable cellular profile; this phone's privileged
+   helper permits only its root-provisioned =emacsos-cellular= profile.
+5. Launch Firefox and Waydroid through Emacs commands.  Their current tested
+   full-screen Sway behavior and cleanup remain unchanged.
+6. An incoming call wakes the display, opens the existing two-tap call plane,
+   and never answers automatically.  Outgoing calls use the same deterministic
+   =emacos-call= primitive.  Answer, decline, hang-up, call state, and audio
+   routing use the EG25/ModemManager path already proven live on this handset.
+
+The Raspberry Pi defaults remain unchanged: internal Optimal-T9 keyboard,
+75-percent control window, scratch initial buffer, SIM7600 call transport, and
+=emacsos-cellular= connection name.
+
+* Design
+
+** Shared UI seams
+
+Add three settings to =os.el=:
+
+- whether to render the internal T9 and editing rows;
+- the percentage of frame height reserved for the Emacs control pane;
+- a function that selects the initial top buffer.
+
+Defaults preserve the existing device.  The PinePhone disables the internal
+keyboard because wvkbd supplies text entry, uses a smaller control pane, and
+opens =*chat*= first.  Utility, contextual command, and call-control rows stay
+inside Emacs so the old interaction model and agent-customizable surface are
+retained.
+
+The PinePhone bootstrap loads the existing =os.el=, =chat.el=,
+=emacos-assist.el=, =network.el=, and =phone-call.el= from the installed,
+root-owned payload.  At deployment, the installer derives the authenticated
+SSH client's IPv4 address and renders it into the root-owned endpoint and
+callback-firewall files.  A later WireGuard activation can replace the route
+without modifying Elisp.
+
+** Assist transport
+
+Keep the existing streaming NDJSON protocol and phone-callback auth-file
+contract.  Emacs exposes its server over TCP before chat begins.  Its rotating
+auth file is included in each chat request; the server rewrites only the host
+field to the request source before an agent callback.  The OpenRC readiness
+probe uses that TCP server file rather than the old Unix socket.
+
+The initial unattended deployment may use the private home LAN.  Remote use
+must run over the phone's WireGuard interface before this is considered daily
+driver parity; neither the Assist HTTP listener nor the Emacs TCP server is to
+be exposed to the public Internet.
+
+** PinePhone calls
+
+Keep the common D-Bus call watcher and two-tap UI.  Select call operations
+through narrow function variables whose defaults are the existing SIM7600
+implementations.  The PinePhone binds them to one root-owned helper with only
+three accepted operations:
+
+- =dial NUMBER= where NUMBER matches =+?[0-9]{5,15}=;
+- =answer CALL_PATH= where CALL_PATH exactly matches a ModemManager call object;
+- =hangup= with no additional argument.
+
+The helper discovers the current modem each time, serializes mutations, puts a
+hard timeout around every =mmcli= call, uses fixed executable paths, and never
+evaluates input.  The lab account receives passwordless =doas= permission for
+this helper only.  It cannot invoke arbitrary =mmcli= arguments or a shell.
+
+=callaudiocli= stays unprivileged in the graphical session because it needs
+that session's D-Bus.  Both the privileged call helper and audio selector run
+as asynchronous Emacs processes, so their bounded external waits cannot trip
+the UI heartbeat.  Call mode is enabled before dial/answer and disabled after
+hang-up or termination.  A failed operation is reported visibly and restores
+normal audio where possible.
+
+The shared call plane keeps its original three-line safety gap by default.
+The PinePhone uses one line because its separate wvkbd leaves a shorter Emacs
+control pane; this keeps both spatially separated actions visible without
+changing the Raspberry Pi layout or the two-tap answer and hang-up guards.
+
+** Network and offline behavior
+
+Make the shared cellular connection name configurable and use an =ip route=
+command available in BusyBox.  The PinePhone binding and root helper agree on
+the fixed =emacsos-cellular= profile.  Reads stay asynchronous and
+single-flight.  No UI refresh may block Emacs on an absent modem,
+NetworkManager, or Assist server.
+
+The existing local-first boundary is the offline cache: =.assist= files and
+their transcripts remain normal files and are usable without the server.  The
+streaming chat buffer preserves rendered content on transport failure.  This
+phase does not invent a second message queue or cached server response store;
+offline message submission reports failure and can be retried by the user.
+
+* Threat model
+
+New attack surfaces are the LAN chat transport, the TCP Emacs callback server,
+the privileged call helper, and staged deployment payloads.
+
+- The chat and callback services are confined to LAN/WireGuard routes.  Every
+  authenticated WireGuard peer can reach the callback port, so the per-request
+  rotating Emacs auth token remains the authorization gate.  No public port
+  forwarding is created.  The callback fragment loads before the image's broad
+  USB and Waydroid rules, then drops every source not accepted explicitly.
+- The call and network helpers each expose a fixed operation grammar, validate
+  every value, serialize mutations, bound subprocesses and output, use fixed
+  paths, and never evaluate input.  The network helper can only toggle radio,
+  operate the fixed cellular profile, or activate a named saved/open Wi-Fi
+  connection.
+- The existing staged installer continues to enforce root-owned installed
+  files, hashes for every payload, maximum file sizes, exact staged-file count,
+  and rejection of symlinks and unexpected names.
+- The installed Assist endpoint is root-owned and cannot be changed by the UI
+  account.  It contains no credential; the rotating Emacs server token remains
+  in its existing mode-0600 auth file.
+- Incoming calls are never automatically answered.  Existing two-tap answer
+  and hang-up confirmation remains intact.
+
+* Numbered implementation plan
+
+1. Add the shared UI and network configuration seams with ERT coverage proving
+   both legacy defaults and PinePhone overrides.
+2. Generalize only the three call mutations and audio hooks, preserving the
+   existing UI/state machine and default SIM7600 behavior.  Add ERT coverage
+   for success, failure, validation, audio teardown, and incoming wake.
+3. Add the PinePhone EG25 helper and adversarial shell tests for malformed
+   numbers, paths, extra arguments, concurrent calls, and the statically
+   enforced subprocess timeout and output bounds.
+4. Replace the minimal PinePhone init payload with an Assist-first bootstrap;
+   stage the shared Elisp modules and operator config through the hashed OpenRC
+   installer.  Preserve Firefox, Waydroid, screen blanking, and no-suspend mode.
+5. Run all Elisp, server, PinePhone shell, lint, and byte-compile checks.  Run
+   the local review lenses to convergence and correct every verified in-scope
+   finding.
+6. Deploy through the phone transaction.  Verify processes, readiness, power,
+   network status, screenshots, synthetic taps/typing, local files, server
+   callbacks, a real Assist exchange, an unreachable-server recovery, Firefox,
+   and Waydroid startup/cleanup.
+7. Exercise calls last.  Place no more than one outgoing call per hour.  Use
+   SMS only to ask Pierre for an inbound call or text.  Do not require Pierre's
+   participation for the rest of the acceptance suite.
+
+* Acceptance evidence required
+
+- Fresh process start reaches a responsive Assist-first Emacs frame without a
+  greeter, Phosh, or automatic suspend process.
+- All deterministic test suites pass, including legacy Raspberry Pi behavior.
+- A captured screenshot shows the expected chat and control layout; synthetic
+  pointer/key input changes the intended buffer and triggers SEND.
+- A real Assist turn streams and completes.  Killing/rejecting the route shows
+  a bounded failure and leaves Emacs responsive; restoring it permits retry.
+- The server can authenticate a callback into this Emacs instance without
+  exposing the callback listener publicly.
+- Network status correctly recognizes the live PinePhone Wi-Fi, LTE modem, and
+  =emacsos-cellular= profile.
+- Firefox opens and returns to Emacs.  Waydroid either opens and cleanly stops
+  or reports that images are absent without harming the session.
+- Call operations use only the EG25 helper, have bidirectional audio, and the
+  call UI follows D-Bus state.  Incoming calls wake the display but do not
+  answer without two taps.
+- The phone remains SSH-reachable, responsive, and charging throughout a long
+  unattended soak with only its display blanked.
+
+* Live validation, 2026-09-03
+
+The v25.06/OpenRC phone is running the current lane deployment.  The following
+acceptance checks have passed on the handset:
+
+- boot and update readiness with Sway, Emacs, wvkbd, PipeWire, WirePlumber,
+  and the authenticated TCP Emacs server alive;
+- no automatic suspend action, with Sway DPMS off after 60 seconds and SSH
+  remaining available;
+- the Assist-first frame and mobile keyboard, checked from captured handset
+  screenshots and synthetic keyboard input;
+- a real streamed Assist reply, followed by a real =eval_elisp= callback that
+  evaluated =(+ 20 22)= on the handset and returned 42;
+- an unreachable Assist endpoint, which produced an in-place error after the
+  three-second test timeout, cleared the in-flight state, preserved the
+  transcript, and allowed the normal endpoint to be restored;
+- a writable local =.assist= file opening in =emacos-assist-mode=;
+- Firefox launch, focus, screenshot, and return to Emacs;
+- a live Waydroid Android frame, captured from the display, followed by session
+  and LXC teardown without harming Emacs.  The sleeping on-demand D-Bus
+  container manager required a separate termination after the container and
+  =waydroid0= were already gone;
+- Wi-Fi status, LTE home registration, the live =emacsos-cellular= bearer,
+  and rejection of invalid network and call-helper operations; and
+- supervised recovery after terminating Emacs.  The complete graphical
+  process tree was rebuilt without a reboot and became ready in about 35
+  seconds.  That test exposed a stale failure diagnostic after recovery; the
+  session now removes it only after all readiness probes pass.
+
+A synthetic incoming-call screenshot initially exposed that the old Pi-sized
+three-line control gap pushed Accept below the PinePhone pane.  The
+platform-specific one-line gap now keeps both Decline and Accept visible while
+retaining their separation and the two-tap answer guard.
+
+WireGuard tools and a new root-only phone identity are staged but deliberately
+not enabled.  The deployment host's root-owned configuration still maps the
+phone's tunnel address to the erased installation's key.  Enabling the new peer
+before replacing that mapping would route Assist into a dead tunnel.  The
+replacement and an away-from-Wi-Fi test remain pending on one local sudo
+authorization.
+
+The current USB-C source advertises only the default Type-C current and no USB
+Power Delivery.  The phone therefore sees a 500 mA input even though the PMIC
+permits 1.5 A, and its battery slowly discharges while the no-suspend session
+runs.  It fell from 100 to 98 percent during the active browser, Android,
+Assist, and crash-recovery checks.  This is a source/cable power limit, not an
+unexpected busy process; the display-off CPU sample was 82 percent idle and
+Waydroid was stopped.  It reached a low of 95 percent by 09:10 after roughly
+five hours of boot and active validation, then the input recovered and charged
+the battery to 99 percent by 09:41.  The long soak must keep checking that the
+battery has enough margin.
+
+Do not use =waydroid status= as a passive stopped-state probe on this image.
+The command contacts =id.waydro.Container= and D-Bus activation starts the
+root container manager even when Android was stopped.  A process, LXC, and
+=waydroid0= check is the non-activating negative probe.  This diagnostic side
+effect caused the otherwise stopped Android stack to start during two checks;
+terminating the wrapper ran its bounded cleanup and removed the container and
+interface again.
+
+The remaining acceptance checks are the final outgoing and incoming call UI
+passes, including bidirectional audio and incoming display wake, plus the
+WireGuard handoff and the completed unattended soak.
+
+* Rollback
+
+A failed fresh install restores the original boot state after proving its UI
+processes stopped.  If it cannot prove that, it preserves the recovery payload
+and account instead of deleting files still in use.  Updates use a separate
+hashed updater that snapshots the current installed files before stopping the
+UI.  An initial stop failure makes no payload changes.  If cleanup still cannot
+prove quiescence, it retains the backup.  If the new UI
+fails and the rollback stop cannot prove quiescence, the updater leaves the
+already-installed new payload untouched and retains the root-only backup.  If
+rollback restores the old files but that UI cannot restart, those files and
+the backup remain for console recovery.  Reflashing the
+already-verified v25.06 customized image remains the final recovery path.

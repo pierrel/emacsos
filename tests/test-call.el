@@ -112,6 +112,43 @@ arg list wins.  Also records calls in the dynamic var `test-call--seen'."
                              (emacos-call "1234567890123456")))
     (should (null test-call--seen))))
 
+(ert-deftest emacos-call-platform-dial-routes-audio-and-operation ()
+  (let ((emacos-call-operation-function
+         (lambda (operation value)
+           (should (eq operation 'dial))
+           (should (equal value "+14155550123"))
+           "dialing: /org/freedesktop/ModemManager1/Call/4"))
+        (emacos-call-audio-function (lambda (active) (should active))))
+    (should (string-prefix-p "dialing:" (emacos-call "+14155550123")))))
+
+(ert-deftest emacos-call-platform-dial-failure-restores-audio ()
+  (let* ((audio nil)
+        (emacos-call-operation-function (lambda (&rest _) "error: rejected"))
+        (emacos-call-audio-function (lambda (active) (push active audio))))
+    (should (equal (emacos-call "+14155550123") "error: rejected"))
+    (should (equal (nreverse audio) '(t nil)))))
+
+(ert-deftest emacos-call-platform-answer-uses-tracked-path ()
+  (let ((emacos-call--call-path "/org/freedesktop/ModemManager1/Call/8")
+        (emacos-call-audio-function #'ignore)
+        (emacos-call-operation-function
+         (lambda (operation value)
+           (should (eq operation 'answer))
+           (should (equal value "/org/freedesktop/ModemManager1/Call/8"))
+           "answered: call active")))
+    (should (string-prefix-p "answered:" (emacos-answer)))))
+
+(ert-deftest emacos-call-platform-hangup-restores-audio ()
+  (let* ((audio 'unset)
+        (emacos-call-operation-function
+         (lambda (operation value)
+           (should (eq operation 'hangup))
+           (should-not value)
+           "hung-up: all calls ended"))
+        (emacos-call-audio-function (lambda (active) (setq audio active))))
+    (should (string-prefix-p "hung-up:" (emacos-hang-up)))
+    (should-not audio)))
+
 (ert-deftest emacos-hang-up-no-modem ()
   (test-call--with (list (cons (lambda (a) (member "-L" a))
                                (cons 0 "No modems were found")))
@@ -188,7 +225,7 @@ keyboard plane) and sets the incoming keyboard plane."
 (defmacro test-call--render-plane (plane &rest body)
   (declare (indent 1))
   `(cl-letf (((symbol-function 'emacos--btn)
-              (lambda (label &rest _) (insert label "\n")))
+              (lambda (label &rest _) (insert label)))
              ((symbol-function 'emacos--center) (lambda (s &rest _) s)))
      (with-temp-buffer
        (funcall ,plane)
@@ -216,6 +253,13 @@ keyboard plane) and sets the incoming keyboard plane."
     (test-call--render-plane #'emacos-call--plane-active
       (should (string-match-p "Confirm hang up?" s)))))
 
+(ert-deftest emacos-call-plane-gap-is-configurable ()
+  "A short platform pane can retain both spatially separated controls."
+  (let ((emacos-call-control-gap-lines 1)
+        (emacos-call--answer-confirm-pending nil))
+    (test-call--render-plane #'emacos-call--plane-incoming
+      (should (string-match-p "Decline\n\nAccept" s)))))
+
 (ert-deftest emacos-call-on-call-added-incoming-shows ()
   "An INCOMING call (Direction=1) records path/number, sets state, shows the
 incoming screen."
@@ -230,6 +274,17 @@ incoming screen."
       (should (eq emacos-call--state 'incoming))
       (should (equal emacos-call--call-path
                      "/org/freedesktop/ModemManager1/Call/0")))))
+
+(ert-deftest emacos-call-on-call-added-incoming-wakes-before-showing ()
+  (let* ((events nil) (emacos-call--state nil)
+        (emacos-call-wake-function (lambda () (push 'wake events))))
+    (cl-letf (((symbol-function 'emacos-call--call-prop)
+               (lambda (_path prop) (pcase prop ("Direction" 1) ("Number" "1"))))
+              ((symbol-function 'emacos-call--watch-call-end) #'ignore)
+              ((symbol-function 'emacos-call-show-incoming)
+               (lambda (_number) (push 'show events))))
+      (emacos-call--on-call-added "/org/freedesktop/ModemManager1/Call/0")
+      (should (equal (nreverse events) '(wake show))))))
 
 (ert-deftest emacos-call-on-call-added-outgoing-shows-active ()
   "An OUTGOING call (Direction=2) shows the in-progress *call* screen, not the

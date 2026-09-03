@@ -22,6 +22,10 @@ timer_pid=
 
 fail() {
     printf 'emacsos-openrc: %s\n' "$1" >&2
+    if [ "$runtime" = /run/emacsos-ui ] && [ -d "$runtime" ] &&
+       [ "$(stat -c %u "$runtime" 2>/dev/null || true)" = "$(id -u)" ]; then
+        printf 'emacsos-openrc: %s\n' "$1" >"$runtime/failure"
+    fi
     exit 1
 }
 
@@ -163,9 +167,11 @@ probe_sway() {
 
 probe_emacs() {
     : >"$probe_file"
-    timeout -s TERM -k 1 3 emacsclient --socket-name=emacsos-openrc --eval t \
-        >"$probe_file" 2>/dev/null
-    [ "$(sed -n '1p' "$probe_file")" = t ]
+    timeout -s TERM -k 1 3 emacsclient \
+        --server-file=/var/lib/emacsos-lab/.emacs.d/server/emacsos-openrc \
+        --eval t \
+        >"$probe_file" 2>&1
+    grep -Fx t "$probe_file" >/dev/null
 }
 
 WAYLAND_DISPLAY=${wayland_socket##*/}
@@ -199,17 +205,28 @@ while [ "$attempt" -lt 150 ]; do
     attempt=$((attempt + 1))
     sleep 0.1
 done
-[ "$attempt" -lt 150 ] || fail 'Emacs did not become ready'
+if [ "$attempt" -ge 150 ]; then
+    probe_sway get_tree || fail 'Sway tree probe failed during Emacs startup'
+    grep -Eq '"app_id"[[:space:]]*:[[:space:]]*"emacs"' "$probe_file" ||
+        fail 'Emacs window did not become ready'
+    if ! probe_emacs; then
+        detail=$(head -c 4096 "$probe_file" | tr '\n' ' ')
+        [ -n "$detail" ] || detail='no emacsclient output'
+        fail "Emacs server did not become ready: $detail"
+    fi
+fi
 
 "$root/session-power" wake
 "$root/process-group" /usr/bin/swayidle -w \
-    timeout 60 "$root/session-power idle-blank" &
+    timeout 60 "$root/session-power idle-blank" \
+    resume "$root/session-power resume" &
 idle_pid=$!
 sleep 0.2
 kill -0 "$idle_pid" 2>/dev/null || fail 'swayidle exited during startup'
 
 printf '%s\n' ready >"$runtime/.ready.tmp"
 mv -- "$runtime/.ready.tmp" "$runtime/ready"
+rm -f -- "$runtime/failure"
 
 while :; do
     for pid in "$sway_pid" "$emacs_pid" "$keyboard_pid" "$idle_pid" \

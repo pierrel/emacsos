@@ -1,8 +1,9 @@
 ;;; phone-call.el --- deterministic cellular call primitives -*- lexical-binding: t; -*-
 
 ;; The DETERMINISTIC primitive layer for phone calls (see README "Layers").
-;; `emacos-call' takes a concrete phone NUMBER and dials it via the SIM7600
-;; modem; `emacos-hang-up' ends the current call.  Same number in -> same
+;; `emacos-call' takes a concrete phone NUMBER and dials it through the
+;; configured platform operation, defaulting to the original SIM7600 path;
+;; `emacos-hang-up' ends the current call.  Same number in -> same
 ;; action out: no name lookup, no confirmation, no agent callback.
 ;;
 ;; Name resolution ("call Ana" -> a number), disambiguation, and
@@ -15,6 +16,48 @@
   "A dialable phone number: optional leading + then 5-15 digits.
 Guards the deterministic primitive so a stray name/letter can never
 reach mmcli.")
+
+(defcustom emacos-call-operation-function nil
+  "Optional platform call operation function.
+When non-nil it is called as (FUNCTION OP VALUE), where OP is `dial',
+`answer', or `hangup'.  VALUE is a validated number, the tracked call object
+path, or nil.  It must return the normal EmacsOS status string.  nil retains
+the SIM7600 transport implemented in this file."
+  :type '(choice (const :tag "SIM7600 transport" nil) function)
+  :group 'emacsos)
+
+(defcustom emacos-call-audio-function nil
+  "Optional function selecting call audio for non-nil, normal audio for nil."
+  :type '(choice (const nil) function)
+  :group 'emacsos)
+
+(defcustom emacos-call-wake-function nil
+  "Optional function used to illuminate the display on an incoming call."
+  :type '(choice (const nil) function)
+  :group 'emacsos)
+
+(defcustom emacos-call-control-gap-lines 3
+  "Blank lines between the two call controls.
+The roomy default preserves the original EmacsOS phone layout.  A platform
+with a separate on-screen keyboard can reduce the gap so both controls remain
+visible in its shorter Emacs control pane."
+  :type 'natnum
+  :group 'emacsos)
+
+(defun emacos-call--audio (active)
+  "Ask the platform to set call-audio ACTIVE, without breaking the call UI."
+  (when emacos-call-audio-function
+    (condition-case err
+        (funcall emacos-call-audio-function active)
+      (error (message "emacos-call: audio routing failed: %s"
+                      (error-message-string err))))))
+
+(defun emacos-call--platform-operation (operation value)
+  "Run the configured platform OPERATION with VALUE and normalize failures."
+  (condition-case err
+      (let ((status (funcall emacos-call-operation-function operation value)))
+        (if (stringp status) status "error: call backend returned no status"))
+    (error (format "error: call backend failed: %s" (error-message-string err)))))
 
 (defun emacos-call--mmcli (&rest args)
   "Run \"mmcli ARGS\" as root (passwordless sudo), capturing output.
@@ -53,37 +96,44 @@ pass an \"error:\"-prefixed return straight through."
 (defun emacos-call (number)
   "Place a cellular voice call to NUMBER (E.164, e.g. \"+14155550123\").
 DETERMINISTIC primitive: dials exactly NUMBER -- no name lookup, no
-confirmation.  Returns a status string: \"dialing: <call-path>\" on
-success, else \"error: <reason>\".  Callable interactively (prompts for a
+confirmation.  Returns a status string beginning \"dialing:\" on accepted
+submission, else \"error: <reason>\".  Callable interactively (prompts for a
 number) and by the agent via eval_elisp."
   (interactive "sNumber to call (+E164): ")
   (let ((status
          (if (not (string-match-p emacos-call--number-re number))
              (format "error: invalid number: %s" number)
-           (let ((m (emacos-call--modem-index)))
-             (if (string-prefix-p "error:" m)
-                 m
-               (let* ((create (cdr (emacos-call--mmcli
-                                    "-m" m
-                                    (format "--voice-create-call=number=%s" number))))
-                      ;; Use the FULL /org/.../Call/N path: mmcli segfaults on
-                      ;; a truncated path (see the call-audio findings doc).
-                      (path (when (string-match
-                                   "/org/freedesktop/ModemManager1/Call/[0-9]+"
-                                   create)
-                              (match-string 0 create))))
-                 (if (not path)
-                     (format "error: could not create call: %s" create)
-                   (let ((start (emacos-call--mmcli "-o" path "--start")))
-                     (if (zerop (car start))
-                         (format "dialing: %s" path)
-                       ;; --start failed: drop the orphaned (created-but-
-                       ;; unstarted) call object, then surface mmcli's ACTUAL
-                       ;; reason rather than a fixed guess.
-                       (emacos-call--mmcli "-o" path "--hangup")
-                       (format "error: dial failed: %s"
-                               (let ((d (cdr start)))
-                                 (if (string= d "") "mmcli --start failed" d))))))))))))
+           (if emacos-call-operation-function
+               (progn
+                 (emacos-call--audio t)
+                 (let ((result (emacos-call--platform-operation 'dial number)))
+                   (when (string-prefix-p "error:" result)
+                     (emacos-call--audio nil))
+                   result))
+             (let ((m (emacos-call--modem-index)))
+               (if (string-prefix-p "error:" m)
+                   m
+                 (let* ((create (cdr (emacos-call--mmcli
+                                      "-m" m
+                                      (format "--voice-create-call=number=%s" number))))
+                        ;; Use the FULL /org/.../Call/N path: mmcli segfaults on
+                        ;; a truncated path (see the call-audio findings doc).
+                        (path (when (string-match
+                                     "/org/freedesktop/ModemManager1/Call/[0-9]+"
+                                     create)
+                                (match-string 0 create))))
+                   (if (not path)
+                       (format "error: could not create call: %s" create)
+                     (let ((start (emacos-call--mmcli "-o" path "--start")))
+                       (if (zerop (car start))
+                           (format "dialing: %s" path)
+                         ;; --start failed: drop the orphaned (created-but-
+                         ;; unstarted) call object, then surface mmcli's ACTUAL
+                         ;; reason rather than a fixed guess.
+                         (emacos-call--mmcli "-o" path "--hangup")
+                         (format "error: dial failed: %s"
+                                 (let ((d (cdr start)))
+                                   (if (string= d "") "mmcli --start failed" d)))))))))))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 
@@ -92,32 +142,37 @@ number) and by the agent via eval_elisp."
   "End the current cellular call.  DETERMINISTIC primitive.
 Returns \"hung-up: ...\" or \"error: ...\"."
   (interactive)
-  (let* ((m (emacos-call--modem-index))
-         (status
-          (if (string-prefix-p "error:" m)
-              m
-            (let ((r (emacos-call--mmcli "-m" m "--voice-hangup-all")))
-              (if (zerop (car r))
-                  "hung-up: all calls ended"
-                ;; Often benign (the call already dropped on a mid-call USB
-                ;; re-enumeration), but surface mmcli's reason, not a guess.
-                (format "error: hangup failed: %s"
-                        (let ((d (cdr r)))
-                          (if (string= d "") "no active call?" d))))))))
+  (let* ((status
+          (if emacos-call-operation-function
+              (emacos-call--platform-operation 'hangup nil)
+            (let ((m (emacos-call--modem-index)))
+              (if (string-prefix-p "error:" m)
+                  m
+                (let ((r (emacos-call--mmcli "-m" m "--voice-hangup-all")))
+                  (if (zerop (car r))
+                      "hung-up: all calls ended"
+                    ;; Often benign (the call already dropped on a mid-call USB
+                    ;; re-enumeration), but surface mmcli's reason, not a guess.
+                    (format "error: hangup failed: %s"
+                            (let ((d (cdr r)))
+                              (if (string= d "") "no active call?" d)))))))))
+         (_audio (when emacos-call-operation-function
+                   (emacos-call--audio nil))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 
 ;;; ------------------------------------------------------------------
-;;; Inbound: detect (D-Bus) -> screen -> answer (AT) / decline
+;;; Inbound: detect (D-Bus) -> screen -> platform answer / decline
 ;;; ------------------------------------------------------------------
-;; ModemManager's QMI accept is broken on the SIM7600G-H ("InvalidQosId"),
-;; so we ANSWER via raw AT `ATA' on a ModemManager-ignored AT port (a udev
-;; rule frees ttyUSB3).  DETECTION still rides ModemManager: the Voice
+;; The legacy SIM7600 transport answers through raw AT because its
+;; ModemManager QMI accept path is broken ("InvalidQosId").  A configured
+;; platform backend may answer differently.  DETECTION rides ModemManager: the Voice
 ;; `CallAdded' D-Bus signal + the call's properties (no sudo to read).
 ;; See docs/2026-06-18-inbound-answering.org.
 
-;; D-Bus is OPTIONAL: it powers only inbound DETECTION.  Outbound (emacos-call
-;; / emacos-hang-up) and answering (emacos-answer, raw AT) work without it.
+;; D-Bus is OPTIONAL for the legacy transport: it powers only inbound
+;; DETECTION, while outbound and raw-AT answer work without it.  Platform
+;; backends may require the D-Bus-tracked call path to answer.
 ;; Soft-require so the file still loads on an Emacs built without D-Bus; the
 ;; watcher + property reads are fboundp-guarded so a missing D-Bus just means
 ;; "no incoming-call screen", never a load/boot failure.
@@ -197,17 +252,28 @@ serial process would make the next open fail device-busy."
 
 ;;;###autoload
 (defun emacos-answer ()
-  "Answer the ringing call.  DETERMINISTIC primitive: sends `ATA' on the
-freed AT port (ModemManager's QMI accept is broken on this modem).
+  "Answer the ringing call through the configured platform operation.
+The legacy transport sends `ATA' on the freed AT port because ModemManager's
+QMI accept is broken on the SIM7600 modem.
 Returns \"answered: ...\" or \"error: ...\"."
   (interactive)
-  (let* ((resp (emacos-call--at "ATA"))
-         (status
-          (cond ((string-prefix-p "error:" resp) resp)
-                ((string-match-p "NO CARRIER\\|ERROR" resp)
-                 (format "error: answer failed: %s" (string-trim resp)))
-                ((string-match-p "BEGIN\\|OK" resp) "answered: call active")
-                (t (format "error: answer unconfirmed: %s" (string-trim resp))))))
+  (let* ((status
+          (if emacos-call-operation-function
+              (progn
+                (emacos-call--audio t)
+                (let ((result
+                       (emacos-call--platform-operation
+                        'answer emacos-call--call-path)))
+                  (when (string-prefix-p "error:" result)
+                    (emacos-call--audio nil))
+                  result))
+            (let ((resp (emacos-call--at "ATA")))
+              (cond ((string-prefix-p "error:" resp) resp)
+                    ((string-match-p "NO CARRIER\\|ERROR" resp)
+                     (format "error: answer failed: %s" (string-trim resp)))
+                    ((string-match-p "BEGIN\\|OK" resp) "answered: call active")
+                    (t (format "error: answer unconfirmed: %s"
+                               (string-trim resp))))))))
     (when (called-interactively-p 'interactive) (message "%s" status))
     status))
 
@@ -267,7 +333,7 @@ spatially separated so a mis-tap toward one can't trigger the other.  Accept
 is two-tap (arms → \"Confirm answer?\")."
   (insert "\n")
   (emacos-call--plane-button "Decline" #'emacos-call--decline)
-  (insert "\n\n\n")
+  (insert (make-string emacos-call-control-gap-lines ?\n))
   (emacos-call--plane-button
    (if emacos-call--answer-confirm-pending "Confirm answer?" "Accept")
    #'emacos-call--answer-tap
@@ -280,7 +346,7 @@ is two-tap (arms → \"Confirm answer?\")."
    (if emacos-call--hangup-confirm-pending "Confirm hang up?" "Hang up")
    #'emacos-call--hangup-tap
    (and emacos-call--hangup-confirm-pending "firebrick4"))
-  (insert "\n\n\n")
+  (insert (make-string emacos-call-control-gap-lines ?\n))
   (emacos-call--plane-button "Back" #'emacos-call--back))
 
 ;;; Show / back / dismiss
@@ -457,7 +523,10 @@ nil on dismiss, freeing the next call."
             emacos-call--call-number (or (emacos-call--call-prop path "Number") ""))
       (emacos-call--watch-call-end path)
       (if (eq dir 1)
-          (progn (setq emacos-call--state 'incoming)
+          (progn
+                 (when emacos-call-wake-function
+                   (ignore-errors (funcall emacos-call-wake-function)))
+                 (setq emacos-call--state 'incoming)
                  (emacos-call-show-incoming emacos-call--call-number))
         (setq emacos-call--state 'active)
         (emacos-call--show-active "Calling…")))))
@@ -479,7 +548,9 @@ promptly on this modem."
      ((get-buffer-window emacos-call--active-buffer)
       (emacos-call--render-active emacos-call--call-number "In progress")
       (emacos-call--rerender))))                   ; outbound ringing → connected
-   ((eq new 7) (emacos-call--dismiss))))
+   ((eq new 7)
+    (when emacos-call-operation-function (emacos-call--audio nil))
+    (emacos-call--dismiss))))
 
 (defun emacos-call--watch-call-end (path)
   "Watch the call at PATH so the screen auto-dismisses when it ends.

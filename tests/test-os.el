@@ -429,6 +429,24 @@ is already in progress, even if the command set differs."
             (should-not (string-match-p "PLANE-SENTINEL" s)))))
     (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
+(ert-deftest test-os-render-page-external-keyboard-keeps-controls ()
+  "An external keyboard removes only text-entry rows, not Emacs controls."
+  (let ((emacos-use-internal-keyboard nil)
+        (text-rows 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
+                  ((symbol-function 'emacos--top-commands) (lambda () nil))
+                  ((symbol-function 'emacos--render-keyboard)
+                   (lambda () (cl-incf text-rows)))
+                  ((symbol-function 'emacos--render-action-row)
+                   (lambda () (cl-incf text-rows))))
+          (emacos--render-page)
+          (should (= text-rows 0))
+          (with-current-buffer "*keyboard*"
+            (should (string-match-p "QUIT" (buffer-string)))
+            (should (string-match-p "SEND\\|Chat" (buffer-string)))))
+      (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
+
 ;;; Utility row: QUIT + M-x + Chat (the mode button lives on the action row)
 
 (ert-deftest test-os-utility-row-has-quit-mx-chat ()

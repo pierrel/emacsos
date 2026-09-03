@@ -7,6 +7,24 @@
   :group 'applications
   :prefix "emacos-")
 
+(defcustom emacos-use-internal-keyboard t
+  "Whether the control pane renders EmacsOS's built-in text keyboard.
+Set this to nil on devices that provide a compositor-level keyboard; the
+utility, context-command, and call-control surfaces remain available."
+  :type 'boolean
+  :group 'emacsos)
+
+(defcustom emacos-control-window-percent 75
+  "Percentage of the Emacs frame reserved for the bottom control pane."
+  :type 'integer
+  :group 'emacsos)
+
+(defcustom emacos-initial-buffer-function
+  (lambda () (get-buffer-create "*scratch*"))
+  "Function returning the top buffer shown when EmacsOS starts."
+  :type 'function
+  :group 'emacsos)
+
 ;; Disable chrome
 (setq inhibit-startup-screen t
       inhibit-startup-message t
@@ -127,9 +145,10 @@ The bottom `*keyboard*' window is the phone's touch CONTROL PLANE, reactive
 to the top buffer (like the command list).  When the top buffer sets this to
 a function, `emacos--render-page' calls it to paint `*keyboard*' INSTEAD of
 the T9 keyboard/action/utility/command bands — the function runs with
-`*keyboard*' as `current-buffer'.  nil (the default) means the normal
-keyboard.  A call buffer sets this to paint Accept/Decline or Hang-up/Back
-(see phone-call.el).")
+`*keyboard*' as `current-buffer'.  nil (the default) means the normal keyboard
+when `emacos-use-internal-keyboard' is non-nil, or only utility and command
+rows when an external keyboard supplies text entry.  A call buffer sets this
+to paint Accept/Decline or Hang-up/Back (see phone-call.el).")
 
 (defvar emacos--last-plane 'unset
   "The keyboard plane `emacos--render-page' last rendered.
@@ -615,7 +634,7 @@ Chat button) so it reads as the app, not plumbing."
 
 (defun emacos--run-command (cmd)
   "Run CMD interactively in the target (editing) window, then refresh.
-The keyboard surface is always shown, so unlike the old swap model
+The control surface is always shown, so unlike the old swap model
 there is no page to force/restore.  Re-render only when CMD actually
 changed the command set: an in-place `M-x <mode>' won't fire
 `window-buffer-change-functions', so the follower can't catch it — but
@@ -991,8 +1010,9 @@ so the follower can no-op when the set is unchanged."
   "Render the *keyboard* window.  When the TOP buffer declares a keyboard
 plane (`emacos--keyboard-plane'), paint that instead — the touch control
 plane is reactive to what's on top (a call buffer shows call controls).
-Otherwise the always-on composite of the T9 keyboard, the action row, the
-utility row, and the top-buffer command list.  Binds `emacos--in-render'
+Otherwise paint the utility row and top-buffer commands, preceded by the T9
+keyboard and action row when `emacos-use-internal-keyboard' is non-nil.  Binds
+`emacos--in-render'
 for the duration so the window-buffer-change follower can't recurse into
 an in-progress render."
   (let* ((buf (get-buffer-create "*keyboard*"))
@@ -1011,8 +1031,9 @@ an in-progress render."
               ;; while the plane is still up would otherwise re-render off a
               ;; stale (pre-call) command set even though the plane is unchanged.
               (setq emacos--last-commands (emacos--top-commands)))
-          (emacos--render-keyboard)
-          (emacos--render-action-row)
+          (when emacos-use-internal-keyboard
+            (emacos--render-keyboard)
+            (emacos--render-action-row))
           (emacos--render-utility-row)
           (emacos--render-commands))
         ;; Record the rendered plane ONLY after the render succeeds (mirrors how
@@ -1041,10 +1062,11 @@ an in-progress render."
   "Set up the EmacsOS environment."
   (set-frame-name "EmacsOS")
   ;; Main editing buffer
-  (switch-to-buffer (get-buffer-create "*scratch*"))
+  (switch-to-buffer (funcall emacos-initial-buffer-function))
   ;; Split: top = editor, bottom = keyboard
   (let* ((total (window-total-height))
-         (kbd-height (/ (* total 3) 4))
+         (percent (max 1 (min 99 emacos-control-window-percent)))
+         (kbd-height (max 1 (/ (* total percent) 100)))
          (kw (split-window nil (- total kbd-height) 'below)))
     (set-window-buffer kw (get-buffer-create "*keyboard*"))
     (set-window-dedicated-p kw t)

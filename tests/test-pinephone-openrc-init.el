@@ -1,4 +1,4 @@
-;;; test-pinephone-openrc-init.el --- Tests for the minimal OpenRC home -*- lexical-binding: t; -*-
+;;; test-pinephone-openrc-init.el --- PinePhone OpenRC bootstrap tests -*- lexical-binding: t; -*-
 
 (require 'ert)
 (require 'cl-lib)
@@ -46,6 +46,63 @@
 
 (ert-deftest emacsos-openrc-wakeup-event-is-silent ()
   (should (eq (lookup-key global-map [WakeUp]) #'ignore)))
+
+(ert-deftest emacsos-openrc-call-operation-uses-only-fixed-helper ()
+  (let (seen)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args) (setq seen args) 'process)))
+      (should (string-prefix-p
+               "dialing:"
+               (emacsos-pinephone-call-operation 'dial "+14155550123")))
+      (should (equal (plist-get seen :command)
+                     '("/usr/bin/doas" "-n"
+                       "/usr/local/sbin/emacsos-openrc-call"
+                       "dial" "+14155550123"))))))
+
+(ert-deftest emacsos-openrc-call-operation-cleans-buffer-after-launch-failure ()
+  (let ((before (buffer-list)))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _) (error "cannot launch"))))
+      (should (string-prefix-p
+               "error: call helper failed:"
+               (emacsos-pinephone-call-operation 'hangup nil)))
+      (should (equal (buffer-list) before)))))
+
+(ert-deftest emacsos-openrc-call-audio-is-bounded-and-asynchronous ()
+  (let (seen)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args) (setq seen args) 'process)))
+      (emacsos-pinephone-call-audio t)
+      (should (equal (plist-get seen :command)
+                     '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "5"
+                       "/usr/bin/callaudiocli" "-m" "1")))
+      (should (eq (plist-get seen :sentinel)
+                  #'emacsos-pinephone-call-audio-finished)))))
+
+(ert-deftest emacsos-openrc-wake-display-is-asynchronous ()
+  (let (started noquery)
+    (cl-letf (((symbol-function 'start-process)
+               (lambda (&rest args) (setq started args) 'process))
+              ((symbol-function 'set-process-query-on-exit-flag)
+               (lambda (_process value) (setq noquery (not value)))))
+      (emacsos-pinephone-wake-display)
+      (should (equal started
+                     '("emacsos-call-wake" nil
+                       "/usr/local/share/emacsos-openrc/session-power" "wake")))
+      (should noquery))))
+
+(ert-deftest emacsos-openrc-network-command-allows-only-ui-actions ()
+  (should (equal
+           (emacsos-pinephone-network-command '("radio" "wifi" "off"))
+           '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-network"
+             "wifi" "off")))
+  (should (equal
+           (emacsos-pinephone-network-command
+            '("con" "up" "emacsos-cellular"))
+           '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-network"
+             "cell" "up")))
+  (should-error
+   (emacsos-pinephone-network-command '("general" "permissions"))))
 
 (ert-deftest emacsos-openrc-firefox-nonterminal-sentinel-keeps-tracking ()
   (let ((buffer (emacsos-pinephone-openrc-home))

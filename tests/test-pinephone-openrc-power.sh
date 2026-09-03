@@ -55,17 +55,35 @@ printf '%s\n' \
     '#!/bin/sh' \
     'printf "%s\n" "$*" >>/tmp/swaymsg.log' \
     'case $* in' \
+    '  *"output DSI-1 power off")' \
+    '    if [ -e /tmp/block-sway ]; then' \
+    '      touch /tmp/sway-reached' \
+    '      read answer </tmp/sway-continue' \
+    '    fi ;;' \
+    'esac' \
+    'case $* in' \
     '  "-s /run/emacsos-ui/sway-ipc.test.sock output DSI-1 power on"|"-s /run/emacsos-ui/sway-ipc.test.sock output DSI-1 power off"|"-s /run/emacsos-ui/sway-ipc.test.sock input type:touch events enabled"|"-s /run/emacsos-ui/sway-ipc.test.sock input type:touch events disabled") exit 0 ;;' \
     '  *) exit 1 ;;' \
     'esac' >/usr/bin/swaymsg
 chmod 0755 /usr/bin/swaymsg
+printf '%s\n' \
+    '#!/bin/sh' \
+    '[ "${WAYLAND_DISPLAY-}" = wayland-test ] || exit 64' \
+    '[ "$*" = "-k F24" ] || exit 64' \
+    'printf "%s\n" "$*" >>/tmp/wtype.log' \
+    'if [ -e /tmp/block-wtype ]; then' \
+    '  touch /tmp/wtype-reached' \
+    '  read answer </tmp/wtype-continue' \
+    'fi' >/usr/bin/wtype
+chmod 0755 /usr/bin/wtype
 
 su -s /bin/sh emacsos-lab -c \
-    'python3 -c "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('\''/run/emacsos-ui/sway-ipc.test.sock'\''); time.sleep(30)"' &
+    'python3 -c "import socket,time; a=socket.socket(socket.AF_UNIX); a.bind('\''/run/emacsos-ui/sway-ipc.test.sock'\''); b=socket.socket(socket.AF_UNIX); b.bind('\''/run/emacsos-ui/wayland-test'\''); time.sleep(30)"' &
 socket_pid=$!
 trap 'kill "$socket_pid" 2>/dev/null || true' EXIT
 attempt=0
-while [ ! -S /run/emacsos-ui/sway-ipc.test.sock ]; do
+while [ ! -S /run/emacsos-ui/sway-ipc.test.sock ] ||
+      [ ! -S /run/emacsos-ui/wayland-test ]; do
     [ "$attempt" -lt 20 ]
     attempt=$((attempt + 1))
     sleep 0.05
@@ -82,17 +100,112 @@ as_lab wake
     '-s /run/emacsos-ui/sway-ipc.test.sock output DSI-1 power on' ]
 [ "$(sed -n '2p' /tmp/swaymsg.log)" = \
     '-s /run/emacsos-ui/sway-ipc.test.sock input type:touch events enabled' ]
+[ "$(sed -n '1p' /tmp/wtype.log)" = '-k F24' ]
+
+mkfifo /tmp/wtype-continue
+touch /tmp/block-wtype
+as_lab wake &
+blocking_wake_pid=$!
+attempt=0
+while [ ! -e /tmp/wtype-reached ]; do
+    [ "$attempt" -lt 20 ]
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+if as_lab idle-blank >/tmp/stale-idle.out 2>&1; then
+    printf '%s\n' 'stale idle callback waited behind wake' >&2
+    exit 1
+fi
+grep -F 'power transition is busy' /tmp/stale-idle.out >/dev/null
+printf '%s\n' continue >/tmp/wtype-continue
+wait "$blocking_wake_pid"
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+rm -f /tmp/block-wtype /tmp/wtype-continue /tmp/wtype-reached
 
 as_lab press
 [ "$(cat /run/emacsos-ui/power-state)" = blank ]
-[ "$(sed -n '3p' /tmp/swaymsg.log)" = \
+[ "$(sed -n '5p' /tmp/swaymsg.log)" = \
     '-s /run/emacsos-ui/sway-ipc.test.sock input type:touch events disabled' ]
-[ "$(sed -n '4p' /tmp/swaymsg.log)" = \
+[ "$(sed -n '6p' /tmp/swaymsg.log)" = \
     '-s /run/emacsos-ui/sway-ipc.test.sock output DSI-1 power off' ]
 
 before=$(wc -l </tmp/swaymsg.log)
 as_lab idle-blank
 [ "$(wc -l </tmp/swaymsg.log)" -eq "$before" ]
+
+# A power key that resumes an idle-blanked seat launches both callbacks.  They
+# must finish active regardless of which one owns the transition lock first.
+mkfifo /tmp/wtype-continue
+touch /tmp/block-wtype
+as_lab resume &
+resume_first_pid=$!
+attempt=0
+while [ ! -e /tmp/wtype-reached ]; do
+    [ "$attempt" -lt 20 ]
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+as_lab press &
+press_second_pid=$!
+printf '%s\n' continue >/tmp/wtype-continue
+wait "$resume_first_pid"
+wait "$press_second_pid"
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+rm -f /tmp/block-wtype /tmp/wtype-continue /tmp/wtype-reached
+
+as_lab press
+as_lab idle-blank
+mkfifo /tmp/wtype-continue
+touch /tmp/block-wtype
+as_lab press &
+press_first_pid=$!
+attempt=0
+while [ ! -e /tmp/wtype-reached ]; do
+    [ "$attempt" -lt 20 ]
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+as_lab resume &
+resume_second_pid=$!
+printf '%s\n' continue >/tmp/wtype-continue
+wait "$press_first_pid"
+wait "$resume_second_pid"
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+rm -f /tmp/block-wtype /tmp/wtype-continue /tmp/wtype-reached
+
+# A volume key can produce resume without a power-key press.  Its Sway binding
+# follows with explicit wake, which clears idle origin before a later press.
+as_lab press
+as_lab idle-blank
+as_lab resume
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+as_lab wake
+as_lab press
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+as_lab wake
+
+mkfifo /tmp/sway-continue
+touch /tmp/block-sway
+as_lab idle-blank &
+slow_idle_pid=$!
+attempt=0
+while [ ! -e /tmp/sway-reached ]; do
+    [ "$attempt" -lt 20 ]
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+as_lab wake &
+waiting_wake_pid=$!
+sleep 2.2
+kill -0 "$waiting_wake_pid"
+printf '%s\n' continue >/tmp/sway-continue
+wait "$slow_idle_pid"
+wait "$waiting_wake_pid"
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+rm -f /tmp/block-sway /tmp/sway-continue /tmp/sway-reached
+
+as_lab press
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
 
 printf '%s\n' 0 >/tmp/suspend-status
 as_lab suspend
@@ -166,6 +279,24 @@ fi
 grep -F 'ambiguous Sway socket' /tmp/ambiguous.out >/dev/null
 kill "$extra_socket_pid"
 wait "$extra_socket_pid" 2>/dev/null || true
+rm -f /run/emacsos-ui/sway-ipc.extra.sock
+
+su -s /bin/sh emacsos-lab -c \
+    'python3 -c "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('\''/run/emacsos-ui/wayland-extra'\''); time.sleep(30)"' &
+extra_wayland_pid=$!
+attempt=0
+while [ ! -S /run/emacsos-ui/wayland-extra ]; do
+    [ "$attempt" -lt 20 ]
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+if as_lab wake >/tmp/ambiguous-wayland.out 2>&1; then
+    printf '%s\n' 'ambiguous Wayland socket was accepted' >&2
+    exit 1
+fi
+grep -F 'ambiguous Wayland socket' /tmp/ambiguous-wayland.out >/dev/null
+kill "$extra_wayland_pid"
+wait "$extra_wayland_pid" 2>/dev/null || true
 
 install -d -m 0755 /tmp/power
 printf '%s\n' 's2idle [deep]' >/tmp/power/mem_sleep

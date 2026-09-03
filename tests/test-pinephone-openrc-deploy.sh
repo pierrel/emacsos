@@ -9,25 +9,51 @@ sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/openrc-suspend-root" \
+    "$deploy_dir/openrc-call-root" \
+    "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-boot-mode" \
     "$deploy_dir/openrc-install-root" \
+    "$deploy_dir/openrc-update-root" \
     "$deploy_dir/openrc-bootstrap-root" \
     "$deploy_dir/install-openrc-session.sh" \
+    "$deploy_dir/update-openrc-session.sh" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/waydroid-container-wrapper"
 
-(cd "$deploy_dir" && sha256sum -c openrc-manifest.sha256)
+manifest_stage=$(mktemp -d)
+trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
+for name in openrc-init.el openrc-sway.config openrc-session \
+    openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
+    emacsos-ui.initd openrc-boot-mode waydroid-container.service \
+    waydroid-container.conf waydroid-container-wrapper; do
+    cp -- "$deploy_dir/$name" "$manifest_stage/$name"
+done
+for name in os.el chat.el emacos-assist.el network.el phone-call.el; do
+    cp -- "$repo_dir/$name" "$manifest_stage/$name"
+done
+cp -- "$deploy_dir/openrc-manifest.sha256" "$manifest_stage/"
+(cd "$manifest_stage" && sha256sum -c openrc-manifest.sha256)
 manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
-expected='emacsos-ui.initd
+expected='chat.el
+emacos-assist.el
+emacsos-ui.initd
+network.el
 openrc-boot-mode
+openrc-call-root
+openrc-chat-url
+openrc-emacs-server.nft
 openrc-init.el
+openrc-network-root
 openrc-process-group
 openrc-session
 openrc-session-power
 openrc-suspend-root
 openrc-sway.config
+os.el
+phone-call.el
 waydroid-container-wrapper
 waydroid-container.conf
 waydroid-container.service'
@@ -76,8 +102,17 @@ grep -F "fail 'multiple Sway sockets appeared'" "$deploy_dir/openrc-session" >/d
 grep -F 'probe_sway get_inputs' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 swaymsg' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 emacsclient' "$deploy_dir/openrc-session" >/dev/null
+grep -F -- '--server-file=/var/lib/emacsos-lab/.emacs.d/server/emacsos-openrc' \
+    "$deploy_dir/openrc-session" >/dev/null
+grep -F 'rm -f -- "$runtime/failure"' \
+    "$deploy_dir/openrc-session" >/dev/null
+grep -F 'grep -Fx t "$probe_file"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'Goodix Capacitive TouchScreen' "$deploy_dir/openrc-session" >/dev/null
 grep -F '/usr/bin/wvkbd-mobintl -H 300 -L 300' "$deploy_dir/openrc-session" >/dev/null
+grep -F 'emacos-call-control-gap-lines 1' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \
+    "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'bindsym F24 nop' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F '/usr/bin/pipewire-pulse &' "$deploy_dir/openrc-session" >/dev/null
 grep -F '/usr/bin/alsaucm -c PinePhone set _fboot ""' \
     "$deploy_dir/openrc-session" >/dev/null
@@ -100,6 +135,7 @@ grep -F '/usr/bin/dbus-daemon --session --nofork --nopidfile --print-address=3' 
     "$deploy_dir/openrc-session" >/dev/null
 grep -F 'PulseAudio-compatible socket did not appear' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'printf '\''%s\n'\'' ready >"$runtime/.ready.tmp"' "$deploy_dir/openrc-session" >/dev/null
+grep -F '>"$runtime/failure"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'mv -- "$runtime/.ready.tmp" "$runtime/ready"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'rm -f -- "$sway_socket"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'rm -f -- "$wayland_socket" "${wayland_socket}.lock"' "$deploy_dir/openrc-session" >/dev/null
@@ -116,12 +152,17 @@ grep -F '/usr/bin/setsid "$@" &' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
+grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
 if grep -F 'session-power suspend' "$deploy_dir/openrc-session" >/dev/null; then
     printf '%s\n' 'automatic deep suspend is enabled during unattended development' >&2
     exit 1
 fi
-grep -F 'press|idle-blank|wake|suspend' "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'press|idle-blank|resume|wake|suspend' \
+    "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'idle-blank) flock -n -x 9' "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \
+    "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
     "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'power=/sys/power' "$deploy_dir/openrc-suspend-root" >/dev/null
@@ -135,7 +176,7 @@ if grep -F '${POWER' "$deploy_dir/openrc-suspend-root" >/dev/null; then
     printf '%s\n' 'root suspend helper accepts a power-path override' >&2
     exit 1
 fi
-if grep -E 'after-resume|before-sleep|[[:space:]]resume[[:space:]]' \
+if grep -E 'after-resume|before-sleep' \
         "$deploy_dir/openrc-session" >/dev/null; then
     printf '%s\n' 'swayidle has a competing wake callback' >&2
     exit 1
@@ -173,11 +214,29 @@ grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager stop' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F "case \$digits in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null
+grep -F "case \$call_id in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null
+grep -F 'ulimit -f 128' "$deploy_dir/openrc-call-root" >/dev/null
+grep -F 'timeout -s TERM -k 1 12 /usr/bin/mmcli' \
+    "$deploy_dir/openrc-call-root" >/dev/null
+grep -F 'flock -n -x 9' "$deploy_dir/openrc-call-root" >/dev/null
+grep -F 'timeout -s TERM -k 1 20 /usr/bin/nmcli' \
+    "$deploy_dir/openrc-network-root" >/dev/null
+grep -F 'flock -n -x 9' "$deploy_dir/openrc-network-root" >/dev/null
 grep -F 'rc-service emacsos-ui start' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F '/usr/local/sbin/emacsos-openrc-boot-mode initialize' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'expected=@@ADMIN_SHA256@@' "$deploy_dir/openrc-bootstrap-root" >/dev/null
 grep -F 'timeout -s TERM -k 1 10 sh -c' "$deploy_dir/openrc-bootstrap-root" >/dev/null
 grep -F 'timeout -s TERM -k 1 10 sh -c' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F "count=\$(grep -Fo '@DEPLOY_CLIENT_IP@'" \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'deploy_client_ip=${SSH_CONNECTION%% *}' \
+    "$deploy_dir/install-openrc-session.sh" \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
 if grep -F 'cp -P' "$deploy_dir/openrc-bootstrap-root" \
         "$deploy_dir/openrc-install-root" >/dev/null; then
     printf '%s\n' 'installer follows staged symlinks' >&2
@@ -203,6 +262,10 @@ grep -F 'output DSI-1 mode 720x1440@60Hz scale 2' "$deploy_dir/openrc-sway.confi
 grep -F 'input type:touch map_to_output DSI-1' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym Mod1+Tab focus next' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym XF86PowerOff exec $power press' "$deploy_dir/openrc-sway.config" >/dev/null
+grep -F 'bindsym XF86AudioRaiseVolume exec $power wake' \
+    "$deploy_dir/openrc-sway.config" >/dev/null
+grep -F 'bindsym XF86AudioLowerVolume exec $power wake' \
+    "$deploy_dir/openrc-sway.config" >/dev/null
 if grep -F 'exec $power toggle' "$deploy_dir/openrc-sway.config" >/dev/null; then
     printf '%s\n' 'power key still uses a racy toggle' >&2
     exit 1
@@ -210,6 +273,11 @@ fi
 grep -F 'for_window [app_id="firefox"] focus' "$deploy_dir/openrc-sway.config" >/dev/null
 
 grep -F '"--new-instance" "about:blank"' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacos-use-internal-keyboard nil' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacos-initial-buffer-function #'"'"'emacos--chat-buffer' \
+    "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'make-process' "$deploy_dir/openrc-init.el" >/dev/null
 if grep -Eq '/home/|192\.168\.' \
         "$deploy_dir/openrc-init.el" \
         "$deploy_dir/openrc-session" \
@@ -217,7 +285,32 @@ if grep -Eq '/home/|192\.168\.' \
         "$deploy_dir/openrc-process-group" \
         "$deploy_dir/openrc-suspend-root" \
         "$deploy_dir/openrc-sway.config" \
+        "$deploy_dir/openrc-chat-url" \
+        "$deploy_dir/openrc-emacs-server.nft" \
         "$deploy_dir/emacsos-ui.initd"; then
     printf '%s\n' 'OpenRC payload contains operator-specific data' >&2
     exit 1
 fi
+
+grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'flock -n -x 9' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rc-service emacsos-ui start 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui stop 9>&-' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui start 9>&-' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F "grep -Fx 'populated 0'" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'pgrep -u "$lab_uid"' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rollback refused while UI remains active' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '/etc/nftables.d/49-emacsos-callback.nft' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rm -f -- /etc/nftables.d/95-emacsos-callback.nft' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'tcp dport 8766 drop' "$deploy_dir/openrc-emacs-server.nft" >/dev/null
+grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'updated UI did not become ready: $detail' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'restore_file openrc-session' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '/usr/sbin/nft -f /etc/nftables.nft' \
+    "$deploy_dir/openrc-update-root" >/dev/null

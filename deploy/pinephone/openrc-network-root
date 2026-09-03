@@ -1,0 +1,81 @@
+#!/bin/sh
+# Fixed NetworkManager mutations for the unprivileged EmacsOS session.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+ulimit -f 128
+export PATH
+
+lock=/run/emacsos-openrc-network.lock
+output=
+
+fail() {
+    printf 'error: %s\n' "$1"
+    exit 1
+}
+
+cleanup() {
+    [ -z "$output" ] || rm -f -- "$output"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'network helper must run as root'
+[ "$#" -ge 1 ] || fail 'missing operation'
+[ -x /usr/bin/nmcli ] || fail 'nmcli is unavailable'
+
+touch "$lock"
+chown root:root "$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+flock -n -x 9 || fail 'another network operation is running'
+
+run_nmcli() {
+    [ -z "$output" ] || rm -f -- "$output"
+    output=$(mktemp /run/emacsos-network.XXXXXX)
+    if timeout -s TERM -k 1 20 /usr/bin/nmcli "$@" >"$output" 2>&1; then
+        return 0
+    else
+        status=$?
+        detail=$(head -c 4096 "$output" | tr '\n' ' ')
+        [ -n "$detail" ] || detail="nmcli exited $status"
+        fail "$detail"
+    fi
+}
+
+validate_name() {
+    name=$1
+    [ -n "$name" ] && [ "${#name}" -le 128 ] || fail 'invalid network name'
+    [ "$(printf '%s\n' "$name" | wc -l)" -eq 1 ] || fail 'invalid network name'
+}
+
+operation=$1
+shift
+case $operation in
+    wifi)
+        [ "$#" -eq 1 ] || fail 'wifi requires one state'
+        case $1 in on|off) ;; *) fail 'invalid Wi-Fi state' ;; esac
+        run_nmcli radio wifi "$1"
+        ;;
+    cell)
+        [ "$#" -eq 1 ] || fail 'cell requires one state'
+        case $1 in up|down) ;; *) fail 'invalid cellular state' ;; esac
+        run_nmcli con "$1" emacsos-cellular
+        ;;
+    saved)
+        [ "$#" -eq 1 ] || fail 'saved requires one connection name'
+        validate_name "$1"
+        run_nmcli -g connection.type con show id "$1"
+        [ "$(sed -n '1p' "$output")" = 802-11-wireless ] &&
+            [ "$(wc -l <"$output")" -eq 1 ] ||
+            fail 'saved connection is not Wi-Fi'
+        run_nmcli con up id "$1"
+        ;;
+    open)
+        [ "$#" -eq 1 ] || fail 'open requires one SSID'
+        validate_name "$1"
+        run_nmcli dev wifi connect "$1"
+        ;;
+    *) fail 'unknown operation' ;;
+esac
