@@ -525,7 +525,7 @@ roadmap summary, and every changed OpenRC comment were checked separately as a
 bounded documentation-alignment pass; no drift was found.
 
 Deterministic verification passes the PinePhone script suite, both OpenRC
-transaction containers, ten PinePhone ERT tests, strict ShellCheck with only
+transaction containers, eleven PinePhone ERT tests, strict ShellCheck with only
 the known OpenRC-run variable and BusyBox =local= exclusions, all 188 EmacsOS
 ERT tests, and all 203 server tests.  The server suite has one upstream
 Python-3.14/Pydantic-v1 compatibility warning.  Scoped =git diff --check= is
