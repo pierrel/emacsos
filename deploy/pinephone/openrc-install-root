@@ -1,0 +1,316 @@
+#!/bin/sh
+# Fixed root installer for the v25.06 OpenRC PinePhone lab session.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+export PATH
+
+stage=/home/user/.cache/emacsos-openrc-stage
+snapshot=
+lock=/run/emacsos-openrc-install.lock
+manifest_hash=2336c1b2f22fdea6e852f86ba3a1720d16bf3eead6f50ac20d6cf83cbc3e1c15
+committed=0
+mutating=0
+lab_group_created=0
+lab_user_created=0
+payload_started=0
+doas_rule_created=0
+ui_started=0
+seatd_was_enabled=0
+seatd_was_running=0
+
+fail() {
+    printf 'emacsos-openrc-install: %s\n' "$1" >&2
+    exit 1
+}
+
+cleanup() {
+    trap - HUP INT TERM
+    if [ "$mutating" -eq 1 ] && [ "$committed" -eq 0 ]; then
+        rm -f -- /run/emacsos-openrc-proof
+        ui_quiescent=1
+        if [ "$ui_started" -eq 1 ]; then
+            rc-service emacsos-ui stop >/dev/null 2>&1 || true
+            service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
+            if [ -e "$service_cgroup" ] || [ -L "$service_cgroup" ]; then
+                if [ ! -d "$service_cgroup" ] || [ -L "$service_cgroup" ] ||
+                   [ ! -f "$service_cgroup/cgroup.events" ] ||
+                   [ -L "$service_cgroup/cgroup.events" ] ||
+                   ! grep -Fx 'populated 0' "$service_cgroup/cgroup.events" \
+                       >/dev/null 2>&1; then
+                    ui_quiescent=0
+                fi
+            fi
+            if getent passwd emacsos-lab >/dev/null 2>&1; then
+                lab_uid=$(id -u emacsos-lab) || ui_quiescent=0
+                if [ "$ui_quiescent" -eq 1 ]; then
+                    if pgrep -u "$lab_uid" >/dev/null 2>&1; then
+                        ui_quiescent=0
+                    else
+                        pgrep_status=$?
+                        [ "$pgrep_status" -eq 1 ] || ui_quiescent=0
+                    fi
+                fi
+            fi
+        fi
+        rc-update del emacsos-ui default >/dev/null 2>&1 || true
+        if [ -d /var/lib/emacsos-openrc-state ] &&
+           [ ! -L /var/lib/emacsos-openrc-state ] &&
+           [ -f /var/lib/emacsos-openrc-state/inittab.original ] &&
+           [ ! -L /var/lib/emacsos-openrc-state/inittab.original ]; then
+            install -o root -g root -m 0644 \
+                /var/lib/emacsos-openrc-state/inittab.original /etc/inittab || true
+        fi
+        if [ "$ui_quiescent" -eq 1 ]; then
+            rm -rf -- /var/lib/emacsos-openrc-state
+            if [ "$payload_started" -eq 1 ]; then
+                [ "$doas_rule_created" -eq 0 ] ||
+                    rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
+                rm -f -- /etc/init.d/emacsos-ui \
+                    /etc/dbus-1/system.d/99-emacsos-waydroid.conf \
+                    /usr/local/share/dbus-1/system-services/id.waydro.Container.service \
+                    /usr/local/libexec/emacsos-waydroid-container \
+                    /usr/local/sbin/emacsos-openrc-suspend \
+                    /usr/local/sbin/emacsos-openrc-boot-mode
+                rm -rf -- /usr/local/share/emacsos-openrc
+            fi
+            [ "$lab_user_created" -eq 0 ] ||
+                deluser emacsos-lab >/dev/null 2>&1 || true
+            [ "$lab_group_created" -eq 0 ] ||
+                delgroup emacsos-lab >/dev/null 2>&1 || true
+            [ "$lab_group_created" -eq 0 ] || rm -rf -- /var/lib/emacsos-lab
+            [ "$seatd_was_enabled" -eq 1 ] ||
+                rc-update del seatd default >/dev/null 2>&1 || true
+            [ "$seatd_was_running" -eq 1 ] ||
+                rc-service seatd stop >/dev/null 2>&1 || true
+        else
+            printf '%s\n' \
+                'emacsos-openrc-install: rollback preserved UI recovery files because processes remain' >&2
+        fi
+    fi
+    [ -z "$snapshot" ] || rm -rf -- "$snapshot"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ "$#" -eq 0 ] || fail 'arguments are not accepted'
+[ "${SUDO_USER-}" = user ] || fail 'must be authorized by the recovery user'
+
+touch "$lock"
+chown root:root "$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+flock -n -x 9 || fail 'install lock is busy'
+
+[ -d "$stage" ] && [ ! -L "$stage" ] || fail 'staging directory is absent'
+[ "$(stat -c '%U:%G:%a:%h:%F' "$stage")" = 'user:user:700:2:directory' ] ||
+    fail 'unsafe staging directory'
+
+count=0
+for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    name=${path##*/}
+    case $name in
+        openrc-manifest.sha256|openrc-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper) ;;
+        *) fail "unexpected staged file: $name" ;;
+    esac
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
+    [ "$(stat -c '%U:%G:%h:%F' "$path")" = 'user:user:1:regular file' ] ||
+        fail "unsafe staged owner or links: $name"
+    [ "$(stat -c '%s' "$path")" -le 1048576 ] || fail "oversized staged file: $name"
+    count=$((count + 1))
+done
+[ "$count" -eq 12 ] || fail 'staging directory is incomplete'
+
+snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
+chown root:root "$snapshot"
+chmod 0700 "$snapshot"
+for name in openrc-manifest.sha256 openrc-init.el openrc-sway.config \
+    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    emacsos-ui.initd openrc-boot-mode waydroid-container.service \
+    waydroid-container.conf \
+    waydroid-container-wrapper; do
+    install -o root -g root -m 0600 /dev/null "$snapshot/$name"
+    timeout -s TERM -k 1 10 sh -c \
+        'ulimit -f 2048; exec cp -- "$1" "$2"' sh \
+        "$stage/$name" "$snapshot/$name"
+    [ -f "$snapshot/$name" ] && [ ! -L "$snapshot/$name" ] ||
+        fail "unsafe root snapshot: $name"
+    [ "$(stat -c '%U:%G:%h:%F' "$snapshot/$name")" = \
+        'root:root:1:regular file' ] || fail "unsafe root snapshot: $name"
+    [ "$(stat -c '%s' "$snapshot/$name")" -le 1048576 ] ||
+        fail "oversized root snapshot: $name"
+    chmod 0600 "$snapshot/$name"
+done
+[ "$(sha256sum "$snapshot/openrc-manifest.sha256")" = \
+    "$manifest_hash  $snapshot/openrc-manifest.sha256" ] || fail 'manifest hash mismatch'
+(cd "$snapshot" && sha256sum -c openrc-manifest.sha256) || fail 'payload hash mismatch'
+
+[ ! -e /var/lib/emacsos-openrc-state ] && [ ! -L /var/lib/emacsos-openrc-state ] ||
+    fail 'boot state already exists'
+[ ! -e /etc/init.d/emacsos-ui ] && [ ! -L /etc/init.d/emacsos-ui ] ||
+    fail 'UI service already exists'
+[ ! -e /usr/local/share/emacsos-openrc ] &&
+    [ ! -L /usr/local/share/emacsos-openrc ] || fail 'UI payload already exists'
+[ ! -e /usr/local/sbin/emacsos-openrc-boot-mode ] &&
+    [ ! -L /usr/local/sbin/emacsos-openrc-boot-mode ] || fail 'boot selector already exists'
+[ ! -e /usr/local/sbin/emacsos-openrc-suspend ] &&
+    [ ! -L /usr/local/sbin/emacsos-openrc-suspend ] || fail 'suspend helper already exists'
+[ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ] &&
+    [ ! -L /usr/local/share/dbus-1/system-services/id.waydro.Container.service ] ||
+    fail 'local Waydroid D-Bus service already exists'
+[ ! -e /etc/dbus-1/system.d/99-emacsos-waydroid.conf ] &&
+    [ ! -L /etc/dbus-1/system.d/99-emacsos-waydroid.conf ] ||
+    fail 'local Waydroid D-Bus policy already exists'
+[ ! -e /usr/local/libexec/emacsos-waydroid-container ] &&
+    [ ! -L /usr/local/libexec/emacsos-waydroid-container ] ||
+    fail 'local Waydroid manager wrapper already exists'
+[ ! -e /var/lib/emacsos-lab ] && [ ! -L /var/lib/emacsos-lab ] ||
+    fail 'lab home already exists'
+[ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
+    [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ] ||
+    fail 'UI suspend rule already exists'
+[ -f /etc/inittab ] && [ ! -L /etc/inittab ] || fail 'unsafe inittab'
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/inittab)" = \
+    'root:root:644:1:regular file' ] || fail 'unsafe inittab owner, mode, or links'
+[ "$(grep -Fxc 'tty1::respawn:/sbin/getty 38400 tty1' /etc/inittab)" -eq 1 ] ||
+    fail 'tty1 getty is not stock'
+[ "$(grep -Fxc '# emacsos-openrc owns tty1' /etc/inittab || true)" -eq 0 ] ||
+    fail 'tty1 is already owned'
+
+rc-update show default 2>/dev/null |
+    grep -Eq '^[[:space:]]*seatd[[:space:]]*\|[[:space:]]*default[[:space:]]*$' &&
+    seatd_was_enabled=1
+rc-service seatd status >/dev/null 2>&1 && seatd_was_running=1
+mutating=1
+
+set -- sway swayidle emacs-pgtk grim wtype wvkbd seatd seatd-openrc firefox \
+    mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils \
+    doas flock util-linux-misc
+apk add --simulate "$@"
+apk add "$@"
+for package do
+    apk info -e "$package" >/dev/null || fail "package did not install: $package"
+done
+for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
+    /usr/bin/pipewire-pulse /usr/bin/wireplumber /usr/bin/waydroid \
+    /usr/bin/swayidle /usr/bin/doas /usr/bin/flock /usr/bin/setsid; do
+    [ -x "$executable" ] || fail "required executable is absent: $executable"
+done
+[ -d /etc/doas.d ] && [ ! -L /etc/doas.d ] || fail 'unsafe doas directory'
+[ "$(stat -c '%U:%G:%a:%F' /etc/doas.d)" = 'root:root:750:directory' ] ||
+    fail 'unsafe doas directory policy'
+
+getent group seat >/dev/null || fail 'seat group is absent'
+getent group video >/dev/null || fail 'video group is absent'
+getent group audio >/dev/null || fail 'audio group is absent'
+if getent passwd emacsos-lab >/dev/null || getent group emacsos-lab >/dev/null; then
+    fail 'lab account already exists'
+fi
+lab_group_created=1
+addgroup -S emacsos-lab
+lab_user_created=1
+adduser -S -D -H -h /var/lib/emacsos-lab -s /sbin/nologin \
+    -G emacsos-lab emacsos-lab
+addgroup emacsos-lab seat
+addgroup emacsos-lab video
+addgroup emacsos-lab audio
+install -d -o emacsos-lab -g emacsos-lab -m 0700 /var/lib/emacsos-lab
+
+groups=$(id -Gn emacsos-lab | tr ' ' '\n' | sort)
+[ "$groups" = "$(printf '%s\n' audio emacsos-lab seat video)" ] ||
+    fail 'lab account group set is unsafe'
+shadow=$(getent shadow emacsos-lab) || fail 'lab account has no shadow entry'
+password=${shadow#*:}
+password=${password%%:*}
+case $password in '!'*|'*'*) ;; *) fail 'lab account password is not locked' ;; esac
+
+payload_started=1
+install -o root -g root -m 0600 /dev/null \
+    /etc/doas.d/95-emacsos-ui-suspend.conf
+doas_rule_created=1
+printf '%s\n' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+    >/etc/doas.d/95-emacsos-ui-suspend.conf
+/usr/bin/doas -C /etc/doas.d/95-emacsos-ui-suspend.conf >/dev/null
+install -d -o root -g root -m 0755 /usr/local/share/emacsos-openrc
+install -o root -g root -m 0644 "$snapshot/openrc-init.el" \
+    /usr/local/share/emacsos-openrc/init.el
+install -o root -g root -m 0644 "$snapshot/openrc-sway.config" \
+    /usr/local/share/emacsos-openrc/sway.config
+install -o root -g root -m 0755 "$snapshot/openrc-session" \
+    /usr/local/share/emacsos-openrc/session
+install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
+    /usr/local/share/emacsos-openrc/session-power
+install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
+    /usr/local/share/emacsos-openrc/process-group
+install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
+    /usr/local/sbin/emacsos-openrc-suspend
+install -o root -g root -m 0755 "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
+install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" \
+    /usr/local/sbin/emacsos-openrc-boot-mode
+for directory in /usr/local/share/dbus-1 \
+    /usr/local/share/dbus-1/system-services \
+    /usr/local/libexec /etc/dbus-1 /etc/dbus-1/system.d; do
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        [ -d "$directory" ] && [ ! -L "$directory" ] ||
+            fail "unsafe local D-Bus directory: $directory"
+        [ "$(stat -c '%U:%G:%a:%F' "$directory")" = \
+            'root:root:755:directory' ] ||
+            fail "unsafe local D-Bus directory policy: $directory"
+    else
+        install -d -o root -g root -m 0755 "$directory"
+    fi
+done
+install -o root -g root -m 0644 "$snapshot/waydroid-container.service" \
+    /usr/local/share/dbus-1/system-services/id.waydro.Container.service
+install -o root -g root -m 0644 "$snapshot/waydroid-container.conf" \
+    /etc/dbus-1/system.d/99-emacsos-waydroid.conf
+install -o root -g root -m 0755 "$snapshot/waydroid-container-wrapper" \
+    /usr/local/libexec/emacsos-waydroid-container
+
+cmp -s "$snapshot/openrc-init.el" /usr/local/share/emacsos-openrc/init.el
+cmp -s "$snapshot/openrc-sway.config" /usr/local/share/emacsos-openrc/sway.config
+cmp -s "$snapshot/openrc-session" /usr/local/share/emacsos-openrc/session
+cmp -s "$snapshot/openrc-session-power" /usr/local/share/emacsos-openrc/session-power
+cmp -s "$snapshot/openrc-process-group" /usr/local/share/emacsos-openrc/process-group
+cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
+cmp -s "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
+cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
+cmp -s "$snapshot/waydroid-container.service" \
+    /usr/local/share/dbus-1/system-services/id.waydro.Container.service
+cmp -s "$snapshot/waydroid-container.conf" \
+    /etc/dbus-1/system.d/99-emacsos-waydroid.conf
+cmp -s "$snapshot/waydroid-container-wrapper" \
+    /usr/local/libexec/emacsos-waydroid-container
+
+rc-update add seatd default
+rc-service seatd start
+[ "$(stat -c '%U:%G:%a:%F' /run/seatd.sock)" = 'root:seat:770:socket' ] ||
+    fail 'seatd socket policy is wrong'
+
+ui_started=1
+install -o root -g root -m 0600 /dev/null /run/emacsos-openrc-proof
+rc-service emacsos-ui start
+ready=0
+attempt=0
+while [ "$attempt" -lt 150 ]; do
+    if rc-service emacsos-ui status >/dev/null 2>&1 &&
+       [ -f /run/emacsos-ui/ready ] && [ ! -L /run/emacsos-ui/ready ] &&
+       [ "$(stat -c '%U:%G:%a:%h:%F' /run/emacsos-ui/ready)" = \
+           'emacsos-lab:emacsos-lab:600:1:regular file' ] &&
+       [ "$(sed -n '1p' /run/emacsos-ui/ready)" = ready ]; then
+        ready=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.2
+done
+[ "$ready" -eq 1 ] || fail 'OpenRC UI proof did not become ready'
+
+/usr/local/sbin/emacsos-openrc-boot-mode initialize
+rm -f -- /run/emacsos-openrc-proof
+committed=1
+printf '%s\n' 'OpenRC UI installed and selected; reboot the phone'

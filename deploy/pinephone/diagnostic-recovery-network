@@ -1,0 +1,26 @@
+#!/bin/sh
+
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+interface=usb0
+address=172.16.42.1/24
+attempt=0
+
+while [ ! -e "/sys/class/net/$interface" ] && [ "$attempt" -lt 200 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+
+if [ ! -e "/sys/class/net/$interface" ]; then
+    logger -t emacsos-recovery "USB interface $interface did not appear"
+    exit 1
+fi
+
+ip link set "$interface" up
+ip -4 address flush dev "$interface" scope global
+ip address add "$address" dev "$interface"
+install -d -m 0755 /run/emacsos-recovery
+printf '%s\n' "$address" > /run/emacsos-recovery/usb-address
+logger -t emacsos-recovery "USB recovery ready on $address"

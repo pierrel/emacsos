@@ -1,0 +1,225 @@
+#!/bin/sh
+# Own and supervise the minimal PinePhone graphical process tree.
+
+set -eu
+umask 077
+
+root=/usr/local/share/emacsos-openrc
+runtime=${XDG_RUNTIME_DIR:-}
+sway_pid=
+emacs_pid=
+keyboard_pid=
+idle_pid=
+pipewire_pid=
+wireplumber_pid=
+pulse_pid=
+dbus_pid=
+sway_socket=
+wayland_socket=
+dbus_address_file=
+probe_file=
+timer_pid=
+
+fail() {
+    printf 'emacsos-openrc: %s\n' "$1" >&2
+    exit 1
+}
+
+[ "$(id -un)" = emacsos-lab ] || fail 'wrong service user'
+[ "${HOME-}" = /var/lib/emacsos-lab ] || fail 'wrong home directory'
+[ "$runtime" = /run/emacsos-ui ] || fail 'wrong runtime directory'
+[ -d "$runtime" ] && [ "$(stat -c %u "$runtime")" = "$(id -u)" ] ||
+    fail 'unsafe runtime directory'
+[ -S /run/seatd.sock ] && [ -r /run/seatd.sock ] && [ -w /run/seatd.sock ] ||
+    fail 'seatd socket is unavailable to the service user'
+
+cleanup() {
+    rm -f -- "$runtime/ready"
+    [ -z "$probe_file" ] || rm -f -- "$probe_file"
+    [ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true
+    [ -z "$timer_pid" ] || wait "$timer_pid" 2>/dev/null || true
+    if output=$(timeout -s TERM -k 1 3 dbus-send --system --print-reply \
+            --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+            org.freedesktop.DBus.NameHasOwner string:id.waydro.Container \
+            2>/dev/null) && printf '%s\n' "$output" | grep -F 'boolean true' \
+            >/dev/null; then
+        timeout -s TERM -k 1 8 waydroid session stop >/dev/null 2>&1 || true
+    fi
+    [ -z "$idle_pid" ] || kill "$idle_pid" 2>/dev/null || true
+    for pid in "$keyboard_pid" "$emacs_pid" "$sway_pid" \
+        "$pulse_pid" "$wireplumber_pid" "$pipewire_pid" "$dbus_pid"; do
+        [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    done
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+        alive=0
+        for pid in "$keyboard_pid" "$emacs_pid" "$sway_pid" \
+            "$pulse_pid" "$wireplumber_pid" "$pipewire_pid" "$dbus_pid"; do
+            [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || alive=1
+        done
+        [ "$alive" -eq 0 ] && break
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    for pid in "$keyboard_pid" "$emacs_pid" "$sway_pid" \
+        "$pulse_pid" "$wireplumber_pid" "$pipewire_pid" "$dbus_pid"; do
+        [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null ||
+            kill -KILL "$pid" 2>/dev/null || true
+        [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    done
+    [ -z "$idle_pid" ] || wait "$idle_pid" 2>/dev/null || true
+    # GTK clients can leave these session-scoped helpers reparented to init.
+    # The locked service account owns no processes outside this UI session.
+    killall -q at-spi-bus-launcher at-spi2-registryd 2>/dev/null || true
+    [ -z "$sway_socket" ] || rm -f -- "$sway_socket"
+    if [ -n "$wayland_socket" ]; then
+        rm -f -- "$wayland_socket" "${wayland_socket}.lock"
+    fi
+    [ -z "$dbus_address_file" ] || rm -f -- "$dbus_address_file"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# start_pre creates a fresh private directory, so every socket discovered here
+# belongs to this service attempt.
+for candidate in "$runtime"/wayland-* "$runtime"/sway-ipc.*.sock; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] ||
+        fail 'stale compositor socket exists'
+done
+
+dbus_address_file=$runtime/dbus-address
+: >"$dbus_address_file"
+/usr/bin/dbus-daemon --session --nofork --nopidfile --print-address=3 \
+    3>"$dbus_address_file" &
+dbus_pid=$!
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    kill -0 "$dbus_pid" 2>/dev/null || fail 'session D-Bus exited during startup'
+    [ -s "$dbus_address_file" ] && break
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+[ -s "$dbus_address_file" ] || fail 'session D-Bus address did not appear'
+IFS= read -r DBUS_SESSION_BUS_ADDRESS <"$dbus_address_file"
+[ -n "$DBUS_SESSION_BUS_ADDRESS" ] || fail 'session D-Bus address is empty'
+export DBUS_SESSION_BUS_ADDRESS
+
+/usr/bin/pipewire &
+pipewire_pid=$!
+/usr/bin/wireplumber &
+wireplumber_pid=$!
+/usr/bin/pipewire-pulse &
+pulse_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    for pid in "$pipewire_pid" "$wireplumber_pid" "$pulse_pid"; do
+        kill -0 "$pid" 2>/dev/null || fail 'a required audio process exited'
+    done
+    [ -S "$runtime/pulse/native" ] && break
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+[ -S "$runtime/pulse/native" ] || fail 'PulseAudio-compatible socket did not appear'
+
+/usr/bin/sway --config "$root/sway.config" &
+sway_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 150 ]; do
+    kill -0 "$sway_pid" 2>/dev/null || fail 'Sway exited during startup'
+    wayland_socket=
+    sway_socket=
+    for candidate in "$runtime"/wayland-*; do
+        [ -S "$candidate" ] || continue
+        [ -z "$wayland_socket" ] || fail 'multiple Wayland sockets appeared'
+        wayland_socket=$candidate
+    done
+    for candidate in "$runtime"/sway-ipc.*.sock; do
+        [ -S "$candidate" ] || continue
+        [ -z "$sway_socket" ] || fail 'multiple Sway sockets appeared'
+        sway_socket=$candidate
+    done
+    if [ -n "$wayland_socket" ] && [ -n "$sway_socket" ]; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+[ -n "$wayland_socket" ] && [ -n "$sway_socket" ] ||
+    fail 'compositor sockets did not appear'
+
+probe_file=$runtime/probe
+
+probe_sway() {
+    request=$1
+    : >"$probe_file"
+    timeout -s TERM -k 1 3 swaymsg -s "$sway_socket" -t "$request" -r \
+        >"$probe_file"
+}
+
+probe_emacs() {
+    : >"$probe_file"
+    timeout -s TERM -k 1 3 emacsclient --socket-name=emacsos-openrc --eval t \
+        >"$probe_file" 2>/dev/null
+    [ "$(sed -n '1p' "$probe_file")" = t ]
+}
+
+WAYLAND_DISPLAY=${wayland_socket##*/}
+SWAYSOCK=$sway_socket
+export WAYLAND_DISPLAY SWAYSOCK
+
+probe_sway get_outputs &&
+    tr -d '\n' <"$probe_file" |
+        grep -Eq '"name": ?"DSI-1".*"active": ?true.*"scale": ?2(\.0+)?' ||
+    fail 'Sway did not acquire the scaled DSI display'
+probe_sway get_inputs &&
+    grep -F 'Goodix Capacitive TouchScreen' "$probe_file" >/dev/null ||
+    fail 'touchscreen is absent from the Sway seat'
+
+/usr/bin/emacs -Q --load "$root/init.el" &
+emacs_pid=$!
+/usr/bin/wvkbd-mobintl -H 300 -L 300 &
+keyboard_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 150 ]; do
+    for pid in "$sway_pid" "$emacs_pid" "$keyboard_pid" \
+        "$pipewire_pid" "$wireplumber_pid" "$pulse_pid" "$dbus_pid"; do
+        kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
+    done
+    if probe_sway get_tree &&
+       grep -Eq '"app_id"[[:space:]]*:[[:space:]]*"emacs"' "$probe_file" &&
+       probe_emacs; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+[ "$attempt" -lt 150 ] || fail 'Emacs did not become ready'
+
+"$root/session-power" wake
+"$root/process-group" /usr/bin/swayidle -w \
+    timeout 60 "$root/session-power idle-blank" \
+    timeout 180 "$root/session-power suspend" &
+idle_pid=$!
+sleep 0.2
+kill -0 "$idle_pid" 2>/dev/null || fail 'swayidle exited during startup'
+
+printf '%s\n' ready >"$runtime/.ready.tmp"
+mv -- "$runtime/.ready.tmp" "$runtime/ready"
+
+while :; do
+    for pid in "$sway_pid" "$emacs_pid" "$keyboard_pid" "$idle_pid" \
+        "$pipewire_pid" "$wireplumber_pid" "$pulse_pid" "$dbus_pid"; do
+        kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
+    done
+    probe_sway get_outputs &&
+        grep -F '"active": true' "$probe_file" >/dev/null ||
+        fail 'display heartbeat failed'
+    probe_emacs || fail 'Emacs heartbeat failed'
+    sleep 30 &
+    timer_pid=$!
+    wait "$timer_pid"
+    timer_pid=
+done

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Keep a crashed Waydroid manager from leaving its privileged container behind.
+
+set -u
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+manager_pid=
+export PATH
+
+stop_session_clients() {
+    lab_uid=$(id -u emacsos-lab 2>/dev/null || true)
+    [ -n "$lab_uid" ] || return
+    session_pids=
+    expected=$(printf '%s\n' python3 /usr/bin/waydroid show-full-ui)
+    for cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$cmdline" ] || continue
+        pid=${cmdline#/proc/}
+        pid=${pid%/cmdline}
+        uid=$(awk '$1 == "Uid:" { print $2; exit }' "/proc/$pid/status" \
+            2>/dev/null || true)
+        [ "$uid" = "$lab_uid" ] || continue
+        command=$(tr '\000' '\n' <"$cmdline" 2>/dev/null || true)
+        [ "$command" = "$expected" ] || continue
+        kill -TERM "$pid" 2>/dev/null || true
+        session_pids="$session_pids $pid"
+    done
+    [ -z "$session_pids" ] || sleep 3
+    for pid in $session_pids; do
+        ! kill -0 "$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    done
+}
+
+cleanup() {
+    trap - HUP INT TERM
+    if [ -n "$manager_pid" ] && kill -0 "$manager_pid" 2>/dev/null; then
+        kill -TERM "$manager_pid" 2>/dev/null || true
+        wait "$manager_pid" 2>/dev/null || true
+    fi
+    stop_session_clients
+    timeout -s TERM -k 3 25 /usr/bin/waydroid -w container stop \
+        >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 143' HUP INT TERM
+
+/usr/bin/waydroid -w container start &
+manager_pid=$!
+wait "$manager_pid"
+status=$?
+manager_pid=
+exit "$status"

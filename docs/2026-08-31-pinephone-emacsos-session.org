@@ -1,0 +1,1258 @@
+#+title: PinePhone EmacsOS session
+#+date: 2026-08-31
+
+* Status
+
+Implementation has resumed on the v25.06/OpenRC recovery image after the
+v26.06 comparison captured an intermittent CPU 2 RCU stall.  On 2026-09-02 the
+v25.06 phone passed its plugged console baseline, expanded its ext4 root to the
+full card, and booted a new minimal OpenRC Sway + PGTK Emacs session.  The
+session is now the phone's boot UI.  Firefox and an on-demand vanilla Waydroid
+instance are installed and have passed their plugged-in feasibility smokes.
+Pierre's first unplugged hands-on UI run, physical panel off/on, and an
+RTC-driven deep-suspend cycle now pass.  It remains a synthetic lab, not a
+daily-driver result: repeated physical-key wake under the new automatic idle
+policy, duration and battery gates, the electrically disabled modem, and
+telephony still await their staged checks.  The prior edge/Phosh card remains
+preserved as rollback.
+
+Do not build the polished PinePhone Emacs UI until the remaining power, Android,
+and recovery gates in this document pass.  Do not make an always-awake phone or
+disable suspend to hide a failure.
+
+On 2026-09-01 the final lab payload installed successfully, passed the
+headless Sway/PGTK/input smoke, restored stock greetd through cleanup, then
+activated successfully on the real DSI display.  The direct session owned
+seat0/VT1 and DSI-1 at 720x1440, scale 2; Emacs was focused and full-screen;
+greetd was disabled and inactive; NetworkManager, ModemManager, and SSH stayed
+active.  Eight simulated power-key DPMS cycles across the last two payloads,
+including three on the final payload, preserved the same Sway and Emacs
+processes.  A forced Emacs exit twice caused the supervisor to terminate the
+whole graphical stack and systemd to restore a clean session.  Captured real
+display images before input, after input, and after recovery matched the
+expected fixed home.
+
+The phone then became unreachable on WireGuard and its last LAN address while
+the final post-recovery screenshot was being copied.  The previous-boot journal
+proved this was not suspend: CPU 2 stalled permanently in
+=bpf_prog_free_deferred= / =bpf_arch_text_invalidate=.  Modem QMI timed out and
+was removed, Wi-Fi/SSH became unusable, and later short power-key events were
+logged without restoring a usable display.  The lab's explicit systemd device
+policy and address-family restriction created BPF programs on every graphical
+service lifetime, so both boundaries were removed before further recovery
+testing.  After a clean reboot, the resulting release passed headless smoke and
+activated normally.  While USB-C power remained online it was initially
+healthy and charging, with the modem and all network services active, the same
+graphical PID, zero restarts, and no kernel warning.  After ten minutes of
+completely quiet plugged-in idle, both WireGuard and the last LAN address were
+unreachable.  No screenshot, input, suspend, DPMS, or forced service exit ran
+during that interval.  A short physical power-button press produced no display
+response.  This latest result makes USB-C/board interaction the leading
+hypothesis; the previous-boot journal and matched unplugged control are still
+needed before assigning the failure below the graphical stack.  The journal
+contained no suspend, thermal, GPU, modem, power-transition, or kernel warning
+after activation; it stopped immediately after the user manager created by the
+midpoint SSH probe shut down.  A rebooted unplugged control then held one SSH
+session open for ten minutes to avoid that lifecycle: it retained the same
+graphical PID, zero restarts, all network/modem services, and a clean kernel
+while the battery fell from 89% to 85%.  It also survived that session's
+teardown and a two-minute disconnected pause.  By 22 minutes after the healthy
+endpoint it was nevertheless unreachable over WireGuard and LAN, and a short
+power-button press produced no display response.  Pierre confirmed USB-C had
+remained unplugged throughout.  USB-C is therefore not a necessary cause,
+although charging may still aggravate the failure.  Delayed session-lifecycle
+BPF retirement or another kernel hang then led the hypotheses.  A follow-up
+enabled temporary systemd linger for the SSH user so its user manager remained
+active across every connection.  At ten minutes the unplugged phone was healthy
+with unchanged graphical and user-manager PIDs, zero restarts, all
+network/modem services, and a clean kernel log.  The twenty-minute check found
+both WireGuard and LAN unreachable anyway.  This excludes USB-C presence and
+user-manager teardown as necessary causes.  A lower-level nondeterministic
+kernel, power-management, or hardware hang now leads, and further UI work is
+stopped at the documented power gate.  This is not a completed daily-driver
+result.
+
+The next isolation step went below the graphical and user-session stacks.
+With =emacsos-lab=, =greetd=, and user linger disabled, an unplugged
+console-only boot froze while the EG25 modem was initializing.  The console
+repeatedly redrew its login prompt as though newline input had arrived, then
+its cursor stopped blinking.  The preceding linger-controlled boot had first
+lost the internal EG25 USB device, then recorded rtkit starvation, a
+three-minute =systemd-logind= watchdog abort, QMI timeouts, =qmi_wwan= transmit
+watchdogs, and the loss of both network paths.  Finally, a boot with
+=eg25-manager= and =ModemManager= disabled as well as all graphics answered a
+timestamped ping continuously from 08:18:05 through 08:29:36, apart from one
+isolated missed reply, then became unreachable on WireGuard and its old LAN
+address.  A LAN sweep found no replacement address.  No physical observer was
+present to distinguish a kernel hang from battery loss, so this last result is
+recorded only as an eleven-minute availability failure.  Graphics, the user
+manager, the modem daemons, and external USB-C presence are not necessary
+causes.  The modem privacy switch remained on, however, so disabling its
+daemons did not electrically remove the EG25 or its internal USB path.  The
+remaining boundary is the kernel/device paths including EG25 USB, SD card,
+battery or board power, and hardware.  Further live testing requires a
+physical restart.
+
+Pierre then flashed the first v26.06/OpenRC console derivative with modem
+switch 1 electrically off.  Its 6.18 kernel created the USB NCM gadget and the
+laptop repeatedly enumerated a =PINE64 PinePhone= with the expected postmarketOS
+identity, but the phone presented no DSI console, never answered IPv4 ARP at
+=172.16.42.1=, emitted no IPv6 neighbor traffic, and never exposed SSH.  The
+blank DSI alone is not evidence of a failed console boot; the missing
+userspace network is.  Because neither USB nor Wi-Fi access existed, this boot
+cannot yet distinguish a rootfs/OpenRC failure from a recovery-network race.
+
+The supported-first decision now uses a replacement =recovery-v2= image.  It
+bakes the private Wi-Fi profile, Thinky's exact public key, a pre-generated
+stable SSH host key, key-only login, and passwordless sudo into the image.  An
+OpenRC boot service configures =usb0= at =172.16.42.1/24= before NetworkManager,
+and =sshd= itself moves to the boot runlevel with that service as a hard
+dependency.  The image was checked through a read-only mount, clean filesystem
+passes, isolated =usb0= execution, AArch64 QEMU validation of its real =sshd=,
+=visudo=, and runlevel graph, and a functional Thinky-key SSH round trip whose
+=sudo -n id -u= returned =0=.  Its compression expands to the checked raw
+digest.  Only PinePhone kernel/hardware execution remains unproved.  If this
+supported v26.06 base survives, stop comparing images and build on it; v25.06
+and DanctNIX are fallbacks only after a failure.
+
+The replacement subsequently booted on the PinePhone and proved its console,
+persistent logs, fixed USB address, SSH identity, and passwordless sudo.  Its
+baked Wi-Fi secret was valid, but NetworkManager's stable cloned MAC repeatedly
+failed association with this PinePhone driver.  Switching the profile to the
+permanent MAC connected immediately; the builder and verifier now pin that
+observed requirement.  Direct Wi-Fi SSH and internet access then worked.
+The subsequent USB-power-removal boundary failed decisively.  At kernel uptime
+254.6 seconds the log records the cable removal; roughly 42 seconds later Linux
+6.18.3 reported an RCU stall on CPU 2 and a starved RCU grace-period thread.
+Wi-Fi, fixed USB IP, SSH, and userspace failed to recover after USB power was
+restored and the display woke.  This reproduces the cross-UI failure with no
+graphical session, no systemd, no modem daemon, and the modem electrically off.
+v26.06 is rejected for this board.  The active comparison is the prepared
+v25.06/OpenRC image with Linux 6.13.8 and the same recovery contract.
+
+One final v26.06 repetition passed the same power boundary.  The phone booted
+without USB, accepted USB power over an existing Wi-Fi SSH session, then
+remained responsive for at least 82 seconds after power removal with 60/60
+monitor probes and no new kernel warning.  This establishes intermittency; it
+does not erase the captured CPU/RCU stall or change the decision to test
+v25.06 next.
+
+** v25.06/OpenRC live result
+
+The v25.06 image booted Linux 6.13.8 with the modem privacy switch still off.
+Its Wi-Fi profile initially exhausted a finite association retry count even
+though its permanent MAC and secret were correct.  Replacing that count with
+NetworkManager's unlimited value retained NetworkManager's observed backoff
+(sub-second, about one second, then about five seconds) and connected without a
+tight loop.  The image template and verifier now pin this value.  The partition
+had expanded to the 128 GB card but ext4 had not, so =resize2fs
+/dev/mmcblk0p2= expanded the mounted filesystem from about 1.1 GB to 117 GB.
+
+The installed base is Sway 1.10.1, PGTK Emacs 30.1, wvkbd 0.16, seatd 0.9.1,
+=grim=, =wtype=, GNU coreutils 9.7, PipeWire 1.4.7, WirePlumber 0.5.10,
+and Waydroid 1.5.2.
+The exact OpenRC service path was tested before tty1 was
+changed.  OpenRC launches one foreground session supervisor as the locked,
+non-login =emacsos-lab= user with stdin detached.  That account belongs only
+to its primary group plus =audio=, =seat=, and =video=: =seat= is required for the
+root-owned =/run/seatd.sock=, and the real DRM launch proved that =video= is
+also required to clone the Mali DRM card fd.  =audio= is required for the
+PinePhone ALSA devices.  It is not in =wheel=, =input=,
+=dialout=, or any SSH/sudo authorization.  The installer, boot selector, and
+service admission require the complete group set to be exactly
+=audio=, =emacsos-lab=, =seat=, and =video=.  Adding the account to =disk= made both
+selector validation and service start reject it; removing that membership
+restored the ready UI.
+
+The service creates a fresh private =/run/emacsos-ui= directory for every
+admission.  The user supervisor directly starts and tracks a private D-Bus
+daemon, PipeWire, WirePlumber, and the PulseAudio-compatible server before
+starting Sway and discovering exactly one fresh
+Wayland socket and one Sway IPC socket there, exports them explicitly, and only
+then starts Emacs and wvkbd.  Every =swaymsg= names the discovered socket.  A
+0600 =ready= marker appears only after DSI-1 is active at 720x1440 scale 2, the
+Goodix touchscreen is on the seat, Emacs is mapped and answers its private Unix
+socket, and wvkbd remains alive.  The launcher tracks its direct children and
+tears the whole stack down on any required-child or heartbeat failure;
+=supervise-daemon= admits at most three delayed restarts per 60-second period.
+The root service never consumes a user-authored PID or readiness value as an
+authorization decision.
+
+The real display showed an editable Emacs home above the 300-logical-pixel
+mobile keyboard.  Twenty consecutive DPMS off/on cycles on the reviewed
+OpenRC path each accepted a new F12 marker after the panel returned.  The
+same service had passed four earlier cycles before its final liveness changes.
+A root-owned test-only uinput device then
+sent a true touchscreen tap to wvkbd's =a= key; Emacs received exactly =a=.
+Killing Emacs caused a complete Sway, Emacs, and wvkbd replacement with new
+PIDs and a fresh ready marker.  No service or kernel fault followed.  This
+corrects two rejected early probe assumptions: a launcher's siblings do not
+inherit sockets created inside Sway, and membership in =seat= alone does not
+provide this board's renderer access.
+
+Firefox 142.0 plus =mobile-config-firefox= 4.6.0 is installed.  The visible
+Emacs home has a large touch-operable =Open Firefox= button.  A simulated real
+touch activated that button, the Sway rule focused Firefox once it mapped, and
+manual navigation loaded =https://example.com= in Firefox's mobile layout with
+wvkbd visible.
+A visible status directly below the button now changes to =Starting Firefox...=
+before the expensive first launch, and returns to =Firefox is closed.= when
+the tracked browser process exits, so a slow launch no longer looks like an
+ignored tap.
+A true touch on wvkbd entered =a= in Firefox.  Switching wvkbd to its alternate
+layout, tapping its =Alt= modifier, returning to the alphabetic layout, and
+tapping =Tab= exercised the actual on-screen keyboard path back to Emacs.
+Closing Firefox removed its process tree, and stopping the UI service while
+Firefox was live also left no =emacsos-lab= process behind.
+Firefox uses the persistent default profile inside the lab account's private
+home.  It contains only synthetic test state; it is not a copied personal
+profile and is not removed on each launch.
+
+Activation saved root-private original and installed copies of
+=/etc/inittab=, enabled =seatd= and =emacsos-ui= in the default runlevel, and
+replaced exactly =tty1::respawn:/sbin/getty 38400 tty1= with one fixed ownership
+marker.  A reboot then brought up the same graphical stack, SSH, NetworkManager,
+and Wi-Fi; tty2 through tty6 remain console recovery paths.  Exhausting the UI
+restart budget deliberately leaves tty1 blank rather than letting two
+supervisors race for it.  Recovery is SSH or tty2-tty6, restore the verified
+inittab state, then reboot.  It is not an automatic visible-console fallback.
+The selector now rolls both inittab and the runlevel back to the prior coherent
+mode if a signal or durability failure lands during either transition, and
+=status= rejects disagreement between them.  Console recovery deliberately
+does not require an intact graphical payload or lab account.  Inittab is the
+canonical boot decision: the OpenRC UI service refuses to start unless it sees
+the exact UI marker (or the root-owned, tmpfs-only installation proof flag).
+Both selectors can finish an interrupted state, so power loss between the
+atomic inittab rename and runlevel update boots the console safely and remains
+repairable by repeating the intended selector.  Every selector action,
+including =status=, also holds one root-owned nonblocking lock.  A deterministic
+concurrent =console=/=ui= test now proves that the second action is rejected
+instead of interleaving the inittab and runlevel changes; the same rejection and
+unchanged live UI were verified on the phone.
+
+The fresh-image installer preflights stock tty1 before making changes.  Every
+user-staged file is copied under a ten-second timeout and one-MiB output bound
+into an already root-owned regular file; only that private copy is hashed or
+used.  A normally reported or trapped failed install stops its proof UI,
+disables its boot entry, and restores inittab.  It removes the partial account,
+payload, and boot state only after both the exact service cgroup and the lab UID
+prove quiescent.  If teardown cannot prove that, rollback preserves the
+service, helper, rule, account, and home as recovery components instead of
+stranding live processes without their management files.  APKs successfully
+added before a later failure remain installed, but are harmless and make a
+clean retry smaller.
+An uncatchable =SIGKILL= or power loss after root mutation can bypass that trap
+and leave destinations which the fresh-only preflight rejects.  This does not
+affect the already installed live phone, but a future image would then be
+reflashed rather than repaired in place.  A resumable root transaction is a
+separate reproducibility improvement, not a property of this installer.
+
+The supervisor sleeps 30 seconds between Sway and Emacs heartbeat rounds.  Each
+call has a three-second TERM timeout and a one-second KILL grace, without a shell pipeline, so a wedged
+IPC socket fails the service instead of wedging its supervisor.  OpenRC 0.62.6 does not consume the
+systemd-style =stopgroup= variable; it was removed rather than documenting a
+false cleanup boundary.  The user supervisor directly owns and reaps Sway,
+Emacs, and wvkbd, and the live Firefox-stop and service-stop tests found no
+remaining browser process.  Its heartbeat delay is an interruptible child, so
+OpenRC does not have to kill the wrapper before its EXIT cleanup runs.  On the
+live phone, a stop during that delay completed in two seconds and left no
+=emacsos-lab= process; the service then started a fresh ready process tree.
+Cleanup also removes only the compositor socket paths that the session
+discovered in its private runtime directory.  A deliberate =SIGKILL= of Sway
+left those paths stale, the wrapper detected the lost child, and the service
+recovered with new Sway and session PIDs plus one fresh socket pair in six
+seconds.  Twelve seconds later only the expected session processes and sleep
+timer remained.  A separate =SIGKILL= of Emacs likewise rebuilt the whole
+session and returned ready in 21 seconds; its transient bounded probes also
+cleared.
+
+The rebooted plugged session remained responsive through package installation,
+Firefox, screenshots, virtual touch, process recovery, and repeated service
+lifetimes.  At the first 19-minute quiet checkpoint it used about 171 MiB of
+2.9 GB RAM with no swap, Wi-Fi was connected, and the kernel log contained no
+RCU stall, watchdog, OOM, thermal, MMC, or new device error.  The battery was
+healthy at 98 percent with USB online and a 2 A input limit; its small reported
+discharge current near full charge is being trended during the longer soak.
+After the liveness update, the booted service passed another real touch launch
+of Firefox, browser close/status recovery, and twenty DPMS off/on plus fresh
+input cycles.  No zombie, restart, kernel warning, or service fault followed.
+After the final interruptible-heartbeat update it passed four more DPMS cycles,
+accepted fresh input after every return, launched Firefox, accepted a real
+touchscreen =a= in its address bar, returned to Emacs, and tore Firefox down.
+The captured screenshot matched the expected mobile Firefox and wvkbd layout.
+The battery remained at 100 percent with USB online; near full charge its
+reported current continued to alternate between charging and a small net
+discharge as the controller topped it off.
+The test-only =wlrctl=, Python uinput, and Python packaging dependencies were
+then removed; the service and ready marker remained healthy.
+
+Waydroid 1.5.2 and the official 2026-04-03 vanilla ARM64 LineageOS 20 images
+are now installed on demand.  The downloaded system archive was 904,855,273
+bytes with SHA-256
+=c4b45fad36bee7c0db8a1d9315a5be0035520c53d3d005a807735ae9b7ee79cf=;
+the mainline vendor archive was 147,648,350 bytes with SHA-256
+=1e6d33d464277ea3964e4658001c8882f21325616d6bcc66d473bc9ee1e246c7=.
+Both were checked before transfer and again on the phone before extraction.
+The package's system D-Bus activation entry omitted =/sbin= and could not find
+=modprobe=, so the installed local override supplies the fixed root PATH while
+retaining the package's ordinary Waydroid manager command.
+
+The Emacs home now exposes =Open Android= and =Stop Android= buttons and reports
+missing initialized images instead of launching a doomed process.  A cold
+launch reached the full LineageOS home in about two minutes, the built-in
+Settings and Jelly Browser applications rendered in portrait with wvkbd, and
+the Android guest acquired =192.168.240.112= through Waydroid's bridge.  HTTPS
+browser traffic incremented the guest NAT and return-flow counters.  The first
+live launch initially lacked DHCP because Waydroid's package had installed
+=/etc/nftables.d/51_waydroid.nft= after nftables was already running; loading
+that already-persistent rule fixed the lease.  A later cold reboot loaded it
+normally: Android reacquired =192.168.240.112=, its network became validated,
+hostname resolution succeeded through =192.168.240.1=, and Jelly rendered
+=https://example.com=.  One hostname probe issued while Android was still
+validating initially failed, then passed without any host change.
+=Stop Android= stopped the user session and LXC container, removed
+the bridge and image mounts, and returned the visible home status in about two
+seconds.  Standard Waydroid behavior leaves its activated root D-Bus manager
+and fixed wrapper dormant after that stop.  A 30-second sample found their CPU
+ticks and context-switch counters unchanged; the Python manager used about 31
+MiB of RAM.  The exact manager was then terminated, the wrapper ran its bounded
+cleanup, and the baseline process set was empty.  Automatic retirement is not
+being added without evidence that the dormant manager materially affects power.
+
+The package's system-bus policy allowed every local account to call the root
+container manager.  A local policy now denies that destination by default and
+allows only root and the locked =emacsos-lab= account.  A live system-bus reload
+proved that the recovery =user= receives =AccessDenied= while =emacsos-lab= can
+query and start the manager.  This narrows host exposure but does not make
+Waydroid a security boundary: Firefox and Waydroid deliberately share the
+graphical UID in this feasibility image.  A compromised native browser process
+could therefore exercise the same manager API.  Separate graphical identities
+and a fixed-command broker are a promotion gate before untrusted browsing and
+Android apps are treated as mutually isolated.
+
+The first automatic-teardown attempt checked the per-user Waydroid session-bus
+name.  Killing Emacs also killed that client before cleanup ran, so the check
+raced false and left the root LXC container running.  The final cleanup checks
+the independently owned system-bus container manager and then issues Waydroid's
+bounded session stop, whose fallback addresses that root manager when the user
+manager has already gone.  A live test started the container, killed Emacs, and
+found a fresh ready UI with a new Emacs PID, stopped LXC, no bridge, no image
+mounts, and no orphaned Waydroid or accessibility helper.
+System-bus activation now starts the manager through a fixed root wrapper.  If
+the manager itself exits or is killed, the wrapper terminates only the exact
+=emacsos-lab= =python3 /usr/bin/waydroid show-full-ui= client and directly runs
+the privileged container stop.  This covers the case where the manager cannot
+answer the UI cleanup request.  The ordinary UI cleanup gives Waydroid eight
+seconds plus one second of kill grace; OpenRC gives the complete session twenty
+seconds before forced termination.
+
+Audio initially exposed only HDMI playback.  Installing the standard
+=alsa-ucm-conf= package and restarting the supervised audio stack produced the
+real =HiFi__Speaker= sink and =HiFi__Mic= source.  The installer now includes
+that package.  A wrapper-based D-Bus prototype also left session descendants
+behind on service stop; the final supervisor owns its foreground session bus
+directly.  Three consecutive stop/start cycles then left no graphical-account
+process after each stop and reused the same seatd process.  Disabling the unused
+GTK accessibility bridge did not prevent every client from launching its bus
+helper, so final session cleanup removes the observed helper explicitly.
+
+The final native Firefox smoke launched from the Emacs button, accepted the
+fixed URL through synthetic Wayland keyboard input, loaded
+=https://example.com=, and rendered the expected page.  Android and Firefox
+were both stopped afterward.  During the heavy container/browser work the
+battery fell from 100 to 97 percent despite USB remaining online; its reported
+net discharge ranged roughly from 29 to 112 mA.  This wall-power path slows the
+loss but did not sustain a positive charge during that boot, so battery state
+remains part of the physical acceptance run.
+The final home was also corrected to open at its first line instead of retaining
+a prior window's bottom scroll position.  A captured 720x1440 screenshot shows
+the title, Firefox control, both Android controls, and wvkbd in the expected
+portrait layout.  A final synthetic power-key cycle returned DSI power from off
+to on without replacing the UI processes, and Emacs accepted a new F12 input.
+At 4 hours 33 minutes of uptime after the disposable Android archives and test
+screenshots were removed, the phone remained reachable with Wi-Fi, DNS, HTTPS,
+speaker, microphone, Sway, Emacs, and wvkbd healthy; no zombie or application
+process remained and the kernel fault scan was empty.  Battery was 95 percent
+with USB online and a reported 63 mA net discharge, confirming that this wall
+power path nearly sustains idle but still does not produce a dependable positive
+charge while the phone is being exercised.
+A final several-minute display-off idle retained the same graphical processes,
+selected the clean =*EmacsOS*= home, answered SSH and HTTPS, and produced no
+kernel fault; the display was powered down before the subsequent cold reboot.
+A subsequent cold reboot restored the UI, audio devices, Wi-Fi, SSH, native
+Firefox, and Waydroid from installed state.  Wi-Fi association took roughly two
+minutes under the intentionally unbounded NetworkManager profile's ordinary
+backoff.  Native Firefox and Android Jelly each visibly rendered
+=https://example.com= in 720x1440 screenshots, and Android shut down cleanly.
+After reboot the controller reported charging rather than discharging; capacity
+rose from 97 to 99 percent during the Android test, so the earlier near-full
+negative current is not explained by a wall supply that can never sustain the
+workload.  Charging behavior remains a physical-test measurement rather than a
+resolved software claim.
+The Android manager and every application process were then stopped, the clean
+=*EmacsOS*= home was selected, and the display was powered down again while the
+same Sway, Emacs, and wvkbd processes continued answering their health probes.
+A final post-reboot off/on/off cycle accepted one fresh F12 input marker without
+changing any of those process IDs; the home was rebuilt clean before the last
+display-off transition.  All nine installed payload hashes matched
+=openrc-manifest.sha256= byte for byte, the boot selector reported =ui=, and
+=seatd= plus =emacsos-ui= remained in the default runlevel.
+This plugged result does not count as suspend or unplugged acceptance.  The
+existing base sleep inhibitor remains unchanged, and the modem remains
+electrically off until Pierre returns.
+
+** 2026-09-02 hands-on power result and automatic-idle design
+
+Pierre used the minimal Emacs home and native Firefox unplugged and reported
+the UI responsive.  The same Sway and Emacs processes survived a physical
+panel-off/panel-on cycle, and Emacs remained touch-responsive afterward.  The
+kernel then completed an RTC-driven 30-second =deep= suspend and resume with
+the same graphical process IDs and no RCU, watchdog, storage, or graphics
+fault.  Wi-Fi and SSH returned roughly 45 seconds after resume; the panel,
+touch, and Emacs were responsive when Pierre checked them.  A second deep
+suspend woke from Pierre's physical power-button press in roughly one second;
+the same Sway and Emacs processes survived, the panel was active, and Wi-Fi
+returned without rebuilding the session.
+
+Battery measurement remains mixed.  Active use initially drew roughly
+0.8--1.0 A with Firefox open and capacity fell from 93 to 80 percent in about
+15 minutes, although part of that step may be gauge settling after unplug.
+After Firefox closed, observed awake draw ranged roughly 0.37--0.75 A.  Once
+power was reconnected, capacity rose from 75 to 90 percent with a reported
+0.73 A charge current.  Automatic deep sleep is therefore required before a
+daily-driver battery claim; a matched duration run remains necessary.
+
+The power policy uses Alpine's 66 KiB =swayidle= 1.8.0 package, which is linked
+against the image's existing elogind.  Physical input while active resets both
+idle deadlines.  At 60 seconds =session-power idle-blank= records a
+blank transition, disables the Goodix touch device, and powers down DSI-1.  At
+180 seconds =session-power suspend= acts only from =blank= and retains its
+private state lock.  Its exact doas command then enters the root-owned
+=emacsos-openrc-suspend= helper.  That helper
+requires selected =deep= sleep and kernel filesystem syncing, performs the
+=/sys/power/wakeup_count= handshake, and writes =mem= to =/sys/power/state=.
+A successful state write returns only after the kernel has resumed, so a
+power-key handler cannot overtake an asynchronous suspend request.  A short
+physical power press is the sole normal wake owner: =active= becomes =blank=; =blank=
+becomes =active= with DSI and touch restored.  A handler
+started by the wake press waits for the state lock and restores the devices
+after the kernel call returns.  There is deliberately no swayidle =resume= or
+=after-resume= display callback.  Such a callback can race the same power-key
+event and blank the just-woken screen.
+
+The locked graphical account is not an elogind login session.  Its direct
+=loginctl suspend= failed, while root elogind requests were asynchronous and
+could report acceptance before the kernel began suspending.  The installed
+doas rule therefore grants that account only the exact, zero-argument
+=/usr/local/sbin/emacsos-openrc-suspend= command.  It grants no shell,
+arbitrary argument, RTC, shutdown, or general file authority.
+The state helper pins its command path, home, runtime, and Sway socket instead
+of trusting those caller variables; accepts one fixed action enum; and
+discovers one owner-checked socket only inside the private runtime directory.
+Non-press lock attempts and every Sway operation are bounded, while the
+asynchronous power-key handler waits for an in-flight kernel transition.  The
+helper records transitional states before device changes and restores an
+active panel after an interrupted or malformed state.  The suspend and display
+state locks remain owned through the complete kernel transition.  =swayidle=
+and its command descendants run in an owned
+process group; session teardown does not return until that group is empty, so
+the supervisor cannot overlap an old suspend worker with a replacement
+session.  Session startup fails unless the start action proves it is already
+inside the exact v25 service cgroup with working kill and event interfaces.
+For explicit service stop, the OpenRC stop process first moves itself to the
+parent cgroup, then writes the exact service-cgroup =cgroup.kill= interface and
+verifies =populated 0= before removing the private runtime.  It does not rely
+on this OpenRC release's broken generic cgroup path lookup or kill the stop
+action along with the service.
+
+The 60/180-second policy intentionally provides no screen lock yet.  This
+remains a non-personal synthetic lab.  The explicit =wake= action is currently
+for session startup and controlled recovery only; a future non-input modem-wake
+path must also define how it rearms the idle timer.  Promotion still requires a
+real touch-operable lock, repeated automatic blank/suspend/physical-wake runs,
+duration and battery results, and modem wake/registration/call/SMS checks.
+
+During this implementation, the three OpenRC Docker tests were found to omit
+=docker run -i=.  Docker therefore closed stdin and never executed their
+here-document test bodies, yielding false green results.  The harness now
+attaches stdin; the installer rollback, boot-mode transaction, and new power
+state machine execute for real in isolated containers.
+
+** v25.06/OpenRC review findings and disposition
+
+The local review loop covered correctness, process liveness, error paths,
+adversarial security, simplicity, design adherence, and documentation drift.
+The verified in-scope findings were fixed:
+
+- a failed DPMS request no longer tears down the graphical session;
+- console recovery no longer depends on an intact UI payload or account;
+- fresh installation preflights tty1, snapshots bounded root-owned copies, and
+  removes partial privileged state only after proving the service cgroup and
+  lab UID quiescent; otherwise it restores a safe boot while preserving the
+  management files and account required for recovery;
+- UI/console selection is transactional across inittab and runlevel updates,
+  repairs interrupted states, rejects mismatched status, and serializes every
+  action so two selectors cannot leave those stores inconsistent;
+- the supervisor's heartbeat delay is interruptible, graceful stop reaps the
+  entire process tree, and hard compositor failure removes only its discovered
+  private-runtime sockets before the bounded restart;
+- Firefox process tracking ignores stale sentinel callbacks and reports slow
+  startup, successful focus, and focus failure in the visible Emacs home;
+- installer, selector, and boot-service admission require the graphical
+  account's complete group set, preventing later membership drift from adding
+  raw-device authority;
+- the system-bus Waydroid policy rejects other local accounts, and the root
+  wrapper cleans the exact graphical client and privileged container after a
+  manager crash;
+- stale systemd designs are marked as historical, and the current roadmap no
+  longer duplicates their forensic record.
+
+The latest focused review found the Android teardown, false focus-status, and
+documentation defects above; each was fixed and re-tested.  The hard-interrupt
+fresh-install limitation is explicitly deferred below.  Broader
+correctness reviewers repeatedly reached their backstops while traversing the
+older systemd and image-building history; their concrete partial findings were
+covered by the focused tests and later reviewers rather than being treated as
+approval.
+
+The final focused convergence round reported no findings from correctness,
+liveness, error handling, adversarial security, simplicity, or design/UX.  Its
+documentation process reached the 150-second backstop while searching the long
+historical record, so the live OpenRC section, its deferred findings, the
+roadmap summary, and every changed OpenRC comment were checked separately as a
+bounded documentation-alignment pass; no drift was found.
+
+Deterministic verification passes the PinePhone script suite, both OpenRC
+transaction containers, ten PinePhone ERT tests, strict ShellCheck with only
+the known OpenRC-run variable and BusyBox =local= exclusions, all 188 EmacsOS
+ERT tests, and all 203 server tests.  The server suite has one upstream
+Python-3.14/Pydantic-v1 compatibility warning.  Scoped =git diff --check= is
+clean.
+
+* Goal and nonnegotiables
+
+The phone must provide:
+
+- materially efficient awake and suspended operation;
+- reliable display blank, deep suspend, and wake;
+- a real Firefox browser;
+- Android applications through an on-demand Waydroid container;
+- calls, SMS, mobile data, Wi-Fi, and WireGuard;
+- an Emacs home surface whose elisp can be changed live;
+- authenticated SSH recovery to stock Phosh during the unlocked lab, followed
+  by automatic locked fallback before promotion.
+
+Firefox and Waydroid require Wayland, so the target is not framebuffer-only
+Emacs.  The smallest useful stack is postmarketOS + Sway + PGTK Emacs.  Firefox,
+Waydroid, Calls, and Chatty are ordinary full-screen Wayland clients.  Sway
+configuration reloads at runtime; elisp hot-reloads through the existing EmacsOS
+deployment pattern after promotion; APK-managed software updates normally.  The
+isolated v0 probe intentionally has no operator Emacs server or hot-reload path.
+
+* Evidence and hypotheses
+
+The phone is an original 3 GiB PinePhone reporting hardware revision 1.2.  On
+2026-08-31 it ran postmarketOS edge, Linux 6.18.3, Phosh/Phoc 0.57, and had
+Binder, memfd, PSI, and DRM render support.  Its repositories offered Sway,
+Cage, PGTK Emacs, Firefox, mobile-config-firefox, and Waydroid.
+
+The latest failed power-button cycle did not enter suspend.  The journal
+recorded a short power-key press at 16:16:48 and Phoc turning DSI-1 off at
+16:16:50.  Linux continued running and reconnected Wi-Fi through 16:19, but no
+second power-key event or DSI modeset was recorded before the forced restart.
+Earlier successful cycles recorded both.  The AXP803 power-key wake source was
+enabled.  This leaves two hypotheses:
+
+Two later stock-session boots on 2026-08-31 froze within minutes while USB
+power was online, before any EmacsOS payload was installed.  SSH and both known
+LAN paths disappeared.  The preceding journal again contained no suspend,
+resume, GPU fault, kernel fault, or OOM.  It did show repeated Phrog/Phoc layout
+transaction failures, a greeter-side OSK restart loop, and a greetd user slice
+peaking at about 624 MiB before Phosh became ready.  The journal then ended at
+the forced restart.  This is evidence against the new session causing the
+freeze and further motivates isolating the stock graphical stack before
+changing the postmarketOS kernel or device base.
+
+- H1: Phosh/Phoc or its input/display path loses the wake.  Sway survives the
+  same display-off and deep-suspend workload.
+- H0: the kernel, AXP803, or board loses the wake or physical key event.  Sway
+  reproduces it, and further PinePhone UI work stops.
+
+RTC wake separates generic deep suspend from the physical button.  Successful
+RTC resume with failed physical wake points at the PMIC/input path.  Failed RTC
+resume points below the shell at the kernel, firmware, or hardware.
+
+** Base-image and upstream evidence
+
+The observed modem failure has an exact upstream analogue in pmaports issue
+#4265: postmarketOS v25.12 PinePhones lost the EG25 USB connection every five
+to fifteen minutes, followed by enumeration failures, QMI and =qmi_wwan=
+timeouts, and recovery only after reboot.  Its reporter said v25.06 worked.
+The issue was closed because v25.12 reached end of life, not because a fix was
+identified.  A downloaded v25.12 image therefore remains a regression
+reference and is not a fallback candidate.
+
+The supported v26.06 release and the installed edge image both use the
+=6.18.3= PinePhone kernel, so changing between them is not a meaningful kernel
+A/B.  The v25.06 branch uses =6.13.8= and is the smallest controlled diagnostic
+change.  It is end-of-life software, not a daily-driver destination.  The
+prepared fallback is therefore a locally built v25.06 OpenRC console image,
+with only Pierre's SSH public key provisioned, for a different known-good SD
+card.  Tests add one layer at a time: console and Wi-Fi with both modem daemons
+disabled; =eg25-manager= alone; =ModemManager= and mobile data; then graphics.
+Failure before the modem or graphics on a different card would strongly favor
+battery, board, or hardware.  Stability would justify a supported v26.06
+userspace with a deliberately tested older/backported kernel rather than
+remaining on v25.06.
+
+The supported v26.06 OpenRC recovery-v2 image is now the first test because a
+passing supported base can become the actual installation without another
+comparison.  If it fails, the v25.06 image on the same card creates the
+controlled 6.18-versus-6.13 boundary that the stock Phosh image could not.  A
+separately verified DanctNIX barebone image with 6.15.6 remains only the third,
+cross-distribution reserve.
+
+The original PinePhone was moved from postmarketOS community to testing on
+2026-08-05 because its =6.18.3= kernel exceeded the project's six-month
+freshness requirement.  Upstream also records why it was not simply advanced:
+newer kernels can break incoming calls across suspend by restarting the modem
+on wake.  This is a real support trade-off, not evidence that another current
+postmarketOS shell would avoid the low-level problem.
+
+* Two operating stages
+
+The first stage is a lab-only feasibility session.  It uses no personal browser
+profile, Android account, message content, contact data, or real unlock
+credential.  SSH remains connected while it runs.  It is not a daily-driver
+session and cannot be promoted merely because Emacs appears on screen.  Its
+DPMS and suspend runs deliberately make no security claim: with only synthetic
+state present, the coordinator may omit authentication so power automation can
+complete.  The full lock → blank → suspend matrix is rerun later with the real
+touch locker.  The lab policy is a separate fixed configuration and is
+ineligible for promotion.
+
+The second stage is the promotable session.  It requires a real
+=ext-session-lock-v1= locker with its own touch credential UI, a user-summoned
+Wayland on-screen keyboard for unlocked applications, and automatic offline
+fallback to a fresh locked Phosh login.  An ordinary keyboard surface cannot
+appear above a secure Wayland lock and is not permitted to inject a credential
+into one.  Until those conditions pass, all real session tests use synthetic
+state only.
+
+* Superseded v26.06/systemd design (historical)
+
+Everything in this section through the next top-level heading describes the
+rejected v26.06/systemd experiment, not the installed v25.06/OpenRC phone.  It
+is retained as a record of the hypotheses and controls that were tested and
+falsified.  The named executable payload and Make targets are no longer
+shipped; only this historical record remains.  The current architecture,
+behavior, and verification are recorded in the v25.06/OpenRC result above.
+
+** Historical reversible direct boot
+
+The v0 install adds, but does not activate:
+
+- =minimal-init.el=, a deliberately plain static PGTK Emacs home;
+- =sway.config=, the synthetic compositor configuration;
+- =emacs-supervisor=, a bounded Sway/Emacs heartbeat and joint termination;
+- =session-power=, the same-user DPMS helper;
+- =emacsos-lab-direct= and =emacsos-lab.service=, the direct user compositor
+  process and boot unit;
+- =emacsos-lab-admin= and =bootstrap-root=, the fixed authenticated install,
+  activation, and stock-restoration boundary;
+- =emacsos-lab-polkit.rules=, a policy that permits only the power-key
+  inhibitor required by the session and denies other brokered authority;
+- =manifest.sha256=, the reviewed payload identity;
+- =install-session.sh=, the bounded unprivileged staging orchestrator;
+- =tests/live-pinephone-session.sh=, read-only gate-zero inventory only.
+
+=make pinephone-install= reruns inventory before staging.  Inventory records the
+stock session and package baseline.  The installer downloads one signed,
+root-owned recursive APK snapshot, simulates the offline transaction from those
+exact files, and installs the same files with networking disabled.  It also
+verifies that the stock =phosh-session= executable is unchanged.  =grim= and =wtype= are installed as
+the fixed screenshot and input tools required by the automated lab harness;
+they do not run as services.
+
+After installation and automated smoke, one authenticated =activate= command
+enables the direct unit, disables and stops greetd, stops tty1's getty, and
+starts the direct unit.  The service conflicts with both tty owners and does
+not map Emacs until its PAM/logind session owns active seat0/VT1 and Sway owns
+DSI-1.  It runs Sway as a dedicated locked-password =emacsos-lab= user; that
+user has an empty private home, no administrator or SSH access, and only the
+video and input groups needed for the seat.  SSH, NetworkManager, and
+the postmarketOS hardware stack remain independent system services.  There is
+no greeter, desktop session chooser, login surface, lock screen, phone shell,
+token, or lease.  A minimal PAM session creates the logind runtime and seat
+without starting a user manager, GNOME keyring, or authentication agent.  The
+supervisor owns both process IDs explicitly, probes Sway output,
+the mapped client, and Emacs IPC every ten seconds, and bounds TERM-to-KILL
+cleanup.  Either required process or heartbeat ending fails the session, and
+systemd makes two lifetime restart attempts after the initial start.  If those fail, the display stays blank and SSH
+remains the deliberate v0 recovery path; Phosh is never started implicitly.
+An authenticated =cleanup= command stops and disables the direct unit, enables
+and starts greetd, verifies it active, then removes the lab files.  Phosh
+packages and configuration remain installed throughout.
+
+** Historical session responsibilities
+
+In v0, Sway owns input bindings and =session-power= owns only same-user DSI-1
+DPMS commands.  A DPMS command failure requests Sway exit.
+=emacs-supervisor= waits for the static Emacs probe and its private IPC server
+to map, reports service readiness, and binds Emacs and Sway liveness together.
+A lifetime systemd restart limit bounds whole-stack recovery.  A
+session-lifetime logind inhibitor blocks only
+competing =handle-power-key= handling; it does not inhibit sleep.
+
+The promotable path adds a narrow same-user coordinator.  It starts the locker,
+waits for its protocol-ready signal, monitors it, sequences DPMS, arms an RTC
+through a fixed helper when testing, and requests normal logind/systemd
+suspend.  The locker alone owns PAM authentication.  Emacs and the harness own
+none of this state.
+
+A short power press acquires the lock and turns the panel off immediately.  If
+the phone remains idle for 120 seconds, the coordinator requests deep suspend.
+The ordinary idle path begins the same sequence after a configurable five
+minutes without input.  A press while merely blank
+turns the panel on to the lock; a press after deep suspend first wakes the
+hardware and then shows that same lock.  Successful unlock returns to the exact
+foreground application.  A locker failure before protocol acquisition aborts
+suspend and restores the unlocked panel.  A failure after acquisition never
+reveals the authenticated session: the coordinator ends Sway so the display
+manager starts a fresh locked Phosh login, or reboots to stock if that fallback
+cannot be proven.  Tests force failure on both sides of readiness with Firefox
+and Waydroid in front.  No script enters or captures a real PIN.  The global
+Phosh and logind policies remain unchanged.
+
+The selected =/sys/power/mem_sleep= state must be =deep=.  Every accepted test
+requires a kernel suspend-entry and resume pair.  A secure, touch-operable
+Wayland session lock is a promotion gate.  An Emacs PIN buffer is not a security
+boundary and cannot substitute for it.
+
+The implemented v0 home is a static non-personal PGTK Emacs frame.  It contains
+no launcher, Firefox button, keyboard, Waybar, or full EmacsOS configuration.
+Its only purpose is to prove native PGTK rendering and supervised recovery.
+
+The planned feasibility home adds large fixed buttons for Firefox, keyboard,
+close-app, and Home.  A two-button unlocked navigation strip
+rendered by packaged Waybar and reserved by Sway remains touch-reachable while
+an application is maximized:
+Home focuses Emacs and Keyboard toggles the same-user Wayland keyboard.  It is
+covered by the secure lock surface.  The session also retains fixed hardware
+bindings for Home and keyboard recovery if Emacs or the navigation strip dies.
+The first Emacs or keyboard failure gets one bounded restart from its fixed
+known-good file set; the hardware binding invokes that same recovery.  A second
+failure ends Sway and reaches a fresh locked Phosh login.
+The harness automates Home → Firefox → keyboard show/type/hide → Home → Firefox
+close → Home and screenshots every visible transition.  This minimal launcher
+ships before physical acceptance; only its polished Assist home is deferred.
+Waybar owns only these two buttons, Sway owns focus and hardware bindings, and
+the fixed =toggle-osk= command owns keyboard state.  Neither Emacs nor the bar
+supervises another component, and this is not a general panel framework.
+
+The planned general keyboard serves Emacs, Firefox, and Waydroid.  The locker provides
+an integrated touch keypad within its single secure lock surface;
+synthetic input does not substitute for either path.  The home intentionally
+does not load =network.el= or the current =phone-call.el=: the former polls =mmcli= while
+awake, and the latter owns SIM7600-specific raw-AT behavior that is not valid for
+the PinePhone EG25-G.  Calls, Chatty, feedbackd, and notification integration
+are deferred until power and recovery pass.  Gate-zero records the current
+system modem, network, audio, and WireGuard state; the real-session gate later
+requires each service to remain healthy.
+Their real commands and app IDs come from live inventory rather than
+assumptions.
+
+** Historical automated acceptance
+
+*** Implemented gate-zero inventory
+
+=tests/live-pinephone-session.sh= is read-only inventory, not the acceptance
+harness described below.  It records private timestamped =inventory.txt= and
+=inventory.stderr= files, checks the display manager, sessions, packages,
+power, input, core services, and SSH boundary, and simulates the named v0
+package request against the current repositories.  The exact snapshot-bound
+offline simulation occurs during installation.  The complete SSH operation is
+bounded to ninety seconds
+with keepalive failure detection and a two-MiB cap per output stream.  A failed
+display-manager, stock-session, package-simulation, power-state, or SSH-key
+probe makes the gate fail after optional diagnostics are collected.  It does
+not install or launch Sway, exercise DPMS or suspend, capture screenshots, or
+prove rollback.
+
+*** Implemented headless smoke and planned real-session harness
+
+Pierre does not manually test the session until the automated power and browser
+gates give high confidence.  =tests/live-pinephone-headless.sh= now runs the
+installed payload with wlroots' headless/pixman backend, verifies IPC and the
+mapped PGTK client, injects a fixed pointer sequence and F12 event, captures
+the resulting screenshot, and proves that killing Emacs terminates Sway and its
+supervisor.  =make pinephone-activate= runs this smoke before it prints the
+separately authenticated activation command; this is an operator workflow gate,
+not a security credential.  The remaining real-session harness is deliberately linear: activate once, assert
+the session, exercise DPMS and one short RTC wake,
+prove authenticated stock restoration, and collect evidence.  The same script grows
+only when each preceding gate passes; it is not a generic test framework.
+
+Each run creates a gitignored, timestamped result directory with mode =0700=
+under =umask 077=.  Individual artifacts use mode =0600= and include the
+command transcript, Sway outputs and tree, screenshots, process and unit state,
+battery samples, bounded scoped journals, and redacted network and modem health.
+Collection excludes environments, NetworkManager secrets, WireGuard
+configuration and keys, SIM and device identifiers, message bodies, contacts,
+browser history, and credentials.  Phone-side copies are removed after
+transfer.  Only a reviewed redacted summary may be committed.
+
+The harness:
+
+1. validates the Sway config before changing sessions;
+2. first runs Sway with wlroots' headless backend to validate config, IPC, app
+   startup, input injection, and screenshot capture without running Phosh or
+   claiming DRM, touch, DPMS, locking, or power equivalence;
+3. asserts outputs, tree, app IDs, focus, and fullscreen state through Sway IPC
+   in the real session;
+4. drives pointer input through Sway IPC and text through a session-local input
+   tool, with no network debug listener or permanent root input daemon;
+5. captures each visible state with =grim=, copies it to the development host,
+   and treats visual inspection as part of the result;
+6. bounds every operation and records one completion signal plus one time
+   backstop; an overrun is diagnosed rather than waited on indefinitely;
+7. sends every accepted display and suspend transition through the same Sway
+   binding and =session-power= path as normal use.  Direct DPMS commands are
+   lower-level diagnostics only.  The fixed root-owned RTC helper accepts a
+   finite duration enum, verifies =mem_sleep= is =deep=, refuses an overlapping
+   alarm, arms the RTC, and requests the normal logind/systemd suspend path so
+   system sleep hooks still run.  The non-root harness may invoke only this
+   helper through =session-power=, never arbitrary =rtcwake=, =systemctl=, or a
+   privileged shell.
+
+The harness is invoked externally through the workspace's existing serialized
+phone-testing resource.  It contains no lock, PID registry, or
+concurrency framework of its own.
+
+Input injection proves compositor and application behavior, not the physical
+PMIC switch.  The physical switch remains a final, narrowly scoped test.
+
+** Historical gates
+
+Run the following in order.  A DPMS or RTC failure stops product UI work.
+
+1. *Inventory and recovery boundary:* identify the stock display manager,
+   tty1/getty, package sources, PAM/logind stack, device groups, and stock
+   session.  Simulate package installation and reject a transaction that
+   mutates Phosh, Phoc, Phrog, or greetd.  Prove key-authenticated non-root SSH, the
+   dedicated lab UID, the disabled-by-default direct unit, and authenticated
+   cleanup back to active greetd before activation.  Cold-boot authentication,
+   a locker, and automatic offline fallback remain promotion gates.
+2. *Headless smoke:* validate the complete Sway config, IPC, PGTK app startup,
+   synthetic input, and screenshot capture without running Phosh or claiming
+   DRM, touch, lock, or power equivalence.
+3. *Session:* plain PGTK Emacs is visible; Phosh/Phoc are absent; SSH,
+   ModemManager, NetworkManager, audio, WireGuard, and the modem remain healthy.
+4. *DPMS:* at least twenty automated output-off/output-on cycles preserve the
+   Sway and Emacs processes, restore a valid screenshot, and produce no new
+   GPU, input, or kernel fault.
+5. *Short deep suspend:* repeated RTC-driven deep-suspend cycles, unplugged and
+   charging, each produce suspend/resume logs, a post-wake screenshot, modem
+   registration, a default route, DNS, Assist HTTPS, and WireGuard recovery.
+   This synthetic lab gate proves power behavior, not lock security.
+6. *Duration and recovery:* repeat at five minutes, thirty minutes, and a
+   multi-hour interval.  Intentional Emacs and Sway failure must kill the whole
+   explicit graphical process set and exhaust only the bounded direct-service restarts; SSH
+   remains reachable and authenticated cleanup returns to active greetd.
+   Automatic fresh locked Phosh fallback without SSH is rerun as a separate
+   promotion gate after a real locker exists.
+7. *Power budget:* compare stock Phosh and Sway in matched tests with the same
+   brightness, radios, modem registration, background services, charge state,
+   battery range, duration, and foreground workload.  Record an absolute
+   daily-driver threshold for both awake draw and suspended loss before judging
+   the result; an unspecified improvement over Phosh is not sufficient.
+8. *Firefox and keyboard:* use a fresh private Firefox profile with its normal
+   sandbox, launch full-screen, summon the real on-screen keyboard, enter and
+   load a fixed HTTPS URL, dismiss the keyboard, verify title/tree, and inspect
+   the screenshot.  Repeat over Wi-Fi and cellular without remote debugging,
+   native messaging, downloads, or reused cookies.
+9. *Narrow physical acceptance:* after the automated gates give high
+   confidence, Pierre performs repeated physical power-button cycles, summons
+   and uses the keyboard in Firefox, securely unlocks by touch, launches and
+   returns from apps through the persistent navigation strip, and returns Home.
+   Wake and unlock must restore the exact foreground app.  This is the smallest
+   irreducibly physical test, not a substitute for automation.
+10. *Waydroid:* start a fresh on-demand instance, use its built-in Settings app,
+    exercise pointer and on-screen-keyboard input, inspect its screenshot, stop
+    it, and prove both the user session and root container are gone.  This proves
+    capability, not Play Services compatibility, strong isolation, or
+    acceptable performance for every app.  No third-party APK or account is
+    admitted during this feasibility gate.  After automation passes, Pierre
+    performs one narrow touch test: Android input, keyboard show/hide, Home,
+    relaunch, and complete stop.
+11. *Telephony:* only after the preceding gates pass, integrate the existing
+    phone clients.  The secure locker must own the locked-call affordance within
+    its protocol surface: a ModemManager call event wakes the panel and shows a
+    safely rendered normalized number, local contact name when available, and
+    explicit unknown or withheld states, plus large Answer and Decline controls
+    without exposing other contact data or the unlocked session.  Answer keeps
+    the session locked, changes the surface to
+    an in-call view with Hang up, and returns to the lock when the call ends;
+    unlocking during the call transfers control to the ordinary call client.
+    An unlocked call uses that ordinary client.  Pierre tests this complete
+    flow, one incoming SMS wake, and bidirectional audio while journals are
+    captured.  Pierre initiates every live call.
+
+** Historical security and privilege boundaries
+
+The installation orchestrator accepts no paths, package names, session names,
+or commands from arguments or the environment.  Pierre's one authenticated
+bootstrap command first copies =bootstrap-root= without following symlinks into
+a private root directory, verifies its reviewed checksum there, and executes
+only that immutable copy.  The bootstrap applies the same snapshot-and-hash
+rule to the admin helper.  The manually authorized install
+runs as a bounded root transient service so an SSH or terminal loss cannot
+interrupt the package transaction.
+
+The admin helper copies the fixed payload into a private root snapshot before
+verification or package work, with a one-MiB file-size limit, and installs only
+from that snapshot.  The package simulation output has the same one-MiB cap.
+The APK files are downloaded once through APK's signed-index/package validation;
+both simulation and installation then use that same root-owned snapshot with
+network access disabled.
+The
+complete release directory is constructed privately and renamed into place
+before the disabled system unit and PAM policy are installed.  Every existing destination is
+preflighted for its intended root-owned type.  Installation never recursively
+copies or changes ownership of a user tree.  Packages come only from the
+phone's configured signed postmarketOS/Alpine repositories; the installer
+performs the identical simulated transaction first and verifies the stock
+Phosh executable before and after the real transaction.
+
+The reviewed manifest digest is embedded independently in the verified admin
+helper.  The admin allowlists exactly nine staged regular files, rejects extra
+entries, snapshots them without following symlinks under per-file and total
+bounds, verifies the pinned manifest and every payload digest, and installs
+only from that root-owned snapshot.  No staged code runs before this trust chain
+is complete.
+
+At Pierre's explicit request, the operator currently has temporary unrestricted
+passwordless sudo in =/etc/sudoers.d/99-user-nopasswd= so unattended live
+development can proceed through freezes and reconnects.  This is broader than
+the payload requires: compromise of the operator account or its SSH key is
+currently root compromise.  Remove that rule or replace it with the fixed
+helper-only commands before promotion.  Independently of that temporary host
+policy, the fixed root helper accepts only =install=, =activate=, or =cleanup=,
+requires =SUDO_USER=user=, and serializes them with one root-owned lock.  Install
+does not enable or start the service.
+Activation verifies the committed release, enables the direct unit, disables
+and stops greetd, releases and activates tty1, and waits boundedly for an
+owner-checked readiness marker written only after Emacs maps.
+Once activation begins changing unit state, failure disables both graphical
+boot units and stops the lab so neither an
+unvalidated lab nor the unstable stock shell can start on the next boot; SSH is
+the documented v0 repair path.  A preflight verification failure changes no
+unit state.  Cleanup tolerates partial installation state, terminates the
+explicit lab process set, restores and verifies greetd on active seat0/tty7
+first, and only then removes the unit, PAM policy, release, dedicated account, private lab home, and
+admin helper.  The unprivileged staging cache is retained for a subsequent
+reinstall and can be removed by the operator.  If greetd cannot be restored,
+recovery artifacts are retained.
+APK packages remain installed.
+
+The unlocked compositor never runs as the SSH/operator user.  Its dedicated
+locked-password account has an empty mode-0700 home, no SSH or administrative
+membership, no access to the operator home, no inherited user services or
+agents or user manager, and only the video/input access required by fixed
+hardware groups.  Its polkit rule grants only the exact logind power-key inhibitor
+used by the service and denies power-off, networking, modem, persistence, and
+all other brokered authority.
+The v0 service makes the host filesystem read-only apart from its private
+runtime/home and private temporary directories, and drops capabilities and new
+privileges.  It deliberately has no systemd device or address-family filter:
+both compile BPF programs whose retirement is unsafe on this kernel.
+This is synthetic lab isolation, not a lock screen.
+
+There is currently no privileged RTC or suspend helper.  That fixed enumerated
+boundary is added only when the planned suspend harness exists.  The payload
+adds no arbitrary =systemctl= or =rtcwake= command, setuid helper, root input
+daemon, browser remote-debug listener, or new network service.  The operator's
+temporary general passwordless sudo is an external development exception, not
+a payload interface, and must not survive promotion.  Raw
+screenshots and transcripts remain confidential and untracked.  SSH recovery
+is key-authenticated; the current stock server also advertises password and
+keyboard-interactive methods, an existing hardening item outside this graphical
+cutover.  Session work does not rewrite SSH configuration.  The
+non-secure lab service has bounded startup and restart attempts.  It never
+starts greetd implicitly; authenticated cleanup is the only stock transition.
+
+Waydroid shares the host kernel and is not a strong sandbox.  It uses a fresh
+test image from one fixed official image channel whose published archive
+digests were verified before extraction.  It has no ADB TCP or debug mode, no
+autostart, and no host or media directory containing personal state.  The
+current package-provided nftables policy permits Android traffic to the host and
+ordinary forwarded destinations; it is sufficient for the built-in-app
+feasibility smoke but not for an untrusted third-party APK.  No third-party app
+or Android account is admitted until a fixed, verified policy denies host,
+WireGuard, LAN, link-local, loopback, carrier-grade NAT, multicast, and other
+private destinations while retaining only DHCP/DNS and ordinary Internet
+egress, and the native browser and Waydroid session no longer share authority
+to the root container manager.  NAT traffic and the new per-UID D-Bus rule alone
+do not satisfy those future boundaries.
+
+Firefox uses its normal sandbox and a fresh non-symlink test profile directory
+created by the graphical user with mode =0700= and private files.  The profile
+is removed after the lab gate.  Fixed URL, title, and app-ID values are passed
+as argv and never interpolated into shell or Sway command strings.  Input
+automation runs as the graphical user, uses
+fixed inert strings, verifies the intended app and focus before typing, and
+does not use =uinput=, =ydotool=, or a root device.  The Emacs server is a Unix
+socket in the private runtime directory, never TCP.  Hot-reloaded elisp remains
+same-user code and cannot modify or invoke arbitrary privileged operations.
+
+** Historical promotion and stop conditions
+
+After every automated and physical gate passes, replace the disposable direct
+lab account with the locked daily-driver EmacsOS session.  Keep Phosh installed
+and retain boot-time automatic last-known-good
+fallback that works without networking, plus one fixed interactive recovery
+command.  Every fallback terminates the old graphical login and reaches a fresh
+locked Phosh greeter; it never directly starts Phosh inside an authenticated
+Sway session.  SSH is useful evidence and recovery access but is not the only
+recovery mechanism.
+
+Software defects in locking, keyboard input, recovery, or telephony block
+promotion and are diagnosed rather than mislabeled as hardware failure.  Stop
+the PinePhone port only when evidence localizes a deep-suspend, RTC-resume,
+physical-wake, or carrier-wake failure below the graphical session, or when the
+matched absolute power budget cannot meet the recorded daily-driver threshold.
+Do not compensate by disabling suspend.  At that point the honest next step is
+different hardware or focused kernel/firmware work, not more interface code.
+
+Promotion replaces the plain feasibility launcher with the real PinePhone
+Assist home.  It reuses the existing deterministic Emacs commands and adds
+fixed commands to launch/focus/stop Calls, Chatty, and Waydroid without a second
+component registry.  A PinePhone-specific Make target reuses the existing
+SSH/scp + remote-emacsclient deployment pattern, names a local Unix Emacs server
+socket under the private runtime directory, and deploys only the PinePhone file
+set.  It does not use the current TCP server path or route hot reload through
+the acceptance harness.
+
+* Superseded v26.06/systemd implementation and verification record
+
+** Historical control flow
+
+The superseded v26.06 path was deliberately smaller than a phone shell.  An
+unprivileged host script stages a checksum-pinned nine-file payload.  Pierre
+then authenticates two fixed root commands: the first installs the independently
+hashed admin helper; the second snapshots and verifies the staged files,
+downloads one signed recursive APK set, simulates and installs those exact APK
+files offline, creates the locked graphical account, and installs the direct
+unit disabled.  Nothing changes the active graphical session during install.
+
+The headless harness runs that installed release with wlroots' headless/pixman
+backend.  It requires the private Emacs IPC server and mapped PGTK client,
+injects pointer and F12 input, captures the resulting screenshot, kills Emacs,
+and requires the supervisor and Sway to terminate within a bounded interval.
+Only after that pass does the Make target print the separately authenticated
+activation command.  Activation verifies the installed release again, then
+switches tty1 from greetd to the dedicated direct service.  Explicit cleanup
+restores and proves active greetd on seat0/tty7 before removing root-managed lab
+state.
+
+At runtime, systemd creates a minimal noninteractive PAM/logind session for the locked
+=emacsos-lab= account.  The direct launcher requires active seat0/VT1, starts
+Sway, and hands both Sway and PGTK Emacs to one supervisor.  The supervisor
+checks the display output, mapped Emacs client, and private IPC socket every ten
+seconds.  A lost child or heartbeat fails the entire service; systemd permits
+only two lifetime retries beyond the initial start.  Failure leaves a blank
+display and authenticated SSH recovery rather than silently starting the
+unstable Phosh stack.
+
+** v26.06/systemd review findings and disposition
+
+Four local review rounds covered correctness, process liveness, error paths,
+adversarial security, simplicity, design adherence, and documentation drift.
+The verified in-scope findings were fixed:
+
+- *IMPORTANT:* clean child exit could leave a dead-looking compositor;
+  supervision now treats every monitored child or heartbeat loss as failure.
+- *IMPORTANT:* several startup, IPC, and cleanup paths could wait forever;
+  startup, TERM-to-KILL teardown, SSH, systemd, package output, and smoke waits
+  now have explicit bounds.
+- *IMPORTANT:* a rolling restart interval did not enforce a lifetime failure
+  cap; =StartLimitIntervalSec=infinity= now makes the initial start plus two
+  retries the complete budget.
+- *IMPORTANT:* the graphical PAM session could inherit a user manager and
+  desktop authority; it now uses a light session, a locked dedicated account,
+  a narrowly allowlisted inhibitor with deny-by-default polkit policy, and a
+  fixed capability/filesystem boundary plus ordinary video/input group access.
+- *IMPORTANT:* package resolution and installation could diverge; one signed
+  root-owned recursive APK snapshot now feeds both offline simulation and
+  offline installation.
+- *IMPORTANT:* activation failure could leave an unvalidated lab enabled for
+  the next boot; after unit-state mutation begins, the failure trap disables
+  both graphical boot units and terminates the lab.  Preflight failure changes
+  no unit state.
+- *IMPORTANT:* documentation overstated inventory and cleanup behavior; it now
+  distinguishes repository simulation from snapshot installation, partial-state
+  cleanup from repeat invocation, retained user staging cache, and private
+  temporary writes.
+- *IMPORTANT:* deployment forced public-key authentication but trusted the SSH
+  profile username; all inventory, staging, and headless operations now force
+  the remote =user= account and disable password, keyboard-interactive, GSSAPI,
+  and host-based authentication.
+- *NIT:* signal handlers that cleaned up without exiting could continue a
+  privileged or graphical operation; every new shell entry point now exits on
+  HUP, INT, or TERM and performs its EXIT cleanup exactly once.
+- *IMPORTANT, live:* Sway ignored the preassigned IPC socket name; both the
+  direct launcher and headless harness now derive the socket from the actual
+  Sway PID.
+- *IMPORTANT, live:* pretty-printed multiline output JSON defeated line-local
+  matching; output probes now flatten the JSON before applying their fixed
+  checks.
+- *IMPORTANT, live:* exporting =WAYLAND_DISPLAY= before the real compositor
+  made wlroots choose a nested Wayland backend instead of DRM.  The direct
+  launcher now unsets it before Sway and discovers the one socket Sway creates
+  before launching Emacs.
+- *IMPORTANT, live:* deny-all polkit also denied the intended power-key
+  inhibitor and caused an authentication agent to appear.  The lab rule now
+  permits only =org.freedesktop.login1.inhibit-handle-power-key= for the locked
+  lab user, the service forbids interactive authorization, and all other
+  actions remain denied.
+- *NIT, live:* the broad PAM session started GNOME keyring and Emacs displayed
+  its startup help until first input.  The final PAM stack is noninteractive
+  plus =pam_systemd=, and an Emacs startup hook clears the echo area after
+  command-line processing.
+- *BLOCKER, live:* after repeated forced graphical recoveries, the kernel
+  entered a permanent RCU stall in =bpf_prog_free_deferred= while executing
+  =bpf_arch_text_invalidate=.  Modem QMI timed out, Wi-Fi and SSH became
+  unreachable, and later power-key events were logged without a usable screen.
+  Removing the explicit systemd =DevicePolicy=closed= eliminated its cgroup
+  device BPF program, but a second forced-recovery run still became unreachable
+  before the kernel's stall-reporting interval.  The remaining
+  =RestrictAddressFamilies= directive also compiles a seccomp BPF filter, so it
+  is removed as well.  The locked account now relies on ordinary video/input
+  group DAC while its capability, filesystem, PAM, polkit, and account
+  boundaries remain.  One clean reboot clears deferred kernel state before an
+  instrumentation-free plugged/unplugged stability comparison.  The first half
+  of that comparison then failed: after clean boot and activation, the phone
+  remained healthy through the midpoint of a quiet ten-minute plugged-in idle
+  interval but was unreachable over both WireGuard and LAN at the end.  USB
+  power was online throughout, and the interval contained no graphical test or
+  service transition that could retire a per-session BPF program.  This
+  falsifies removal of those two BPF-producing unit directives as a sufficient
+  fix.  A subsequent short physical power-button press produced no display
+  response.  It does not yet distinguish a USB-C/board fault from a different
+  kernel or graphical hang; the next evidence is whether unplugging restores
+  input, the previous-boot journal, and the matched unplugged idle control.
+  Unplugging the already-wedged phone and issuing another short power-button
+  press did not restore it.  After forced reboot, the journal showed no
+  suspend or fault report and ended after the midpoint SSH-created user manager
+  shut down.  A matched unplugged run with one SSH session held open passed ten
+  minutes, and the phone remained healthy for two minutes after that session
+  shut down.  The phone later wedged before the 22-minute follow-up while USB-C
+  remained unplugged.  This excludes USB-C presence as a necessary cause; it
+  does not exclude delayed BPF retirement after SSH/user-manager teardown or a
+  separate nondeterministic kernel hang.  Temporary systemd linger then kept
+  the same operator user manager alive across all SSH sessions.  The unplugged
+  phone passed a clean ten-minute checkpoint but lost WireGuard and LAN before
+  the twenty-minute checkpoint.  User-manager teardown is therefore not a
+  necessary cause either.
+
+One proposed change was rejected: automatically starting Phosh after a v0
+session crash conflicts with the explicit requirement that greetd and Phosh not
+appear during this experiment, and would reintroduce the stack correlated with
+the freezes.  Explicit authenticated cleanup is the only v0 transition back to
+stock.  Automatic locked offline fallback remains mandatory before promotion.
+
+Two focused correctness/liveness reviewers exceeded their five-minute
+backstops while exploring platform documentation and produced no final finding;
+they were terminated rather than allowed to block the loop.  Their partial
+analysis was covered by the completed security, documentation, and focused
+follow-up passes.  One reviewer-side Emacs invocation could not create a
+temporary native-comp directory because that reviewer was intentionally
+read-only; the same test passes in the normal local test environment.
+
+** Deterministic verification
+
+The final local run passed:
+
+- 188 existing EmacsOS ERT tests;
+- two new minimal PinePhone home ERT tests;
+- eight OpenRC launcher ERT tests;
+- both OpenRC installer and boot-selector transaction containers;
+- shell syntax for every new entry point;
+- manifest membership, every payload checksum, and the independently embedded
+  manifest checksum;
+- systemd unit validation;
+- static assertions for account, PAM, restart, group-based device access, filesystem, socket,
+  polkit, SSH-authentication, and offline-package boundaries;
+- =git diff --check=.
+
+Live verification passed the signed APK snapshot transaction, installed-release
+hash check, cleanup to active stock greetd, repeated headless smoke, direct
+seat0/VT1 and DRM activation, real DSI output and tree assertions, Emacs IPC,
+synthetic pointer and keyboard input, real-display screenshots, eight simulated
+power-key DPMS cycles across the last two payloads, and two intentional Emacs
+failure recoveries.  On the final payload the direct service started with no
+GNOME keyring or authentication agent; NetworkManager, ModemManager, SSH, and
+the exact power-key inhibitor stayed active.  The graphical checks themselves
+had only the expected forced-failure journal entry and nonfatal wlroots
+seatd/realtime fallbacks, but the later previous-boot inspection found the
+kernel-level BPF/RCU stall described above.
+
+The first forced reboot proved direct boot and restored networking, but it was
+not a clean software-requested reboot.  A later clean reboot proved the fully
+BPF-filter-free service could install, pass headless smoke, activate, and remain
+healthy for several plugged-in minutes; loss of both network paths by the
+ten-minute check blocks further recovery stress until its previous-boot journal
+is collected and the matched unplugged idle control is run.  Deep
+suspend/resume, Pierre's physical touch acceptance, modem registration after
+sleep, and authenticated stock recovery after the final payload remain
+unproven.  Firefox and Waydroid now pass their plugged-in automated feasibility
+gates, including captured real-screen inspection, but not cellular or physical
+acceptance.  The OpenRC session has also passed more than twenty DPMS cycles
+across reviewed payloads without replacing its graphical processes.
+
+** Hard parts and learnings
+
+The hard part was not drawing an Emacs screen.  It was constructing a direct
+graphical login that can fail without corrupting recovery, does not borrow
+authority from the SSH user or a desktop user manager, and cannot turn a dropped
+SSH connection into a half-installed package set.  The stock freezes also made
+failure attribution central: a headless compositor test is useful evidence, but
+only repeated real DSI/PMIC suspend cycles can separate Phosh failure from a
+kernel or board defect.
+
+The main learning is that “minimal” must describe ownership as well as process
+count.  One compositor, one application, one supervisor, one fixed root helper,
+and explicit promotion gates are easier to reason about than a stripped desktop
+whose greeter, lock screen, policy broker, and user services still make hidden
+decisions.
+
+** Deferred findings and next actions
+
+The fresh installer rolls back ordinary errors and caught signals, but an
+uncatchable kill or power loss during root mutation can leave a partial install
+that its fresh-only preflight rejects.  Reflash is the current recovery.  A
+future reusable image pipeline should add a durable resumable transaction before
+claiming in-place retry after arbitrary interruption.
+
+The stock SSH daemon still advertises password and keyboard-interactive methods.
+The new tooling refuses those methods, so this does not weaken the cutover path,
+but disabling them globally would reduce the phone's existing attack surface.
+That is deferred because graphical replacement does not authorize changing the
+operator's recovery service.
+
+The minimal PAM session, Alpine package snapshot behavior, headless and DRM
+Sway commands, narrow polkit policy, and supervised recovery have now been
+proven against the phone's installed systemd, PAM, APK, and wlroots versions.
+The RCU trace proves that retiring a BPF program can hang this kernel, but the
+quiet plugged-in failure proves that avoiding the two known per-session BPF
+producers is not sufficient.  Those results stopped further work on v26.06 and
+triggered the known-stable-kernel comparison.  They are not instructions for
+the current v25.06/OpenRC image.
+
+The v25.06 image now has a stable plugged-in minimal UI, real touch keyboard,
+native Firefox, on-demand vanilla Android, and handset audio devices.  Pierre's
+hands-on plugged test is next.  When he returns, run the unplugged awake-idle
+and suspend/resume gates, then turn on and validate the modem only with him
+present.  Third-party Android APKs remain blocked on a restrictive guest
+network policy; telephony and the polished Assist home remain deferred until
+the physical acceptance gates pass.

@@ -1,0 +1,27 @@
+[connection]
+id=EmacsOS recovery WiFi
+type=wifi
+interface-name=wlan0
+autoconnect=true
+autoconnect-priority=100
+autoconnect-retries=0
+
+[wifi]
+cloned-mac-address=permanent
+mode=infrastructure
+ssid=@@WIFI_SSID@@
+
+[wifi-security]
+auth-alg=open
+key-mgmt=wpa-psk
+psk=@@WIFI_PSK@@
+
+[ipv4]
+method=auto
+never-default=false
+
+[ipv6]
+addr-gen-mode=stable-privacy
+method=auto
+
+[proxy]
