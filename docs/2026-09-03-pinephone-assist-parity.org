@@ -266,6 +266,19 @@ single captured platform finalizer now makes that recovery part of both boot
 and live config apply, including failed-load paths, instead of modifying the
 user's valid configuration for the other device.
 
+The live network page exposed a separate state-model error: Wi-Fi owned the
+default route while the cellular profile was also active, but the page called
+cellular off because it inferred profile activity from the route.  The cached
+state now derives the configured GSM profile's activity from its actual
+NetworkManager device.  The toggle and label use that value, while the modeline
+still reports the default-route carrier.  Hot reload discards any reader using the old output
+shape, post-action refresh replaces a pre-action read, and a profile with the
+same name but a non-GSM type is rejected.  The cellular cutover script also
+activates the fallback before disabling Wi-Fi and restores Wi-Fi from its EXIT
+trap, including termination during the down command.  An independently detached
+30-second recovery is armed before Wi-Fi goes down, so process loss that skips
+the trap still restores the saved connection.
+
 After validating the complete update payload, the updater monotonically removes
 the former =emacsos-openrc-suspend= root helper and its =doas= rule.  A later UI
 update failure cannot restore that authority.  Fresh installs never stage or

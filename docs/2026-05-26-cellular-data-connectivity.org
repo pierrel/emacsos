@@ -213,9 +213,10 @@ we instead ship the on-device surface now, in =network.el=:
   =nmcli=/=mmcli= output into a delimited blob; a sentinel parses it into a
   cached =emacos-net-state= and calls =force-mode-line-update=.  A single
   =defcustom emacos-net-refresh-interval= (30s) repeat timer (lazy, hot-reload
-  guarded) keeps it fresh; the timer only updates the var, redisplay does the
-  rest.  A single-flight guard (=emacos-net--proc=) means reads never stack on
-  the single-core Zero W.
+  guarded) keeps it fresh; it starts the reader, whose sentinel updates the
+  cache and repaints the visible status.  A single-flight guard
+  (=emacos-net--proc=) means reads never stack on resource-constrained phone
+  hardware.
 
 The one piece still deferred is *typing a new secured wifi password* — that
 needs protected credential entry; =emacos-net--connect-kind= is the seam, and
@@ -358,9 +359,11 @@ is the real-phone runbook above.
 The elisp (=network.el=) DOES have a unit-test seam, and =tests/test-network.el=
 (wired into =make test-elisp=) covers the pure core: the terse-line splitter
 (escaped colons/backslashes), the blob parser (-> =emacos-net-state= for
-wifi-active / cell-active / no-net / unprovisioned), the modeline formatter +
-its tap properties, the =emacos-net--connect-kind= seam, the dynamic command
-set, the page render, and the single-flight refresh guard (=cl-letf=-stubbing
+wifi-active / cell-active / no-net / unprovisioned and provisioned-active /
+provisioned-inactive cell profiles), the modeline formatter + its tap
+properties, the =emacos-net--connect-kind= seam, cell-toggle selection
+independent of the default route, the dynamic command set, the page render,
+and the single-flight refresh guard (=cl-letf=-stubbing
 =make-process=, the =tests/test-chat.el= pattern).  *Real-phone-only:* the
 actual =nmcli=/=mmcli= execution, the radio toggles toggling, a real wifi
 connect, and the modeline *tap* on the panel.
