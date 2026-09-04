@@ -93,5 +93,36 @@
               (should (equal emacos-assist-web--draft-harness "deepagents")))
           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
+(ert-deftest test-assist-web-workspace-snapshot-keeps-the-server-branch-name ()
+  (let* ((emacos-assist-web-cache-directory (make-temp-file "assist-web-cache-" t))
+         (source (make-temp-file "assist-web-source-" t))
+         (archive (make-temp-file "assist-web-archive-" nil ".tar.gz"))
+         (done nil) workspace problem)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "notes.md" source) (insert "hello"))
+          (should (eq 0 (call-process "tar" nil nil nil "-czf" archive "-C" source ".")))
+          (emacos-assist-web--extract-workspace-async
+           archive "thread-1" "assist/demo"
+           (lambda (result error) (setq workspace result problem error done t)))
+          (dotimes (_ 100)
+            (unless done (accept-process-output nil 0.05)))
+          (should done)
+          (should-not problem)
+          (should (equal (with-temp-buffer
+                           (insert-file-contents (expand-file-name "notes.md" workspace))
+                           (buffer-string))
+                         "hello"))
+          (when (executable-find "git")
+            (should (equal (string-trim (with-temp-buffer
+                                          (call-process "git" nil t nil "-C" workspace
+                                                        "branch" "--show-current")
+                                          (buffer-string)))
+                           "assist/demo"))))
+      (when (file-exists-p archive) (delete-file archive))
+      (when (file-directory-p source) (delete-directory source t))
+      (when (file-directory-p emacos-assist-web-cache-directory)
+        (delete-directory emacos-assist-web-cache-directory t)))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

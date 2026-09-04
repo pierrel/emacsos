@@ -407,7 +407,7 @@ fails, so the previous usable snapshot stays intact until this point."
                              stage nil)
                      (error "Could not unpack Assist Web workspace"))
                  (error (setq problem (error-message-string err))))
-             (when (file-directory-p stage) (delete-directory stage t))
+             (when (and stage (file-directory-p stage)) (delete-directory stage t))
              (when (file-exists-p archive) (delete-file archive))
              (when (buffer-live-p log) (kill-buffer log)))
            (funcall callback result problem)))))))
