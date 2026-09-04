@@ -461,21 +461,37 @@ every agent-config load."
 (defvar emacsos-pinephone-keyboard-hidden nil
   "Non-nil after this Emacs instance has hidden wvkbd.")
 
-(defconst emacsos-pinephone-wvkbd-pid
+(defvar emacsos-pinephone-wvkbd-pid
   (let ((pid (getenv "EMACSOS_WVKBD_PID")))
     (and pid (string-match-p "\\`[1-9][0-9]*\\'" pid) pid))
-  "The current session's directly supervised wvkbd process ID, or nil.")
+  "Current session's directly supervised wvkbd process ID, or nil.")
+
+(defun emacsos-pinephone-valid-wvkbd-pid-p (pid)
+  "Return non-nil when PID is the expected isolated keyboard process."
+  (let* ((default-directory "/")
+         (attributes (and pid (process-attributes (string-to-number pid)))))
+    (and (equal (alist-get 'comm attributes) "wvkbd-mobintl")
+         (equal (alist-get 'user attributes) "emacsos-lab"))))
+
+(defun emacsos-pinephone-find-wvkbd-pid ()
+  "Return the one exact supervised wvkbd PID, or nil."
+  (let ((default-directory "/"))
+    (with-temp-buffer
+      (when (zerop (call-process "/usr/bin/pgrep" nil t nil
+                                "-u" "emacsos-lab" "-f"
+                                "^/usr/bin/wvkbd-mobintl -H 300 -L 300$"))
+        (let ((pids (split-string (buffer-string) "\n" t)))
+          (and (= (length pids) 1) (car pids)))))))
 
 (defun emacsos-pinephone-signal-keyboard (signal)
   "Send SIGNAL to this session's supervised wvkbd process.
-Reject a missing, stale, or unexpected PID before signaling it."
+Refresh a missing or stale PID only from one exact isolated keyboard process."
   (let ((pid emacsos-pinephone-wvkbd-pid))
-    (unless pid
-      (user-error "Keyboard control is unavailable"))
-    (let ((attributes (process-attributes (string-to-number pid))))
-      (unless (and (equal (alist-get 'comm attributes) "wvkbd-mobintl")
-                   (equal (alist-get 'user attributes) "emacsos-lab"))
-        (user-error "Keyboard control is unavailable")))
+    (unless (emacsos-pinephone-valid-wvkbd-pid-p pid)
+      (setq pid (emacsos-pinephone-find-wvkbd-pid))
+      (unless (emacsos-pinephone-valid-wvkbd-pid-p pid)
+        (user-error "Keyboard control is unavailable"))
+      (setq emacsos-pinephone-wvkbd-pid pid))
     (signal-process (string-to-number pid) signal)))
 
 (defun emacsos-pinephone-toggle-keyboard ()
