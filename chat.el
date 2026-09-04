@@ -152,6 +152,7 @@ rather than pushing it forward.")
 ;; at call time — chat.el is the generic engine; the .assist surface plugs in.
 (declare-function emacos-assist--surface-context "emacos-assist")
 (declare-function emacos-assist--save "emacos-assist")
+(declare-function emacos-assist-web-send "assist-web")
 
 (defun emacos--chat-render-buffer ()
   "The buffer the stream handlers render into: the active stream buffer if
@@ -970,7 +971,8 @@ Interactive so M-x can reach it; the Chat utility button reaches it via
 
 (defun emacos--chat-surface-on-top ()
   "Return the chat-surface buffer in the target (editor) window — the *chat*
-scratch OR a file-backed `emacos-assist-mode' buffer — else nil.  Uses
+scratch, a file-backed `emacos-assist-mode' buffer, or a canonical
+`emacos-assist-web-mode' buffer — else nil.  Uses
 `emacos--target' (the authority on \"what's on top\"), not `current-buffer'
 \(renders/callbacks run with *keyboard* current), so it agrees with
 `emacos--top-commands'."
@@ -978,7 +980,9 @@ scratch OR a file-backed `emacos-assist-mode' buffer — else nil.  Uses
          (b (and w (window-buffer w))))
     (when (and b
                (or (eq b (get-buffer emacos--chat-buffer-name))
-                   (with-current-buffer b (derived-mode-p 'emacos-assist-mode))))
+                   (with-current-buffer b
+                     (or (derived-mode-p 'emacos-assist-mode)
+                         (derived-mode-p 'emacos-assist-web-mode)))))
       b)))
 
 (defun emacos--chat-on-top-p ()
@@ -994,7 +998,10 @@ refuses with a hint and the command list shows ABORT."
   (interactive)
   (let ((surface (emacos--chat-surface-on-top)))
     (if surface
-        (emacos--chat-send surface)
+        (with-current-buffer surface
+          (if (derived-mode-p 'emacos-assist-web-mode)
+              (emacos-assist-web-send)
+            (emacos--chat-send surface)))
       (emacos--chat-show-top-buffer))))
 
 (defun emacos--chat-button-label ()

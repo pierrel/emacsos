@@ -3,8 +3,10 @@
 PINEPHONE_HOST ?= phoney
 export PINEPHONE_HOST
 
+EMACSOS_PHONE_HOST ?= phoney
+
 local-connect-server:
-	ssh -t phone emacsclient -f server -t
+	ssh -t $(EMACSOS_PHONE_HOST) emacsclient -f server -t
 
 test-pinephone-scripts:
 	tests/test-pinephone-diagnostic-recovery.sh
@@ -53,28 +55,31 @@ PHONE_INIT_SNIPPET ?= ~/.emacs.d/emacsos-init.el
 # install time, e.g.:
 #   make phone-install DEV_BOX_URL=http://dev.lan:8765/chat
 DEV_BOX_URL ?= http://$(shell ip -4 -o addr show scope global 2>/dev/null | awk '{print $$4}' | cut -d/ -f1 | head -1):8765/chat
+ASSIST_WEB_API_URL ?= https://assist.invalid/api/v1/phone
 
 phone-install:
 	@echo "→ Installing to phone:$(PHONE_EMACSOS_DIR)"
 	@echo "  chat URL: $(DEV_BOX_URL)"
-	ssh phone "mkdir -p $(PHONE_EMACSOS_DIR)"
-	scp os.el chat.el emacos-assist.el network.el phone-call.el phone:$(PHONE_EMACSOS_DIR)/
-	sed "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" deploy/emacsos-init.el.in \
-	  | ssh phone "cat > $(PHONE_INIT_SNIPPET)"
+	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
+	ssh $(EMACSOS_PHONE_HOST) "mkdir -p $(PHONE_EMACSOS_DIR)"
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(EMACSOS_PHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	sed -e "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" \
+	    -e "s|@@ASSIST_WEB_API_URL@@|$(ASSIST_WEB_API_URL)|g" deploy/emacsos-init.el.in \
+	  | ssh $(EMACSOS_PHONE_HOST) "cat > $(PHONE_INIT_SNIPPET)"
 	@echo
 	@echo "✓ Installed.  If this is the first run, add ONE line to phone's init.el:"
 	@echo "    (load-file \"$(PHONE_INIT_SNIPPET)\")"
 	@echo "  then bounce the phone's emacs (or run \`make local-deploy\` to hot-reload now)."
 
 local-deploy:
-	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
-	scp os.el chat.el emacos-assist.el network.el phone-call.el phone:$(PHONE_EMACSOS_DIR)/
+	ssh $(EMACSOS_PHONE_HOST) mkdir -p $(PHONE_EMACSOS_DIR)
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(EMACSOS_PHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
 	# run -- the snippet re-applies (setq emacos-chat-server-url ...)
 	# which would otherwise be reset back to the defcustom default
 	# when chat.el is reloaded.  Conditional so a fresh phone (no
 	# phone-install yet) still gets a working code reload.
-	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
+	ssh $(EMACSOS_PHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 # Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
 # docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific
@@ -167,7 +172,7 @@ playground-install:
 	@echo "✓ playground files installed to phone:$(PHONE_PLAYGROUND_DIR)/"
 
 test-elisp:
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-network.el -l tests/test-call.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

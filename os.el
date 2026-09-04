@@ -721,7 +721,8 @@ Order each list by PRIORITY: the command list shows up to
 reachable via M-x.  Grow this incrementally.")
 
 (defvar emacos-global-commands
-  '(("Save"          . save-buffer)
+  '(("Threads"       . emacos-assist-web-open-thread)
+    ("Save"          . save-buffer)
     ("Undo"          . undo)
     ("Find File"     . find-file)
     ("Switch Buffer" . switch-to-buffer)
@@ -752,6 +753,8 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos--chat-button "chat")
 (declare-function emacos--chat-button-label "chat")
 (declare-function emacos-assist--command-set "emacos-assist")
+(declare-function emacos-assist-web--command-set "assist-web")
+(declare-function emacos-assist-web-open-thread "assist-web")
 
 ;; Defined in network.el (required at the bottom of this file).
 (defvar emacos-net--buffer-name)
@@ -794,8 +797,16 @@ rather than only M-x."
         ;; `current-buffer', so without this wrap the buffer-local read
         ;; sees nil and "Forget" never relabels — caught live 2026-05-30.
         (with-current-buffer buf (emacos-assist--command-set)))
+       ((and buf (with-current-buffer buf
+                   (derived-mode-p 'emacos-assist-web-mode)))
+        (with-current-buffer buf (emacos-assist-web--command-set)))
        ((and buf (eq buf (get-buffer emacos-net--buffer-name)))
         (emacos-net--command-set))
+       ((and buf (boundp 'emacos-assist-web--workspace-read-only)
+             (buffer-local-value 'emacos-assist-web--workspace-read-only buf))
+        '(("Open" . dired-find-file)
+          ("Up" . dired-up-directory)
+          ("Refresh" . revert-buffer)))
        ((emacos--mode-commands-for mode))
        (t emacos-global-commands))))))
 
@@ -1106,6 +1117,7 @@ an in-progress render."
              (file-name-directory (or load-file-name buffer-file-name)))
 (require 'chat)
 (require 'emacos-assist)
+(require 'assist-web)
 (require 'network)
 (require 'phone-call)
 

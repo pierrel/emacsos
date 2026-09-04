@@ -89,6 +89,11 @@
 ;; Re-run `make phone-install DEV_BOX_URL=...` to change.
 (setq emacos-chat-server-url "@@CHAT_URL@@")
 
+;; Canonical Assist Web API.  This uses HTTPS and a separate bearer token in
+;; `emacos-assist-web-token-file'; the token is deliberately not generated into
+;; this public configuration snippet.
+(setq emacos-assist-web-api-url "@@ASSIST_WEB_API_URL@@")
+
 ;; TCP server so emacsclient from the dev box can reach this daemon.
 ;; (server-running-p) is idempotent: skip if some earlier init already
 ;; started the server.
