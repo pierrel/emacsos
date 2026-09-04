@@ -13,9 +13,9 @@ when Assist is temporarily unreachable.
 
 * User flow
 
-1. From any EmacsOS buffer, the user invokes =emacos-assist-open-thread=.
+1. From any EmacsOS buffer, the user invokes =emacos-assist-web-open-thread=.
    The primary phone affordance is a =Threads= command-row button; =C-t= and
-   =M-x emacos-assist-open-thread= are the keyboard equivalents. The phone
+   =M-x emacos-assist-web-open-thread= are the keyboard equivalents. The phone
    deliberately supports one modified key at a time, so prefix chords are not
    used.
 2. The minibuffer offers a completion list of cached and freshly fetched web
@@ -49,6 +49,21 @@ when Assist is temporarily unreachable.
    nonexistent or out-of-worktree reference produces a small visible error and
    never opens an arbitrary phone path.
 
+=New thread= is also a top-level phone action, not an action that requires an
+existing thread. It is visible beside =Threads= in the ordinary command row
+and bound globally to =M-t=. On a first run with no cache, it fetches the
+repository and harness catalog asynchronously, then opens its two completion
+prompts. Thus a repository with no existing thread is an ordinary first-use
+case, not a dead end.
+
+Within a thread, the command band has touch buttons and direct meta-key
+bindings: =M-r= refreshes the transcript, =M-d= shows Diff, =M-f= opens Files,
+=M-p= opens Pins, and =M-n= creates a new thread. The bindings are direct
+single modified keys because the phone supports its modifier layer naturally;
+they do not require an Emacs prefix chord. =ABORT= remains an explicit touch
+control while a run is in flight so it cannot be confused with normal =C-g=
+quit behavior.
+
 The thread buffer must retain the normal EmacsOS property that chat stays
 readable while Assist runs and has a visible =ABORT= control.  It shows durable
 queued/running status, then refreshes the canonical final response atomically;
@@ -77,7 +92,9 @@ second UI to maintain.
 - The first use may show cached entries immediately and refresh on request;
   a failed refresh leaves the previous cache visible with its age.
 - Creating a thread presents repository and harness choices through the same
-  completion UI, then opens an empty dedicated thread buffer.  The actual
+  completion UI, even when the selected repository has no existing thread.
+  A cache miss first fetches that catalog asynchronously, then opens an empty
+  dedicated thread buffer. The actual
   server-side thread is created on the first sent message, matching the web
   product's current semantics.
 

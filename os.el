@@ -722,6 +722,7 @@ reachable via M-x.  Grow this incrementally.")
 
 (defvar emacos-global-commands
   '(("Threads"       . emacos-assist-web-open-thread)
+    ("New thread"    . emacos-assist-web-new-thread)
     ("Save"          . save-buffer)
     ("Undo"          . undo)
     ("Find File"     . find-file)
@@ -755,6 +756,7 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos-assist--command-set "emacos-assist")
 (declare-function emacos-assist-web--command-set "assist-web")
 (declare-function emacos-assist-web-open-thread "assist-web")
+(declare-function emacos-assist-web-new-thread "assist-web")
 
 ;; Defined in network.el (required at the bottom of this file).
 (defvar emacos-net--buffer-name)

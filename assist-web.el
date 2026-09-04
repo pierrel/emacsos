@@ -774,12 +774,9 @@ fails, so the previous usable snapshot stays intact until this point."
                (message "Queued Assist run cancelled"))
              (emacos-assist-web-refresh-thread buffer))))))))
 
-(defun emacos-assist-web-new-thread ()
-  "Open a local draft which becomes a web thread only on its first Send."
-  (interactive)
-  (emacos-assist-web--load-catalog)
-  (let* ((cache (emacos-assist-web--read-cache emacos-assist-web--catalog-file))
-         (repositories (alist-get 'repositories cache))
+(defun emacos-assist-web--new-thread-from-catalog (cache)
+  "Choose a repository and harness from CATALOG, then open a local draft."
+  (let* ((repositories (alist-get 'repositories cache))
          (labels (mapcar (lambda (repo) (alist-get 'label repo)) repositories))
          (selected (and labels (completing-read "Repository: " labels nil t nil nil (car labels))))
          (repo (seq-find (lambda (item) (equal selected (alist-get 'label item))) repositories))
@@ -804,6 +801,22 @@ fails, so the previous usable snapshot stays intact until this point."
                           selected selected-harness))
           (emacos-assist-web--write-prompt)))
       (switch-to-buffer buffer))))
+
+(defun emacos-assist-web-new-thread ()
+  "Create a local draft, fetching repository choices on first use if needed."
+  (interactive)
+  (let ((cache (emacos-assist-web--read-cache emacos-assist-web--catalog-file)))
+    (if (and (alist-get 'repositories cache) (alist-get 'harnesses cache))
+        (emacos-assist-web--new-thread-from-catalog cache)
+      (message "Fetching repositories for a new Assist thread…")
+      (emacos-assist-web--request
+       "GET" "threads" nil
+       (lambda (value error)
+         (if error
+             (message "Cannot create a thread until repository choices load: %s" error)
+           (setq emacos-assist-web--catalog (alist-get 'threads value))
+           (emacos-assist-web--write-cache emacos-assist-web--catalog-file value)
+           (emacos-assist-web--new-thread-from-catalog value)))))))
 
 (defun emacos-assist-web-show-diff ()
   "Fetch the authoritative thread diff into an Emacs diff buffer."
@@ -913,6 +926,12 @@ fails, so the previous usable snapshot stays intact until this point."
   (add-hook 'after-change-functions #'emacos-assist-web--after-change nil t))
 
 (global-set-key (kbd "C-t") #'emacos-assist-web-open-thread)
+(global-set-key (kbd "M-t") #'emacos-assist-web-new-thread)
+(define-key emacos-assist-web-mode-map (kbd "M-r") #'emacos-assist-web-refresh-thread)
+(define-key emacos-assist-web-mode-map (kbd "M-d") #'emacos-assist-web-show-diff)
+(define-key emacos-assist-web-mode-map (kbd "M-f") #'emacos-assist-web-show-files)
+(define-key emacos-assist-web-mode-map (kbd "M-p") #'emacos-assist-web-show-pins)
+(define-key emacos-assist-web-mode-map (kbd "M-n") #'emacos-assist-web-new-thread)
 
 (emacos-assist-web--load-catalog)
 
