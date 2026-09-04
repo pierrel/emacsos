@@ -294,12 +294,20 @@ install either artifact.  This makes accidental kernel suspend unreachable
 from the UI during the unattended soak instead of relying only on the absence
 of an idle command.
 
-WireGuard tools and a new root-only phone identity are staged but deliberately
-not enabled.  The deployment host's root-owned configuration still maps the
-phone's tunnel address to the erased installation's key.  Enabling the new peer
-before replacing that mapping would route Assist into a dead tunnel.  The
-replacement and an away-from-Wi-Fi test remain pending on one local sudo
-authorization.
+WireGuard is enabled and starts with the phone.  Its profile routes only the
+WireGuard subnet, never Thinky's LAN address: its first activation exposed that
+the latter route makes the existing LAN SSH control connection disappear before
+the tunnel has established.  IPv6 LAN SSH recovered the phone, the stale route
+was removed, and ordinary LAN SSH then worked again.  The configured peer has
+sent authenticated handshake packets but received no reply, so Thinky's
+root-owned =wg0= still does not accept this installation's new phone key (or
+has an equivalent server-side mismatch).  After the one local-sudo peer
+registration succeeds, the persistent chat URL must change from Thinky's LAN
+address to its =10.0.0.1= WireGuard address and Emacs must reload that value;
+the server already listens on the WireGuard interface.  This ordering keeps
+today's LAN Assist working while making the final endpoint work both at home
+and away, without reintroducing the SSH-routing trap.  An away-from-Wi-Fi
+Assist test remains the final network acceptance check.
 
 The current USB-C source advertises only the default Type-C current and no USB
 Power Delivery.  The phone therefore sees a 500 mA input even though the PMIC
