@@ -16,7 +16,9 @@ adduser -S -D -H -h /var/lib/emacsos-lab -s /sbin/nologin \
     -G emacsos-lab emacsos-lab
 install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /run/emacsos-ui /var/lib/emacsos-lab /usr/local/share/emacsos-openrc
-install -o root -g root -m 0755 /source/session-power \
+sed -e 's|^external_power=.*$|external_power=/tmp/external-power/online|' \
+    /source/session-power >/tmp/session-power.test
+install -o root -g root -m 0755 /tmp/session-power.test \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 /source/process-group \
     /usr/local/share/emacsos-openrc/process-group
@@ -24,6 +26,7 @@ sed -e 's|^power=/sys/power$|power=/tmp/power|' \
     -e 's|^power_key=.*$|power_key=/tmp/power-key/wakeup|' \
     -e 's|^axp_power_key=.*$|axp_power_key=/tmp/axp-power-key/wakeup|' \
     -e 's|^modem=.*$|modem=/tmp/modem|' \
+    -e 's|^external_power=.*$|external_power=/tmp/external-power/online|' \
     /source/suspend-root >/tmp/suspend-root.test
 chmod 0755 /tmp/suspend-root.test
 
@@ -92,6 +95,9 @@ as_lab() {
         "/usr/local/share/emacsos-openrc/session-power $1"
 }
 
+install -d -m 0755 /tmp/external-power
+printf '%s\n' 0 >/tmp/external-power/online
+
 as_lab wake
 [ "$(cat /run/emacsos-ui/power-state)" = active ]
 [ "$(sed -n '1p' /tmp/swaymsg.log)" = \
@@ -139,6 +145,16 @@ as_lab idle-blank
 as_lab suspend
 [ "$(cat /tmp/doas.log)" = /usr/local/sbin/emacsos-openrc-suspend ]
 rm -f /tmp/doas.log
+
+# USB power keeps the display active and also wakes an already idle-blanked
+# display rather than allowing the root helper to suspend it.
+printf '%s\n' 1 >/tmp/external-power/online
+as_lab suspend
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+[ ! -e /tmp/doas.log ]
+printf '%s\n' 0 >/tmp/external-power/online
+as_lab idle-blank
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
 
 # A power key that resumes an idle-blanked seat launches both callbacks.  They
 # must finish active regardless of which one owns the transition lock first.
@@ -272,6 +288,15 @@ printf '%s\n' disabled >/tmp/modem/power/wakeup
 [ "$(cat /tmp/power-key/wakeup)" = enabled ]
 [ "$(cat /tmp/axp-power-key/wakeup)" = enabled ]
 [ "$(cat /tmp/modem/power/wakeup)" = enabled ]
+printf '%s\n' 1 >/tmp/external-power/online
+: >/tmp/power/state
+set +e
+/tmp/suspend-root.test >/tmp/root-powered.out 2>&1
+root_powered_status=$?
+set -e
+[ "$root_powered_status" -eq 77 ]
+[ ! -s /tmp/power/state ]
+printf '%s\n' 0 >/tmp/external-power/online
 if /tmp/suspend-root.test unexpected >/tmp/root-arg.out 2>&1; then
     printf '%s\n' 'root suspend helper accepted an argument' >&2
     exit 1

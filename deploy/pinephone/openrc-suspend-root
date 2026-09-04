@@ -10,6 +10,7 @@ power=/sys/power
 power_key=/sys/devices/platform/gpio-keys/power/wakeup
 axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
 modem=/sys/devices/platform/soc/1c1b000.usb/usb1/1-1
+external_power=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp20x-usb-power-supply/power_supply/axp20x-usb/online
 lock=/run/emacsos-openrc-suspend.lock
 
 fail() {
@@ -24,6 +25,16 @@ enable_wakeup() {
     printf '%s\n' enabled >"$wakeup" || fail "could not enable: $wakeup"
     [ "$(sed -n '1p' "$wakeup")" = enabled ] ||
         fail "wakeup source is disabled: $wakeup"
+}
+
+external_power_online() {
+    [ -f "$external_power" ] && [ ! -L "$external_power" ] ||
+        fail "external power state is absent: $external_power"
+    case $(sed -n '1p' "$external_power") in
+        0) return 1 ;;
+        1) return 0 ;;
+        *) fail "invalid external power state: $external_power" ;;
+    esac
 }
 
 trap 'exit 1' HUP INT TERM
@@ -47,6 +58,7 @@ grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
 enable_wakeup "$power_key"
 enable_wakeup "$axp_power_key"
 enable_wakeup "$modem/power/wakeup"
+external_power_online && exit 77
 
 : >"$lock"
 chown root:root "$lock"

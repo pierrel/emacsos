@@ -166,17 +166,21 @@ grep -F '/usr/bin/setsid "$@" &' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'timeout 120 "$root/session-power suspend"' "$deploy_dir/openrc-session" >/dev/null
+grep -F 'timeout 180 "$root/session-power suspend"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'press|idle-blank|resume|wake|suspend)' \
     "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'suspend) flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
     "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'external_power_online; then' \
+    "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'expected EG25 modem is absent' "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'enable_wakeup "$power_key"' "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'enable_wakeup "$axp_power_key"' "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'enable_wakeup "$modem/power/wakeup"' \
+    "$deploy_dir/openrc-suspend-root" >/dev/null
+grep -F 'external_power_online && exit 77' \
     "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'idle-blank) flock -n -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \

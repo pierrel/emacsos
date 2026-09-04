@@ -13,6 +13,7 @@ runtime=$XDG_RUNTIME_DIR
 state=$runtime/power-state
 idle_origin=$runtime/idle-origin
 lock=$runtime/power-state.lock
+external_power=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp20x-usb-power-supply/power_supply/axp20x-usb/online
 sway_socket=
 wayland_socket=
 
@@ -64,6 +65,12 @@ esac
 
 publish_state() {
     printf '%s\n' "$1" >"$state"
+}
+
+external_power_online() {
+    [ -f "$external_power" ] && [ ! -L "$external_power" ] || return 0
+    [ "$(sed -n '1p' "$external_power")" = 0 ] || return 0
+    return 1
 }
 
 sway() {
@@ -141,7 +148,9 @@ case $1 in
         esac
         ;;
     idle-blank)
-        if [ "$current" = active ]; then
+        if external_power_online; then
+            exit 0
+        elif [ "$current" = active ]; then
             enter_blank idle
         else
             : >"$idle_origin"
@@ -157,6 +166,11 @@ case $1 in
     suspend)
         [ "$current" = blank ] || exit 0
         [ -f "$idle_origin" ] && [ ! -L "$idle_origin" ] || exit 0
+        if external_power_online; then
+            restore_active
+            rm -f -- "$idle_origin"
+            exit 0
+        fi
         set +e
         doas -n /usr/local/sbin/emacsos-openrc-suspend
         suspend_status=$?
@@ -164,6 +178,10 @@ case $1 in
         case $suspend_status in
         0|75)
             exit 0
+            ;;
+        77)
+            restore_active
+            rm -f -- "$idle_origin"
             ;;
         *)
             restore_active || true
