@@ -1,0 +1,69 @@
+#!/bin/sh
+# Enter deep suspend only after arming the PinePhone's required wake sources.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+umask 077
+
+power=/sys/power
+power_key=/sys/devices/platform/gpio-keys/power/wakeup
+axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
+modem=/sys/devices/platform/soc/1c1b000.usb/usb1/1-1
+lock=/run/emacsos-openrc-suspend.lock
+
+fail() {
+    printf 'emacsos-openrc-suspend: %s\n' "$1" >&2
+    exit 1
+}
+
+enable_wakeup() {
+    wakeup=$1
+    [ -f "$wakeup" ] && [ ! -L "$wakeup" ] ||
+        fail "wakeup source is absent: $wakeup"
+    printf '%s\n' enabled >"$wakeup" || fail "could not enable: $wakeup"
+    [ "$(sed -n '1p' "$wakeup")" = enabled ] ||
+        fail "wakeup source is disabled: $wakeup"
+}
+
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ "$#" -eq 0 ] || fail 'arguments are not accepted'
+[ -d "$power" ] && [ ! -L "$power" ] || fail 'unsafe power interface'
+grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
+    fail 'deep suspend is not selected'
+[ "$(sed -n '1p' "$power/sync_on_suspend")" = 1 ] ||
+    fail 'kernel suspend syncing is disabled'
+[ -r "$power/wakeup_count" ] && [ -w "$power/wakeup_count" ] ||
+    fail 'wakeup counter is unavailable'
+[ -w "$power/state" ] || fail 'suspend state is unavailable'
+[ -f "$modem/idVendor" ] && [ ! -L "$modem/idVendor" ] &&
+    [ "$(sed -n '1p' "$modem/idVendor")" = 2c7c ] &&
+    [ -f "$modem/idProduct" ] && [ ! -L "$modem/idProduct" ] &&
+    [ "$(sed -n '1p' "$modem/idProduct")" = 0125 ] ||
+    fail 'expected EG25 modem is absent'
+
+enable_wakeup "$power_key"
+enable_wakeup "$axp_power_key"
+enable_wakeup "$modem/power/wakeup"
+
+: >"$lock"
+chown root:root "$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+flock -n -x 9 || fail 'suspend is already in progress'
+
+wakeup_count=$(sed -n '1p' "$power/wakeup_count")
+case $wakeup_count in
+    ''|*[!0-9]*) fail 'invalid wakeup counter' ;;
+esac
+
+# A wake event between the read and either write makes the kernel reject the
+# transition. Exit 75 so the display owner treats it as a normal wake race.
+printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
+if ! printf '%s\n' mem >"$power/state"; then
+    new_wakeup_count=$(sed -n '1p' "$power/wakeup_count") || exit 1
+    [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75
+    exit 1
+fi

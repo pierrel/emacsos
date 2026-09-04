@@ -13,11 +13,10 @@ boot_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=c042ec7c8dade083114aad6931b7938836ebe9b8feb5eba960256db2f9aaab39
+manifest_hash=0baace6afc94847560596340f62a4eec95e0785bfc94afcedfcf9f98f7a52996
 mutating=0
 committed=0
 config_dir_created=0
-revoking_suspend=0
 
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
@@ -121,12 +120,6 @@ retain_backup() {
 
 cleanup() {
     trap - HUP INT TERM
-    if [ "$revoking_suspend" -eq 1 ]; then
-        rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf \
-            /usr/local/sbin/emacsos-openrc-suspend
-        sync -f /etc/doas.d >/dev/null 2>&1 || true
-        sync -f /usr/local/sbin >/dev/null 2>&1 || true
-    fi
     if [ "$mutating" -eq 1 ] && [ "$committed" -eq 0 ]; then
         if ! stop_ui >/dev/null 2>&1; then
             printf '%s\n' \
@@ -147,6 +140,10 @@ cleanup() {
                 /usr/local/share/emacsos-openrc/emacos-assist.el 0644
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
             restore_file phone-call.el /usr/local/share/emacsos-openrc/phone-call.el 0644
+            restore_file openrc-suspend-root \
+                /usr/local/sbin/emacsos-openrc-suspend 0755
+            restore_file openrc-boot-mode \
+                /usr/local/sbin/emacsos-openrc-boot-mode 0755
             restore_file openrc-call-root /usr/local/sbin/emacsos-openrc-call 0755
             restore_file openrc-network-root \
                 /usr/local/sbin/emacsos-openrc-network 0755
@@ -201,7 +198,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-emacs-server.nft) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-emacs-server.nft) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -211,13 +208,13 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 22 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 23 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group \
+    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el \
     emacos-assist.el network.el phone-call.el openrc-call-root \
@@ -283,28 +280,6 @@ done
     fail 'call dependencies are absent'
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 
-# Privilege removal is monotonic: a later UI update failure must not restore a
-# kernel-suspend path while the phone is unattended.
-boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
-doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
-install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
-printf '%s\n' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
-    >"$doas_tmp"
-chown root:root "$doas_tmp"
-chmod 0600 "$doas_tmp"
-/usr/bin/doas -C "$doas_tmp" >/dev/null
-revoking_suspend=1
-rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-sync -f /etc/doas.d
-rm -f -- /usr/local/sbin/emacsos-openrc-suspend
-sync -f /usr/local/sbin
-mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf
-doas_tmp=
-mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
-boot_tmp=
-
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
 chown root:root "$backup"
 chmod 0700 "$backup"
@@ -320,6 +295,8 @@ for pair in \
     'emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     'network.el:/usr/local/share/emacsos-openrc/network.el' \
     'phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el' \
+    'openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend' \
+    'openrc-boot-mode:/usr/local/sbin/emacsos-openrc-boot-mode' \
     'openrc-call-root:/usr/local/sbin/emacsos-openrc-call' \
     'openrc-network-root:/usr/local/sbin/emacsos-openrc-network' \
     'openrc-chat-url:/etc/emacsos-openrc/chat-url' \
@@ -333,6 +310,24 @@ done
 
 mutating=1
 stop_ui
+boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
+doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
+install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
+printf '%s\n' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
+    >"$doas_tmp"
+chown root:root "$doas_tmp"
+chmod 0600 "$doas_tmp"
+/usr/bin/doas -C "$doas_tmp" >/dev/null
+install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
+    /usr/local/sbin/emacsos-openrc-suspend
+mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf
+doas_tmp=
+mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
+boot_tmp=
+rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
 for module in os.el chat.el emacos-assist.el network.el phone-call.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
@@ -367,6 +362,7 @@ cmp -s "$snapshot/openrc-sway.config" \
 cmp -s "$snapshot/openrc-session" /usr/local/share/emacsos-openrc/session
 cmp -s "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
+cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
 cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
@@ -375,8 +371,6 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 [ ! -e /etc/nftables.d/95-emacsos-callback.nft ] &&
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
-[ ! -e /usr/local/sbin/emacsos-openrc-suspend ] &&
-    [ ! -L /usr/local/sbin/emacsos-openrc-suspend ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
 for module in os.el chat.el emacos-assist.el network.el phone-call.el \

@@ -15,7 +15,7 @@ adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group \
+    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
@@ -196,7 +196,7 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
     /tmp/stuck-error >/dev/null
 [ -x /etc/init.d/emacsos-ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
-[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /usr/local/sbin/emacsos-openrc-call ]
 [ -x /usr/local/sbin/emacsos-openrc-network ]
 [ -f /etc/emacsos-openrc/chat-url ]
@@ -218,6 +218,7 @@ rm -f /etc/init.d/emacsos-ui \
     /etc/dbus-1/system.d/99-emacsos-waydroid.conf \
     /usr/local/share/dbus-1/system-services/id.waydro.Container.service \
     /usr/local/libexec/emacsos-waydroid-container \
+    /usr/local/sbin/emacsos-openrc-suspend \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/sbin/emacsos-openrc-boot-mode \
@@ -256,7 +257,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/share/emacsos-openrc/process-group ]
-[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
 grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
@@ -275,13 +276,14 @@ fi
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/share/emacsos-openrc/process-group ]
-[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /etc/init.d/emacsos-ui ]
 [ -f /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
 [ -f /etc/dbus-1/system.d/99-emacsos-waydroid.conf ]
 [ -x /usr/local/libexec/emacsos-waydroid-container ]
 [ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
     "$(printf '%s\n' \
+        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
         'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
@@ -328,7 +330,7 @@ if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
     printf '%s\n' 'injected legacy migration failure was accepted' >&2
     exit 1
 fi
-[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 [ -f /run/emacsos-ui/ready ]
@@ -345,7 +347,7 @@ cmp -s /source/openrc-session-power \
 grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 [ ! -e /etc/nftables.d/95-emacsos-callback.nft ]
-[ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
+[ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session

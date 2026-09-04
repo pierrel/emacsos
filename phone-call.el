@@ -286,9 +286,11 @@ keyboard plane, and call badge.")
   "Global D-Bus signal registrations; nil means inbound detection is unarmed.")
 (defvar emacos-call--call-added-handle nil
   "Persistent CallAdded registration with callback-side unique-owner checks.")
+(defvar emacos-call--sms-added-handle nil
+  "Persistent received-SMS registration with callback-side owner checks.")
 (defvar emacos-call--owner-watch-handle nil
   "Exact bus-daemon NameOwnerChanged registration for ModemManager.")
-(defconst emacos-call--watcher-topology-version 2
+(defconst emacos-call--watcher-topology-version 3
   "Persistent wildcard signal topology with callback-side owner/path checks.")
 (defvar emacos-call--installed-watcher-topology nil
   "Watcher topology currently installed in this Emacs process.")
@@ -1449,9 +1451,21 @@ No D-Bus match is added or removed on this live path."
                (equal emacos-call--call-path path))
       (emacos-call--on-call-state old new reason))))
 
+(defun emacos-call--on-sms-added (_path received)
+  "Wake the handset for a received SMS from the current ModemManager owner."
+  (when (and received emacos-call-wake-function
+             (equal (emacos-call--event-owner) emacos-call--current-owner))
+    (ignore-errors (funcall emacos-call-wake-function))))
+
 (defun emacos-call--register-call-added (owner)
   "Register persistent call signals and accept only current unique OWNER."
   (setq emacos-call--current-owner owner)
+  (setq emacos-call--sms-added-handle
+        (or emacos-call--sms-added-handle
+            (emacos-call--register-signal-bounded
+             :system nil nil
+             "org.freedesktop.ModemManager1.Modem.Messaging" "Added"
+             #'emacos-call--on-sms-added)))
   (setq emacos-call--call-added-handle
         (or emacos-call--call-added-handle
             (emacos-call--register-signal-bounded
@@ -1469,7 +1483,8 @@ No D-Bus match is added or removed on this live path."
   (setq emacos-call--watcher-handles
         (delq nil (list emacos-call--owner-watch-handle
                         emacos-call--call-added-handle
-                        emacos-call--state-handle))))
+                        emacos-call--state-handle
+                        emacos-call--sms-added-handle))))
 
 (defun emacos-call--on-owner-changed (name old-owner new-owner)
   "Update accepted call identity when ModemManager NAME changes owner."
@@ -1500,8 +1515,8 @@ No D-Bus match is added or removed on this live path."
       (emacos-call--show-active "Status unknown"))))
 
 (defun emacos-call--watcher-ensure ()
-  "Subscribe to trusted CallAdded and ModemManager owner changes.
-CallAdded and StateChanged use persistent sender-wildcard bus matches, then
+  "Subscribe to trusted call, SMS, and ModemManager owner signals.
+CallAdded, Added, and StateChanged use persistent sender-wildcard bus matches, then
 validate immutable event metadata against the cached unique owner and tracked
 path.  Only boot, hot migration, or explicit stop changes bus matches; live
 call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
@@ -1516,6 +1531,7 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
           emacos-call--owner-watch-handle nil
           emacos-call--call-added-handle nil
           emacos-call--state-handle nil
+          emacos-call--sms-added-handle nil
           emacos-call--installed-watcher-topology nil
           emacos-call--watched-call nil
           emacos-call--owner-generation (1+ emacos-call--owner-generation)))
@@ -1545,19 +1561,21 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
       (error
        (dolist (handle (delq nil (list emacos-call--owner-watch-handle
                                       emacos-call--call-added-handle
-                                      emacos-call--state-handle)))
+                                      emacos-call--state-handle
+                                      emacos-call--sms-added-handle)))
          (emacos-call--unregister-signal-bounded handle))
        (setq emacos-call--watcher-handles nil
              emacos-call--owner-watch-handle nil
              emacos-call--call-added-handle nil
              emacos-call--state-handle nil
+             emacos-call--sms-added-handle nil
              emacos-call--installed-watcher-topology nil
              emacos-call--current-owner nil)
        (message "emacos-call: inbound watcher unavailable: %s"
                 (error-message-string err))))))
 
 (defun emacos-call--watcher-stop ()
-  "Unsubscribe all call and owner signals (dev/debug affordance)."
+  "Unsubscribe all call, SMS, and owner signals (dev/debug affordance)."
   (interactive)
   (dolist (handle emacos-call--watcher-handles)
     (emacos-call--unregister-signal-bounded handle))
@@ -1566,6 +1584,7 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
         emacos-call--call-added-handle nil
         emacos-call--current-owner nil
         emacos-call--state-handle nil
+        emacos-call--sms-added-handle nil
         emacos-call--installed-watcher-topology nil
         emacos-call--watched-call nil
         emacos-call--owner-generation (1+ emacos-call--owner-generation)

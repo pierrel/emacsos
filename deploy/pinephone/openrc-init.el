@@ -420,12 +420,23 @@ every agent-config load."
     (emacsos-pinephone-call-audio-start
      emacsos-pinephone-call-audio-desired)))
 
+(defvar emacsos-pinephone-wake-process nil
+  "The one outstanding fixed display-wake helper, if any.")
+
 (defun emacsos-pinephone-wake-display ()
   "Wake the display and re-arm idle blanking without blocking ModemManager."
-  (let ((process
-         (start-process "emacsos-call-wake" nil
-                        "/usr/local/share/emacsos-openrc/session-power" "wake")))
-    (set-process-query-on-exit-flag process nil)))
+  (unless (process-live-p emacsos-pinephone-wake-process)
+    (let ((process
+           (start-process "emacsos-call-wake" nil
+                          "/usr/local/share/emacsos-openrc/session-power" "wake")))
+      (setq emacsos-pinephone-wake-process process)
+      (set-process-query-on-exit-flag process nil)
+      (set-process-sentinel
+       process
+       (lambda (finished _event)
+         (when (and (eq finished emacsos-pinephone-wake-process)
+                    (memq (process-status finished) '(exit signal)))
+           (setq emacsos-pinephone-wake-process nil)))))))
 
 (defun emacsos-pinephone-network-command (arguments)
   "Translate NetworkManager ARGUMENTS into the fixed root-helper command."

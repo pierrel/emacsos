@@ -114,10 +114,8 @@ ui_enabled() {
 
 check_service() {
     check_root_file /etc/init.d/emacsos-ui 755
+    check_root_file /usr/local/sbin/emacsos-openrc-suspend 755
     check_root_file /etc/doas.d/95-emacsos-ui.conf 600
-    [ ! -e /usr/local/sbin/emacsos-openrc-suspend ] &&
-        [ ! -L /usr/local/sbin/emacsos-openrc-suspend ] ||
-        fail 'legacy suspend helper is installed'
     [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
         [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ] ||
         fail 'legacy suspend authority is installed'
@@ -125,6 +123,7 @@ check_service() {
         fail 'process-group owner is absent'
     [ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
         "$(printf '%s\n' \
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
             'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ] ||
         fail 'UI authority is invalid'

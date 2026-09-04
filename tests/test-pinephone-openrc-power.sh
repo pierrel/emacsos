@@ -6,6 +6,7 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone/openrc-session-power:/source/session-power:ro" \
+    -v "$repo_dir/deploy/pinephone/openrc-suspend-root:/source/suspend-root:ro" \
     -v "$repo_dir/deploy/pinephone/openrc-process-group:/source/process-group:ro" \
     python:3.13-alpine /bin/sh -s <<'CONTAINER'
 set -eu
@@ -19,6 +20,12 @@ install -o root -g root -m 0755 /source/session-power \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 /source/process-group \
     /usr/local/share/emacsos-openrc/process-group
+sed -e 's|^power=/sys/power$|power=/tmp/power|' \
+    -e 's|^power_key=.*$|power_key=/tmp/power-key/wakeup|' \
+    -e 's|^axp_power_key=.*$|axp_power_key=/tmp/axp-power-key/wakeup|' \
+    -e 's|^modem=.*$|modem=/tmp/modem|' \
+    /source/suspend-root >/tmp/suspend-root.test
+chmod 0755 /tmp/suspend-root.test
 
 mv /usr/bin/flock /usr/bin/flock.real
 printf '%s\n' \
@@ -34,6 +41,14 @@ printf '%s\n' \
     'done' \
     'exec "$@"' >/usr/bin/timeout
 chmod 0755 /usr/bin/timeout
+printf '%s\n' \
+    '#!/bin/sh' \
+    '[ "$1" = -n ] || exit 64' \
+    'shift' \
+    '[ "$#" -eq 1 ] && [ "$1" = /usr/local/sbin/emacsos-openrc-suspend ] || exit 64' \
+    'printf "%s\\n" "$1" >>/tmp/doas.log' \
+    'exit "$(cat /tmp/suspend-status)"' >/usr/bin/doas
+chmod 0755 /usr/bin/doas
 printf '%s\n' \
     '#!/bin/sh' \
     'printf "%s\n" "$*" >>/tmp/swaymsg.log' \
@@ -112,9 +127,18 @@ as_lab press
 [ "$(sed -n '6p' /tmp/swaymsg.log)" = \
     '-s /run/emacsos-ui/sway-ipc.test.sock output DSI-1 power off' ]
 
+# The second idle timer cannot suspend a manually blanked screen until the
+# first timer has marked it as idle-originated.
+printf '%s\n' 0 >/tmp/suspend-status
+as_lab suspend
+[ ! -e /tmp/doas.log ]
+
 before=$(wc -l </tmp/swaymsg.log)
 as_lab idle-blank
 [ "$(wc -l </tmp/swaymsg.log)" -eq "$before" ]
+as_lab suspend
+[ "$(cat /tmp/doas.log)" = /usr/local/sbin/emacsos-openrc-suspend ]
+rm -f /tmp/doas.log
 
 # A power key that resumes an idle-blanked seat launches both callbacks.  They
 # must finish active regardless of which one owns the transition lock first.
@@ -232,6 +256,33 @@ fi
 grep -F 'ambiguous Wayland socket' /tmp/ambiguous-wayland.out >/dev/null
 kill "$extra_wayland_pid"
 wait "$extra_wayland_pid" 2>/dev/null || true
+
+install -d -m 0755 /tmp/power /tmp/power-key /tmp/axp-power-key /tmp/modem/power
+printf '%s\n' 's2idle [deep]' >/tmp/power/mem_sleep
+printf '%s\n' 1 >/tmp/power/sync_on_suspend
+printf '%s\n' 41 >/tmp/power/wakeup_count
+: >/tmp/power/state
+printf '%s\n' disabled >/tmp/power-key/wakeup
+printf '%s\n' disabled >/tmp/axp-power-key/wakeup
+printf '%s\n' 2c7c >/tmp/modem/idVendor
+printf '%s\n' 0125 >/tmp/modem/idProduct
+printf '%s\n' disabled >/tmp/modem/power/wakeup
+/tmp/suspend-root.test
+[ "$(cat /tmp/power/state)" = mem ]
+[ "$(cat /tmp/power-key/wakeup)" = enabled ]
+[ "$(cat /tmp/axp-power-key/wakeup)" = enabled ]
+[ "$(cat /tmp/modem/power/wakeup)" = enabled ]
+if /tmp/suspend-root.test unexpected >/tmp/root-arg.out 2>&1; then
+    printf '%s\n' 'root suspend helper accepted an argument' >&2
+    exit 1
+fi
+grep -F 'arguments are not accepted' /tmp/root-arg.out >/dev/null
+printf '%s\n' dead >/tmp/modem/idProduct
+if /tmp/suspend-root.test >/tmp/root-modem.out 2>&1; then
+    printf '%s\n' 'root suspend helper accepted an unexpected modem' >&2
+    exit 1
+fi
+grep -F 'expected EG25 modem is absent' /tmp/root-modem.out >/dev/null
 
 printf '%s\n' \
     '#!/bin/sh' \

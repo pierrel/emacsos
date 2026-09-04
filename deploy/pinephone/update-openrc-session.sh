@@ -28,6 +28,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-process-group" \
+    "$deploy_dir/openrc-suspend-root" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-chat-url" \

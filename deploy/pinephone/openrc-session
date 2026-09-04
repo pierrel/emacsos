@@ -220,6 +220,7 @@ fi
 "$root/session-power" wake
 "$root/process-group" /usr/bin/swayidle -w \
     timeout 60 "$root/session-power idle-blank" \
+    timeout 120 "$root/session-power suspend" \
     resume "$root/session-power resume" &
 idle_pid=$!
 sleep 0.2

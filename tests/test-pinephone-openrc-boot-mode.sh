@@ -6,6 +6,7 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone/openrc-boot-mode:/source/openrc-boot-mode:ro" \
+    -v "$repo_dir/deploy/pinephone/openrc-suspend-root:/source/openrc-suspend-root:ro" \
     alpine:3.22 /bin/sh -s <<'CONTAINER'
 set -eu
 
@@ -51,6 +52,7 @@ install -o root -g root -m 0755 /dev/null \
     /usr/local/share/emacsos-openrc/process-group
 install -o root -g root -m 0755 /dev/null /etc/init.d/emacsos-ui
 printf '%s\n' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     >/etc/doas.d/95-emacsos-ui.conf
@@ -58,21 +60,14 @@ chown root:root /etc/doas.d/95-emacsos-ui.conf
 chmod 0600 /etc/doas.d/95-emacsos-ui.conf
 install -o root -g root -m 0755 /source/openrc-boot-mode \
     /usr/local/sbin/emacsos-openrc-boot-mode
+install -o root -g root -m 0755 /source/openrc-suspend-root \
+    /usr/local/sbin/emacsos-openrc-suspend
 printf '%s\n' \
     '::sysinit:/sbin/openrc sysinit' \
     'tty1::respawn:/sbin/getty 38400 tty1' \
     'tty2::respawn:/sbin/getty 38400 tty2' >/etc/inittab
 chown root:root /etc/inittab
 chmod 0644 /etc/inittab
-
-install -o root -g root -m 0755 /dev/null \
-    /usr/local/sbin/emacsos-openrc-suspend
-if /usr/local/sbin/emacsos-openrc-boot-mode initialize >/tmp/legacy.out 2>&1; then
-    printf '%s\n' 'boot mode accepted a legacy suspend helper' >&2
-    exit 1
-fi
-grep -F 'legacy suspend helper is installed' /tmp/legacy.out >/dev/null
-rm -f /usr/local/sbin/emacsos-openrc-suspend
 
 /usr/local/sbin/emacsos-openrc-boot-mode initialize
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]

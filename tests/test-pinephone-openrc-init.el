@@ -325,16 +325,28 @@
       (should (eq emacsos-pinephone-call-audio-process 'second)))))
 
 (ert-deftest emacsos-openrc-wake-display-is-asynchronous ()
-  (let (started noquery)
+  (let ((emacsos-pinephone-wake-process nil) started noquery sentinel)
     (cl-letf (((symbol-function 'start-process)
                (lambda (&rest args) (setq started args) 'process))
+              ((symbol-function 'process-live-p) (lambda (_) nil))
               ((symbol-function 'set-process-query-on-exit-flag)
-               (lambda (_process value) (setq noquery (not value)))))
+               (lambda (_process value) (setq noquery (not value))))
+              ((symbol-function 'set-process-sentinel)
+               (lambda (_process value) (setq sentinel value))))
       (emacsos-pinephone-wake-display)
       (should (equal started
                      '("emacsos-call-wake" nil
                        "/usr/local/share/emacsos-openrc/session-power" "wake")))
-      (should noquery))))
+      (should noquery)
+      (should (functionp sentinel)))))
+
+(ert-deftest emacsos-openrc-wake-display-coalesces-an-outstanding-helper ()
+  (let ((emacsos-pinephone-wake-process 'running) started)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'start-process)
+               (lambda (&rest _) (setq started t))))
+      (emacsos-pinephone-wake-display)
+      (should-not started))))
 
 (ert-deftest emacsos-openrc-network-command-allows-only-ui-actions ()
   (should (equal
