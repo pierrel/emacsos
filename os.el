@@ -33,19 +33,26 @@ utility, context-command, and call-control surfaces remain available."
 (menu-bar-mode -1)
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
-;; Global, minimal modeline: the EmacsOS label + a tappable cell/wifi
-;; status segment (`emacos-net-mode-line-string', network.el) + a tappable
-;; in-call badge (`emacos-call-mode-line-string', phone-call.el — empty
-;; unless a call is active), shown on every top (editing) buffer.  Replaces
+;; Global, minimal modeline: the EmacsOS label + device-supplied segments + a
+;; tappable cell/wifi status segment (`emacos-net-mode-line-string', network.el)
+;; + a tappable in-call badge (`emacos-call-mode-line-string', phone-call.el —
+;; empty unless a call is active), shown on every top (editing) buffer.  Replaces
 ;; the stock clutter (buffer position, minor modes, encoding); the *keyboard*
 ;; buffer overrides this to nil on each render (`emacos--render-page').
 ;; time/date/battery are left for the "Modeline status bar" roadmap item to
 ;; append here.  Set at load time (not in `emacos--init') so a hot-reload
 ;; re-applies it.  Both `:eval's resolve their functions at redisplay, after
 ;; the `(require 'network)' / `(require 'phone-call)' at the bottom of this file.
+(defvar emacos-platform-mode-line-segments nil
+  "Additional mode-line segments supplied by the device bootstrap.
+Each entry must be valid `mode-line-format' data.  The platform sets this
+before loading EmacsOS so the segment also survives a live reload of os.el.")
+
 (setq-default mode-line-format
-              '(" EmacsOS  " (:eval (emacos-net-mode-line-string))
-                (:eval (emacos-call-mode-line-string))))
+              (append '(" EmacsOS  ")
+                      emacos-platform-mode-line-segments
+                      '((:eval (emacos-net-mode-line-string))
+                        (:eval (emacos-call-mode-line-string)))))
 
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;

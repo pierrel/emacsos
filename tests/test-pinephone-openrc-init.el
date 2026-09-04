@@ -21,6 +21,7 @@
           (should (search-forward "Open Android" nil t))
           (should (search-forward "Stop Android" nil t))
           (should (search-forward "Android is stopped." nil t)))
+          (should-not (local-variable-p 'mode-line-format))
       (kill-buffer buffer))))
 
 (ert-deftest emacsos-openrc-firefox-status-is-visible ()
@@ -46,6 +47,50 @@
 
 (ert-deftest emacsos-openrc-wakeup-event-is-silent ()
   (should (eq (lookup-key global-map [WakeUp]) #'ignore)))
+
+(ert-deftest emacsos-openrc-keyboard-toggle-signals-validated-wvkbd ()
+  (let ((emacsos-pinephone-wvkbd-pid "42")
+        (emacsos-pinephone-keyboard-hidden nil)
+        signal)
+    (cl-letf (((symbol-function 'process-attributes)
+               (lambda (_) '((comm . "wvkbd-mobintl") (user . "emacsos-lab"))))
+              ((symbol-function 'signal-process)
+               (lambda (pid value) (setq signal (list pid value))))
+              ((symbol-function 'force-mode-line-update) #'ignore))
+      (emacsos-pinephone-toggle-keyboard)
+      (should (equal signal '(42 SIGUSR1)))
+      (should emacsos-pinephone-keyboard-hidden)
+      (emacsos-pinephone-toggle-keyboard)
+      (should (equal signal '(42 SIGUSR2)))
+      (should-not emacsos-pinephone-keyboard-hidden))))
+
+(ert-deftest emacsos-openrc-keyboard-toggle-rejects-an-unexpected-process ()
+  (let ((emacsos-pinephone-wvkbd-pid "42")
+        called)
+    (cl-letf (((symbol-function 'process-attributes)
+               (lambda (_) '((comm . "not-wvkbd") (user . "emacsos-lab"))))
+              ((symbol-function 'signal-process)
+               (lambda (&rest _) (setq called t))))
+      (should-error (emacsos-pinephone-toggle-keyboard) :type 'user-error)
+      (should-not called))))
+
+(ert-deftest emacsos-openrc-keyboard-toggle-rejects-a-missing-pid ()
+  (let ((emacsos-pinephone-wvkbd-pid nil)
+        called)
+    (cl-letf (((symbol-function 'signal-process)
+               (lambda (&rest _) (setq called t))))
+      (should-error (emacsos-pinephone-toggle-keyboard) :type 'user-error)
+      (should-not called))))
+
+(ert-deftest emacsos-openrc-keyboard-mode-line-label-tracks-state ()
+  (let ((emacsos-pinephone-keyboard-hidden nil))
+    (should (equal (substring-no-properties
+                    (emacsos-pinephone-keyboard-mode-line-string))
+                   "  kbd hide"))
+    (setq emacsos-pinephone-keyboard-hidden t)
+    (should (equal (substring-no-properties
+                    (emacsos-pinephone-keyboard-mode-line-string))
+                   "  kbd show"))))
 
 (ert-deftest emacsos-openrc-frame-layout-finalizer-maximizes-frame ()
   (let (seen)

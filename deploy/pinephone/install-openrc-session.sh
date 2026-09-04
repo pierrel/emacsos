@@ -32,6 +32,8 @@ ssh -T "$@" "$phone_host" \
 scp -q "$@" \
     "$deploy_dir/openrc-manifest.sha256" \
     "$deploy_dir/openrc-init.el" \
+    "$deploy_dir/dtach-shell.el" \
+    "$deploy_dir/dtach-shell-init.el" \
     "$deploy_dir/openrc-sway.config" \
     "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \

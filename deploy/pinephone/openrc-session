@@ -186,10 +186,11 @@ probe_sway get_inputs &&
     grep -F 'Goodix Capacitive TouchScreen' "$probe_file" >/dev/null ||
     fail 'touchscreen is absent from the Sway seat'
 
-/usr/bin/emacs -Q --load "$root/init.el" &
-emacs_pid=$!
 /usr/bin/wvkbd-mobintl -H 300 -L 300 &
 keyboard_pid=$!
+export EMACSOS_WVKBD_PID=$keyboard_pid
+/usr/bin/emacs -Q --load "$root/init.el" &
+emacs_pid=$!
 
 attempt=0
 while [ "$attempt" -lt 150 ]; do

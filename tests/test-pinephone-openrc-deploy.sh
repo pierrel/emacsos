@@ -21,7 +21,7 @@ sh -n "$deploy_dir/openrc-session" \
 
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
-for name in openrc-init.el openrc-sway.config openrc-session \
+for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
     openrc-session-power openrc-process-group \
     openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -38,6 +38,8 @@ manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
 expected='chat.el
+dtach-shell-init.el
+dtach-shell.el
 emacos-assist.el
 emacsos-ui.initd
 network.el
@@ -108,7 +110,18 @@ grep -F 'rm -f -- "$runtime/failure"' \
 grep -F 'grep -Fx t "$probe_file"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'Goodix Capacitive TouchScreen' "$deploy_dir/openrc-session" >/dev/null
 grep -F '/usr/bin/wvkbd-mobintl -H 300 -L 300' "$deploy_dir/openrc-session" >/dev/null
+grep -F 'export EMACSOS_WVKBD_PID=$keyboard_pid' "$deploy_dir/openrc-session" >/dev/null
+keyboard_line=$(grep -nF '/usr/bin/wvkbd-mobintl -H 300 -L 300' \
+    "$deploy_dir/openrc-session")
+keyboard_line=${keyboard_line%%:*}
+emacs_line=$(grep -nF '/usr/bin/emacs -Q --load "$root/init.el" &' \
+    "$deploy_dir/openrc-session")
+emacs_line=${emacs_line%%:*}
+[ "$keyboard_line" -lt "$emacs_line" ]
 grep -F 'emacos-call-control-gap-lines 1' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F "'SIGUSR1" "$deploy_dir/openrc-init.el" >/dev/null
+grep -F "'SIGUSR2" "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacsos-pinephone-keyboard-mode-line-map' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \
     "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'bindsym F24 nop' "$deploy_dir/openrc-sway.config" >/dev/null

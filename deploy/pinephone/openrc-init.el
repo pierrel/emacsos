@@ -200,8 +200,7 @@
       (text-mode)
       (visual-line-mode 1)
       (setq-local truncate-lines nil
-                  word-wrap t
-                  mode-line-format nil)
+                  word-wrap t)
       (goto-char (point-min)))
     (switch-to-buffer buffer)
     (goto-char (point-min))
@@ -448,6 +447,53 @@ every agent-config load."
        (append prefix (list "open" ssid)))
       (_ (error "unsupported network action")))))
 
+(defvar emacsos-pinephone-keyboard-hidden nil
+  "Non-nil after this Emacs instance has hidden wvkbd.")
+
+(defconst emacsos-pinephone-wvkbd-pid
+  (let ((pid (getenv "EMACSOS_WVKBD_PID")))
+    (and pid (string-match-p "\\`[1-9][0-9]*\\'" pid) pid))
+  "The current session's directly supervised wvkbd process ID, or nil.")
+
+(defun emacsos-pinephone-signal-keyboard (signal)
+  "Send SIGNAL to this session's supervised wvkbd process.
+Reject a missing, stale, or unexpected PID before signaling it."
+  (let ((pid emacsos-pinephone-wvkbd-pid))
+    (unless pid
+      (user-error "Keyboard control is unavailable"))
+    (let ((attributes (process-attributes (string-to-number pid))))
+      (unless (and (equal (alist-get 'comm attributes) "wvkbd-mobintl")
+                   (equal (alist-get 'user attributes) "emacsos-lab"))
+        (user-error "Keyboard control is unavailable")))
+    (signal-process (string-to-number pid) signal)))
+
+(defun emacsos-pinephone-toggle-keyboard ()
+  "Hide the compositor keyboard, or show it again when it is hidden."
+  (interactive)
+  (if emacsos-pinephone-keyboard-hidden
+      (progn
+        (emacsos-pinephone-signal-keyboard 'SIGUSR2)
+        (setq emacsos-pinephone-keyboard-hidden nil))
+    (emacsos-pinephone-signal-keyboard 'SIGUSR1)
+    (setq emacsos-pinephone-keyboard-hidden t))
+  (force-mode-line-update t))
+
+(defconst emacsos-pinephone-keyboard-mode-line-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] #'emacsos-pinephone-toggle-keyboard)
+    map)
+  "Keymap for the visible PinePhone keyboard control.")
+
+(defun emacsos-pinephone-keyboard-mode-line-string ()
+  "Return the touch control for the compositor keyboard in the modeline."
+  (propertize (if emacsos-pinephone-keyboard-hidden "  kbd show" "  kbd hide")
+              'local-map emacsos-pinephone-keyboard-mode-line-map
+              'mouse-face 'mode-line-highlight
+              'help-echo "Tap to hide or show the keyboard"))
+
+(setq emacos-platform-mode-line-segments
+      '((:eval (emacsos-pinephone-keyboard-mode-line-string))))
+
 (when (display-graphic-p)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
   (setq emacos-use-internal-keyboard nil
@@ -478,6 +524,7 @@ every agent-config load."
   (server-start)
   (set-face-attribute 'default nil :height 140)
   (require 'os)
+  (load "/usr/local/share/emacsos-openrc/dtach-shell-init.el" nil nil t)
   (setq emacos-global-commands
         (append '(("Firefox" . emacsos-pinephone-open-firefox)
                   ("Android" . emacsos-pinephone-open-waydroid)

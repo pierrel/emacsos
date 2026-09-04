@@ -14,7 +14,7 @@ addgroup -S user
 adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
-for name in openrc-manifest.sha256 openrc-init.el openrc-sway.config \
+for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group \
     openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -203,6 +203,8 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
 [ -f /usr/local/share/emacsos-openrc/os.el ]
 [ -f /usr/local/share/emacsos-openrc/chat.el ]
+[ -f /usr/local/share/emacsos-openrc/dtach-shell.el ]
+[ -f /usr/local/share/emacsos-openrc/dtach-shell-init.el ]
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 getent passwd emacsos-lab >/dev/null
 pgrep -u "$(id -u emacsos-lab)" >/dev/null
@@ -257,7 +259,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
 [ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
-grep -F 'apk add --simulate sway swayidle emacs-pgtk grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
+grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
     /tmp/apk-log >/dev/null
 grep -F 'rc-service emacsos-ui start' /tmp/rc-service-log >/dev/null
 grep -F 'rc-service eg25-manager start' /tmp/rc-service-log >/dev/null
