@@ -52,10 +52,8 @@ EVAL_TIMEOUT_SECONDS = 15.0
 # stashes the phone identity for this request.
 PHONE_CONTEXT_KEY = "phone_context"
 
-# Substring redaction for the elisp-eval log line.  We log the expr
-# the agent sent (so we can debug why a call returned what it did),
-# but if the expr happens to contain a secret the user pasted into
-# chat we want it scrubbed before it lands in the log file.
+# Substring redaction for the human-written apply-config summary.  Elisp source
+# is never logged; its INFO record contains only the character count.
 _REDACT_RE = re.compile(
     r"(password|secret|api[_-]?key|token|authinfo)",
     re.IGNORECASE,
@@ -82,9 +80,8 @@ def _redact(s: str) -> str:
     """Substring-replace lines mentioning known-secret-shaped words.
     Conservative: matches anywhere on the line, replaces the whole
     line with `<redacted>` rather than trying to surgically remove
-    just the secret value.  False positives (a benign expr mentioning
-    "password" as a string literal) get redacted from logs — that's
-    the right side of the trade-off."""
+    just the secret value.  False positives in a summary get redacted
+    from logs — that's the right side of the trade-off."""
     return "\n".join(
         "<redacted>" if _REDACT_RE.search(line) else line
         for line in s.splitlines()
@@ -118,7 +115,7 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
         return ("error: phone context not set (server bug — channel "
                 "tool invoked outside a /chat turn)")
 
-    log.info("eval_elisp on %s: %s", ctx.phone_host, _redact(code))
+    log.info("eval_elisp on %s: %d chars", ctx.phone_host, len(code))
     try:
         ok, output = phone_mod.call_emacs(
             ctx.auth_contents,

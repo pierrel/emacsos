@@ -94,14 +94,22 @@ through narrow function variables whose defaults are the existing SIM7600
 implementations.  The PinePhone binds them to one root-owned helper with only
 three accepted operations:
 
-- =dial NUMBER= where NUMBER matches =+?[0-9]{5,15}=;
-- =answer CALL_PATH= where CALL_PATH exactly matches a ModemManager call object;
-- =hangup= with no additional argument.
+- =dial OWNER NUMBER= where OWNER is the captured unique D-Bus owner and NUMBER
+  matches =+?[0-9]{5,15}=;
+- =answer OWNER CALL_PATH= where CALL_PATH exactly matches a ModemManager call
+  object;
+- =hangup OWNER CALL_PATH= for a known call, or argumentless =hangup= only for
+  the pathless =Status unknown= recovery surface.
 
-The helper discovers the current modem each time, serializes mutations, puts a
-hard timeout around every =mmcli= call, uses fixed executable paths, and never
-evaluates input.  The lab account receives passwordless =doas= permission for
-this helper only.  It cannot invoke arbitrary =mmcli= arguments or a shell.
+The helper discovers the current modem for dial and global recovery hangup,
+serializes mutations, puts a hard timeout around every modem-control subprocess,
+uses =gdbus= against the captured unique
+owner and exact path for CreateCall, Start, Accept, and known-call Hangup, uses
+fixed executable paths, and never evaluates input.  It emits a created-path
+marker before Start and an answering-path marker before Accept so abnormal
+process death remains an actionable uncertain call rather than a passive
+failure.  The lab account receives passwordless =doas= permission for this
+helper only.  It cannot invoke arbitrary =mmcli= arguments or a shell.
 
 =callaudiocli= stays unprivileged in the graphical session because it needs
 that session's D-Bus.  Both the privileged call helper and audio selector run

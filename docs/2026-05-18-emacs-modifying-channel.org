@@ -1,6 +1,13 @@
 #+title: Emacs-modifying channel
 #+date: 2026-05-18
 
+* Current privacy note (2026-09-03)
+
+The channel no longer logs raw =eval_elisp= source or raw chat messages.  It
+logs lengths only, rather than raw content.  The configuration-apply summary still uses its
+separate redaction helper for its narrower status record.  This supersedes any
+older logging examples below.
+
 The mechanism that lets the agent (running server-side, inside `assist`'s `Thread`) call back into the phone's emacs daemon DURING a `/chat` turn — evaluate elisp, see the result, reason about it, decide next steps.  Step 4+ of the MVP sequence in [[file:2026-05-12-agent-driven-customization.org][2026-05-12-agent-driven-customization.org]]; builds on the streaming pipe shipped in [[file:2026-05-17-streaming-responses.org][2026-05-17-streaming-responses.org]] and the back-channel mechanism (`phone.call_emacs`) preserved through PR #8.
 
 * Design-review revisions (2026-05-18)

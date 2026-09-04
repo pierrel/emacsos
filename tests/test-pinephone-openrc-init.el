@@ -94,14 +94,132 @@
 (ert-deftest emacsos-openrc-call-operation-uses-only-fixed-helper ()
   (let (seen)
     (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest args) (setq seen args) 'process)))
+               (lambda (&rest args) (setq seen args) 'process))
+              ((symbol-function 'emacos-call--modem-manager-owner)
+               (lambda () ":1.42")))
       (should (string-prefix-p
-               "dialing:"
-               (emacsos-pinephone-call-operation 'dial "+14155550123")))
+               "pending:"
+               (emacsos-pinephone-call-operation
+                'dial ":1.bound" "+14155550123")))
       (should (equal (plist-get seen :command)
                      '("/usr/bin/doas" "-n"
                        "/usr/local/sbin/emacsos-openrc-call"
-                       "dial" "+14155550123"))))))
+                       "dial" ":1.bound" "+14155550123"))))))
+
+(ert-deftest emacsos-openrc-answer-and-hangup-are-asynchronous ()
+  "Starting a helper is pending; only its sentinel delivers terminal success."
+  (dolist (case '((answer "/org/freedesktop/ModemManager1/Call/4"
+                          "pending: answer requested")
+                  (hangup "/org/freedesktop/ModemManager1/Call/4"
+                          "pending: hangup requested")))
+    (let (seen
+          (emacos-call--call-owner ":1.42"))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args) (setq seen args) 'process))
+                ((symbol-function 'emacos-call--modem-manager-owner)
+                 (lambda () ":1.42")))
+        (should (equal
+                 (emacsos-pinephone-call-operation
+                  (nth 0 case) ":1.42" (nth 1 case) #'ignore)
+                 (nth 2 case)))
+        (should (equal
+                 (plist-get seen :command)
+                 (append
+                  '("/usr/bin/doas" "-n"
+                    "/usr/local/sbin/emacsos-openrc-call")
+                  (list (symbol-name (nth 0 case)))
+                  (and (memq (nth 0 case) '(answer hangup)) '(":1.42"))
+                  (and (nth 1 case) (list (nth 1 case))))))
+        (should (functionp (plist-get seen :sentinel)))))))
+
+(ert-deftest emacsos-openrc-pathless-hangup-uses-global-recovery-operation ()
+  (let (seen)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args) (setq seen args) 'process)))
+      (should (equal (emacsos-pinephone-call-operation
+                      'hangup nil nil #'ignore)
+                     "pending: hangup requested"))
+      (should (equal (plist-get seen :command)
+                     '("/usr/bin/doas" "-n"
+                       "/usr/local/sbin/emacsos-openrc-call" "hangup"))))))
+
+(ert-deftest emacsos-openrc-call-finished-delivers-terminal-result ()
+  (let ((buffer (generate-new-buffer " *test-call-result*"))
+        delivered)
+    (with-current-buffer buffer
+      (insert "created-call-path: /org/freedesktop/ModemManager1/Call/12\n"
+              "dialing: /org/freedesktop/ModemManager1/Call/12\n"))
+    (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'process-exit-status) (lambda (_) 0)))
+      (emacsos-pinephone-call-finished
+       'process "finished" 'dial (lambda (status) (setq delivered status))))
+    (should (equal delivered
+                   "dialing: /org/freedesktop/ModemManager1/Call/12"))
+    (should-not (buffer-live-p buffer))))
+
+(ert-deftest emacsos-openrc-abnormal-dial-retains-uncertain-call-path ()
+  "A helper death after call creation cannot become a passive failure."
+  (let ((buffer (generate-new-buffer " *test-call-interrupted*"))
+        delivered)
+    (with-current-buffer buffer
+      (insert "created-call-path: /org/freedesktop/ModemManager1/Call/12\n"))
+    (cl-letf (((symbol-function 'process-status) (lambda (_) 'signal))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'process-exit-status) (lambda (_) 15)))
+      (emacsos-pinephone-call-finished
+       'process "killed" 'dial (lambda (status) (setq delivered status))))
+    (should (equal delivered
+                   (concat
+                    "error: uncertain-call-path="
+                    "/org/freedesktop/ModemManager1/Call/12; "
+                    "dial helper terminated before final status")))
+    (should-not (buffer-live-p buffer))))
+
+(ert-deftest emacsos-openrc-success-with-missing-output-stays-canonical ()
+  (should
+   (equal
+    (emacsos-pinephone-call-result
+     'dial
+     (concat "created-call-path: /org/freedesktop/ModemManager1/Call/12\n"
+             "error: ModemManager owner changed")
+     nil)
+    (concat "error: uncertain-call-path="
+            "/org/freedesktop/ModemManager1/Call/12; "
+            "ModemManager owner changed")))
+  (should (equal (emacsos-pinephone-call-result 'answer "" t)
+                 "answered: call active"))
+  (should (equal (emacsos-pinephone-call-result 'hangup "" t)
+                 "hung-up: call ended"))
+  (should (equal
+           (emacsos-pinephone-call-result 'dial "" t)
+           "error: uncertain-call; dial helper completed without call identity")))
+
+(ert-deftest emacsos-openrc-abnormal-answer-retains-uncertain-call-path ()
+  (should
+   (equal
+    (emacsos-pinephone-call-result
+     'answer
+     "answering-call-path: /org/freedesktop/ModemManager1/Call/12"
+     nil)
+    (concat "error: uncertain-answer-call-path="
+            "/org/freedesktop/ModemManager1/Call/12; "
+            "answer helper terminated before final status")))
+  (should (equal
+           (emacsos-pinephone-call-result 'answer "" nil)
+           "error: uncertain-answer; answer helper failed without final status")))
+
+(ert-deftest emacsos-openrc-call-finished-prefixes-helper-failure ()
+  (let ((buffer (generate-new-buffer " *test-call-error*"))
+        delivered)
+    (with-current-buffer buffer (insert "modem rejected"))
+    (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'process-exit-status) (lambda (_) 1)))
+      (emacsos-pinephone-call-finished
+       'process "failed" 'dial (lambda (status) (setq delivered status))))
+    (should (equal delivered "error: modem rejected"))
+    (should-not (buffer-live-p buffer))))
 
 (ert-deftest emacsos-openrc-call-operation-cleans-buffer-after-launch-failure ()
   (let ((before (buffer-list)))
@@ -109,19 +227,57 @@
                (lambda (&rest _) (error "cannot launch"))))
       (should (string-prefix-p
                "error: call helper failed:"
-               (emacsos-pinephone-call-operation 'hangup nil)))
+               (emacsos-pinephone-call-operation 'hangup nil nil)))
+      (should (equal (buffer-list) before)))))
+
+(ert-deftest emacsos-openrc-call-operation-needs-stable-owner-before-launch ()
+  (let ((before (buffer-list)) launched)
+    (cl-letf (((symbol-function 'emacos-call--modem-manager-owner)
+               (lambda () ":1.fallback"))
+              ((symbol-function 'make-process)
+               (lambda (&rest _) (setq launched t))))
+      (should (equal
+               (emacsos-pinephone-call-operation
+                'dial nil "+14155550123")
+               "error: ModemManager owner unavailable"))
+      (should-not launched)
       (should (equal (buffer-list) before)))))
 
 (ert-deftest emacsos-openrc-call-audio-is-bounded-and-asynchronous ()
-  (let (seen)
+  (let (seen
+        (emacsos-pinephone-call-audio-process nil)
+        (emacsos-pinephone-call-audio-desired nil))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args) (setq seen args) 'process)))
       (emacsos-pinephone-call-audio t)
       (should (equal (plist-get seen :command)
                      '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "5"
                        "/usr/bin/callaudiocli" "-m" "1")))
-      (should (eq (plist-get seen :sentinel)
-                  #'emacsos-pinephone-call-audio-finished)))))
+      (should (functionp (plist-get seen :sentinel))))))
+
+(ert-deftest emacsos-openrc-call-audio-coalesces-to-latest-state ()
+  "A stale enable cannot finish after a requested normal-audio transition."
+  (let ((emacsos-pinephone-call-audio-process nil)
+        (emacsos-pinephone-call-audio-desired nil)
+        starts)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (push args starts)
+                 (if (= (length starts) 1) 'first 'second)))
+              ((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-buffer)
+               (lambda (process)
+                 (plist-get (if (eq process 'first) (car (last starts))
+                              (car starts))
+                            :buffer)))
+              ((symbol-function 'process-exit-status) (lambda (_) 0)))
+      (emacsos-pinephone-call-audio t)
+      (emacsos-pinephone-call-audio nil)
+      (should (= (length starts) 1))
+      (funcall (plist-get (car starts) :sentinel) 'first "finished")
+      (should (= (length starts) 2))
+      (should (equal (car (last (plist-get (car starts) :command))) "0"))
+      (should (eq emacsos-pinephone-call-audio-process 'second)))))
 
 (ert-deftest emacsos-openrc-wake-display-is-asynchronous ()
   (let (started noquery)

@@ -49,6 +49,16 @@ def test_eval_elisp_returns_emacsclient_stdout_on_success():
     assert kwargs["timeout"] == 15.0
 
 
+def test_eval_elisp_log_omits_source(caplog):
+    caplog.set_level("INFO")
+    source = '(emacos-call "+14155550123")'
+    with patch("emacsos_server.channel.phone_mod.call_emacs",
+               return_value=(True, "ok")):
+        _invoke(source)
+    assert source not in caplog.text
+    assert f"{len(source)} chars" in caplog.text
+
+
 # --- error contract ---------------------------------------------------------
 
 def test_eval_elisp_returns_error_prefix_on_elisp_failure():

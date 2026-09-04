@@ -13,7 +13,7 @@ boot_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=c21b33d6d9cc9aeced16f2914af44ec4a379f1f1def1b55f74716d50970d39b4
+manifest_hash=a16a0999077b9b28a542dfca740db9fbcbdc3208cb348882cc27bb13d46acdac
 mutating=0
 committed=0
 config_dir_created=0
@@ -274,7 +274,8 @@ for target in /usr/local/share/emacsos-openrc/os.el \
             fail "unsafe installed owner or links: $target"
     fi
 done
-[ -x /usr/bin/doas ] && [ -x /usr/bin/callaudiocli ] && [ -x /usr/bin/mmcli ] ||
+[ -x /usr/bin/doas ] && [ -x /usr/bin/callaudiocli ] && \
+    [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 
@@ -284,7 +285,7 @@ boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
 doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
 install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
 printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     >"$doas_tmp"
 chown root:root "$doas_tmp"

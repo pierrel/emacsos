@@ -405,13 +405,11 @@ breaks the no-retry hint.  Lift the classification into
 tool.  Deletes ~12 lines of substring matching + the dedicated
 unreachable-shape tests.
 
-** TODO Redact secrets in `/chat` request log
+** DONE Keep chat and elisp source out of request logs
 
-`app.py`'s `log.info("POST /chat msg=%r", req.message)` logs the
-user's chat input verbatim.  `channel._redact` exists and could be
-applied here.  Surfaced by the code-review team; not done in the
-channel PR because that PR shouldn't widen scope to `app.py`'s
-logging.
+*Shipped 2026-09-03.*  The =/chat= request and =eval_elisp= INFO records log
+only source lengths, not the user's message or evaluated Elisp.  This avoids
+depending on incomplete substring redaction for arbitrary private content.
 
 ** DONE Remote connectivity: WireGuard for the away phone
 

@@ -571,7 +571,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
 
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request):
-    log.info("POST /chat msg=%r", req.message)
+    log.info("POST /chat msg_chars=%d", len(req.message))
     phone_auth = req.phone.auth_file if req.phone is not None else None
     return StreamingResponse(
         _stream_turn(req.message, phone_auth, request, req.thread_id, req.workdir),

@@ -148,7 +148,7 @@ the T9 keyboard/action/utility/command bands — the function runs with
 `*keyboard*' as `current-buffer'.  nil (the default) means the normal keyboard
 when `emacos-use-internal-keyboard' is non-nil, or only utility and command
 rows when an external keyboard supplies text entry.  A call buffer sets this
-to paint Accept/Decline or Hang-up/Back (see phone-call.el).")
+to paint proposal, status, answer, or hang-up controls (see phone-call.el).")
 
 (defvar emacos--last-plane 'unset
   "The keyboard plane `emacos--render-page' last rendered.

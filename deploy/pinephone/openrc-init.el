@@ -250,36 +250,111 @@ every agent-config load."
         (t (message "emacsos: platform finalizer restore failed: %s"
                     (error-message-string err)))))))
 
-(defun emacsos-pinephone-call-finished (process _event operation)
-  "Report terminal PROCESS output for OPERATION and restore audio on failure."
+(defvar emacos-call--call-owner nil
+  "Unique owner of the tracked call or pathless recovery state.")
+
+(defun emacsos-pinephone-call-result (operation status success)
+  "Normalize helper STATUS, preserving uncertain dial and answer identity."
+  (let ((lines (split-string status "\n" t "[ \t\r]+"))
+        created answering terminal)
+    (dolist (line lines)
+      (when (string-match
+             "\\`created-call-path: \\(/org/freedesktop/ModemManager1/Call/[0-9]+\\)\\'"
+             line)
+        (setq created (match-string 1 line)))
+      (when (string-match
+             "\\`answering-call-path: \\(/org/freedesktop/ModemManager1/Call/[0-9]+\\)\\'"
+             line)
+        (setq answering (match-string 1 line)))
+      (when (pcase operation
+              ('dial
+               (or (string-match-p
+                    "\\`dialing: /org/freedesktop/ModemManager1/Call/[0-9]+\\'"
+                    line)
+                   (string-prefix-p "error:" line)))
+              ('answer (or (string-prefix-p "answered:" line)
+                           (string-prefix-p "error:" line)))
+              ('hangup (or (string-prefix-p "hung-up:" line)
+                           (string-prefix-p "error:" line))))
+        (setq terminal line)))
+    (cond
+     ((and terminal
+           (eq operation 'dial)
+           created
+           (string-prefix-p "error:" terminal)
+           (not (string-match-p
+                 "\\`error: \\(uncertain-\\)?call-path=/org/freedesktop/ModemManager1/Call/[0-9]+;"
+                 terminal)))
+      (format "error: uncertain-call-path=%s; %s"
+              created
+              (string-trim (substring terminal (length "error:")))))
+     (terminal terminal)
+     ((and (eq operation 'dial) created)
+      (format (concat "error: uncertain-call-path=%s; "
+                      "dial helper terminated before final status")
+              created))
+     ((and (eq operation 'answer) answering)
+      (format (concat "error: uncertain-answer-call-path=%s; "
+                      "answer helper terminated before final status")
+              answering))
+     ((and success (eq operation 'dial))
+      "error: uncertain-call; dial helper completed without call identity")
+     ((and success (eq operation 'answer)) "answered: call active")
+     ((and success (eq operation 'hangup)) "hung-up: call ended")
+     ((eq operation 'answer)
+      "error: uncertain-answer; answer helper failed without final status")
+     (success (format "%s completed" operation))
+     ((string-empty-p status) (format "error: %s helper failed" operation))
+     (t
+      (let ((detail (replace-regexp-in-string
+                     "[\r\n\t ]+" " " (string-trim status))))
+        (concat "error: "
+                (if (string-empty-p detail)
+                    (format "%s helper failed" operation)
+                  (truncate-string-to-width detail 4096 nil nil "…"))))))))
+
+(defun emacsos-pinephone-call-finished
+    (process _event operation completion)
+  "Report terminal PROCESS status through COMPLETION or a user message."
   (when (memq (process-status process) '(exit signal))
     (let* ((buffer (process-buffer process))
            (status (if (buffer-live-p buffer)
                        (with-current-buffer buffer (string-trim (buffer-string)))
-                     "")))
+                     ""))
+           (success (zerop (process-exit-status process)))
+           (result (emacsos-pinephone-call-result operation status success)))
       (unwind-protect
-          (if (zerop (process-exit-status process))
-              (message "%s" (if (string-empty-p status)
-                                 (format "%s completed" operation)
-                               status))
-            (when (memq operation '(dial answer))
-              (emacos-call--audio nil))
-            (when (eq operation 'answer)
-              (emacos-call--dismiss))
-            (message "emacos-call: %s"
-                     (if (string-empty-p status)
-                         (format "%s helper failed" operation)
-                       status)))
+          (if completion
+              (condition-case err
+                  (funcall completion result)
+                (error
+                 (message "emacos-call: completion failed: %s"
+                          (error-message-string err))))
+            (if success
+                (message "%s" result)
+              (when (memq operation '(dial answer))
+                (emacos-call--audio nil))
+              (when (eq operation 'answer)
+                (emacos-call--dismiss))
+              (message "emacos-call: %s" result)))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(defun emacsos-pinephone-call-operation (operation value)
-  "Start validated PinePhone call OPERATION for VALUE without blocking Emacs."
+(defun emacsos-pinephone-call-operation
+    (operation owner value &optional completion)
+  "Start call OPERATION for OWNER and VALUE; report via COMPLETION or messages."
   (let* ((buffer (generate-new-buffer " *emacsos-call*"))
          (args (append (list "-n" "/usr/local/sbin/emacsos-openrc-call"
                              (symbol-name operation))
+                       (and owner (list owner))
                        (and value (list value)))))
     (condition-case err
-        (progn
+        (if (and (or (memq operation '(dial answer))
+                     (and (eq operation 'hangup) value))
+                 (not owner))
+            (progn
+              (kill-buffer buffer)
+              "error: ModemManager owner unavailable")
+          (progn
           (make-process
            :name (format "emacsos-call-%s" operation)
            :buffer buffer
@@ -287,18 +362,23 @@ every agent-config load."
            :noquery t
            :sentinel (lambda (proc event)
                        (emacsos-pinephone-call-finished
-                        proc event operation)))
+                        proc event operation completion)))
           (pcase operation
-            ('dial "dialing: requested")
-            ('answer "answered: requested")
-            ('hangup "hung-up: requested")
-            (_ "error: unsupported call operation")))
+            ('dial "pending: dial requested")
+            ('answer "pending: answer requested")
+            ('hangup "pending: hangup requested")
+            (_ "error: unsupported call operation"))))
       (error
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (format "error: call helper failed: %s" (error-message-string err))))))
 
-(defun emacsos-pinephone-call-audio-finished (process _event)
-  "Report a terminal call-audio PROCESS failure and release its buffer."
+(defvar emacsos-pinephone-call-audio-process nil
+  "The one serialized callaudiocli process, including pending sentinel work.")
+(defvar emacsos-pinephone-call-audio-desired nil
+  "Latest requested call-audio state while a transition is running.")
+
+(defun emacsos-pinephone-call-audio-finished (process _event requested)
+  "Finish serialized audio PROCESS for REQUESTED and apply the latest state."
   (when (memq (process-status process) '(exit signal))
     (let ((buffer (process-buffer process)))
       (unwind-protect
@@ -308,22 +388,38 @@ every agent-config load."
                          (with-current-buffer buffer
                            (string-trim (buffer-string)))
                        "no diagnostic output")))
-        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))
+    (when (eq process emacsos-pinephone-call-audio-process)
+      (setq emacsos-pinephone-call-audio-process nil)
+      (unless (eq requested emacsos-pinephone-call-audio-desired)
+        (emacsos-pinephone-call-audio-start
+         emacsos-pinephone-call-audio-desired)))))
 
-(defun emacsos-pinephone-call-audio (active)
-  "Select call audio when ACTIVE without blocking the Emacs event loop."
+(defun emacsos-pinephone-call-audio-start (active)
+  "Start the one asynchronous audio transition to ACTIVE."
   (let ((buffer (generate-new-buffer " *emacsos-call-audio*")))
     (condition-case err
-        (make-process
-         :name "emacsos-call-audio"
-         :buffer buffer
-         :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "5"
-                        "/usr/bin/callaudiocli" "-m" (if active "1" "0"))
-         :noquery t
-         :sentinel #'emacsos-pinephone-call-audio-finished)
+        (setq emacsos-pinephone-call-audio-process
+              (make-process
+               :name "emacsos-call-audio"
+               :buffer buffer
+               :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "5"
+                              "/usr/bin/callaudiocli" "-m"
+                              (if active "1" "0"))
+               :noquery t
+               :sentinel (lambda (process event)
+                           (emacsos-pinephone-call-audio-finished
+                            process event active))))
       (error
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (signal (car err) (cdr err))))))
+
+(defun emacsos-pinephone-call-audio (active)
+  "Select call audio when ACTIVE, serializing and coalescing transitions."
+  (setq emacsos-pinephone-call-audio-desired (and active t))
+  (unless emacsos-pinephone-call-audio-process
+    (emacsos-pinephone-call-audio-start
+     emacsos-pinephone-call-audio-desired)))
 
 (defun emacsos-pinephone-wake-display ()
   "Wake the display and re-arm idle blanking without blocking ModemManager."

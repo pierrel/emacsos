@@ -1,6 +1,18 @@
 #+title: Inbound phone answering (detect → screen → answer/reject)
 #+date: 2026-06-18
 
+* Current implementation note (2026-09-03)
+
+The original hardware findings and legacy SIM7600 transport below remain
+valid.  The current shared call state machine is specified in
+[[file:2026-09-03-structural-outgoing-call-confirmation.org][Structural outgoing-call confirmation]].  Its persistent =CallAdded= and
+=StateChanged= matches accept any sender at the bus layer, then their callbacks
+require the immutable event sender to equal ModemManager's cached unique owner;
+=StateChanged= additionally requires the exact tracked call path.  The PinePhone platform backend also binds mutations that way and uses exact known-call
+hangup; the preserved SIM7600 transport remains global.  Only the PinePhone's
+deliberately pathless recovery action retains global hangup.  The older
+broad-sender, three-state, and multi-call descriptions below are historical.
+
 Receiving calls on the phone. Outbound (=emacos-call=) already exists; this adds
 the inbound half: detect a ringing call, show who's calling, let the user
 answer or decline. Sibling to the outbound call work and the call-audio

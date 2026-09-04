@@ -125,7 +125,7 @@ check_service() {
         fail 'process-group owner is absent'
     [ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
         "$(printf '%s\n' \
-            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+            'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ] ||
         fail 'UI authority is invalid'
     [ -x /usr/local/share/emacsos-openrc/session ] ||

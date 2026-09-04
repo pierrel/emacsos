@@ -202,14 +202,14 @@ grep -F 'timeout -s TERM -k 2 30 rc-service eg25-manager stop' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager stop' \
     "$deploy_dir/openrc-install-root" >/dev/null
-grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "case \$digits in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null
 grep -F "case \$call_id in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null
 grep -F 'ulimit -f 128' "$deploy_dir/openrc-call-root" >/dev/null
-grep -F 'timeout -s TERM -k 1 12 /usr/bin/mmcli' \
+grep -F 'timeout -s TERM -k 1 12 "$executable" "$@"' \
     "$deploy_dir/openrc-call-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-call-root" >/dev/null
 grep -F 'timeout -s TERM -k 1 20 /usr/bin/nmcli' \

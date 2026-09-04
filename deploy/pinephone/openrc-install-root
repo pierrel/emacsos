@@ -9,7 +9,7 @@ export PATH
 stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=c21b33d6d9cc9aeced16f2914af44ec4a379f1f1def1b55f74716d50970d39b4
+manifest_hash=a16a0999077b9b28a542dfca740db9fbcbdc3208cb348882cc27bb13d46acdac
 committed=0
 mutating=0
 lab_group_created=0
@@ -277,7 +277,8 @@ done
 for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     /usr/bin/pipewire-pulse /usr/bin/wireplumber /usr/bin/waydroid \
     /usr/bin/swayidle /usr/bin/doas /usr/bin/flock /usr/bin/setsid \
-    /usr/bin/alsaucm /usr/bin/callaudiocli /usr/bin/mmcli /usr/sbin/nft; do
+    /usr/bin/alsaucm /usr/bin/callaudiocli /usr/bin/mmcli /usr/bin/gdbus \
+    /usr/sbin/nft; do
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
 [ -d /etc/doas.d ] && [ ! -L /etc/doas.d ] || fail 'unsafe doas directory'
@@ -317,7 +318,7 @@ install -o root -g root -m 0600 /dev/null \
     /etc/doas.d/95-emacsos-ui.conf
 doas_rule_created=1
 printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     >/etc/doas.d/95-emacsos-ui.conf
 /usr/bin/doas -C /etc/doas.d/95-emacsos-ui.conf >/dev/null

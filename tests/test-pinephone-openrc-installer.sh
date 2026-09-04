@@ -133,7 +133,7 @@ for group in seat video audio; do
     getent group "$group" >/dev/null || addgroup -S "$group"
 done
 for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid \
-    alsaucm callaudiocli mmcli; do
+    alsaucm callaudiocli mmcli gdbus; do
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 install -d -o root -g root -m 0750 /etc/doas.d
@@ -280,7 +280,7 @@ fi
 [ -x /usr/local/libexec/emacsos-waydroid-container ]
 [ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
     "$(printf '%s\n' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
     'root:root:600:1:regular file' ]

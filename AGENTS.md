@@ -50,9 +50,11 @@ boot too).
 - **Layers: deterministic emacs primitives + an interpretive agent** (README "Layers"). Every
   device action is an emacs interactive command; the dividing line is *determinism*. Emacs
   commands are **deterministic primitives** — concrete arg in, same action out, no model in the
-  loop (e.g. `(emacos-call "+1XXXXXXXXXX")` just dials). The **agent is the interpretive layer**:
-  turning fuzzy intent ("call Ana") into a concrete primitive call — resolution, disambiguation,
-  confirmation — is the agent's job and lives in a **skill**, never in the primitive. Build a
+  loop (e.g. `(emacos-call "+1XXXXXXXXXX")` stages that number in the local call UI). The
+  **agent is the interpretive layer**: turning fuzzy intent ("call Ana") into a concrete primitive
+  call — resolution and disambiguation — is skill work. Safety-critical authorization may remain
+  a deterministic local UI boundary; the ordinary public flow dials a staged call only after two
+  phone actions. Build a
   feature as *a deterministic command (shared by user taps and agent elisp) + a skill that
   resolves intent down to that command's args*. Skills direct the agent to evaluate elisp; they
   don't add bespoke server tools. Agent-platform services that aren't device control (the model,
