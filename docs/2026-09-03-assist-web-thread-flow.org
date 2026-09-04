@@ -14,8 +14,7 @@ when Assist is temporarily unreachable.
 * User flow
 
 1. From any EmacsOS buffer, the user invokes =emacos-assist-web-open-thread=.
-   The primary phone affordance is a =Threads= command-row button; =C-t= and
-   =M-x emacos-assist-web-open-thread= are the keyboard equivalents. The phone
+   =C-c C-t= and =M-x emacos-assist-web-open-thread= are the entry points. The phone
    deliberately supports one modified key at a time, so prefix chords are not
    used.
 2. The minibuffer offers a completion list of cached and freshly fetched web
@@ -50,19 +49,18 @@ when Assist is temporarily unreachable.
    never opens an arbitrary phone path.
 
 =New thread= is also a top-level phone action, not an action that requires an
-existing thread. It is visible beside =Threads= in the ordinary command row
-and bound globally to =M-t=. On a first run with no cache, it fetches the
+existing thread. It is bound globally to =C-c C-n= and available through
+=M-x=. On a first run with no cache, it fetches the
 repository and harness catalog asynchronously, then opens its two completion
 prompts. Thus a repository with no existing thread is an ordinary first-use
 case, not a dead end.
 
-Within a thread, the command band has touch buttons and direct meta-key
-bindings: =M-r= refreshes the transcript, =M-d= shows Diff, =M-f= opens Files,
-=M-p= opens Pins, and =M-n= creates a new thread. The bindings are direct
-single modified keys because the phone supports its modifier layer naturally;
-they do not require an Emacs prefix chord. =ABORT= remains an explicit touch
-control while a run is in flight so it cannot be confused with normal =C-g=
-quit behavior.
+Within a thread, all actions use conventional direct =C-c C-…= bindings or
+=M-x=, never a second command-button UI: =C-c C-r= refreshes, =C-c C-d= shows
+Diff, =C-c C-f= opens Files, =C-c C-p= opens Pins, =C-c C-i= pins the assistant
+response at point, =C-c C-o= loads older history, =C-c C-n= creates a new
+thread, and =C-c C-a= attempts to abort an unclaimed run. File paths and the
+=Unpin= affordance are clickable references to the corresponding objects.
 
 The thread buffer must retain the normal EmacsOS property that chat stays
 readable while Assist runs and has a visible =ABORT= control.  It shows durable

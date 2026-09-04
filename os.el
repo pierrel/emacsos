@@ -721,9 +721,7 @@ Order each list by PRIORITY: the command list shows up to
 reachable via M-x.  Grow this incrementally.")
 
 (defvar emacos-global-commands
-  '(("Threads"       . emacos-assist-web-open-thread)
-    ("New thread"    . emacos-assist-web-new-thread)
-    ("Save"          . save-buffer)
+  '(("Save"          . save-buffer)
     ("Undo"          . undo)
     ("Find File"     . find-file)
     ("Switch Buffer" . switch-to-buffer)
@@ -754,7 +752,6 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos--chat-button "chat")
 (declare-function emacos--chat-button-label "chat")
 (declare-function emacos-assist--command-set "emacos-assist")
-(declare-function emacos-assist-web--command-set "assist-web")
 (declare-function emacos-assist-web-open-thread "assist-web")
 (declare-function emacos-assist-web-new-thread "assist-web")
 
@@ -801,7 +798,7 @@ rather than only M-x."
         (with-current-buffer buf (emacos-assist--command-set)))
        ((and buf (with-current-buffer buf
                    (derived-mode-p 'emacos-assist-web-mode)))
-        (with-current-buffer buf (emacos-assist-web--command-set)))
+        nil)
        ((and buf (eq buf (get-buffer emacos-net--buffer-name)))
         (emacos-net--command-set))
        ((and buf (boundp 'emacos-assist-web--workspace-read-only)

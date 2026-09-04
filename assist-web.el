@@ -904,34 +904,25 @@ fails, so the previous usable snapshot stays intact until this point."
       (emacos-assist-web--open-workspace emacos-assist-web--workspace)
     (emacos-assist-web-sync-workspace t)))
 
-(defun emacos-assist-web--command-set ()
-  "Compact command band for a canonical web-thread buffer."
-  (if emacos-assist-web--in-flight
-      (list (cons "ABORT" #'emacos-assist-web-abort)
-            (cons "Refresh" #'emacos-assist-web-refresh-thread)
-            (cons "Diff" #'emacos-assist-web-show-diff))
-    (list (cons "Refresh" #'emacos-assist-web-refresh-thread)
-          (cons "Files" #'emacos-assist-web-show-files)
-          (cons "Sync files" #'emacos-assist-web-sync-workspace)
-          (cons "Older" #'emacos-assist-web-load-older)
-          (cons "Diff" #'emacos-assist-web-show-diff)
-          (cons "Pins" #'emacos-assist-web-show-pins)
-          (cons "Pin" #'emacos-assist-web-pin-response)
-          (cons "New thread" #'emacos-assist-web-new-thread))))
-
 (define-derived-mode emacos-assist-web-mode text-mode "Assist Web"
   "Major mode for an existing canonical Assist Web thread."
   (variable-pitch-mode 1)
   (setq-local truncate-lines nil)
   (add-hook 'after-change-functions #'emacos-assist-web--after-change nil t))
 
-(global-set-key (kbd "C-t") #'emacos-assist-web-open-thread)
-(global-set-key (kbd "M-t") #'emacos-assist-web-new-thread)
-(define-key emacos-assist-web-mode-map (kbd "M-r") #'emacos-assist-web-refresh-thread)
-(define-key emacos-assist-web-mode-map (kbd "M-d") #'emacos-assist-web-show-diff)
-(define-key emacos-assist-web-mode-map (kbd "M-f") #'emacos-assist-web-show-files)
-(define-key emacos-assist-web-mode-map (kbd "M-p") #'emacos-assist-web-show-pins)
-(define-key emacos-assist-web-mode-map (kbd "M-n") #'emacos-assist-web-new-thread)
+;; C-c C-… keeps this client within normal Emacs's user-reserved convention.
+;; Every non-object action is reachable through M-x as well; the touch UI does
+;; not grow a parallel command-button surface.
+(global-set-key (kbd "C-c C-t") #'emacos-assist-web-open-thread)
+(global-set-key (kbd "C-c C-n") #'emacos-assist-web-new-thread)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-r") #'emacos-assist-web-refresh-thread)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-d") #'emacos-assist-web-show-diff)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-f") #'emacos-assist-web-show-files)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-p") #'emacos-assist-web-show-pins)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-i") #'emacos-assist-web-pin-response)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-o") #'emacos-assist-web-load-older)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-n") #'emacos-assist-web-new-thread)
+(define-key emacos-assist-web-mode-map (kbd "C-c C-a") #'emacos-assist-web-abort)
 
 (emacos-assist-web--load-catalog)
 
