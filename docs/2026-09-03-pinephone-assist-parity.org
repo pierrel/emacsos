@@ -298,16 +298,23 @@ WireGuard is enabled and starts with the phone.  Its profile routes only the
 WireGuard subnet, never Thinky's LAN address: its first activation exposed that
 the latter route makes the existing LAN SSH control connection disappear before
 the tunnel has established.  IPv6 LAN SSH recovered the phone, the stale route
-was removed, and ordinary LAN SSH then worked again.  The configured peer has
-sent authenticated handshake packets but received no reply, so Thinky's
-root-owned =wg0= still does not accept this installation's new phone key (or
-has an equivalent server-side mismatch).  After the one local-sudo peer
-registration succeeds, the persistent chat URL must change from Thinky's LAN
-address to its =10.0.0.1= WireGuard address and Emacs must reload that value;
-the server already listens on the WireGuard interface.  This ordering keeps
-today's LAN Assist working while making the final endpoint work both at home
-and away, without reintroducing the SSH-routing trap.  An away-from-Wi-Fi
-Assist test remains the final network acceptance check.
+was removed, and ordinary LAN SSH then worked again.  Thinky's root-owned
+=wg0= now accepts this installation's key.  The persistent chat URL is
+=http://<thinky-wg-ip>:8767/chat= and the server listens there.  A real Emacs
+chat turn arrived from =<phone-wg-ip>=, built the phone's Assist thread, and
+completed the model call.  This proves the chat UI uses the tunnel rather than
+the LAN address.
+
+The away-from-Wi-Fi handoff also passed without human intervention.  A detached
+test first armed a separate 60-second Wi-Fi recovery, activated the existing
+=emacsos-cellular= profile, disconnected Wi-Fi, and recreated =wg0= so its UDP
+socket binds the new carrier route.  =wwan0= became the default route; three
+pings over the tunnel reached Thinky in 133–198 ms, its =/chat= endpoint
+responded, and a fresh handshake completed.  The test restored Wi-Fi and
+recreated =wg0= once more so the normal home route is current.  The bounce is
+needed only after a Wi-Fi/cellular interface change, not for ordinary use or
+boot.  This fulfills the away Assist transport acceptance gate while preserving
+the safe LAN SSH control route.
 
 The current USB-C source advertises only the default Type-C current and no USB
 Power Delivery.  The phone therefore sees a 500 mA input even though the PMIC
@@ -328,9 +335,12 @@ effect caused the otherwise stopped Android stack to start during two checks;
 terminating the wrapper ran its bounded cleanup and removed the container and
 interface again.
 
-The remaining acceptance checks are the final outgoing and incoming call UI
-passes, including bidirectional audio and incoming display wake, plus the
-WireGuard handoff and the completed unattended soak.
+The final live call checks also passed end to end: an incoming carrier call
+woke the phone and completed with audio, while an Assist-proposed outgoing call
+required the visible two-tap confirmation and then completed with audio and
+hangup.  Combined with the nearly sixteen-hour no-suspend soak, charging,
+stable Emacs UI, and recurring WireGuard handshakes, this closes the PinePhone
+Assist parity acceptance for the current unattended configuration.
 
 * Rollback
 
