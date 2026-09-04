@@ -839,12 +839,37 @@ fails, so the previous usable snapshot stays intact until this point."
            (let ((buffer (get-buffer-create (format "*assist pins %s*" tid))))
              (with-current-buffer buffer
                (special-mode)
+               (setq-local emacos-assist-web--thread-id tid)
                (let ((inhibit-read-only t))
                  (erase-buffer)
                  (dolist (pin (alist-get 'pins value))
-                   (insert (format "[%s]\n%s\n\n" (alist-get 'created_at pin)
-                                   (alist-get 'text pin))))))
-             (switch-to-buffer buffer))))))))
+                   (insert (format "[%s]\n%s\n" (alist-get 'created_at pin)
+                                   (alist-get 'text pin)))
+                   (let ((start (point)))
+                     (insert "Unpin\n\n")
+                     (add-text-properties
+                      start (point)
+                      `(mouse-face highlight help-echo "Remove this pin"
+                                   emacos-assist-web-pin-id ,(alist-get 'response_id pin)
+                                   keymap ,(let ((map (make-sparse-keymap)))
+                                             (define-key map [mouse-1]
+                                               #'emacos-assist-web-unpin-at-point)
+                                             map))))))
+             (switch-to-buffer buffer)))))))))
+
+(defun emacos-assist-web-unpin-at-point ()
+  "Remove the response pin at point and refresh its pins buffer."
+  (interactive)
+  (let ((response-id (get-text-property (point) 'emacos-assist-web-pin-id)))
+    (if (not response-id)
+        (message "Tap an Unpin link")
+      (emacos-assist-web--request
+       "DELETE" (format "threads/%s/pins/%s" emacos-assist-web--thread-id response-id) nil
+       (lambda (_value error)
+         (if error
+             (message "Unpin failed: %s" error)
+           (message "Pin removed")
+           (emacos-assist-web-show-pins)))))))
 
 (defun emacos-assist-web-pin-response ()
   "Pin the finalized assistant response at point."
