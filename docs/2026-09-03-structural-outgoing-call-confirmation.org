@@ -255,3 +255,38 @@ the explicitly accepted full-trust boundary.
   legacy SIM7600 calls, and PinePhone call audio retain their behavior.
 - Both proposal states fit the real PinePhone pane.  The live step-by-step
   evidence shows no new ModemManager call object until the second confirmation.
+
+* Verification (2026-09-03)
+
+The converged local run passed all 285 Elisp tests, all 217 server tests, every
+PinePhone installer/helper/power script test, syntax and diff checks, and the
+real-model Docker smoke (streaming, =eval_elisp=, and =chat.el= round trip).
+Four substantive review rounds covered correctness, event-loop liveness,
+adversarial security, simplicity, design adherence, and documentation drift.
+
+Commit =0995fee= was deployed to the v25.06 OpenRC PinePhone.  The live Emacs
+reported watcher topology 2 with three persistent registrations and an exact
+unique ModemManager owner.  Public =emacos-call= staged a redacted synthetic
+number and returned =confirmation-required:= without changing the modem's call
+object list.  The first Call action, an unrelated action, and expiry after 15
+seconds likewise left the call list unchanged.  A second action against a
+temporarily substituted synthetic backend reached that backend exactly once;
+its terminal error produced the persistent =Call failed= surface with a
+=Dismiss= action, confirmed by an on-device screenshot, without touching the
+modem.  The real backend was restored and the test state cleared.
+
+A natural call-by-name request through the deployed Assist service loaded the
+call skill, staged one proposal, returned phone-confirmation guidance, and
+created no modem call object.  Server logs recorded only message and Elisp
+lengths.  Restarting ModemManager changed its unique owner while all three
+watcher handles stayed installed; Emacs remained responsive, the call state
+stayed idle, and the physical modem reappeared after 30 seconds.  Display blank
+and wake both preserved SSH/UI liveness.  Kernel suspend and its former helper
+and privilege rule remain absent; only 60-second display blanking remains.
+
+The Sway seat exposes keyboard and touch but no virtual pointer, so unattended
+tests invoked the exact button action functions rather than synthesizing a
+physical touchscreen event.  No live carrier call was placed while the user
+was away.  Earlier live testing already proved outgoing and incoming carrier
+audio; the remaining human check is one ordinary physical two-tap call after
+review.
