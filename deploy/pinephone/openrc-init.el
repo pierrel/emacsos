@@ -541,6 +541,13 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
                 (insert-file-contents url-file)
                 (string-trim (buffer-string)))
             "http://localhost:8765/chat")))
+  (let ((url-file "/etc/emacsos-openrc/assist-web-url"))
+    (setq emacos-assist-web-api-url
+          (if (file-readable-p url-file)
+              (with-temp-buffer
+                (insert-file-contents url-file)
+                (string-trim (buffer-string)))
+            "https://assist.invalid/api/v1/phone")))
   (defvar emacos-agent-file "/var/lib/emacsos-lab/.emacs.d/emacsos/agent.el"
     "Persistent agent configuration applied by Assist.")
   (require 'server)

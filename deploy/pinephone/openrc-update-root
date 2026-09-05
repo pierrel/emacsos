@@ -13,10 +13,13 @@ boot_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=3da4c1a247c24aedaa44216d8e1ac5e33b9ce96cd0d014a26af2820526adef8c
+manifest_hash=d8b0c64e61b4966a846b36cd170b7e5df6490e4ba6ae6469cdd09f1475ccdf69
 mutating=0
 committed=0
+restart_only=0
 config_dir_created=0
+token_parent_dir_created=0
+token_config_dir_created=0
 
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
@@ -136,6 +139,7 @@ cleanup() {
                 /usr/local/share/emacsos-openrc/session-power 0755
             restore_file os.el /usr/local/share/emacsos-openrc/os.el 0644
             restore_file chat.el /usr/local/share/emacsos-openrc/chat.el 0644
+            restore_file assist-web.el /usr/local/share/emacsos-openrc/assist-web.el 0644
             restore_file emacos-assist.el \
                 /usr/local/share/emacsos-openrc/emacos-assist.el 0644
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
@@ -148,6 +152,17 @@ cleanup() {
             restore_file openrc-network-root \
                 /usr/local/sbin/emacsos-openrc-network 0755
             restore_file openrc-chat-url /etc/emacsos-openrc/chat-url 0644
+            restore_file openrc-assist-web-url /etc/emacsos-openrc/assist-web-url 0644
+            restore_file assist-web-token \
+                /var/lib/emacsos-lab/.config/emacsos/assist-web-token 0600
+            if [ -f /var/lib/emacsos-lab/.config/emacsos/assist-web-token ]; then
+                chown emacsos-lab:emacsos-lab \
+                    /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+            fi
+            [ "$token_config_dir_created" -eq 0 ] ||
+                rmdir /var/lib/emacsos-lab/.config/emacsos 2>/dev/null || true
+            [ "$token_parent_dir_created" -eq 0 ] ||
+                rmdir /var/lib/emacsos-lab/.config 2>/dev/null || true
             restore_file openrc-emacs-server.nft \
                 /etc/nftables.d/49-emacsos-callback.nft 0644
             restore_file 95-emacsos-callback.nft \
@@ -162,6 +177,15 @@ cleanup() {
                     'emacsos-openrc-update: rollback UI failed to start' >&2
                 retain_backup
             fi
+        fi
+    elif [ "$restart_only" -eq 1 ] && [ "$committed" -eq 0 ]; then
+        if stop_ui >/dev/null 2>&1; then
+            start_ui >/dev/null 2>&1 ||
+                printf '%s\n' \
+                    'emacsos-openrc-update: unchanged UI failed to restart' >&2
+        else
+            printf '%s\n' \
+                'emacsos-openrc-update: UI did not quiesce; no files changed' >&2
         fi
     fi
     [ -z "$snapshot" ] || rm -rf -- "$snapshot"
@@ -198,7 +222,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-emacs-server.nft) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -208,7 +232,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 23 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 26 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
@@ -216,13 +240,13 @@ chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
-    waydroid-container.conf waydroid-container-wrapper os.el chat.el \
+    waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
     emacos-assist.el network.el phone-call.el openrc-call-root \
-    openrc-network-root openrc-chat-url openrc-emacs-server.nft; do
+    openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
+    assist-web-token; do
     install -o root -g root -m 0600 /dev/null "$snapshot/$name"
-    timeout -s TERM -k 1 10 sh -c \
-        'ulimit -f 2048; exec cp -- "$1" "$2"' sh \
-        "$stage/$name" "$snapshot/$name"
+    timeout -s TERM -k 1 10 su user -s /bin/sh -c \
+        "ulimit -f 2048; exec cat -- '$stage/$name'" >"$snapshot/$name"
     [ -f "$snapshot/$name" ] && [ ! -L "$snapshot/$name" ] ||
         fail "unsafe root snapshot: $name"
     [ "$(stat -c '%U:%G:%h:%F' "$snapshot/$name")" = \
@@ -234,7 +258,10 @@ done
 [ "$(sha256sum "$snapshot/openrc-manifest.sha256")" = \
     "$manifest_hash  $snapshot/openrc-manifest.sha256" ] || fail 'manifest hash mismatch'
 (cd "$snapshot" && sha256sum -c openrc-manifest.sha256) || fail 'payload hash mismatch'
+LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
+    "$snapshot/assist-web-token" || fail 'invalid Assist Web token'
 render_client_ip_template "$snapshot/openrc-chat-url"
+render_client_ip_template "$snapshot/openrc-assist-web-url"
 render_client_ip_template "$snapshot/openrc-emacs-server.nft"
 
 for directory in /usr/local/share/emacsos-openrc /usr/local/sbin \
@@ -255,6 +282,7 @@ for target in /usr/local/share/emacsos-openrc/init.el \
 done
 for target in /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/chat.el \
+    /usr/local/share/emacsos-openrc/assist-web.el \
     /usr/local/share/emacsos-openrc/emacos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
@@ -263,6 +291,7 @@ for target in /usr/local/share/emacsos-openrc/os.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-network \
     /etc/emacsos-openrc/chat-url \
+    /etc/emacsos-openrc/assist-web-url \
     /etc/nftables.d/49-emacsos-callback.nft \
     /etc/nftables.d/95-emacsos-callback.nft \
     /usr/local/sbin/emacsos-openrc-suspend \
@@ -283,6 +312,24 @@ done
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
 chown root:root "$backup"
 chmod 0700 "$backup"
+restart_only=1
+stop_ui || fail 'UI did not become quiescent'
+for directory in /var/lib/emacsos-lab /var/lib/emacsos-lab/.config \
+    /var/lib/emacsos-lab/.config/emacsos; do
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        [ -d "$directory" ] && [ ! -L "$directory" ] &&
+            [ "$(stat -c '%U:%G:%F' "$directory")" = \
+                'emacsos-lab:emacsos-lab:directory' ] ||
+            fail "unsafe Assist Web configuration directory: $directory"
+    fi
+done
+token_target=/var/lib/emacsos-lab/.config/emacsos/assist-web-token
+if [ -e "$token_target" ] || [ -L "$token_target" ]; then
+    [ -f "$token_target" ] && [ ! -L "$token_target" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$token_target")" = \
+            'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
+        fail 'unsafe installed Assist Web token'
+fi
 for pair in \
     'openrc-init.el:/usr/local/share/emacsos-openrc/init.el' \
     'dtach-shell.el:/usr/local/share/emacsos-openrc/dtach-shell.el' \
@@ -292,6 +339,7 @@ for pair in \
     'openrc-session-power:/usr/local/share/emacsos-openrc/session-power' \
     'os.el:/usr/local/share/emacsos-openrc/os.el' \
     'chat.el:/usr/local/share/emacsos-openrc/chat.el' \
+    'assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el' \
     'emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     'network.el:/usr/local/share/emacsos-openrc/network.el' \
     'phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el' \
@@ -300,6 +348,8 @@ for pair in \
     'openrc-call-root:/usr/local/sbin/emacsos-openrc-call' \
     'openrc-network-root:/usr/local/sbin/emacsos-openrc-network' \
     'openrc-chat-url:/etc/emacsos-openrc/chat-url' \
+    'openrc-assist-web-url:/etc/emacsos-openrc/assist-web-url' \
+    'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token' \
     'openrc-emacs-server.nft:/etc/nftables.d/49-emacsos-callback.nft' \
     '95-emacsos-callback.nft:/etc/nftables.d/95-emacsos-callback.nft' \
     '95-emacsos-ui.conf:/etc/doas.d/95-emacsos-ui.conf'; do
@@ -309,7 +359,7 @@ for pair in \
 done
 
 mutating=1
-stop_ui
+restart_only=0
 boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
 doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
 install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
@@ -328,7 +378,7 @@ doas_tmp=
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el chat.el emacos-assist.el network.el phone-call.el \
+for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -351,6 +401,18 @@ if [ ! -d /etc/emacsos-openrc ]; then
 fi
 install -o root -g root -m 0644 "$snapshot/openrc-chat-url" \
     /etc/emacsos-openrc/chat-url
+install -o root -g root -m 0644 "$snapshot/openrc-assist-web-url" \
+    /etc/emacsos-openrc/assist-web-url
+if [ ! -d /var/lib/emacsos-lab/.config ]; then
+    token_parent_dir_created=1
+fi
+if [ ! -d /var/lib/emacsos-lab/.config/emacsos ]; then
+    token_config_dir_created=1
+fi
+install -d -o emacsos-lab -g emacsos-lab -m 0700 \
+    /var/lib/emacsos-lab/.config /var/lib/emacsos-lab/.config/emacsos
+install -o emacsos-lab -g emacsos-lab -m 0600 "$snapshot/assist-web-token" \
+    /var/lib/emacsos-lab/.config/emacsos/assist-web-token
 install -o root -g root -m 0644 "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 rm -f -- /etc/nftables.d/95-emacsos-callback.nft
@@ -367,13 +429,18 @@ cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
 cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
 cmp -s "$snapshot/openrc-chat-url" /etc/emacsos-openrc/chat-url
+cmp -s "$snapshot/openrc-assist-web-url" /etc/emacsos-openrc/assist-web-url
+cmp -s "$snapshot/assist-web-token" \
+    /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+[ "$(stat -c '%U:%G:%a:%h:%F' /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
+    'emacsos-lab:emacsos-lab:600:1:regular file' ]
 cmp -s "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 [ ! -e /etc/nftables.d/95-emacsos-callback.nft ] &&
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el chat.el emacos-assist.el network.el phone-call.el \
+for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done

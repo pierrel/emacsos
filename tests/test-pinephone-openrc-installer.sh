@@ -16,17 +16,22 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
-    openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
+    openrc-call-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
     waydroid-container-wrapper; do
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el emacos-assist.el network.el phone-call.el; do
+for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
+printf '%s\n' test-assist-web-token \
+    >/home/user/.cache/emacsos-openrc-stage/assist-web-token
+chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-token
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-token
 
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "apk $*" >>/tmp/apk-log' 'exit 0' \
     >/usr/bin/apk
@@ -290,6 +295,13 @@ fi
     'root:root:600:1:regular file' ]
 [ "$(cat /etc/emacsos-openrc/chat-url)" = \
     'http://198.51.100.10:8765/chat' ]
+[ "$(cat /etc/emacsos-openrc/assist-web-url)" = \
+    'https://198.51.100.10:5050/api/v1/phone' ]
+[ "$(cat /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
+    test-assist-web-token ]
+[ "$(stat -c '%U:%G:%a:%h:%F' \
+    /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
+    'emacsos-lab:emacsos-lab:600:1:regular file' ]
 grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 grep -F 'iifname "wg0" tcp dport 8766' \
@@ -297,6 +309,7 @@ grep -F 'iifname "wg0" tcp dport 8766' \
 grep -F 'tcp dport 8766 drop' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 if grep -F '@DEPLOY_CLIENT_IP@' /etc/emacsos-openrc/chat-url \
+    /etc/emacsos-openrc/assist-web-url \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null; then
     printf '%s\n' 'installed deployment template retained its placeholder' >&2
     exit 1
@@ -319,6 +332,7 @@ mv /etc/nftables.d/49-emacsos-callback.nft \
     /etc/nftables.d/95-emacsos-callback.nft
 rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/chat.el \
+    /usr/local/share/emacsos-openrc/assist-web.el \
     /usr/local/share/emacsos-openrc/emacos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
@@ -339,6 +353,8 @@ DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
     /bin/sh /source/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
 [ -f /etc/emacsos-openrc/chat-url ]
+[ -f /etc/emacsos-openrc/assist-web-url ]
+cmp -s /repo/assist-web.el /usr/local/share/emacsos-openrc/assist-web.el
 cmp -s /source/openrc-init.el /usr/local/share/emacsos-openrc/init.el
 cmp -s /source/openrc-sway.config \
     /usr/local/share/emacsos-openrc/sway.config

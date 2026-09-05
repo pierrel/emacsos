@@ -9,7 +9,7 @@
 #   2. Start the container with --network=host so its emacs daemon
 #      binds to the host's 127.0.0.1:12345 -- shared loopback is the
 #      cleanest topology for a single-host simulation.
-#   3. Start emacsos-server on port 8765 in the background.
+#   3. Start emacsos-server on the configured smoke port (8765 by default).
 #   4. Read the auth file from the running daemon (docker exec).
 #   5. From inside the container, POST /chat to the server with the
 #      auth-file contents in the request body -- the production

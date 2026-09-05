@@ -1,7 +1,7 @@
 #+title: Assist web threads in EmacsOS
 #+date: 2026-09-03
 
-State: Step 1 API merged; Step 2 client in progress
+State: Step 1 API merged; Step 2 client implemented and under final review
 
 * Product requirement
 
@@ -52,9 +52,9 @@ case, not a dead end.
 All Assist Web commands use the conventional =C-c C-a= prefix and are also
 available through =M-x=; there is no second command-button UI. =C-c C-a t=
 opens a thread, =C-c C-a n= starts a new thread, =C-c C-a r= refreshes the
-thread catalog, =C-c
-C-a s= sends, =C-c C-a o= loads older history, and =C-c C-a a= attempts to
-abort an unclaimed run.
+thread catalog, =C-c C-a g= refreshes the current thread, =C-c C-a s= sends,
+=C-c C-a o= loads older history, and =C-c C-a a= attempts to abort an
+unclaimed run.
 
 The thread buffer must retain the normal EmacsOS property that chat stays
 readable while Assist runs and has an =Abort= command. It shows durable
@@ -77,8 +77,8 @@ capture management stay on the web rather than becoming a second UI to maintain.
   the entry came from cache.  It sorts in the same state-aware order as Assist
   web, with recent activity breaking ties.
 - Completion matching is case-insensitive and matches both the complete title
-  and a normalized search key. Normalization removes only leading emoji and
-  whitespace, never text in the middle of a title or meaningful punctuation.
+  and Assist's server-provided normalized search description. The client does
+  not maintain a second title-normalization implementation.
 - The first use may show cached entries immediately and refresh on request;
   a failed refresh leaves the previous cache visibly marked as cached.
 - Creating a thread presents repository and harness choices through the same
@@ -230,7 +230,7 @@ framework route layout.
 * Step 2 implementation plan
 
 1. Keep =assist-web.el= as a thin asynchronous client of the merged phone API.
-   Retain only the cached catalog, canonical snapshot/history, draft, send,
+   Retain only the cached catalog, bounded recent snapshot, draft, send,
    run-observation, and abort surfaces for this step. The currently prototyped
    workspace, diff, file-link, and pin commands belong to later delivery steps
    and must not be exposed or tested as Step 2 behavior.
@@ -248,8 +248,9 @@ framework route layout.
    sends that exact pair only; editing the draft first clears the retry identity
    and mints a new key. Failed observation leaves the pending response visibly
    incomplete and offers refresh, never silently resubmission.
-5. Merge an older page only after checking its opaque cursor and chronology.
-   Keep the server's byte-bounded =next_before= cursor from the older page, so
+5. Merge an older page only after checking its thread identity, requested
+   cursor, non-overlapping message identities, and advancing next cursor. Keep
+   the server's byte-bounded =next_before= cursor from the older page, so
    pagination never skips messages the server omitted under its response bound.
 6. Cover cached-open, stale/offline behavior, duplicate-title buffers,
    idempotent retry/edit behavior, terminal/error stream teardown, history
@@ -264,3 +265,44 @@ framework route layout.
 - Workspace snapshot publication, dired restrictions, and file-link refresh
   remain real later-step concerns but are out of Step 2 rather than partially
   shipping an unsafe or slow approximation.
+
+* Step 2 implementation
+
+=assist-web.el= is the complete Step 2 client. It owns one buffer-local state
+machine per canonical thread. A phone-wide reservation shared with =chat.el=
+covers the POST-acceptance and observation lifecycle of the single active run.
+Catalog refreshes, thread refreshes, sends,
+and streams carry independent generations, so a late response cannot replace
+state created by a later user action. Entering an already open thread reuses
+its buffer by opaque thread id and never redraws over an active send.
+
+The editable prompt is delimited by markers rather than rediscovered from its
+text. Multiline input, leading spaces, and trailing spaces therefore survive
+cache, retry, and send exactly. Before a POST, the client atomically persists
+the exact text and idempotency key. A local cache failure prevents the POST and
+releases the run reservation. Once Assist accepts a new thread, its canonical
+per-thread draft is saved before the local new-thread draft is removed. An
+accepted run whose observation is interrupted is restored as a visible pending
+turn after Emacs restarts.
+
+Catalogs and recent snapshots remain one bounded JSON record each. Older
+history pages are combined only in memory and are not persisted, so repeated
+history browsing cannot grow the disk cache without bound. Cache write
+failures are contained and visible rather than interrupting network callbacks
+or leaving the UI reserved forever.
+
+All requests require an HTTPS endpoint and a bounded, header-safe bearer token.
+The client disables redirects, automatic URL caching, URL debug output,
+transparent content encoding, and URL-library retries. It bounds JSON bodies,
+HTTP headers, and individual SSE records. SSE is accepted only after a 2xx
+=text/event-stream= response, and the final process buffer is retained long
+enough to parse a terminal event even when the URL library detaches it.
+
+The v25.06/OpenRC installer and updater deploy =assist-web.el=, render the
+Assist endpoint from the deployment client's protected-network address, and
+install the operator-supplied token as
+=/var/lib/emacsos-lab/.config/emacsos/assist-web-token= owned by
+=emacsos-lab= with mode =0600=. The secret is validated as a single bounded
+token but is deliberately excluded from the tracked payload manifest. The
+legacy =phone-install= path likewise refuses its sentinel URL and requires an
+explicit HTTPS endpoint plus a private token file.

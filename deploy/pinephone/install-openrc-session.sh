@@ -12,6 +12,14 @@ deploy_dir=$repo_dir/deploy/pinephone
 stage=/home/user/.cache/emacsos-openrc-stage
 bootstrap=/home/user/.cache/emacsos-openrc-bootstrap
 bootstrap_local=
+token_file=${ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token}
+
+[ -f "$token_file" ] && [ ! -L "$token_file" ] &&
+    LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
+        "$token_file" || {
+    printf '%s\n' 'Assist Web token file must contain one safe token' >&2
+    exit 1
+}
 
 cleanup() {
     [ -z "$bootstrap_local" ] || rm -f -- "$bootstrap_local"
@@ -42,6 +50,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-chat-url" \
+    "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/openrc-boot-mode" \
@@ -52,10 +61,12 @@ scp -q "$@" \
 scp -q "$@" \
     "$repo_dir/os.el" \
     "$repo_dir/chat.el" \
+    "$repo_dir/assist-web.el" \
     "$repo_dir/emacos-assist.el" \
     "$repo_dir/network.el" \
     "$repo_dir/phone-call.el" \
     "$phone_host:$stage/"
+scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
 scp -q "$@" "$deploy_dir/openrc-install-root" "$phone_host:$bootstrap/"
 ssh -T "$@" "$phone_host" \
     "chmod 0600 '$bootstrap/openrc-install-root' && chmod 0600 '$stage'/*"

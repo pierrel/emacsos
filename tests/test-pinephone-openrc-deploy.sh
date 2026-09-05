@@ -24,12 +24,13 @@ manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
     openrc-session-power openrc-process-group openrc-suspend-root \
-    openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
+    openrc-call-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el chat.el emacos-assist.el network.el phone-call.el; do
+for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
 cp -- "$deploy_dir/openrc-manifest.sha256" "$manifest_stage/"
@@ -38,12 +39,14 @@ manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
-expected='chat.el
+expected='assist-web.el
+chat.el
 dtach-shell-init.el
 dtach-shell.el
 emacos-assist.el
 emacsos-ui.initd
 network.el
+openrc-assist-web-url
 openrc-boot-mode
 openrc-call-root
 openrc-chat-url
@@ -253,6 +256,31 @@ if grep -F 'cp -P' "$deploy_dir/openrc-bootstrap-root" \
 fi
 grep -F 'phone_host=${PINEPHONE_HOST:?' "$deploy_dir/install-openrc-session.sh" >/dev/null
 grep -F 'PasswordAuthentication=no' "$deploy_dir/install-openrc-session.sh" >/dev/null
+grep -F 'ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token' \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'Assist Web token file must contain one safe token' \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'assist-web-token' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'su user -s /bin/sh -c' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'emacsos-lab:emacsos-lab:600:1:regular file' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+quiesce_line=$(grep -nF 'restart_only=1' "$deploy_dir/openrc-update-root")
+quiesce_line=${quiesce_line%%:*}
+token_check_line=$(grep -nF 'token_target=/var/lib/emacsos-lab' \
+    "$deploy_dir/openrc-update-root")
+token_check_line=${token_check_line%%:*}
+token_backup_line=$(grep -nF \
+    "'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token'" \
+    "$deploy_dir/openrc-update-root")
+token_backup_line=${token_backup_line%%:*}
+[ "$quiesce_line" -lt "$token_check_line" ]
+[ "$token_check_line" -lt "$token_backup_line" ]
+if grep -F 'assist-web-token' "$deploy_dir/openrc-manifest.sha256" >/dev/null; then
+    printf '%s\n' 'secret token must not be pinned in the public manifest' >&2
+    exit 1
+fi
 
 grep -F 'Exec=/usr/local/libexec/emacsos-waydroid-container' \
     "$deploy_dir/waydroid-container.service" >/dev/null
@@ -286,6 +314,8 @@ grep -F 'emacos-use-internal-keyboard nil' "$deploy_dir/openrc-init.el" >/dev/nu
 grep -F 'emacos-initial-buffer-function #'"'"'emacos--chat-buffer' \
     "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F '"/etc/emacsos-openrc/assist-web-url"' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacos-assist-web-api-url' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'make-process' "$deploy_dir/openrc-init.el" >/dev/null
 if grep -Eq '/home/|192\.168\.' \
         "$deploy_dir/openrc-init.el" \
@@ -294,6 +324,7 @@ if grep -Eq '/home/|192\.168\.' \
         "$deploy_dir/openrc-process-group" \
         "$deploy_dir/openrc-sway.config" \
         "$deploy_dir/openrc-chat-url" \
+        "$deploy_dir/openrc-assist-web-url" \
         "$deploy_dir/openrc-emacs-server.nft" \
         "$deploy_dir/emacsos-ui.initd"; then
     printf '%s\n' 'OpenRC payload contains operator-specific data' >&2

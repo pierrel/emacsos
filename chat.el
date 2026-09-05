@@ -61,6 +61,9 @@ the budget and can tap ABORT to cancel.  See design doc §6."
 (defvar emacos--chat-in-flight nil
   "Non-nil while a stream is open.  Re-entrancy guard for SEND.")
 
+(defvar emacos--assist-active-surface nil
+  "Owner of the phone-wide Assist request slot, or nil when it is free.")
+
 (defvar emacos--chat-can-rollback nil
   "Non-nil when the last turn applied a config (an `applied' event
 arrived), so the chat command list offers a ROLLBACK entry (at the
@@ -142,8 +145,7 @@ rather than pushing it forward.")
 
 ;; The chat stream engine is buffer-agnostic: handlers render into the
 ;; buffer that initiated the current stream, not the literal *chat*.  That
-;; buffer is the *chat* scratch, a file-backed `emacos-assist-mode' buffer, or
-;; a canonical `emacos-assist-web-mode' buffer.
+;; buffer is the *chat* scratch or a file-backed `emacos-assist-mode' buffer.
 ;; The single server-wide stream lock means only one stream is ever in
 ;; flight, so this global safely names its target for the duration.
 (defvar emacos--chat-stream-buffer nil
@@ -464,6 +466,8 @@ of the terminal handlers (end, error, abort, watchdog)."
         emacos--chat-last-event-time nil
         emacos--chat-in-flight nil
         emacos--chat-process nil)
+  (when (eq emacos--assist-active-surface 'chat)
+    (setq emacos--assist-active-surface nil))
   ;; Re-render the keyboard page so CLEAR returns + ABORT goes away.
   (when (fboundp 'emacos--render-page)
     (emacos--render-page)))
@@ -567,12 +571,15 @@ url-retrieve time is what we must preserve."
   (lambda (proc bytes)
     (when (functionp url-filter)
       (funcall url-filter proc bytes))
-    (let ((buf (process-buffer proc)))
-      (when (and buf (buffer-live-p buf))
-        (with-current-buffer buf
-          (when (and (boundp 'url-http-end-of-headers)
-                     url-http-end-of-headers)
-            (emacos--chat-drain-body)))))))
+    ;; url-http may drain an aborted process after another request starts.
+    ;; Only the process currently owning the phone-wide chat state may dispatch.
+    (when (eq proc emacos--chat-process)
+      (let ((buf (process-buffer proc)))
+        (when (and buf (buffer-live-p buf))
+          (with-current-buffer buf
+            (when (and (boundp 'url-http-end-of-headers)
+                       url-http-end-of-headers)
+              (emacos--chat-drain-body))))))))
 
 ;; Note: we used to wrap the process-sentinel for client-side
 ;; connection-lost detection, but url-http SWAPS its sentinel as the
@@ -650,10 +657,13 @@ markers/lines after the UI has been cleaned up."
   "Open a streaming request to /chat with SURFACE's current input.
 SURFACE defaults to the *chat* buffer; a `emacos-assist-mode' file buffer
 sends its per-file thread id + the file's directory so the server keys a
-per-file conversation and operates on that directory."
+  per-file conversation and operates on that directory."
   (interactive)
-  (if emacos--chat-in-flight
-      (message "chat: stream in flight; tap ABORT to cancel")
+  (when (and (bufferp emacos--assist-active-surface)
+             (not (buffer-live-p emacos--assist-active-surface)))
+    (setq emacos--assist-active-surface nil))
+  (if (or emacos--chat-in-flight emacos--assist-active-surface)
+      (message "another Assist request is in flight; abort it before sending")
     (let* ((buf (or surface (emacos--chat-buffer)))
            (msg (emacos--chat-current-input buf))
            (ctx nil))
@@ -663,6 +673,7 @@ per-file conversation and operates on that directory."
         ;; empty-input tap must not reach it (it would dirty a fresh file).
         (setq ctx (emacos--chat-surface-context buf))
         (setq emacos--chat-in-flight t
+              emacos--assist-active-surface 'chat
               emacos--chat-tokens-seen 0
               emacos--chat-stream-buffer buf)
         ;; Render the you> line + clear input region right away;
@@ -971,10 +982,13 @@ Interactive so M-x can reach it; the Chat utility button reaches it via
       (set-window-buffer w buf))))
 
 (defun emacos--chat-surface-on-top ()
-  "Return the chat-surface buffer in the target (editor) window — the *chat*
-scratch, a file-backed `emacos-assist-mode' buffer, or a canonical
-`emacos-assist-web-mode' buffer — else nil.  Uses
-`emacos--target' (the authority on \"what's on top\"), not `current-buffer'
+  "Return an Assist-surface buffer in the target (editor) window.
+
+This recognizes the *chat* scratch, a file-backed `emacos-assist-mode'
+buffer, or a canonical `emacos-assist-web-mode' buffer for shared shell
+utilities; the web client has its own transport and parser.  Return nil for
+other buffers.  Uses `emacos--target' (the authority on \"what's on top\"),
+not `current-buffer'
 \(renders/callbacks run with *keyboard* current), so it agrees with
 `emacos--top-commands'."
   (let* ((w (emacos--target))

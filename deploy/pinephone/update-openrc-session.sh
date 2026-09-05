@@ -10,6 +10,14 @@ phone_host=${PINEPHONE_HOST:?set PINEPHONE_HOST to the SSH profile}
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 deploy_dir=$repo_dir/deploy/pinephone
 stage=/home/user/.cache/emacsos-openrc-update
+token_file=${ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token}
+
+[ -f "$token_file" ] && [ ! -L "$token_file" ] &&
+    LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
+        "$token_file" || {
+    printf '%s\n' 'Assist Web token file must contain one safe token' >&2
+    exit 1
+}
 
 set -- -o User=user -o BatchMode=yes -o PreferredAuthentications=publickey \
     -o PubkeyAuthentication=yes -o PasswordAuthentication=no \
@@ -32,6 +40,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-chat-url" \
+    "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/openrc-boot-mode" \
@@ -39,9 +48,10 @@ scp -q "$@" \
     "$deploy_dir/waydroid-container.conf" \
     "$deploy_dir/waydroid-container-wrapper" \
     "$phone_host:$stage/"
-scp -q "$@" "$repo_dir/os.el" "$repo_dir/chat.el" \
+scp -q "$@" "$repo_dir/os.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
     "$repo_dir/emacos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
     "$phone_host:$stage/"
+scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
 ssh -T "$@" "$phone_host" "chmod 0600 '$stage'/*"
 ssh -T "$@" "$phone_host" \
     'deploy_client_ip=${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP="$deploy_client_ip" /bin/sh' \

@@ -12,6 +12,7 @@
     (let ((kill-buffer-query-functions nil))
       (kill-buffer emacos--chat-buffer-name)))
   (setq emacos--chat-in-flight nil
+        emacos--assist-active-surface nil
         emacos--chat-can-rollback nil
         emacos--chat-confirm-pending nil
         emacos--chat-rollback-pending nil
@@ -253,6 +254,22 @@ UI in the in-flight/ABORT state with no process to clean it up."
       (should (string-match-p "disk full"
                               (with-current-buffer buf (buffer-string)))))))
 
+(ert-deftest chat-test-send-does-not-overlap-an-assist-web-request ()
+  "The local chat and canonical Web client share one phone request slot."
+  (chat-test--reset)
+  (let ((buf (get-buffer-create emacos--chat-buffer-name)) requested)
+    (emacos--chat-init-buffer buf)
+    (with-current-buffer buf (goto-char (point-max)) (insert "hello"))
+    (setq emacos--assist-active-surface (generate-new-buffer " *web-owner*"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (&rest _) (setq requested t))))
+          (emacos--chat-send buf)
+          (should-not requested)
+          (should-not emacos--chat-in-flight))
+      (kill-buffer emacos--assist-active-surface)
+      (setq emacos--assist-active-surface nil))))
+
 (ert-deftest chat-test-rollback-note-targets-chat-not-active-stream ()
   "An async /rollback result must land in *chat* (the legacy config flow),
 not in a .assist stream the user started before the callback returned."
@@ -340,6 +357,18 @@ bot line if a stream was open (start handler had run)."
       (setq emacos--chat-process 'fake-proc)
       (emacos--chat-abort)
       (should-not delete-called))))
+
+(ert-deftest chat-test-old-process-filter-cannot-dispatch-into-a-new-request ()
+  (chat-test--reset)
+  (let ((emacos--chat-process 'new-process)
+        raw-filter-called drained)
+    (cl-letf (((symbol-function 'emacos--chat-drain-body)
+               (lambda () (setq drained t))))
+      (funcall (emacos--chat-make-filter
+                (lambda (_proc _bytes) (setq raw-filter-called t)))
+               'old-process "late bytes"))
+    (should raw-filter-called)
+    (should-not drained)))
 
 ;;; Command-list integration
 
