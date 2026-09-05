@@ -1,0 +1,33 @@
+#!/bin/sh
+# Copy the reviewed root installer across the user-controlled staging boundary.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+export PATH
+
+source=/home/user/.cache/emacsos-openrc-bootstrap/openrc-install-root
+expected=@@ADMIN_SHA256@@
+copy=
+
+cleanup() {
+    [ -z "$copy" ] || rm -f -- "$copy"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ]
+[ "${SUDO_USER-}" = user ]
+[ -f "$source" ] && [ ! -L "$source" ]
+[ "$(stat -c '%U:%G:%a:%h:%F' "$source")" = 'user:user:600:1:regular file' ]
+[ "$(stat -c '%s' "$source")" -le 1048576 ]
+
+copy=$(mktemp /var/tmp/emacsos-openrc-root.XXXXXX)
+timeout -s TERM -k 1 10 sh -c \
+    'ulimit -f 2048; exec cp -- "$1" "$2"' sh "$source" "$copy"
+[ -f "$copy" ] && [ ! -L "$copy" ]
+[ "$(stat -c '%U:%G:%h:%F' "$copy")" = 'root:root:1:regular file' ]
+[ "$(stat -c '%s' "$copy")" -le 1048576 ]
+chmod 0700 "$copy"
+[ "$(sha256sum "$copy")" = "$expected  $copy" ]
+DEPLOY_CLIENT_IP=${DEPLOY_CLIENT_IP-} SUDO_USER=user /bin/sh "$copy"

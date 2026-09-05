@@ -422,13 +422,13 @@ stream that started meanwhile."
 (defun emacos--chat-handle-applied (event)
   "Handle the `applied' event: the agent shipped a config to the phone.
 Note it in the transcript and offer a ROLLBACK button.  `:broken' t
-means it was committed but errored while loading (a JSON false parses
-as the symbol `:false', so test for `t' explicitly)."
+means it was committed but loading or platform finalization errored (a JSON
+false parses as the symbol `:false', so test for `t' explicitly)."
   (let ((detail (or (plist-get event :detail) "config applied"))
         (broken (eq (plist-get event :broken) t)))
     (emacos--chat-note
      (if broken
-         (format "[applied but BROKEN — consider rolling back: %s]" detail)
+         (format "[applied but BROKEN; inspect failure: %s]" detail)
        (format "[%s]" detail)))
     (setq emacos--chat-can-rollback t emacos--chat-rollback-pending nil)
     (when (fboundp 'emacos--render-page)
@@ -949,9 +949,9 @@ repeated rollbacks don't leak ` *http*` buffers."
               (detail (or (plist-get result :detail) "")))
           (emacos--chat-note (format "[rollback %s: %s]" st detail)
                              (emacos--chat-buffer))
-          ;; A reached rollback (applied / load_error) consumes the undo;
-          ;; hide ROLLBACK until the next apply.  noop/unreachable/error
-          ;; keep it available to retry.
+          ;; A reached-and-recorded rollback (applied / load_error) consumes
+          ;; the undo; hide ROLLBACK until the next apply.  Other outcomes
+          ;; leave history unchanged and keep the same retry available.
           (when (member st '("applied" "load_error"))
             (setq emacos--chat-can-rollback nil emacos--chat-rollback-pending nil))
           (when (fboundp 'emacos--render-page)

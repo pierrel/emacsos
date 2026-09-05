@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from unittest.mock import patch
 
 import pytest
 
@@ -61,7 +62,6 @@ def test_rollback_reverts_to_prior_body(tmp_path):
     assert r.current().body == "(setq foo 2)"
     res = r.rollback()
     assert res.ok
-    assert res.version is not None
     # Reverting the "set foo to 2" commit restores foo 1.
     assert r.current().body == "(setq foo 1)"
 
@@ -84,6 +84,19 @@ def test_rollback_on_empty_repo_reports_nothing(tmp_path):
     res = r.rollback()  # only scaffold (or nothing) exists
     assert not res.ok
     assert "nothing to roll back" in res.detail
+
+
+def test_rollback_body_previews_without_changing_history(tmp_path):
+    r = _repo(tmp_path)
+    r.write_and_commit("(setq foo 1)", "set foo")
+    before = r.current().sha
+    assert r.rollback_body() == ""
+    assert r.current().sha == before
+
+
+def test_rollback_body_is_none_for_scaffold_only(tmp_path):
+    r = _repo(tmp_path)
+    assert r.rollback_body() is None
 
 
 def test_ensure_recovers_from_interrupted_staging(tmp_path):
@@ -155,6 +168,20 @@ def test_reapplying_identical_config_creates_no_empty_commit(tmp_path):
     # No new commit, same HEAD — no empty commit to break a later revert.
     assert sha2 == sha1
     assert count2 == count1
+
+
+def test_post_commit_sha_read_failure_stays_recorded(tmp_path):
+    r = _repo(tmp_path)
+    real_git = r._git
+
+    def git_without_head_read(*args):
+        if args == ("rev-parse", "HEAD"):
+            raise OSError("metadata unavailable")
+        return real_git(*args)
+
+    with patch.object(r, "_git", side_effect=git_without_head_read):
+        assert r.write_and_commit("(setq foo 1)", "set foo") is None
+    assert r.current().body == "(setq foo 1)"
 
 
 def test_rollback_after_identical_reapply_does_not_error(tmp_path):

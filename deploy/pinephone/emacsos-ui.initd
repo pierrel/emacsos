@@ -1,0 +1,80 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+
+name="EmacsOS minimal UI"
+description="Minimal Sway, PGTK Emacs, and on-screen keyboard session"
+
+supervisor=supervise-daemon
+command=/usr/bin/env
+command_args="-i PATH=/usr/bin:/usr/sbin:/bin:/sbin HOME=/var/lib/emacsos-lab USER=emacsos-lab LOGNAME=emacsos-lab XDG_RUNTIME_DIR=/run/emacsos-ui XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd WLR_BACKENDS=drm,libinput MOZ_ENABLE_WAYLAND=1 NO_AT_BRIDGE=1 /usr/local/share/emacsos-openrc/session"
+command_user=emacsos-lab
+directory=/var/lib/emacsos-lab
+input_file=/dev/null
+output_logger="logger -t emacsos-ui -p daemon.info"
+error_logger="logger -t emacsos-ui -p daemon.err"
+umask=077
+retry="TERM/20/KILL/5"
+respawn_delay=2
+respawn_max=3
+respawn_period=60
+
+depend() {
+    need localmount seatd cgroups
+    after modules
+}
+
+start_pre() {
+    local cgroup uid group groups runtime
+    cgroup=/sys/fs/cgroup/openrc.emacsos-ui
+    [ -d "$cgroup" ] && [ ! -L "$cgroup" ] || return 1
+    [ -f "$cgroup/cgroup.procs" ] && [ ! -L "$cgroup/cgroup.procs" ] || return 1
+    [ -w "$cgroup/cgroup.kill" ] && [ -r "$cgroup/cgroup.events" ] || return 1
+    grep -Fx "$$" "$cgroup/cgroup.procs" >/dev/null || return 1
+    if [ "$(grep -Fxc '# emacsos-openrc owns tty1' /etc/inittab || true)" -ne 1 ]; then
+        [ -f /run/emacsos-openrc-proof ] && [ ! -L /run/emacsos-openrc-proof ] || return 1
+        [ "$(stat -c '%U:%G:%a:%h:%F' /run/emacsos-openrc-proof)" = \
+            'root:root:600:1:regular file' ] || return 1
+    fi
+    uid=$(id -u emacsos-lab) || return 1
+    group=$(id -g emacsos-lab) || return 1
+    groups=$(id -Gn emacsos-lab | tr ' ' '\n' | sort) || return 1
+    [ "$groups" = "$(printf '%s\n' audio emacsos-lab seat video)" ] || return 1
+    runtime=/run/emacsos-ui
+    if [ -e "$runtime" ] || [ -L "$runtime" ]; then
+        [ -d "$runtime" ] && [ ! -L "$runtime" ] || return 1
+        [ "$(stat -c '%u:%g' "$runtime")" = "$uid:$group" ] || return 1
+        findmnt -rn -o TARGET "$runtime" | grep -Fx "$runtime" >/dev/null && return 1
+        rm -rf -- "$runtime"
+    fi
+    install -d -o "$uid" -g "$group" -m 0700 "$runtime"
+}
+
+stop_post() {
+    local attempt events group parent runtime uid
+    group=/sys/fs/cgroup/openrc.emacsos-ui
+    parent=/sys/fs/cgroup
+    if [ -e "$group" ] || [ -L "$group" ]; then
+        [ -d "$group" ] && [ ! -L "$group" ] || return 1
+        [ -w "$parent/cgroup.procs" ] || return 1
+        [ -w "$group/cgroup.kill" ] && [ -r "$group/cgroup.events" ] || return 1
+        printf '%s\n' "$$" >"$parent/cgroup.procs" || return 1
+        grep -Fx "$$" "$parent/cgroup.procs" >/dev/null || return 1
+        printf '%s\n' 1 >"$group/cgroup.kill" || return 1
+        attempt=0
+        while [ "$attempt" -lt 50 ]; do
+            events=$(cat "$group/cgroup.events") || return 1
+            printf '%s\n' "$events" | grep -Fx 'populated 0' >/dev/null && break
+            attempt=$((attempt + 1))
+            sleep 0.1
+        done
+        printf '%s\n' "$events" | grep -Fx 'populated 0' >/dev/null || return 1
+    fi
+    runtime=/run/emacsos-ui
+    [ -e "$runtime" ] || [ -L "$runtime" ] || return 0
+    [ -d "$runtime" ] && [ ! -L "$runtime" ] || return 1
+    uid=$(id -u emacsos-lab) || return 1
+    group=$(id -g emacsos-lab) || return 1
+    [ "$(stat -c '%u:%g' "$runtime")" = "$uid:$group" ] || return 1
+    findmnt -rn -o TARGET "$runtime" | grep -Fx "$runtime" >/dev/null && return 1
+    rm -rf -- "$runtime"
+}

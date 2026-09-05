@@ -11,10 +11,9 @@
 ;; state.  Nothing on the redisplay/tap path blocks the main loop (the
 ;; project's prime directive — see docs/2026-05-17-streaming-responses.org).
 ;;
-;; Connecting to a NEW *secured* wifi network needs a WPA password, which
-;; needs digits on the T9 keyboard — the "Numbers + symbols on the keyboard"
-;; roadmap item, not yet done.  So saved/open networks connect now; a new
-;; secured network degrades to a clear note rather than a half-built prompt.
+;; Connecting to a NEW *secured* wifi network needs a protected credential
+;; entry flow, which is not implemented yet.  Saved/open networks connect now;
+;; a new secured network degrades to a clear note rather than a leaky prompt.
 ;; `emacos-net--connect-kind' is the single seam where that lands later.
 
 (require 'cl-lib)
@@ -27,16 +26,24 @@
 
 (defcustom emacos-net-refresh-interval 30
   "Seconds between background network-status refreshes.
-Kept slow on purpose: `mmcli --signal-get' wakes the modem, and the
-status is glanceable, not real-time.  The Zero W is single-core ARM11."
+Kept slow because modem status polling costs power and the result is
+glanceable, not real-time."
   :type 'integer
   :group 'emacsos)
 
 (defconst emacos-net--buffer-name "*network*")
 
-(defconst emacos-net--cell-con "emacsos-cellular"
-  "NetworkManager connection name the cellular bring-up creates.
-Must match CON_NAME in deploy/cellular-bringup.sh.")
+(defcustom emacos-net-cell-connection "emacsos-cellular"
+  "NetworkManager connection name used for cellular data."
+  :type 'string
+  :group 'emacsos)
+
+(defcustom emacos-net-command-function nil
+  "Optional function translating nmcli ARGS into a process command list.
+nil runs nmcli directly.  A platform can return a narrowly privileged helper
+command while keeping network actions asynchronous."
+  :type '(choice (const nil) function)
+  :group 'emacsos)
 
 ;;; State
 
@@ -47,7 +54,8 @@ Must match CON_NAME in deploy/cellular-bringup.sh.")
   ssid                      ; current wifi SSID string, or nil
   signal                    ; 0-100 signal of the active iface, or nil
   (wifi-list nil)           ; list of plists (:ssid :signal :security :in-use :saved)
-  (cell-provisioned nil)    ; t once the emacsos-cellular connection exists
+  (cell-provisioned nil)    ; t once the named GSM connection exists
+  (cell-on nil)             ; t while that NetworkManager profile is active
   (cell-state "")           ; mmcli modem state: "registered" / "searching" / "" ...
   (stamp 0.0))              ; float-time of the snapshot
 
@@ -56,7 +64,29 @@ Must match CON_NAME in deploy/cellular-bringup.sh.")
 
 (defvar emacos-net--proc nil
   "Live status-reader process, or nil.  Single-flight guard: a refresh
-no-ops while this is live, so concurrent reads can't stack on the Zero W.")
+no-ops while this is live, so concurrent reads cannot stack on the phone.")
+
+(defun emacos-net--ensure-state-shape ()
+  "Reset cached network state when hot reload changes its struct layout."
+  (unless (condition-case nil
+              (progn (emacos-net-state-stamp emacos-net--state) t)
+            (error nil))
+    (setq emacos-net--state (make-emacos-net-state))))
+
+(defun emacos-net--discard-reader ()
+  "Discard an in-flight status read and its output buffer."
+  (when emacos-net--proc
+    (let ((proc emacos-net--proc))
+      (setq emacos-net--proc nil)
+      (set-process-sentinel proc #'ignore)
+      (when (process-live-p proc)
+        (delete-process proc))
+      (when (buffer-live-p (process-buffer proc))
+        (kill-buffer (process-buffer proc))))))
+
+;; `defvar' preserves old state and processes when this file is hot-reloaded.
+(emacos-net--ensure-state-shape)
+(emacos-net--discard-reader)
 
 (defvar emacos-net--timer nil
   "Repeat timer driving background refresh.  Guarded so a hot-reload of
@@ -111,11 +141,19 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
                              ((string-match-p "\\bdev wl" route) 'wifi)
                              ((string-match-p "\\bdev ww" route) 'cell)
                              (t 'none)))
-         ;; saved profiles + cell-provisioned, from `con show'
-         (saved nil) (cell-provisioned nil))
+         ;; saved profiles + cellular profile activity, from `con show'
+         (saved nil) (cell-provisioned nil) (cell-on nil))
     (dolist (l (emacos-net--section blob "CONS"))
-      (let* ((f (emacos-net--split-terse l)) (name (nth 0 f)) (type (nth 1 f)))
-        (when (string= name emacos-net--cell-con) (setq cell-provisioned t))
+      (let* ((f (emacos-net--split-terse l))
+             (name (nth 0 f))
+             (type (nth 1 f))
+             (device (nth 2 f)))
+        (when (and (string= name emacos-net-cell-connection)
+                   (string= type "gsm"))
+          (setq cell-provisioned t
+                cell-on (and device
+                             (not (string-empty-p device))
+                             (not (string= device "--")))))
         (when (string= type "802-11-wireless") (push name saved))))
     ;; wifi networks from `dev wifi'
     (let (wifi-list cur-ssid cur-signal)
@@ -150,6 +188,7 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
                        (t nil))
          :wifi-list (nreverse wifi-list)
          :cell-provisioned cell-provisioned
+         :cell-on cell-on
          :cell-state (or cell-state "")
          :stamp (float-time))))))
 
@@ -185,7 +224,7 @@ Wrapped so a redisplay-time error can never brick the modeline."
   "Classify wifi NET (a `wifi-list' plist) for connecting:
 `saved' (NM has a profile — no password), `open' (no security — no
 password), or `needs-password' (new secured network — blocked until the
-Numbers keyboard item lands; see the file header)."
+network page gains password entry; see the file header)."
   (cond ((plist-get net :saved) 'saved)
         ((let ((s (plist-get net :security))) (or (null s) (string-empty-p s))) 'open)
         (t 'needs-password)))
@@ -195,11 +234,11 @@ Numbers keyboard item lands; see the file header)."
 (defun emacos-net--reader-script ()
   "Shell script gathering every read into one delimited blob.
 One process, one sentinel — simpler and lighter than chaining readers.
-mmcli is queried only if a modem is present, to avoid waking it needlessly."
+The asynchronous mmcli attempt suppresses errors when no modem is present."
   (concat
    "echo @@RADIO; nmcli -t -f WIFI radio 2>/dev/null; "
-   "echo @@ROUTE; ip -o -4 route show default 2>/dev/null; "
-   "echo @@CONS;  nmcli -t -f NAME,TYPE con show 2>/dev/null; "
+   "echo @@ROUTE; ip -4 route show default 2>/dev/null; "
+   "echo @@CONS;  nmcli -t -f NAME,TYPE,DEVICE con show 2>/dev/null; "
    "echo @@WIFI;  nmcli -t -f ACTIVE,SSID,SIGNAL,SECURITY dev wifi 2>/dev/null; "
    "echo @@CELL;  mmcli -m any --output-keyvalue 2>/dev/null; "
    "echo @@END"))
@@ -229,12 +268,14 @@ wedge all future refreshes."
   (when (memq (process-status proc) '(exit signal))
     (let ((buf (process-buffer proc)))
       (unwind-protect
-          (when (buffer-live-p buf)
+          (when (and (eq proc emacos-net--proc)
+                     (buffer-live-p buf))
             (let ((blob (with-current-buffer buf (buffer-string))))
               (setq emacos-net--state (emacos-net--parse blob))
               (force-mode-line-update t)
               (emacos-net--render-if-shown)))
-        (setq emacos-net--proc nil)
+        (when (eq proc emacos-net--proc)
+          (setq emacos-net--proc nil))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 ;;; Control actions
@@ -242,16 +283,31 @@ wedge all future refreshes."
 (defun emacos-net--action (args)
   "Run an `nmcli' command (ARGS, a list of strings) async, then refresh.
 The post-action refresh is delayed ~1.5s so nmcli has time to settle."
-  (make-process
-   :name "emacos-net-act"
-   :buffer (generate-new-buffer " *emacos-net-act*")
-   :command (cons "nmcli" args)
-   :noquery t
-   :sentinel (lambda (p _e)
-               (when (memq (process-status p) '(exit signal))
-                 (when (buffer-live-p (process-buffer p))
-                   (kill-buffer (process-buffer p)))
-                 (run-with-timer 1.5 nil #'emacos-net--refresh)))))
+  (let (buffer)
+    (condition-case err
+        (let ((command (if emacos-net-command-function
+                           (funcall emacos-net-command-function args)
+                         (cons "nmcli" args))))
+          (setq buffer (generate-new-buffer " *emacos-net-act*"))
+        (make-process
+         :name "emacos-net-act"
+         :buffer buffer
+         :command command
+         :noquery t
+         :sentinel (lambda (p _e)
+                     (when (memq (process-status p) '(exit signal))
+                       (when (buffer-live-p (process-buffer p))
+                         (kill-buffer (process-buffer p)))
+                       (run-with-timer 1.5 nil #'emacos-net--refresh-after-action)))))
+      (error
+       (when (buffer-live-p buffer) (kill-buffer buffer))
+       (message "emacos-net: cannot change network: %s"
+                (error-message-string err))))))
+
+(defun emacos-net--refresh-after-action ()
+  "Replace any pre-action status read with a fresh one."
+  (emacos-net--discard-reader)
+  (emacos-net--refresh))
 
 (defun emacos-net-toggle-wifi ()
   "Toggle the wifi radio."
@@ -266,9 +322,9 @@ Only meaningful once `make cellular-bringup' has created the connection."
   (interactive)
   (if (emacos-net-state-cell-provisioned emacos-net--state)
       (emacos-net--action
-       (list "con" (if (eq (emacos-net-state-active-iface emacos-net--state) 'cell)
+       (list "con" (if (emacos-net-state-cell-on emacos-net--state)
                        "down" "up")
-             emacos-net--cell-con))
+             emacos-net-cell-connection))
     (message "Cellular not set up yet — run `make cellular-bringup APN=...'")))
 
 (defun emacos-net-connect (ssid)
@@ -279,7 +335,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
       ('saved (emacos-net--action (list "con" "up" ssid)))
       ('open  (emacos-net--action (list "dev" "wifi" "connect" ssid)))
       ('needs-password
-       ;; Deferred: a WPA password needs the number keyboard (not yet built).
+       ;; Deferred: this page has no credential-entry flow yet.
        (message "%s needs a password — number keys coming soon" ssid))
       (_ (message "Unknown network: %s" ssid)))))
 
@@ -308,10 +364,10 @@ Only meaningful once `make cellular-bringup' has created the connection."
         (if (emacos-net-state-cell-provisioned st)
             (progn
               (insert (format "Cell: %s%s\n"
-                              (if (eq (emacos-net-state-active-iface st) 'cell) "on" "off")
+                              (if (emacos-net-state-cell-on st) "on" "off")
                               (let ((s (emacos-net-state-cell-state st)))
                                 (if (string-empty-p s) "" (format " (%s)" s)))))
-              (emacos--btn (if (eq (emacos-net-state-active-iface st) 'cell)
+              (emacos--btn (if (emacos-net-state-cell-on st)
                                " Cell off " " Cell on ")
                            #'emacos-net-toggle-cell nil emacos--btn-label-scale))
           (insert "Cell: not set up (run cellular bring-up)"))
@@ -332,7 +388,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
               (insert "\n"))))
         (when (seq-some (lambda (n) (eq (emacos-net--connect-kind n) 'needs-password))
                         (emacos-net-state-wifi-list st))
-          (insert "\nSecured networks need the number keyboard — coming soon.\n")))
+          (insert "\nNew secured networks need credential entry — coming soon.\n")))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (goto-char (point-min)))
@@ -353,7 +409,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
 Labels flip with state, so this is derived fresh each render."
   (list (cons (if (eq (emacos-net-state-wifi-on emacos-net--state) t) "Wifi off" "Wifi on")
               #'emacos-net-toggle-wifi)
-        (cons (if (eq (emacos-net-state-active-iface emacos-net--state) 'cell)
+        (cons (if (emacos-net-state-cell-on emacos-net--state)
                   "Cell off" "Cell on")
               #'emacos-net-toggle-cell)
         (cons "Refresh" #'emacos-net--refresh)))

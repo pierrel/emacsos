@@ -1,6 +1,16 @@
 #+title: Call-by-name + the Layers model (deterministic primitives + interpretive agent)
 #+date: 2026-06-18
 
+* Current implementation note (2026-09-03)
+
+The principle and call-by-name flow below remain valid, but the public
+=emacos-call= primitive now stages a proposal instead of dialing immediately.
+The local UI requires two consecutive Call activations on the same visible
+proposal before the private transport can mutate the modem.  See
+[[file:2026-09-03-structural-outgoing-call-confirmation.org][Structural outgoing-call confirmation]] for the current state machine and
+security boundary.  Descriptions below that say =emacos-call= dials directly
+or place confirmation only in the agent are historical.
+
 The "call <name>" feature, and the architectural principle it established. The
 *hardware/recording* side (modem, PCM capture, transcription) is its sibling
 doc =2026-06-18-call-audio.org= (it lands with the hardware-build work — not in

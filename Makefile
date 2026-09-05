@@ -1,7 +1,31 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp smoke install-server-service deploy-sms-forward deploy-call-bridge
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge
+
+PINEPHONE_HOST ?= phoney
+export PINEPHONE_HOST
 
 local-connect-server:
 	ssh -t phone emacsclient -f server -t
+
+test-pinephone-scripts:
+	tests/test-pinephone-diagnostic-recovery.sh
+	tests/test-pinephone-openrc-deploy.sh
+	tests/test-pinephone-openrc-boot-mode.sh
+	tests/test-pinephone-openrc-installer.sh
+	tests/test-pinephone-openrc-call.sh
+	tests/test-pinephone-openrc-network.sh
+	tests/test-pinephone-openrc-power.sh
+	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
+
+pinephone-openrc-install: test-pinephone-scripts
+	deploy/pinephone/install-openrc-session.sh
+
+pinephone-openrc-ui:
+	ssh $(PINEPHONE_HOST) sudo -n /usr/local/sbin/emacsos-openrc-boot-mode ui
+	@echo 'Reboot the phone to enter the minimal UI.'
+
+pinephone-openrc-console:
+	ssh $(PINEPHONE_HOST) sudo -n /usr/local/sbin/emacsos-openrc-boot-mode console
+	@echo 'Reboot the phone to restore the tty1 console.'
 
 # === Phone deployment ===
 #

@@ -1,0 +1,193 @@
+#!/bin/sh
+# Serialize display and suspend state for the minimal OpenRC session.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+HOME=/var/lib/emacsos-lab
+XDG_RUNTIME_DIR=/run/emacsos-ui
+export PATH HOME XDG_RUNTIME_DIR
+unset SWAYSOCK
+umask 077
+
+runtime=$XDG_RUNTIME_DIR
+state=$runtime/power-state
+idle_origin=$runtime/idle-origin
+lock=$runtime/power-state.lock
+external_power=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp20x-usb-power-supply/power_supply/axp20x-usb/online
+sway_socket=
+wayland_socket=
+
+fail() {
+    printf 'emacsos-session-power: %s\n' "$1" >&2
+    exit 1
+}
+
+trap 'exit 1' HUP INT TERM
+
+[ "$#" -eq 1 ] || fail 'one action is required'
+case $1 in
+    press|idle-blank|resume|wake|suspend) ;;
+    *) fail 'unknown action' ;;
+esac
+
+[ "$(id -un)" = emacsos-lab ] || fail 'wrong service user'
+[ -d "$runtime" ] && [ ! -L "$runtime" ] || fail 'invalid runtime directory'
+[ "$(stat -c '%U:%G:%a:%F' "$runtime")" = \
+    'emacsos-lab:emacsos-lab:700:directory' ] || fail 'unsafe runtime directory'
+
+for candidate in "$runtime"/sway-ipc.*.sock; do
+    [ -S "$candidate" ] || continue
+    [ -z "$sway_socket" ] || fail 'ambiguous Sway socket'
+    [ "$(stat -c '%U:%G:%F' "$candidate")" = \
+        'emacsos-lab:emacsos-lab:socket' ] || fail 'unsafe Sway socket'
+    sway_socket=$candidate
+done
+[ -n "$sway_socket" ] || fail 'Sway socket is absent'
+for candidate in "$runtime"/wayland-*; do
+    [ -S "$candidate" ] || continue
+    [ -z "$wayland_socket" ] || fail 'ambiguous Wayland socket'
+    [ "$(stat -c '%U:%G:%F' "$candidate")" = \
+        'emacsos-lab:emacsos-lab:socket' ] || fail 'unsafe Wayland socket'
+    wayland_socket=$candidate
+done
+[ -n "$wayland_socket" ] || fail 'Wayland socket is absent'
+WAYLAND_DISPLAY=${wayland_socket##*/}
+export WAYLAND_DISPLAY
+
+: >"$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+case $1 in
+    press|resume|wake) flock -x 9 || fail 'power transition lock failed' ;;
+    idle-blank) flock -n -x 9 || fail 'power transition is busy' ;;
+    suspend) flock -w 2 -x 9 || fail 'power transition is busy' ;;
+esac
+
+publish_state() {
+    printf '%s\n' "$1" >"$state"
+}
+
+external_power_online() {
+    [ -f "$external_power" ] && [ ! -L "$external_power" ] || return 0
+    [ "$(sed -n '1p' "$external_power")" = 0 ] || return 0
+    return 1
+}
+
+sway() {
+    timeout -s TERM -k 1 3 swaymsg -s "$sway_socket" "$@" >/dev/null
+}
+
+restore_active() {
+    publish_state waking
+    output_ok=0
+    touch_ok=0
+    activity_ok=0
+    sway output DSI-1 power on && output_ok=1
+    sway input type:touch events enabled && touch_ok=1
+    if [ "$output_ok" -eq 1 ] && [ "$touch_ok" -eq 1 ]; then
+        timeout -s TERM -k 1 3 /usr/bin/wtype -k F24 && activity_ok=1
+    fi
+    if [ "$output_ok" -eq 1 ] && [ "$touch_ok" -eq 1 ] &&
+       [ "$activity_ok" -eq 1 ]; then
+        publish_state active
+        return 0
+    fi
+    return 1
+}
+
+enter_blank() {
+    origin=$1
+    publish_state blanking
+    touch_ok=0
+    output_ok=0
+    sway input type:touch events disabled && touch_ok=1
+    sway output DSI-1 power off && output_ok=1
+    if [ "$touch_ok" -eq 1 ] && [ "$output_ok" -eq 1 ]; then
+        if [ "$origin" = idle ]; then
+            : >"$idle_origin"
+        else
+            rm -f -- "$idle_origin"
+        fi
+        publish_state blank
+        return 0
+    fi
+    restore_active || true
+    return 1
+}
+
+if [ -f "$state" ] && [ ! -L "$state" ]; then
+    current=$(sed -n '1p' "$state")
+else
+    current=unknown
+fi
+case $current in
+    active|blank) ;;
+    *)
+        restore_active || fail 'could not recover interrupted power state'
+        rm -f -- "$idle_origin"
+        exit 0
+        ;;
+esac
+
+case $1 in
+    press)
+        case $current in
+            active)
+                if [ -e "$idle_origin" ] || [ -L "$idle_origin" ]; then
+                    [ -f "$idle_origin" ] && [ ! -L "$idle_origin" ] ||
+                        fail 'unsafe idle-origin marker'
+                    rm -f -- "$idle_origin"
+                else
+                    enter_blank manual
+                fi
+                ;;
+            blank)
+                restore_active
+                rm -f -- "$idle_origin"
+                ;;
+        esac
+        ;;
+    idle-blank)
+        if external_power_online; then
+            exit 0
+        elif [ "$current" = active ]; then
+            enter_blank idle
+        else
+            : >"$idle_origin"
+        fi
+        ;;
+    resume)
+        [ "$current" != blank ] || restore_active
+        ;;
+    wake)
+        restore_active
+        rm -f -- "$idle_origin"
+        ;;
+    suspend)
+        [ "$current" = blank ] || exit 0
+        [ -f "$idle_origin" ] && [ ! -L "$idle_origin" ] || exit 0
+        if external_power_online; then
+            restore_active
+            rm -f -- "$idle_origin"
+            exit 0
+        fi
+        set +e
+        doas -n /usr/local/sbin/emacsos-openrc-suspend
+        suspend_status=$?
+        set -e
+        case $suspend_status in
+        0|75)
+            exit 0
+            ;;
+        77)
+            restore_active
+            rm -f -- "$idle_origin"
+            ;;
+        *)
+            restore_active || true
+            rm -f -- "$idle_origin"
+            exit "$suspend_status"
+            ;;
+        esac
+        ;;
+esac

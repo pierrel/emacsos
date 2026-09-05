@@ -1,0 +1,292 @@
+#+title: Structural outgoing-call confirmation
+#+date: 2026-09-03
+
+* Objective
+
+Make an ordinary Assist call request incapable of reaching the modem before
+the person holding the phone confirms the displayed target with two consecutive
+local control activations.  Preserve name resolution in the agent, the existing
+incoming and active-call UI, the PinePhone's asynchronous call helper, and the
+legacy synchronous SIM7600 transport.
+
+* Lineage
+
+This design follows [[file:2026-06-18-call-by-name-skill.org][the original call-by-name design]] and
+[[file:2026-09-03-pinephone-assist-parity.org][the PinePhone parity implementation]].  Those records made conversational
+confirmation an agent responsibility and exposed =emacos-call= as an immediate
+dial primitive.  A live natural call request on 2026-09-03 resolved the right
+saved contact but invoked that primitive in the same turn, before confirmation.
+This design replaces the disproven prose-only gate without rewriting either
+historical record.
+
+* User flow
+
+1. Assist resolves one concrete number and evaluates =emacos-call NUMBER=.
+2. The phone replaces the top buffer with =Call?= and the number.  The control
+   pane shows =Cancel= and =Call= together above the fold.
+3. The first Call activation relabels that button =Confirm call?= in red.  It
+   does not invoke the backend.  Any other button or command, replacing the
+   proposal, a call event, or a 15-second timeout disarms it.  A hidden proposal
+   cannot be confirmed unless it becomes visible again before timeout.
+4. The next activation of the same visible proposal's Confirm call control
+   atomically consumes the arm and changes the top buffer to =Starting call…=
+   before launching the backend.  It uses the owner already captured by the
+   exact ModemManager owner watch, so this input path performs no blocking bus
+   read.
+5. The asynchronous PinePhone helper or synchronous legacy transport supplies
+   the terminal result.  =Starting call…= is deliberately non-cancellable: the
+   modem mutation may already be in flight, so hiding it cannot truthfully stop
+   it.  Success binds the exact path returned by either the fixed PinePhone root
+   helper or the legacy local transport and installs the termination watch
+   without another synchronous bus read.  An asynchronous
+   snapshot then verifies the path's owner, outgoing direction, and number and
+   downgrades any mismatch or unreadable result to the actionable pathless
+   recovery surface.  It shows =Calling…= for a nonterminal call, =In progress=
+   if already active, =Status unknown= if a modem restart makes state unreadable,
+   or dismisses if already terminated.  Failure restores audio and leaves a
+   persistent =Call failed= surface with a bounded reason and one =Dismiss=
+   action; only dismissal restores the previous buffer.
+   If start fails and the helper cannot prove that cleanup succeeded, the call
+   instead remains on an active =Status unknown= surface with call audio and
+   =Hang up=.  A possibly live carrier call is never hidden as a harmless error.
+
+The proposal and armed screenshots must show both controls on the PinePhone's
+short control pane.  The shared three-line gap and PinePhone one-line override
+remain the same settings used by incoming calls.
+
+* State and interface contract
+
+The single call state machine becomes:
+
+- =nil -> proposed(ID, NUMBER, unarmed)= on a valid public =emacos-call=;
+- =proposed unarmed -> proposed armed(ID)= on the first visible Call action;
+- =proposed armed(ID) -> dial-requested(ID, NUMBER)= only when the immediately
+  consumed arm still names the current visible proposal;
+- =dial-requested -> active(PATH)= after its attempt-bound terminal helper
+  success returns an exact path; its asynchronous property verification may
+  refine the display or conservatively replace it with pathless recovery;
+- =dial-requested -> active(PATH-or-nil, status-unknown)= when start and cleanup
+  both fail, or when a returned path cannot be verified, preserving call audio
+  and global Hang up for a possibly live call;
+- =dial-requested -> failed(REASON) -> nil= on terminal failure and a later
+  explicit Dismiss;
+- =proposed -> nil= on Cancel;
+- =nil -> incoming -> active -> nil= remains the incoming-call flow;
+- =nil -> active= remains the adoption path for calls created outside this UI; and
+- =incoming-or-active -> terminated -> nil= is the transient carrier-ended
+  state while an already-running answer or hangup helper releases exclusion.
+
+Every public call stages a fresh monotonically increasing proposal ID, even if
+the number is unchanged.  Restaging while proposed replaces it unarmed.
+Staging while dial-requested, incoming, or active returns =error: call already
+in progress= without changing the tracked call; staging may replace a failed
+surface with a fresh unarmed proposal.  An incoming event cancels a mere
+proposal or failed surface before taking the screen.  An external outgoing
+=CallAdded= while proposed or failed cancels that surface and is adopted by the
+existing active-call path.  Outgoing events during dial-requested are not bound
+early because D-Bus supplies no proposal ID.  The attempt-bound fixed helper
+result is the authority for the exact candidate call path; the path is bound
+immediately without blocking the Emacs event loop and then checked by the same
+bounded asynchronous snapshot path used for live signals.  Both transports
+include a created path in a start-failure result.  An event for that exact
+failed path is either
+remembered while the helper is pending, regardless of readable properties, or
+ignored once after completion, so a
+delayed nonterminal snapshot cannot replace the persistent failure and the
+marker cannot survive after its event.  The marker also carries ModemManager's
+unique D-Bus owner, so a service restart makes an old marker ineligible even if
+the new process reuses the same numeric path.  The newest four events observed
+while the outgoing helper is pending are retained; one cannot disappear merely because its
+one =CallAdded= signal raced the helper.  Because no proposal identity exists
+on that signal, any extra same-owner event makes either helper success or
+failure use pathless =Status unknown= rather than synchronously inspecting and
+possibly misattributing the event.  If the requested outgoing call succeeds
+while another live event is pending, the UI likewise
+uses pathless =Status unknown= with global Hang up because it cannot safely
+represent both calls.  A live outgoing or unreadable event after failure uses
+the same recovery surface rather than concealing a carrier call.  =CallAdded=
+and =StateChanged= each use one persistent sender-wildcard D-Bus match installed
+at boot.  Their callbacks read the immutable event sender and accept only the
+cached unique ModemManager owner; =StateChanged= also requires the exact tracked
+path.  An exact bus-daemon =NameOwnerChanged= watch, filtered to ModemManager's
+well-known name, updates that cache and invalidates old work without adding or
+removing a match in the live callback.  Development hot reload removes legacy
+per-owner and per-call matches once before installing this persistent topology.
+Untrusted senders and malformed paths are inert, and pending dial events are
+bounded at four.  The live signal callback and an uncontested successful dial
+completion each read one complete property snapshot
+asynchronously, with a 500 ms D-Bus timeout and 750 ms local fallback, so a
+wedged modem cannot block Emacs input.  Its post-registration state refresh is
+also asynchronous.  The owner-watch generation invalidates delayed snapshots
+after a service restart; a failed current-generation snapshot becomes the
+actionable pathless recovery surface.  Property reads and the persistent state
+callback use the same captured unique owner and exact path.  A queued terminal callback or delayed
+helper result from an old owner therefore cannot dismiss or bind a replacement
+call even if the new process reuses the numeric object path.  An unverified
+successful or cleanup-uncertain dial result stays on an actionable =Status
+unknown= surface with global Hang up rather than binding the possibly unrelated
+object.  A known call instead hangs up through its captured owner and exact
+object path.  If answer invokes =Accept= but its helper then dies, its
+pre-Accept path marker lets the client reconcile the owner-bound object state;
+an unreadable result remains actionable rather than pretending that the answer
+failed harmlessly.
+
+An adopted external outgoing call enables call audio after its state is proven
+nonterminal.  An adopted incoming call enables call audio only if it is already
+active; an ordinary ring retains normal audio until the user accepts it.
+An incoming call that becomes active through an external answer enables call
+audio on its state transition.  Decline and confirmed Hang up dismiss after
+backend success, or after the carrier independently reports termination while
+the helper is pending.  Otherwise failure leaves the appropriate controls
+visible and preserves call audio so a possibly live call remains recoverable.  While
+those asynchronous helpers run, their controls are replaced by =Answering…= or
+=Ending call…= so repeated taps cannot start overlapping mutations.  A same-call
+D-Bus transition updates but retains that exclusion identity until the helper
+sentinel releases it.  A ModemManager restart moves the identity to pathless
+recovery without dropping exclusion.  The newest valid =CallAdded= event is
+deferred until that sentinel runs, then replayed against the current unique
+owner; an event from an older owner is discarded.  A replacement call after
+exclusion ends makes the old completion inert.
+Completion is bound to the exact local operation identity, owner, path, and state.
+
+The existing =*call*= buffer is reused for proposed, starting, failed, and
+active states so capture, restoration, cleanup, and the modeline retain one lifecycle.
+The present transport body becomes private =emacos-call--dial=.  A platform
+operation explicitly accepts the captured service owner and a completion
+callback.  The PinePhone backend returns
+=pending:= only after successfully spawning its bounded helper for dial,
+answer, or hangup, then invokes the callback exactly once with the helper's
+actual terminal result.  Dial completion carries the proposal and original
+ModemManager owner; answer and hangup completion carries a fresh local
+operation identity plus the tracked owner, path, and state.  Stale or repeated
+completions cannot mutate a later state.  The synchronous default returns its
+terminal status directly through the same transitions.  Legacy multiline
+=mmcli= diagnostics are normalized to one bounded line before entering the
+exact status grammar.  The PinePhone helper emits the created path before
+starting a call and the answer-attempt path before accepting, so even abnormal
+process death becomes an actionable uncertain call rather than a passive
+failure.  In the PinePhone platform backend, CreateCall, path-specific Start,
+known-call Hangup, and Accept methods address the captured unique D-Bus owner
+rather than a restartable well-known name.  Its global hangup is reserved for a
+pathless =Status unknown= recovery.  The preserved SIM7600 default retains its
+existing =mmcli= dial and global hangup transport.
+Audio-route transitions are serialized and coalesced to the latest requested
+state so a stale helper cannot win a completion race.
+
+* Authority and threat model
+
+The model controls the proposed number.  Validation remains at public staging,
+private dialing, and the root helper before it reaches modem control.  The
+privileged helper retains fixed paths, a fixed operation grammar, serialization,
+bounded subprocesses and output, and no input evaluation.  This change adds no
+listener, endpoint, credential, or root permission.
+
+This boundary contains the observed accidental and instruction-missing use of
+the advertised public command.  Full-trust =eval_elisp= can intentionally call
+internal functions, synthesize two activations, or invoke its existing =doas=
+permission directly; Emacs cannot distinguish those events from a local seat.
+That accepted broader authority model is unchanged.  Documentation therefore
+does not claim cryptographic physical-presence enforcement.  A future hostile-
+agent boundary would require removing universal Elisp/root-helper authority,
+not another naming convention.
+
+The number is sensitive personal data.  Its existing transmission to the model
+and presence in the local helper's D-Bus method arguments or legacy =mmcli=
+argument vectors remain necessary
+for this implementation.  Neither raw =eval_elisp= source nor raw chat messages
+will be written to server logs; only their lengths are logged.  The call
+helper's =doas= rule uses =nolog= so authorization logs do not persist dial
+arguments.  Tests and live evidence redact real numbers.
+
+The root helper will not grow a second active-call probe in this change.
+ModemManager retains terminated call objects, so a path-presence check would
+reject later legitimate calls, while individually querying an unbounded call
+list would enlarge a bounded privileged helper.  The public state machine
+prevents a second ordinary dial; deliberate direct-helper use is already inside
+the explicitly accepted full-trust boundary.
+
+* Numbered implementation plan
+
+1. Refactor =phone-call.el= into public proposal and private dial paths.  Reuse
+   =*call*=, add proposal/dial-requested rendering, an ID-bound 15-second arm,
+   command and visibility disarming, explicit collision transitions, and one
+   terminal-result handler shared by synchronous and asynchronous transports.
+2. Extend the platform-operation callback in =phone-call.el= and
+   =deploy/pinephone/openrc-init.el=.  Have the PinePhone process sentinel
+   deliver actual bounded-helper completion for all three mutations and let
+   stale callbacks no-op.
+3. Update =tests/test-call.el= and =tests/test-pinephone-openrc-init.el= for the
+   state table, restage-between-taps, loss-of-visibility, unrelated-command,
+   timeout, stale-completion, asynchronous pending/failure, persistent failure,
+   early and delayed failed-path events, exact path-bound state watches, exact
+   returned-path adoption, uncertain cleanup, external-call audio, unreadable
+   external state, and existing incoming/active behavior.  Retain root-helper
+   adversarial tests.
+4. Update the call skill, =README.org=, =AGENTS.md=, and =CLAUDE.md= so current
+   guidance advertises proposal staging and never directs the agent to the
+   private transport.  Stop logging raw =eval_elisp= source in
+   =server/emacsos_server/channel.py= and raw chat messages in
+   =server/emacsos_server/app.py=; prove both with focused server tests.
+5. Run all Elisp, server, PinePhone shell, syntax, lint, deterministic privacy,
+   docstring-alignment, and adversarial-security checks.  Review until no real
+   in-scope finding remains.
+6. Deploy through the phone transaction.  Correlate screenshots and synthetic
+   pointer input with redacted ModemManager call-object snapshots and helper
+   completion at each state: before staging, after staging, after first tap,
+   after an unrelated action, during =Starting call…=, after a forced helper
+   failure, and after the second consecutive tap.  Place no more than one
+   actual outgoing call per hour.
+
+* Acceptance
+
+- Public =emacos-call= never invokes the backend and returns
+  =confirmation-required:= for a valid idle proposal.
+- Replacement always creates a new unarmed identity; the stale second action,
+  another command, hidden surface, timeout, and call event cannot dial.
+- Only two consecutive actions on the same visible proposal reach one backend
+  invocation, whose number is revalidated.
+- Pending, success, and persistent acknowledged failure are durably visible;
+  dial, answer, and hangup terminal callbacks are bound to their exact attempt,
+  while the persistent state callback accepts only the exact tracked object
+  path and ModemManager owner.
+- A cleanup failure produces an active uncertain-call surface with Hang up,
+  never a passive failure surface that could conceal a live carrier call.
+- Incoming answer, active hang-up, previous-buffer restoration, modeline badge,
+  legacy SIM7600 calls, and PinePhone call audio retain their behavior.
+- Both proposal states fit the real PinePhone pane.  The live step-by-step
+  evidence shows no new ModemManager call object until the second confirmation.
+
+* Verification (2026-09-03)
+
+The converged local run passed all 285 Elisp tests, all 217 server tests, every
+PinePhone installer/helper/power script test, syntax and diff checks, and the
+real-model Docker smoke (streaming, =eval_elisp=, and =chat.el= round trip).
+Four substantive review rounds covered correctness, event-loop liveness,
+adversarial security, simplicity, design adherence, and documentation drift.
+
+Commit =0995fee= was deployed to the v25.06 OpenRC PinePhone.  The live Emacs
+reported watcher topology 2 with three persistent registrations and an exact
+unique ModemManager owner.  Public =emacos-call= staged a redacted synthetic
+number and returned =confirmation-required:= without changing the modem's call
+object list.  The first Call action, an unrelated action, and expiry after 15
+seconds likewise left the call list unchanged.  A second action against a
+temporarily substituted synthetic backend reached that backend exactly once;
+its terminal error produced the persistent =Call failed= surface with a
+=Dismiss= action, confirmed by an on-device screenshot, without touching the
+modem.  The real backend was restored and the test state cleared.
+
+A natural call-by-name request through the deployed Assist service loaded the
+call skill, staged one proposal, returned phone-confirmation guidance, and
+created no modem call object.  Server logs recorded only message and Elisp
+lengths.  Restarting ModemManager changed its unique owner while all three
+watcher handles stayed installed; Emacs remained responsive, the call state
+stayed idle, and the physical modem reappeared after 30 seconds.  Display blank
+and wake both preserved SSH/UI liveness.  Kernel suspend and its former helper
+and privilege rule remain absent; only 60-second display blanking remains.
+
+The Sway seat exposes keyboard and touch but no virtual pointer, so unattended
+tests invoked the exact button action functions rather than synthesizing a
+physical touchscreen event.  No live carrier call was placed while the user
+was away.  Earlier live testing already proved outgoing and incoming carrier
+audio; the remaining human check is one ordinary physical two-tap call after
+review.

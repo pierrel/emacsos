@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+
+description="Configure deterministic PinePhone USB recovery networking"
+command=/usr/local/sbin/emacsos-recovery-network
+
+depend() {
+    need localmount
+    before networkmanager sshd
+    use logger
+}
+
+start() {
+    ebegin "$description"
+    "$command"
+    eend $?
+}

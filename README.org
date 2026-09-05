@@ -241,27 +241,29 @@ actors is *determinism*:
 
 - *Emacs interactive commands are deterministic primitives.* A concrete
   argument in, the same action out — every time, with no language model in the
-  loop and no callback into the agent. =(emacos-call "+14155550123")= dials that
-  number. It does not ask "who is that?", it does not confirm, it does not think.
-  These primitives are the reliable floor that the user (by tapping) and the
-  agent (by evaluating elisp) share equally.
+  loop and no callback into the agent. =(emacos-call "+14155550123")= stages
+  that exact number in the local call UI. It does not ask "who is that?" or
+  think. These primitives are the reliable floor that the user (by tapping)
+  and the agent (by evaluating elisp) share.
 
 - *The agent is the interpretive layer on top.* Turning fuzzy human intent
   ("call Ana") into a concrete primitive call is irreducibly the agent's job:
   who is Ana, what does "call" mean, what is her number, is there more than
-  one match? Resolution, disambiguation, and confirmation live *here* — never
-  inside a primitive.
+  one match? Resolution and disambiguation live here. Authorization for a
+  safety-critical side effect can remain a deterministic local UI boundary:
+  in the ordinary public flow, two phone actions are required after staging.
 
 - *Skills are elisp recipes.* A skill does not add a bespoke tool; it tells the
   agent which elisp to evaluate — to either *initiate* a deterministic command
-  (=(emacos-call "+1…")=) or *change/extend* functionality (define a command,
+  (=(emacos-call "+1…")= stages a proposal) or *change/extend* functionality (define a command,
   then persist it via the config layer). The agent's one universal lever is
   evaluating elisp.
 
 So a feature is built as: a deterministic emacs command (shared by user and
 agent) + a skill that teaches the agent how to resolve intent down to that
 command's concrete arguments. "call Ana" is agent work; =(emacos-call
-"+1…")= is a primitive. They must not blur together.
+"+1…")= is a proposal primitive; two local confirmations own the modem effect.
+They must not blur together.
 
 (Agent-platform services that are *not* device control — the language model,
 conversation memory, config git-versioning/rollback — stay server-side; the
@@ -277,5 +279,6 @@ here — the open-ended one (evaluate elisp) and the deterministic primitives
 (commands) — so a skill's job is to *direct the model on which to use*: search
 and inspect by *evaluating elisp*; act by *invoking a command*. (The call skill
 is the worked example: it greps the user's files for a number via elisp, then
-dials via the =emacos-call= command.) New capabilities slot in the same way — a
-deterministic command plus a skill that routes to it — not as bespoke tools.
+stages it via =emacos-call=; two local phone actions perform the dial.) New
+capabilities slot in the same way — a deterministic command plus a skill that
+routes to it — not as bespoke tools.

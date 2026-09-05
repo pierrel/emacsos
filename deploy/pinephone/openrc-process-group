@@ -1,0 +1,70 @@
+#!/bin/sh
+# Run one session subtree and do not exit until that process group is empty.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+umask 077
+
+leader=
+
+fail() {
+    printf 'emacsos-process-group: %s\n' "$1" >&2
+    exit 1
+}
+
+group_has_process() {
+    for process_stat in /proc/[0-9]*/stat; do
+        [ -r "$process_stat" ] || continue
+        IFS= read -r process_line <"$process_stat" || continue
+        process_fields=${process_line#*) }
+        # shellcheck disable=SC2086
+        set -- $process_fields
+        [ "${3-}" != "$leader" ] || return 0
+    done
+    return 1
+}
+
+cleanup() {
+    trap - HUP INT TERM
+    [ -n "$leader" ] || return 0
+    kill -TERM "-$leader" 2>/dev/null || true
+    attempt=0
+    while group_has_process && [ "$attempt" -lt 30 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    group_has_process && kill -KILL "-$leader" 2>/dev/null || true
+    # A privileged helper cannot be signalled by this account.  Do not let the
+    # service respawn until it has returned and left the old group.
+    while group_has_process; do
+        sleep 0.1
+    done
+    wait "$leader" 2>/dev/null || true
+    leader=
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -un)" = emacsos-lab ] || fail 'wrong service user'
+[ "$#" -gt 0 ] || fail 'a command is required'
+
+/usr/bin/setsid "$@" &
+leader=$!
+sleep 0.1
+if [ -r "/proc/$leader/stat" ]; then
+    IFS= read -r leader_line <"/proc/$leader/stat"
+    leader_fields=${leader_line#*) }
+    # shellcheck disable=SC2086
+    set -- $leader_fields
+    [ "${3-}" = "$leader" ] && [ "${4-}" = "$leader" ] ||
+        fail 'child does not own its process group'
+fi
+
+set +e
+wait "$leader"
+status=$?
+set -e
+cleanup
+trap - EXIT
+exit "$status"

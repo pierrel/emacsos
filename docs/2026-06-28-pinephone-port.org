@@ -1,6 +1,29 @@
 #+title: Porting emacsos to the PinePhone Pro (the ready-to-use base)
 #+date: 2026-06-28
 
+* Current device note (2026-08-31)
+
+The first device that actually landed is an original 3 GiB PinePhone hardware
+revision 1.2, not the PinePhone Pro proposed below.  It now runs postmarketOS
+edge and has working cellular data, SMS, outgoing and incoming voice, Wi-Fi,
+WireGuard, and Firefox under Phosh.  Phosh remains a rollback target, but its
+UI performance and intermittent blank-display/wake failures make it unsuitable
+as the intended shell.
+
+The active experiment is therefore the reversible postmarketOS + Sway + PGTK
+Emacs session in [[file:2026-08-31-pinephone-emacsos-session.org][2026-08-31-pinephone-emacsos-session.org]].  It keeps the
+distribution's kernel, modem, network, and audio integration and gates further
+UI work on matched power, suspend/resume, Firefox, touch-keyboard, recovery,
+and Waydroid evidence.  The document below is retained as the original Pro
+portability analysis; its statements that no device had landed are historical.
+
+The direct session later reproduced whole-phone unreachability even after all
+graphics and both modem daemons were disabled.  Work is now paused at a
+lower-level kernel/device, SD, battery, or board gate.  The next controlled
+test and the three prepared console images are documented in
+[[file:2026-09-01-pinephone-base-recovery.org][2026-09-01-pinephone-base-recovery.org]]; do not resume UI work until its
+electrically modem-off base test passes.
+
 A second device track: while the [[file:hardware-build.org][hand-built slab]] (Pi Zero 2 W + PiTFT +
 SIM7600 HAT) continues, run emacsos on an *off-the-shelf Linux phone* so there's
 a pocketable, daily-usable device *now*. Decision (2026-06-28): *PinePhone Pro*,
@@ -113,6 +136,10 @@ will "just work," but *voice* is modem-specific.
 - [ ] First pocket carry: daily-driver smoke (chat, a call, data off home WiFi)
 
 * Iteration log
+- *2026-08-31* — Rebased the live track on the original 3 GiB PinePhone 1.2
+  running postmarketOS edge.  Phosh proved the modem/data/browser baseline but
+  not the desired shell reliability.  Linked the gated minimal Sway + PGTK
+  Emacs feasibility experiment; Phosh stays installed for recovery.
 - *2026-06-28* — Doc started. Decision to add a PinePhone Pro track as the
   ready-to-use pocket device alongside the hand-built slab. Portability surveyed
   against the current repo; nothing ported yet. Device not yet ordered (Pierre

@@ -1,6 +1,14 @@
 #+title: The keyboard as a buffer-reactive touch control plane (call controls)
 #+date: 2026-06-20
 
+* Current implementation note (2026-09-03)
+
+The keyboard-plane design remains current.  Its three-state call lifecycle and
+immediate outbound primitive are historical; see
+[[file:2026-09-03-structural-outgoing-call-confirmation.org][Structural outgoing-call confirmation]] for the current lifecycle, local
+two-action outgoing confirmation, unique-owner/path signal binding, and the
+PinePhone backend's exact known-call hangup now implemented by =phone-call.el=.
+
 The keyboard window is the phone's *touch control plane*. Today it always
 paints the T9 keyboard; this change makes it *reactive to the top buffer*, so a
 call buffer replaces the keyboard with its own controls. First use: move the
@@ -44,7 +52,9 @@ pure UI wired to them.
   a call and still get back to hang up.
 
 * State transitions (D-Bus, both directions)
-=emacos-call--on-call-added= registers a per-call StateChanged watch, then:
+The persistent =CallAdded= callback invokes
+=emacos-call--on-call-added-async= with immutable sender metadata, selects the
+exact owner/path accepted by the persistent =StateChanged= callback, then:
 - Direction 1 (incoming) → =incoming=, show =*incoming-call*=.
 - Direction 2 (outgoing) → =active=, show =*call*= ("Calling…").
 =emacos-call--on-call-state=:
@@ -55,8 +65,9 @@ pure UI wired to them.
 Belt-and-suspenders: the Accept tap also flips to =*call*= on a successful
 =emacos-answer= (don't depend solely on the active D-Bus signal).
 
-The outbound =*call*= screen is best-effort via CallAdded(Direction 2); inbound
-(the explicit ask) is fully covered. =emacos-call= stays a pure primitive.
+The public =emacos-call= now stages the outbound =*call*= proposal.  After the
+local two-action confirmation, helper completion binds its returned exact path;
+=CallAdded(Direction 2)= is also retained for external outgoing calls.
 
 * Decisions (forks, resolved with the user 2026-06-20)
 1. *Return-to-call after Back* → *tappable modeline badge* (vs. keyboard always

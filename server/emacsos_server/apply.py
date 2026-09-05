@@ -1,16 +1,19 @@
-"""Apply an agent.el body to the live phone + classify the outcome.
+"""Apply a rendered agent.el file to the live phone and classify the outcome.
 
 Transport: send the file CONTENTS as an elisp string over the existing
 emacsclient channel (no scp — one transport, one auth path).  The
 phone writes a temp file in the target dir, atomically renames it over
-agent.el, then `load-file`s it — all inside one `condition-case` so a
-broken config comes back as a *value* (`load-error: ...`, exit 0),
-distinct from an unreachable phone (call_emacs exit != 0).
+agent.el, then `load-file`s it and runs the optional platform finalizer that was
+registered before the load.  The whole operation returns failures as
+a *value* (`load-error: ...` or `apply-error: ...`, exit 0).  Failures proven
+to occur before dispatch are unreachable; timeout and other ambiguous
+post-dispatch failures are apply errors because the saved-file state is unknown.
 
 The phone owns the agent.el path: the apply expr reads
 `emacos-agent-file` (a defvar the boot snippet sets) with a hardcoded
 fallback, so the server constant and the boot path can't silently
-diverge.  Design doc: docs/2026-05-21-config-apply-rollback.org.
+diverge.  Original design: docs/2026-05-21-config-apply-rollback.org.
+PinePhone finalizer: docs/2026-09-03-pinephone-assist-parity.org.
 """
 from __future__ import annotations
 
@@ -48,7 +51,9 @@ MAX_BODY_BYTES = 100_000
 
 @dataclass(frozen=True)
 class ApplyResult:
-    status: Literal["applied", "load_error", "unreachable", "too_large"]
+    status: Literal[
+        "applied", "load_error", "apply_error", "unreachable", "too_large"
+    ]
     detail: str
 
 
@@ -59,29 +64,63 @@ def _elisp_string(s: str) -> str:
 
 def _build_apply_expr(content: str) -> str:
     """Elisp that atomically writes the agent.el CONTENT to the phone's
-    agent file and loads it, returning `"ok: loaded"` or
-    `"load-error: <...>"`.  CONTENT is the FULL file (header carrying the
-    `lexical-binding` cookie + body + provide), exactly what git stores —
-    `config_repo.render` is the single source, so the phone's file and
-    git never diverge and the load honors lexical-binding."""
+    agent file, loads it, and runs the phone's optional
+    `emacos-agent-config-applied-function`, returning `"ok: loaded"`,
+    `"load-error: <...>"`, or `"apply-error: <...>"`.  CONTENT is the full
+    candidate file (header carrying the `lexical-binding` cookie + body +
+    provide) produced by `config_repo.render`.  A confirmed-and-recorded
+    operation stores those same bytes in git.  The platform
+    finalizer is captured as a function object before the load and run before
+    its variable is restored.  Agent config remains full-trust Elisp, not a
+    security boundary."""
     content_lit = _elisp_string(content)
     return f"""(condition-case err
-    (let ((f (expand-file-name (or (bound-and-true-p emacos-agent-file)
-                                   {_elisp_string(DEFAULT_PHONE_AGENT_FILE)})))
-          (content {content_lit}))
+    (let* ((f (expand-file-name (or (bound-and-true-p emacos-agent-file)
+                                    {_elisp_string(DEFAULT_PHONE_AGENT_FILE)})))
+           (content {content_lit})
+           (raw-finalizer
+            (and (boundp 'emacos-agent-config-applied-function)
+                 emacos-agent-config-applied-function))
+           (finalizer
+            (if (symbolp raw-finalizer)
+                (indirect-function raw-finalizer)
+              raw-finalizer))
+           (load-failure nil)
+           (finalizer-failure nil))
       (make-directory (file-name-directory f) t)
       (let ((tmp (make-temp-file (concat (file-name-directory f) "agent-") nil ".el")))
         (with-temp-file tmp (insert content))
         (rename-file tmp f t))
-      (load-file f)
-      "ok: loaded")
-  (error (format "load-error: %S" err)))"""
+      (unwind-protect
+          (condition-case caught
+              (load-file f)
+            (t (setq load-failure caught)))
+        (when finalizer
+          (condition-case caught
+              (funcall finalizer)
+            (t (setq finalizer-failure caught))))
+        (condition-case caught
+            (setq emacos-agent-config-applied-function finalizer)
+          (t
+           (unless finalizer-failure
+             (setq finalizer-failure caught)))))
+      (cond ((and load-failure finalizer-failure)
+             (format (concat "load-error: config-load: %S; "
+                             "platform-finalizer: %S")
+                     load-failure finalizer-failure))
+            (load-failure
+             (format "load-error: config-load: %S" load-failure))
+            (finalizer-failure
+             (format "load-error: platform-finalizer: %S"
+                     finalizer-failure))
+            (t "ok: loaded")))
+  (t (format "apply-error: %S" err)))"""
 
 
 def apply_to_phone(ctx: PhoneContext, content: str) -> ApplyResult:
-    """Write+load the agent.el CONTENT on the phone, classify honestly.
-    CONTENT is the rendered file (see `config_repo.render`), not the bare
-    body — the caller renders so the phone matches what git commits."""
+    """Write and load agent.el, run platform finalizers, and classify honestly.
+    CONTENT is the rendered candidate file (see `config_repo.render`), not the
+    bare body.  A caller may record the same bytes after a confirmed write."""
     n_bytes = len(content.encode("utf-8"))
     if n_bytes > MAX_BODY_BYTES:
         return ApplyResult(
@@ -99,24 +138,32 @@ def apply_to_phone(ctx: PhoneContext, content: str) -> ApplyResult:
         )
     except Exception as e:  # noqa: BLE001 — surface as a structured result
         log.exception("apply_to_phone raised")
-        return ApplyResult(status="unreachable", detail=f"{type(e).__name__}: {e}")
+        return ApplyResult(status="apply_error", detail=f"{type(e).__name__}: {e}")
 
     if ok:
         # call_emacs returns Emacs' PRINTED representation; our expr
-        # returns a string, so it arrives quoted (`"ok: loaded"` /
-        # `"load-error: ..."`).  Strip the surrounding read-syntax quotes
-        # before the prefix check — otherwise a load failure starts with
-        # `"` and gets misclassified as `applied`.
+        # returns a string, so it arrives quoted (`"ok: loaded"`,
+        # `"load-error: ..."`, or `"apply-error: ..."`).  Strip the
+        # surrounding read-syntax quotes before the prefix check — otherwise
+        # a load failure starts with `"` and gets misclassified as `applied`.
         text = (output[1:-1]
                 if len(output) >= 2 and output[0] == '"' == output[-1]
                 else output)
+        if text.startswith("apply-error:"):
+            return ApplyResult(status="apply_error", detail=text)
         if text.startswith("load-error:"):
             return ApplyResult(status="load_error", detail=text)
         return ApplyResult(status="applied", detail=text)
     # call_emacs itself failed.
-    if phone_mod.is_unreachable(output):
+    # Timeout and an unclassified non-zero exit may occur after Emacs began
+    # evaluating the expression, so the saved-file state is unconfirmed.
+    if "timed out" in output or output.startswith("exit "):
+        return ApplyResult(status="apply_error", detail=output)
+    if (output.startswith("auth file:")
+            or output.startswith("emacsclient binary not found:")
+            or output.startswith("[Errno ")
+            or output.startswith("emacsclient: connect:")):
         return ApplyResult(status="unreachable", detail=output)
-    # A non-unreachable call_emacs failure is unusual here (the expr
-    # always returns a string on a reachable phone); treat as load_error
-    # so it's reported as broken-config rather than infra.
-    return ApplyResult(status="load_error", detail=output)
+    # A non-unreachable call_emacs failure gives no proof that the atomic
+    # rename completed, so it must not enter the commit-after-receipt path.
+    return ApplyResult(status="apply_error", detail=output)

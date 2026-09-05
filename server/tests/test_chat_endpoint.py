@@ -85,6 +85,18 @@ def test_streams_start_token_end_for_simple_response(client):
     assert end["text"] == "Hello!"
 
 
+def test_chat_log_omits_message(client, caplog):
+    caplog.set_level("INFO")
+    message = "call +14155550123"
+    scripted = [("messages", (_FakeAIMessageChunk(content="ready"), {}))]
+    with patch("emacsos_server.app._start_stream_iter",
+               return_value=iter(scripted)):
+        with client.stream("POST", "/chat", json=_chat_body(message)) as response:
+            _collect_events(response)
+    assert message not in caplog.text
+    assert f"msg_chars={len(message)}" in caplog.text
+
+
 def test_streams_multiple_tokens_concatenate_into_end_text(client):
     scripted = [
         ("messages", (_FakeAIMessageChunk(content="The "), {})),
@@ -474,15 +486,16 @@ def test_config_apply_skill_directs_to_get_config_not_phone_probe():
     assert "read it first with `eval_elisp`" not in text
 
 
-def test_skill_sources_has_call_skill_with_confirm_guidance():
-    """The call skill ships and keeps its confirm-before-dial mandate — it can
-    place a REAL phone call, so guard its presence + the safety instruction."""
+def test_skill_sources_has_call_skill_with_phone_local_confirmation():
+    """The call skill stages the proposal and reserves dialing for phone taps."""
     import emacsos_server.app as app_mod
     path = os.path.join(app_mod._SKILLS_DIR, "call", "SKILL.md")
     assert os.path.exists(path)
     text = open(path).read()
     assert "emacos-call" in text
-    assert "Confirm before dialing" in text
+    assert "confirmation-required: confirm on phone" in text
+    assert "actual dial is a later local UI action" in text
+    assert "never synthesize the confirmation actions" in text
 
 
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):

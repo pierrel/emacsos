@@ -15,8 +15,8 @@ status + control* surface — a tappable cell/wifi modeline indicator and a
 originally deferred to the *Modeline status bar* item (Decision 6), but
 pulled in at the user's request so the cellular work is *visible and
 controllable* on the phone, not invisible plumbing.  See Decision 6 for the
-design and the one piece still deferred (typing a *new* secured wifi
-password, which needs the Numbers keyboard item).
+design and the one piece still deferred (a protected credential-entry flow for
+a *new* secured wifi password, including digits and symbols).
 
 The reference for "get this going" is the OURS project (a DIY Pi phone
 on the same SIM7600 module).  We borrow its *shape* — AT-command modem,
@@ -71,8 +71,8 @@ working public-internet data."
 
 *Out (called out so they don't sneak in):*
 - *Typing a NEW secured wifi password.*  Connecting to a saved/open network
-  works; a new WPA network needs digits on the T9 keyboard — the *Numbers +
-  symbols on the keyboard* roadmap item, not yet done.  =network.el= degrades
+  works; a new WPA network needs a protected credential-entry flow as well as
+  digits and symbols.  =network.el= degrades
   to a clear note (=emacos-net--connect-kind='s =needs-password= branch is
   the single seam where the future masked-prompt lands).
 - *The full =emacos-wifi-mode=* (=tabulated-list-mode=, Forget, scan refresh
@@ -213,12 +213,13 @@ we instead ship the on-device surface now, in =network.el=:
   =nmcli=/=mmcli= output into a delimited blob; a sentinel parses it into a
   cached =emacos-net-state= and calls =force-mode-line-update=.  A single
   =defcustom emacos-net-refresh-interval= (30s) repeat timer (lazy, hot-reload
-  guarded) keeps it fresh; the timer only updates the var, redisplay does the
-  rest.  A single-flight guard (=emacos-net--proc=) means reads never stack on
-  the single-core Zero W.
+  guarded) keeps it fresh; it starts the reader, whose sentinel updates the
+  cache and repaints the visible status.  A single-flight guard
+  (=emacos-net--proc=) means reads never stack on resource-constrained phone
+  hardware.
 
 The one piece still deferred is *typing a new secured wifi password* — that
-needs the Numbers keyboard item; =emacos-net--connect-kind= is the seam, and
+needs protected credential entry; =emacos-net--connect-kind= is the seam, and
 new-secured networks degrade to a clear on-page note rather than a doomed
 =nmcli= connect that could hang on a secret-agent prompt.
 
@@ -358,9 +359,11 @@ is the real-phone runbook above.
 The elisp (=network.el=) DOES have a unit-test seam, and =tests/test-network.el=
 (wired into =make test-elisp=) covers the pure core: the terse-line splitter
 (escaped colons/backslashes), the blob parser (-> =emacos-net-state= for
-wifi-active / cell-active / no-net / unprovisioned), the modeline formatter +
-its tap properties, the =emacos-net--connect-kind= seam, the dynamic command
-set, the page render, and the single-flight refresh guard (=cl-letf=-stubbing
+wifi-active / cell-active / no-net / unprovisioned and provisioned-active /
+provisioned-inactive cell profiles), the modeline formatter + its tap
+properties, the =emacos-net--connect-kind= seam, cell-toggle selection
+independent of the default route, the dynamic command set, the page render,
+and the single-flight refresh guard (=cl-letf=-stubbing
 =make-process=, the =tests/test-chat.el= pattern).  *Real-phone-only:* the
 actual =nmcli=/=mmcli= execution, the radio toggles toggling, a real wifi
 connect, and the modeline *tap* on the panel.
@@ -434,9 +437,9 @@ Each its own design doc + branch.
 4. *Modeline status bar* — the cell/wifi *signal* segment ships here
    (Decision 6); what remains for that item is *time / date / battery* and
    stripping any residual clutter, appended to the same =mode-line-format=.
-5. *Numbers + symbols on the keyboard* — unblocks typing a new secured wifi
-   password (the =needs-password= seam in =network.el=) and the full
-   =emacos-wifi-mode=.
+5. *Protected Wi-Fi credential entry* — builds on numbers and symbols to
+   unblock a new secured network (the =needs-password= seam in =network.el=)
+   and the full =emacos-wifi-mode=.
 
 * Companion docs
 

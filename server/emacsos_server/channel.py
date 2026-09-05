@@ -52,10 +52,8 @@ EVAL_TIMEOUT_SECONDS = 15.0
 # stashes the phone identity for this request.
 PHONE_CONTEXT_KEY = "phone_context"
 
-# Substring redaction for the elisp-eval log line.  We log the expr
-# the agent sent (so we can debug why a call returned what it did),
-# but if the expr happens to contain a secret the user pasted into
-# chat we want it scrubbed before it lands in the log file.
+# Substring redaction for the human-written apply-config summary.  Elisp source
+# is never logged; its INFO record contains only the character count.
 _REDACT_RE = re.compile(
     r"(password|secret|api[_-]?key|token|authinfo)",
     re.IGNORECASE,
@@ -82,9 +80,8 @@ def _redact(s: str) -> str:
     """Substring-replace lines mentioning known-secret-shaped words.
     Conservative: matches anywhere on the line, replaces the whole
     line with `<redacted>` rather than trying to surgically remove
-    just the secret value.  False positives (a benign expr mentioning
-    "password" as a string literal) get redacted from logs — that's
-    the right side of the trade-off."""
+    just the secret value.  False positives in a summary get redacted
+    from logs — that's the right side of the trade-off."""
     return "\n".join(
         "<redacted>" if _REDACT_RE.search(line) else line
         for line in s.splitlines()
@@ -118,7 +115,7 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
         return ("error: phone context not set (server bug — channel "
                 "tool invoked outside a /chat turn)")
 
-    log.info("eval_elisp on %s: %s", ctx.phone_host, _redact(code))
+    log.info("eval_elisp on %s: %d chars", ctx.phone_host, len(code))
     try:
         ok, output = phone_mod.call_emacs(
             ctx.auth_contents,
@@ -149,9 +146,11 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     Pass the COMPLETE config — this REPLACES the config file wholesale,
     it is NOT appended.  Whatever you leave out is GONE after the next
     restart, so include everything the config should contain, not only
-    the line you're changing.  If the user already has config, call
-    `get_config` first to read the saved body and build on it — don't
-    reconstruct it from memory.
+    the line you're changing.  If the user already has config and no prior
+    operation is unconfirmed or unrecorded, call `get_config` first to read
+    the last server-recorded body and build on it — don't reconstruct it from
+    memory.  An outstanding unconfirmed/unrecorded result requires phone-file
+    reconciliation first.
 
     SUMMARY is a short imperative description of the change (e.g. "make
     the cursor blue").  It becomes the git commit message and is shown
@@ -165,16 +164,19 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     - `applied: ...` — committed and loaded cleanly.  The user gets a
       ROLLBACK affordance in the chat UI; tell them it's applied.
     - `applied-but-broken: ...` — committed as the new config but it
-      errored while loading on the phone.  Tell the user and suggest
-      rolling back; do NOT just retry the same elisp (it'll fail the
-      same way) — send a corrected config or let them roll back.
+      errored while loading or restoring platform state on the phone.  Tell
+      the user and suggest
+      inspecting the reported failure; do NOT blindly retry the same elisp.
+      A config-load failure needs a corrected config or rollback.  A platform
+      finalization failure needs its reported platform problem fixed.
     - `error: phone unreachable: ... (do not retry — surface to user)` —
       nothing was committed; the phone couldn't be reached.
     - `error: config too large: ...` — nothing was committed.
-    - `applied-but-unrecorded: ...` — the config is LIVE on the phone
-      but the server failed to record it in git, so it can't be rolled
-      back from history.  Tell the user; do NOT retry (that would just
-      re-apply the same live config).
+    - `error: config application unconfirmed: ...` — the server could not
+      prove the phone-side write completed, so nothing was committed.
+    - `applied-but-unrecorded: ...` — the phone wrote the config but the
+      server failed to record it in git.  The tagged detail says whether
+      activation also failed.  Tell the user; do NOT retry blindly.
 
     Match the FULL prefix up to the colon when reasoning about the
     result: `applied:` is clean; the `applied-but-*` variants are not.
@@ -187,10 +189,11 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
 
     log.info("apply_config on %s: %s", ctx.phone_host, _redact(summary))
     # Apply FIRST, commit only if the phone actually received it: this
-    # keeps the git repo == what's on the phone (no phantom commit for a
-    # config the phone never saw).  A load_error still counts as
-    # "received" — the phone wrote the file then errored loading it, so
-    # it IS the phone's current config and belongs in history.
+    # keeps the git repo aligned after every confirmed-and-recorded write (no
+    # phantom commit for an unconfirmed config).  A load_error still counts as
+    # "received" — the phone wrote the file, then its load or platform
+    # finalization failed, so it IS the phone's current config and belongs
+    # in history.
     #
     # Apply the RENDERED file (the same content git commits, via
     # config_repo.render) — NOT the bare elisp — so the phone's agent.el
@@ -202,6 +205,10 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     if ar.status == "unreachable":
         return (f"error: phone unreachable: {ar.detail} "
                 "(do not retry — surface to user)")
+    if ar.status == "apply_error":
+        return (f"error: config application unconfirmed: {ar.detail}; the "
+                "server did not commit it; reconcile the phone file before "
+                "another persistent config change")
 
     try:
         repo = ConfigRepo(_CONFIG.config_dir)
@@ -209,24 +216,28 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
         sha = repo.write_and_commit(elisp, summary)
     except Exception as e:  # noqa: BLE001 — report as a tool-result string
         log.exception("apply_config: git commit failed")
-        return (f"applied-but-unrecorded: loaded on the phone but the "
-                f"server failed to record it in git ({e}); the change is "
-                "live but cannot be rolled back from history")
+        activation = ("loaded cleanly" if ar.status == "applied" else
+                      f"activation failed ({ar.detail})")
+        return (f"applied-but-unrecorded: written on the phone and {activation}, "
+                f"but the server failed to record it in git ({e}); it cannot "
+                "be rolled back from history; reconcile the phone file before "
+                "another persistent config change")
 
-    short = sha[:7]
+    version = f" (v{sha[:7]})" if sha else ""
     if ar.status == "applied":
-        return (f"applied: {summary} (v{short}) — loaded cleanly on the "
+        return (f"applied: {summary}{version} — loaded cleanly on the "
                 "phone; the user can roll back from the chat UI")
-    # load_error: HEAD is the new (broken) config; rollback is the fix.
-    return (f"applied-but-broken: {summary} (v{short}) — committed as the "
-            f"new config but it errored while loading ({ar.detail}); roll "
-            "back or send a corrected config")
+    # load_error: HEAD is the new saved config, but loading or platform
+    # finalization failed.  Remediation depends on the tagged phase.
+    return (f"applied-but-broken: {summary}{version} — committed as the "
+            f"new config but loading or platform finalization errored "
+            f"({ar.detail}); inspect that failure before rolling back or "
+            "sending a corrected config")
 
 
 @tool
 def get_config() -> str:
-    """Return the user's CURRENTLY SAVED emacs config — the elisp body that
-    is committed and loads on the next restart.
+    """Return the LAST SERVER-RECORDED emacs config body.
 
     Call this BEFORE `apply_config` whenever you're changing a config the
     user already has: `apply_config` REPLACES the whole file, so you must
@@ -236,11 +247,13 @@ def get_config() -> str:
     it, fold in your change, and pass the result straight back to
     `apply_config`, which takes the same bare-body form this returns.
 
-    This is the SAVED config, not the live running state — to check what
-    emacs is actually doing right now, use `eval_elisp` instead.  The two
-    can differ (e.g. a config that was applied but errored while loading).
-    The saved config does not change within a turn unless you call
-    `apply_config`, so one read is enough.
+    This is recorded history, not the phone file or live running state.  To
+    check what emacs is actually doing right now, use `eval_elisp` instead.
+    After an unconfirmed or unrecorded config result, stop persistent config
+    work and reconcile the phone file with history before trusting this body.
+    Runtime can also differ after a config load or platform finalization error.
+    The saved config does not change within a turn unless `apply_config` or
+    `revert_config` changes it, so read it again after either operation.
 
     Returns the bare elisp body; or `empty: ...` when nothing is saved yet;
     or `error: ...` if the saved config can't be read (tell the user rather
@@ -272,20 +285,28 @@ def get_config() -> str:
 
 
 def revert_head_and_apply(ctx: PhoneContext, repo: ConfigRepo) -> tuple[str, str]:
-    """Undo the last apply: git-revert the config repo's HEAD, then load the
-    resulting config on the phone.  Returns ``(status, detail)`` where status is
-    ``"noop"`` (nothing to undo) or one of ``apply_to_phone``'s statuses.
+    """Undo the last apply: preview the prior body, write it to the phone,
+    then git-revert HEAD.  Returns ``(status, detail)`` where status is
+    ``"noop"`` (nothing to undo), ``"unrecorded"`` (phone written but git
+    failed), or one of ``apply_to_phone``'s statuses.
 
     Shared by the ``/rollback`` endpoint (app.py) and the ``revert_config`` tool
-    so the revert-then-apply path lives in one place.  May raise
+    so the apply-then-record undo transaction lives in one place.  May raise
     ``ConfigRepoError`` on a corrupt repo / revert conflict — callers convert it
     to a structured result."""
-    result = repo.rollback()
-    if not result.ok:
-        return ("noop", result.detail)
-    # Apply the RENDERED file (what git holds) so the phone's agent.el stays
-    # byte-identical to the repo, with the lexical-binding cookie.
-    ar = apply_mod.apply_to_phone(ctx, render(result.version.body))
+    body = repo.rollback_body()
+    if body is None:
+        return ("noop", "nothing to roll back (no config applied yet)")
+    ar = apply_mod.apply_to_phone(ctx, render(body))
+    if ar.status not in ("applied", "load_error"):
+        return (ar.status, ar.detail)
+    try:
+        repo.rollback()
+    except Exception as e:  # noqa: BLE001 — preserve phone + git outcomes
+        activation = ("loaded cleanly" if ar.status == "applied" else
+                      f"activation failed ({ar.detail})")
+        return ("unrecorded", f"written on the phone and {activation}, but "
+                f"the server failed to record the rollback in git ({e})")
     return (ar.status, ar.detail)
 
 
@@ -329,11 +350,16 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
     The revert is itself recorded in git, so it too can be undone.  Returns:
     - `reverted: ...` / `restored: ...` — done and loaded cleanly on the phone.
     - `nothing to roll back ...` — there was no prior apply to undo.
-    - `reverted-but-broken:` / `restored-but-broken:` — loaded but it errored;
-      send a corrected config or pick a different version.
-    - `restored-but-unrecorded: ...` — a restored config is LIVE on the phone but
-      the server failed to record it in git; tell the user, do NOT retry.
+    - `reverted-but-broken:` / `restored-but-broken:` — written but config
+      loading or platform finalization errored; inspect the tagged failure.
+    - `restored-but-unrecorded: ...` — the phone wrote a restored config but
+      the server failed to record it in git; tagged detail says whether it
+      activated cleanly.  Tell the user; do NOT retry blindly.
     - `error: phone unreachable: ... (do not retry — surface to user)`.
+    - `error: config application unconfirmed: ...` — the server could not
+      prove the phone-side write completed; history is unchanged.
+    - `reverted-but-unrecorded: ...` — the phone was written but the rollback
+      commit failed; retrying is safe because history is unchanged.
     - `error: ...` — e.g. an unknown target sha; tell the user, don't retry.
     """
     cfg = (config or {}).get("configurable") or {}
@@ -371,6 +397,11 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
     if status == "unreachable":
         return (f"error: phone unreachable: {detail} "
                 "(do not retry — surface to user)")
+    if status == "apply_error":
+        return (f"error: config application unconfirmed: {detail}; "
+                "saved history is unchanged")
+    if status == "unrecorded":
+        return f"reverted-but-unrecorded: {detail}; retrying is safe"
     if body is not None:
         # Restore path: commit only after the phone received it (mirrors
         # apply_config); undo-last was already committed by rollback().
@@ -380,27 +411,33 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
             log.exception("revert_config: commit failed")
             # Reachable only on the restore path (undo-last is already committed
             # by rollback()), so the verb is always "restored".
-            return ("restored-but-unrecorded: loaded on the phone but the server "
-                    f"failed to record it in git ({e}); the change is live but "
-                    "cannot be rolled back from history")
+            activation = ("loaded cleanly" if status == "applied" else
+                          f"activation failed ({detail})")
+            return ("restored-but-unrecorded: written on the phone and "
+                    f"{activation}, but the server failed to record it in git "
+                    f"({e}); do not retry; reconcile the phone file with "
+                    "history before another persistent config change")
     if status == "applied":
         # Don't promise the chat-UI ROLLBACK button: it's enabled only by the
         # `applied` event app.py derives from apply_config, not revert_config —
         # so it won't appear after a conversational revert.  The user undoes
         # again by asking (another revert_config), not by tapping.
         return f"{verb}: loaded cleanly on the phone"
-    # load_error: the phone wrote+errored the file, so it IS the live config.
-    return (f"{verb}-but-broken: loaded but it errored ({detail}); send a "
-            "corrected config or pick a different version to restore")
+    # load_error: the phone wrote the saved file, but the runtime state may be
+    # only partially changed when loading or platform finalization errored.
+    return (f"{verb}-but-broken: written but loading or platform "
+            f"finalization errored ({detail}); inspect that failure before "
+            "sending a corrected config or restoring another version")
 
 
 # The exported set of tools emacsos-server adds to every /chat agent
 # via `Thread(..., spec=AgentSpec(tools=EMACS_TOOLS))`.  `eval_elisp` inspects /
-# experiments on the live phone; `get_config` reads the saved config body
-# so the agent can restate-and-change without relying on conversation
-# memory (the committed file is the source of truth post-/clear);
-# `apply_config` ships a verified config to the phone with a git-backed,
-# rollback-able commit; `config_history` + `revert_config` make rollback
+# experiments on the live phone; `get_config` reads the last server-recorded
+# body so the agent can restate-and-change without relying on conversation
+# memory; `apply_config` ships a verified config to the phone with a
+# git-backed, rollback-able commit.  Unconfirmed/unrecorded results require
+# phone-file reconciliation before this body is authoritative.
+# `config_history` + `revert_config` make rollback
 # conversational (undo the last change, or restore an older version by sha).
 #
 # `apply_config` in particular must stay a TOP-LEVEL tool (not buried in a

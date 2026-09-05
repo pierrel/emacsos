@@ -1,0 +1,252 @@
+#!/bin/sh
+# Reversibly select the minimal UI or the preserved tty1 console on OpenRC.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+export PATH
+
+inittab=/etc/inittab
+state=/var/lib/emacsos-openrc-state
+lock=/run/emacsos-openrc-boot-mode.lock
+install_lock=/run/emacsos-openrc-install.lock
+line='tty1::respawn:/sbin/getty 38400 tty1'
+marker='# emacsos-openrc owns tty1'
+tmp=
+state_tmp=
+transition=
+restart_ui_on_rollback=0
+
+fail() {
+    printf 'emacsos-openrc: %s\n' "$1" >&2
+    exit 1
+}
+
+cleanup() {
+    trap - HUP INT TERM
+    case $transition in
+        initialize|ui)
+            if rollback_inittab "$state/inittab.original"; then
+                rc-update del emacsos-ui default >/dev/null 2>&1 || true
+                [ "$transition" != initialize ] || rm -rf -- "$state"
+            fi
+            ;;
+        console)
+            if rollback_inittab "$state/inittab.installed"; then
+                rc-update add emacsos-ui default >/dev/null 2>&1 || true
+                [ "$restart_ui_on_rollback" -eq 0 ] ||
+                    rc-service emacsos-ui start 8>&- 9>&- >/dev/null 2>&1 || true
+            fi
+            ;;
+    esac
+    [ -z "$tmp" ] || rm -f -- "$tmp"
+    [ -z "$state_tmp" ] || rm -rf -- "$state_tmp"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ "$#" -eq 1 ] || fail 'one action is required'
+case $1 in initialize|ui|console|status) ;; *) fail 'unknown action' ;; esac
+if [ "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != "$install_lock" ]; then
+    touch "$install_lock"
+    chown root:root "$install_lock"
+    chmod 0600 "$install_lock"
+    exec 8>"$install_lock"
+    flock -n -x 8 || fail 'install or update is busy'
+fi
+touch "$lock"
+chown root:root "$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+flock -n -x 9 || fail 'boot mode transition is busy'
+
+check_root_file() {
+    file=$1
+    mode=$2
+    [ -f "$file" ] && [ ! -L "$file" ] || fail "unsafe file: $file"
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$file")" = "root:root:$mode:1:regular file" ] ||
+        fail "unsafe owner, mode, or links: $file"
+}
+
+file_hash() {
+    hash_line=$(sha256sum "$1") || return
+    printf '%s\n' "${hash_line%% *}"
+}
+
+replace_inittab() {
+    source=$1
+    check_root_file "$source" 600
+    tmp=$(mktemp /etc/.inittab.emacsos.XXXXXX)
+    install -o root -g root -m 0644 "$source" "$tmp"
+    sync
+    mv -f -- "$tmp" "$inittab"
+    tmp=
+    sync
+}
+
+rollback_inittab() {
+    source=$1
+    [ -f "$source" ] && [ ! -L "$source" ] || return 1
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$source")" = \
+        'root:root:600:1:regular file' ] || return 1
+    cmp -s "$source" "$inittab" && return 0
+    rollback_tmp=$(mktemp /etc/.inittab.emacsos.rollback.XXXXXX) || return 1
+    if install -o root -g root -m 0644 "$source" "$rollback_tmp"; then
+        sync || { rm -f -- "$rollback_tmp"; return 1; }
+        mv -f -- "$rollback_tmp" "$inittab" || {
+            rm -f -- "$rollback_tmp"
+            return 1
+        }
+        rollback_tmp=
+        sync || return 1
+        cmp -s "$source" "$inittab"
+    else
+        rm -f -- "$rollback_tmp"
+        return 1
+    fi
+}
+
+ui_enabled() {
+    rc-update show default 2>/dev/null |
+        grep -Eq '^[[:space:]]*emacsos-ui[[:space:]]*\|[[:space:]]*default[[:space:]]*$'
+}
+
+check_service() {
+    check_root_file /etc/init.d/emacsos-ui 755
+    check_root_file /usr/local/sbin/emacsos-openrc-suspend 755
+    check_root_file /etc/doas.d/95-emacsos-ui.conf 600
+    [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
+        [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ] ||
+        fail 'legacy suspend authority is installed'
+    [ -x /usr/local/share/emacsos-openrc/process-group ] ||
+        fail 'process-group owner is absent'
+    [ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
+        "$(printf '%s\n' \
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+            'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ] ||
+        fail 'UI authority is invalid'
+    [ -x /usr/local/share/emacsos-openrc/session ] ||
+        fail 'session payload is absent'
+    [ "$(id -un emacsos-lab)" = emacsos-lab ] || fail 'lab account is absent'
+    groups=$(id -Gn emacsos-lab | tr ' ' '\n' | sort)
+    [ "$groups" = "$(printf '%s\n' audio emacsos-lab seat video)" ] ||
+        fail 'lab account group set is unsafe'
+    return 0
+}
+
+check_state() {
+    [ -d "$state" ] && [ ! -L "$state" ] || fail 'boot state is absent'
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$state")" = 'root:root:700:2:directory' ] ||
+        fail 'unsafe boot state directory'
+    for name in inittab.original inittab.installed; do
+        check_root_file "$state/$name" 600
+    done
+    [ "$(grep -Fxc "$line" "$state/inittab.original")" -eq 1 ] ||
+        fail 'saved console state is invalid'
+    [ "$(grep -Fxc "$marker" "$state/inittab.original" || true)" -eq 0 ] ||
+        fail 'saved console state owns tty1'
+    [ "$(grep -Fxc "$line" "$state/inittab.installed" || true)" -eq 0 ] ||
+        fail 'saved UI state retains tty1 getty'
+    [ "$(grep -Fxc "$marker" "$state/inittab.installed")" -eq 1 ] ||
+        fail 'saved UI state is invalid'
+}
+
+initialize() {
+    check_service
+    check_root_file "$inittab" 644
+    [ ! -e "$state" ] && [ ! -L "$state" ] || fail 'boot state already exists'
+    [ "$(grep -Fxc "$line" "$inittab")" -eq 1 ] || fail 'tty1 getty is not stock'
+    [ "$(grep -Fxc "$marker" "$inittab" || true)" -eq 0 ] || fail 'tty1 is already owned'
+    rc-service emacsos-ui status >/dev/null || fail 'UI proof is not running'
+    rc-service emacsos-ui stop
+
+    transition=initialize
+    state_tmp=$(mktemp -d /var/lib/.emacsos-openrc-state.XXXXXX)
+    chown root:root "$state_tmp"
+    chmod 0700 "$state_tmp"
+    install -o root -g root -m 0600 "$inittab" "$state_tmp/inittab.original"
+    awk -v line="$line" -v marker="$marker" '
+        $0 == line { print marker; replaced++; next }
+        { print }
+        END { if (replaced != 1) exit 1 }
+    ' "$inittab" >"$state_tmp/inittab.installed"
+    chown root:root "$state_tmp/inittab.installed"
+    chmod 0600 "$state_tmp/inittab.installed"
+    mv -- "$state_tmp" "$state"
+    state_tmp=
+    check_state
+
+    rc-update add seatd default
+    rc-update add emacsos-ui default
+    replace_inittab "$state/inittab.installed"
+    transition=
+    printf '%s\n' 'UI selected; reboot is required'
+}
+
+select_ui() {
+    check_service
+    check_state
+    check_root_file "$inittab" 644
+    current=$(file_hash "$inittab")
+    if [ "$current" = "$(file_hash "$state/inittab.installed")" ]; then
+        rc-update add seatd default
+        rc-update add emacsos-ui default
+        printf '%s\n' 'UI selected; reboot is required'
+        return
+    fi
+    [ "$current" = "$(file_hash "$state/inittab.original")" ] ||
+        fail 'current inittab matches neither saved state'
+    transition=ui
+    rc-update add seatd default
+    rc-update add emacsos-ui default
+    replace_inittab "$state/inittab.installed"
+    transition=
+    printf '%s\n' 'UI selected; reboot is required'
+}
+
+select_console() {
+    check_state
+    check_root_file "$inittab" 644
+    current=$(file_hash "$inittab")
+    if [ "$current" = "$(file_hash "$state/inittab.original")" ]; then
+        rc-update del emacsos-ui default >/dev/null 2>&1 || true
+        printf '%s\n' 'console selected; reboot is required'
+        return
+    fi
+    [ "$current" = "$(file_hash "$state/inittab.installed")" ] ||
+        fail 'current inittab matches neither saved state'
+    rc-service emacsos-ui status >/dev/null 2>&1 && restart_ui_on_rollback=1
+    transition=console
+    rc-service emacsos-ui stop 2>/dev/null || true
+    lab_uid=$(id -u emacsos-lab 2>/dev/null || true)
+    [ -z "$lab_uid" ] || ! pgrep -u "$lab_uid" >/dev/null 2>&1 ||
+        fail 'lab processes remain after UI stop'
+    replace_inittab "$state/inittab.original"
+    rc-update del emacsos-ui default
+    transition=
+    printf '%s\n' 'console selected; reboot is required'
+}
+
+show_status() {
+    check_state
+    check_root_file "$inittab" 644
+    current=$(file_hash "$inittab")
+    if [ "$current" = "$(file_hash "$state/inittab.installed")" ]; then
+        ui_enabled || fail 'UI inittab is not enabled in the default runlevel'
+        printf '%s\n' ui
+    elif [ "$current" = "$(file_hash "$state/inittab.original")" ]; then
+        ! ui_enabled || fail 'console inittab still enables the UI service'
+        printf '%s\n' console
+    else
+        fail 'current inittab matches neither saved state'
+    fi
+}
+
+case $1 in
+    initialize) initialize ;;
+    ui) select_ui ;;
+    console) select_console ;;
+    status) show_status ;;
+esac

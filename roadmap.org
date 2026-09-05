@@ -57,10 +57,12 @@ state doc, not another software slice.
 * TODO PinePhone minimal client with reliable deep sleep
 
 Use the PinePhone as the first integrated Assist smartphone testbed, but replace
-the general-purpose Phosh desktop with the smallest useful awake surface: Emacs
-plus a framebuffer keyboard, phone primitives, and the Assist client.  Removing
-the compositor and desktop stack should improve responsiveness and reduce awake
-overhead, but it is explicitly *not* the battery strategy by itself.
+the general-purpose Phosh desktop with the smallest useful awake surface: a
+minimal Wayland compositor, PGTK Emacs, phone primitives, and the Assist client.
+Firefox and Waydroid make a compositor non-optional; they run as on-demand
+full-screen clients rather than turning EmacsOS back into a desktop.  Removing
+the Phosh/GNOME shell should improve responsiveness and reduce awake overhead,
+but it is explicitly *not* the battery strategy by itself.
 
 Battery life depends on making Crust deep suspend reliable.  The intended power
 model is:
@@ -85,11 +87,37 @@ power-key event, kernel panic, GPU error, OOM, or clean shutdown.  Do not paper
 over that failure with a lighter UI; prove the new display-off and suspend/resume
 path directly.
 
+The v26.06/OpenRC control captured a kernel RCU stall after USB power removal,
+so it is rejected for this experiment.  The active v25.06/OpenRC/6.13.8 image
+has passed a multi-hour plugged run with Sway, PGTK Emacs, wvkbd, handset audio,
+Firefox, on-demand Waydroid, repeated DPMS, and intentional UI failure recovery.
+Pierre's first unplugged hands-on run, physical display-off/wake, and an
+RTC-driven deep suspend passed with the same Sway and Emacs processes.  During
+unattended integration, only the reviewed 60-second display blank is installed;
+the kernel-suspend helper and UI suspend privilege are removed so the phone
+remains remotely recoverable.  Four
+plugged automatic RTC-wake cycles passed under the former suspend policy.  The
+three post-fix captures were clean, including a 23-minute-33-second unreachable
+interval between kernel suspend entry and RTC wake, followed by visible Firefox
+and Android browser smokes.  The next gates are duration and battery runs,
+followed by modem validation with Pierre present.
+Firefox/Android authority
+separation and restrictive guest networking remain gates before untrusted
+Android apps.  Detailed evidence and rejected
+hypotheses are in [[file:docs/2026-08-31-pinephone-emacsos-session.org][the session record]];
+verified images and fallback procedure are in
+[[file:docs/2026-09-01-pinephone-base-recovery.org][the base-recovery record]].
+
 Acceptance is repeated unplugged display-off/deep-suspend/resume cycles with
 working calls and SMS wake, clean modem and network recovery, Assist reconnection,
 and materially lower measured standby drain.  Also test the charging case
 separately because PinePhone USB-C/display interactions have already produced
 different behavior in live use.
+
+The staged direct-computer architecture, automatic screenshot/input/suspend
+harness, authenticated lab recovery, later locked fallback, promotion gates,
+and stop conditions are in
+[[file:docs/2026-08-31-pinephone-emacsos-session.org][2026-08-31-pinephone-emacsos-session.org]].
 
 * Ergonomics iteration
 
@@ -377,13 +405,11 @@ breaks the no-retry hint.  Lift the classification into
 tool.  Deletes ~12 lines of substring matching + the dedicated
 unreachable-shape tests.
 
-** TODO Redact secrets in `/chat` request log
+** DONE Keep chat and elisp source out of request logs
 
-`app.py`'s `log.info("POST /chat msg=%r", req.message)` logs the
-user's chat input verbatim.  `channel._redact` exists and could be
-applied here.  Surfaced by the code-review team; not done in the
-channel PR because that PR shouldn't widen scope to `app.py`'s
-logging.
+*Shipped 2026-09-03.*  The =/chat= request and =eval_elisp= INFO records log
+only source lengths, not the user's message or evaluated Elisp.  This avoids
+depending on incomplete substring redaction for arbitrary private content.
 
 ** DONE Remote connectivity: WireGuard for the away phone
 

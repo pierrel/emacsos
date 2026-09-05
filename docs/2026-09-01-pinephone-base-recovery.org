@@ -1,0 +1,460 @@
+#+title: PinePhone base recovery
+#+date: 2026-09-01
+
+* Decision
+
+The supported postmarketOS v26.06 OpenRC console recovery failed Stage A, so
+the active image is the prepared v25.06/6.13.8 recovery build.  On v26.06, USB
+power removal at kernel uptime 254.6 seconds was followed about 42 seconds
+later by an RCU stall on CPU 2.  The RCU grace-period thread starved, Wi-Fi and
+SSH stopped responding, and neither reconnecting USB power nor a power-key
+wake restored networking.  This occurred with no graphical session, no modem
+daemon, and privacy switch 1 physically off.  It therefore fails below the UI
+and modem layers.  The v25.06 image has since passed its plugged console and
+minimal-graphics gates; only a v25.06 unplugged failure advances to DanctNIX.
+
+The recovery-v2 image removes systemd and all graphics, keeps NetworkManager,
+starts with the EG25 manager disabled, and removes first-boot access as an
+unknown.  It configures USB recovery at =172.16.42.1/24= before NetworkManager,
+starts SSH in OpenRC's boot runlevel with a pre-generated host key, authorizes
+only Thinky's key for =user=, grants that user passwordless sudo, and carries a
+private auto-connect Wi-Fi profile.  A blank DSI display is not a blocker for
+this console image; USB and Wi-Fi SSH are its control surfaces.
+
+* Why this image
+
+- The current edge install and supported v26.06 both use the PinePhone 6.18.3
+  kernel.  Moving between them does not isolate the kernel.
+- pmaports issue #4265 describes the same v25.12 failure signature seen here:
+  the internal EG25 USB device disappears after five to fifteen minutes,
+  re-enumeration fails, QMI and =qmi_wwan= time out, and only a reboot recovers
+  it.  The reporter said v25.06 worked.  The issue was closed at v25.12 end of
+  life without a technical fix.
+- v25.06 uses the substantially older 6.13.8 kernel.  OpenRC console also
+  removes systemd, Phosh, Sway, Emacs, display managers, and compositor/input
+  paths from the first test.
+- Mobian's current PinePhone weekly image is Debian Testing, requires Tow-Boot,
+  and changes the bootloader and userspace along with the kernel.  It remains a
+  later cross-distribution check, not the clean first A/B.
+
+Primary references:
+
+- [[https://gitlab.postmarketos.org/postmarketOS/pmaports/-/work_items/4265][pmaports #4265: v25.12 EG25 USB regression]]
+- [[https://gitlab.postmarketos.org/postmarketOS/pmaports/-/commit/8b4155af3bf09ac5f31effba513c5bb42af3f654][PinePhone moved from community to testing]]
+- [[https://gitlab.postmarketos.org/postmarketOS/pmaports/-/work_items/4676][pmaports #4676: kernel freshness and call-on-wake trade-off]]
+- [[https://docs.postmarketos.org/pmaports/main/releases.html][postmarketOS release support policy]]
+- [[https://wiki.postmarketos.org/wiki/PINE64_PinePhone_(pine64-pinephone)][postmarketOS PinePhone page]]
+- [[https://pine64.org/documentation/PinePhone/Revisions/PinePhone_v1.2/][PINE64 revision 1.2 USB-C erratum]]
+
+* Older-kernel fallback artifact
+
+On Thinky:
+
+#+begin_src text
+~/Downloads/pinephone-pmos-v25.06-custom-build/output/20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img.xz
+#+end_src
+
+The adjacent =SHA256SUMS.recovery-v2= file is authoritative for transfer
+verification.  Its compressed SHA-256 is
+=263b3e85d64a0abea98d390f2af6c46a8768c4f588320a5fa54a7a95f39cc717=;
+the expanded image SHA-256 is
+=b0c7e0ea84a11c9ae8a69b655b6e3c301470228324ba66a28afc49df54df34c0=.
+The build has these verified properties:
+
+- postmarketOS v25.06, OpenRC, console UI;
+- =linux-postmarketos-allwinner= 6.13.8_git20250323-r0;
+- no Phosh, Sway, Emacs, or ModemManager package;
+- SSH enabled key-only and Pierre's current =id_ed25519.pub= installed for
+  =user=; the temporary password works only at a physical console;
+- fixed early USB recovery at =172.16.42.1/24=, a pre-generated host key,
+  NetworkManager, and private Wi-Fi with the hardware-proven permanent-MAC
+  policy;
+- passwordless root through both real =sudo= and Alpine's =sudo=-to-=doas=
+  compatibility path;
+- =eg25-manager= installed but removed from the default runlevel;
+- existing BusyBox kernel/system loggers enabled with four bounded 2 MiB
+  rotations under =/var/log= so evidence survives a forced reboot;
+- intact boot script, kernel, initramfs, and PinePhone 1.2 device tree;
+- clean read-only =e2fsck= of its ext2 boot and ext4 root filesystems;
+- a tested xz stream and matching SHA-256 digest.
+
+The temporary first-boot password is =147147=.  Replace it immediately if the
+image survives the diagnostic.  The SSH key is the preferred login path.
+
+** Reproduction record
+
+The build used tracked =deploy/pinephone/fallback-pmbootstrap.cfg= with
+pmbootstrap 3.5.2 and pmaports v25.06 commit
+=10a477ce653458f6e7d412563b5f77b71b2cc0e4=.  Source archives and the exact
+build container were:
+
+#+begin_src text
+pmbootstrap-3.5.2.tar.gz  d646424a74bafb56551201f68349b30623272b15e0076684787961afa00d06d0
+pmaports-v25.06.tar.gz    c37b730c7d7c95cc2ee38f387cde15f6e9bd362aeac5afc8e9c14f1c041e4d76
+alpine:edge               sha256:020dfcbaaf4cc1078bf2d9c7ba31a8466e334061dcd2f248001d68f79e52c000
+#+end_src
+
+pmbootstrap =install= and =export= produced the raw image.  The post-build
+rootfs changes removed
+=/etc/runlevels/default/eg25-manager= while retaining the package for Stage B,
+and enabled the already-installed BusyBox =syslogd= and =klogd= with bounded
+on-disk rotation.  The tracked =diagnostic-sshd.conf= disables SSH password,
+keyboard-interactive, and root login.
+The resulting raw image is 1,529,872,384 bytes with SHA-256
+=a89216d0f0d38f2538ee342bc7efc294755bcefdf471cab3a64d5f6d5099a2e3=.
+The xz stream expands to that exact digest.
+
+* Supported 6.18/OpenRC recovery image
+
+This is the first image to flash.  It retains the supported v26.06 userspace
+and the same 6.18.3 PinePhone kernel family as the failed edge install while
+removing the graphical, systemd, ordinary first-boot networking, and generated
+SSH-identity variables:
+
+#+begin_src text
+~/Downloads/pinephone-pmos-v26.06-custom-build/output/20260901-postmarketOS-v26.06-console-recovery-v2-pine64-pinephone.img.xz
+#+end_src
+
+Its adjacent =SHA256SUMS.recovery-v2= records compressed SHA-256
+=725b2cdb2e86d16856197d9bc304514f8c7af080a983300cace2d2c8f2447a0d=.
+The verified build is postmarketOS v26.06, OpenRC console,
+=linux-postmarketos-allwinner= 6.18.3_git20260105-r3, with Thinky's SSH key,
+key-only SSHD, pre-generated stable host identity, passwordless sudo, fixed
+early USB recovery, and private DHCP Wi-Fi auto-connect enabled; no graphical
+or ModemManager packages; =eg25-manager= installed but disabled; and bounded
+persistent logging.  Both filesystems, boot files, xz stream, and decompressed
+digest passed validation.  Its raw image is 1,771,044,864 bytes with SHA-256
+=32584a59ef34535ed551b5c10c62ebab7ee124eb5b4c57fed3429f344a8d521c=.
+
+Verification used the image itself, not only its source tree.  A read-only
+mount checked exact file contents, ownership, modes, runlevel links, disabled
+modem service, SSH key, Wi-Fi profile, USB profile, and host key.  QEMU user
+emulation ran the image's AArch64 =sshd.pam -t=, =visudo -c=, and =rc-update=
+checks.  An isolated dummy =usb0= executed the recovery program and acquired
+exactly =172.16.42.1/24=.  Finally, an ephemeral Docker SSH server loaded the
+baked authentication and sudo policy: Thinky's private key logged in as
+=user= and =sudo -n id -u= returned =0=.  This proves the packaged access
+contract; only the PinePhone kernel/USB/Wi-Fi hardware boot remains live-only.
+
+The first live =recovery-v2= boot proved the console, persistent logging, USB
+gadget, fixed =172.16.42.1/24= recovery address, key-only SSH identity, and
+passwordless sudo.  Wi-Fi initially failed association even though the baked
+secret was present and the access point advertised compatible WPA2.  The
+profile's default stable cloned MAC was the cause: changing only
+=802-11-wireless.cloned-mac-address= to =permanent= made the same connection
+activate immediately and obtain DHCP.  The tracked profile and image verifier
+now require that observed hardware contract.  The first boot's log contains no
+panic, RCU stall, thermal fault, or storage error; its later black display is
+not by itself evidence of a system hang because the console image deliberately
+ignores the power key and remained inaccessible after the late USB connection
+missed the bounded early recovery window.  The following controlled unplug did
+prove the lower-level failure: the persistent log records USB removal at
+kernel uptime 254.6 seconds, an RCU stall on CPU 2 about 42 seconds later, and
+starvation of the RCU grace-period thread.  Reconnecting power and waking the
+display did not restore networking or userspace.  v26.06 is therefore rejected
+for this phone; do not spend more time on its UI.
+
+A final matched repetition showed that the failure is intermittent, not that
+it was fixed.  After a forced restart with USB absent, Wi-Fi SSH came up, USB
+power negotiated 5 V/2.4 A cleanly, and the phone remained reachable while
+charging.  Removing power at kernel uptime 360.2 seconds produced 60/60
+successful five-second probes across the whole monitor and no new kernel
+warning; the final SSH snapshot was healthy 82 seconds after removal, beyond
+the earlier 42-second failure point.  Keep both results: one clean repetition
+does not invalidate the captured RCU stall, so v26.06 remains rejected and
+v25.06 remains the next test.
+
+The first v25.06 boot saw the network at full strength but exhausted
+NetworkManager's finite automatic retry budget after transient association
+timeouts.  A manual activation immediately completed association, the WPA
+four-way handshake, and DHCP with the baked secret and permanent MAC unchanged.
+The live profile and tracked template now set =connection.autoconnect-retries=0=
+so boot-time association keeps using NetworkManager's native increasing delays
+instead of stopping for an interactive secret agent.
+
+The source archive represents official v26.06 branch head
+=2b7f90ea7c2ae4d42ae187dc0b528dc163767b04= and has SHA-256
+=3c211e9335da3e06384ce0963eeebaabe045531bad0e95d07952b6f52c0d091b=.
+It was built with pmbootstrap 3.11.1 archive SHA-256
+=9254c6118fd390728814a78d16fa1dcf8fbbc8a24530ef1f98e6188e7fb48555=
+and the same pinned Alpine build container.  The current channel metadata was
+added locally for pmbootstrap;
+package sources and the resulting installed packages remained v26.06/Alpine
+3.24.  The temporary password is =147147=.
+
+The supported image failed.  The 6.13 image is now the active installation.
+With the modem electrically off it booted the console, expanded the root
+filesystem, installed the minimum Sway/PGTK Emacs/wvkbd stack, and rebooted
+into that OpenRC-supervised UI.  The plugged session passed real display and
+touch input, whole-session recovery, native Firefox, Wi-Fi, and repeated DPMS
+tests without a kernel warning.  Its first unplugged hands-on run, physical
+panel off/wake, and RTC deep suspend also passed.  Four later automatic
+plugged RTC-wake cycles returned the same graphical processes, including a
+23-minute-33-second continuously unreachable interval between kernel deep
+suspend and RTC wake.  Keep building on v25.06 while the duration, battery,
+repeated physical-wake, and modem gates continue; do not advance to DanctNIX
+unless this base regresses.
+Thinky's prepared aliases are =phoney-diag-v2506= and =phoney-diag-v2606= so
+the images keep separate SSH host-key records.
+
+* Third reserve: DanctNIX barebone
+
+Do not use this before the v25.06 Stage A test.  It is retained as an
+independent Arch ARM/systemd check if the 6.13 result is ambiguous, or if a
+later cross-distribution comparison is needed:
+
+#+begin_src text
+~/Downloads/pinephone-danctnix-barebone/20260901-danctnix-barebone-pinephone-diagnostic.img.xz
+#+end_src
+
+The derivative's adjacent =SHA256SUMS.diagnostic= records SHA-256
+=0e5797ae22c0b4dc76d2c3ad143f5e2e57d81e2d5c1d317038009f9f7c623af8=.
+It is based on the upstream 2025-12-24 original-PinePhone barebone release,
+whose image and detached signature were both checksum-verified against GitHub
+release metadata.  The detached signature was verified with Danct12's full
+fingerprint =F09A 933C 0FE0 331E 558C A4E1 66CA B7EA A45D D781=.  The signed
+upstream files and =SHA256SUMS.upstream= remain in the same directory.
+
+The local derivative changes only the diagnostic access boundary: it installs
+Pierre's SSH public key for =alarm=, makes SSH key-only, and disables
+=eg25-manager=.  It passed
+read-only FAT/ext4 filesystem checks and internal validation.  It is Arch ARM
+barebone with systemd, the 6.15.6-2-megi-danctnix kernel, SSH, NetworkManager,
+and USB tethering enabled, with no display manager.  Its temporary password is
+=123456=.  USB tethering assigns the phone =10.15.19.82/24=; if the laptop does
+not configure itself, assign =10.15.19.100/24= to the new USB network interface
+and SSH to =alarm@10.15.19.82=.
+
+This reserve is weaker than the first test because it changes the distribution
+and init system while using a third kernel, but it is still more relevant to a
+minimal Emacs computer than a full Mobian/Phosh image.  The original PinePhone
+does not need Tow-Boot for this DanctNIX image; the release's Tow-Boot warning
+applies to PinePhone Pro.
+
+Do not run =pacman -Syu= before its first availability test: that would replace
+the image's 6.15.6 kernel and destroy the comparison.  The live Arch ARM
+repositories were checked on 2026-09-01 and contain native aarch64 Firefox
+154.0.1 and Waydroid 1.6.3, so it can satisfy the browser and Android gates if
+its hardware baseline passes.  Its rolling update model and smaller
+PinePhone-specific support surface still make it a reserve rather than the
+first long-term choice.
+
+* Transfer to the laptop
+
+Transfer the v25.06 recovery-v2 image:
+
+#+begin_src sh
+mkdir -p ~/Downloads/pinephone-v2506-recovery
+scp 'thinky:Downloads/pinephone-pmos-v25.06-custom-build/output/20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img.xz' ~/Downloads/pinephone-v2506-recovery/
+scp 'thinky:Downloads/pinephone-pmos-v25.06-custom-build/output/SHA256SUMS.recovery-v2' ~/Downloads/pinephone-v2506-recovery/
+cd ~/Downloads/pinephone-v2506-recovery
+sha256sum -c SHA256SUMS.recovery-v2
+xz -t 20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img.xz
+unxz -k 20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img.xz
+#+end_src
+
+Both verification commands must succeed silently or print =OK=.  Stop if
+either fails.
+
+* Identify and flash a different SD card
+
+Before inserting the card:
+
+#+begin_src sh
+lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,TYPE,MOUNTPOINTS
+#+end_src
+
+Insert the card, then run the same command again.  The one new whole disk is
+the target.  Its old partitions do not need to be preserved and will be
+replaced by the image.  In the commands below, replace =/dev/sdX= with that
+verified whole-disk path.  Never use a partition such as =/dev/sdX1=.  Never
+use the laptop's NVMe disk.
+
+Unmount each mounted partition shown beneath that exact card, then write and
+verify it:
+
+#+begin_src sh
+sudo umount /dev/sdX1
+sudo umount /dev/sdX2
+sudo dd if="$PWD/20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img" of=/dev/sdX bs=4M iflag=fullblock status=progress conv=fsync
+sudo cmp -n "$(stat -c %s 20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img)" 20260901-postmarketOS-v25.06-console-recovery-v2-pine64-pinephone.img /dev/sdX
+sync
+#+end_src
+
+An =umount= command may say a partition is not mounted; that is harmless.  A
+successful =cmp= prints nothing.  Eject the card only after =sync= returns.
+
+* First boot and access
+
+Power the PinePhone fully off, insert the new SD card, and start it.  The DSI
+display may remain blank: this image deliberately has no graphical session or
+on-screen keyboard.  It should connect to the baked private Wi-Fi profile by
+DHCP and start SSH during OpenRC's boot runlevel.  Fixed USB recovery is
+independent of NetworkManager: the phone is =172.16.42.1/24= and the connected
+host should be =172.16.42.2/24=.  Connect a known-good data cable to Thinky for
+direct agent access, or to the laptop for local diagnosis.  On a laptop:
+
+#+begin_src sh
+ip -br address
+ping -c 3 172.16.42.1
+ssh -o HostKeyAlias=phoney-diag-v2506 -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 user@172.16.42.1
+#+end_src
+
+Using a separate host-key alias preserves the current =phoney= identity.  On
+a revision 1.2 board, USB data can depend on cable orientation because of the
+documented VCONN/CC erratum.  If no USB network appears, disconnect the cable,
+turn the USB-C plug over, and reconnect it.  Do not diagnose image failure from
+one cable orientation.  A USB keyboard or serial cable is the console fallback.
+Thinky's SSH config is already prepared as =ssh phoney-diag-v2506= and
+=ssh phoney-diag-v2606=.  The Arch reserve is =ssh phoney-diag-arch= after
+assigning the host side of its USB network =10.15.19.100/24=.
+
+* Staged acceptance
+
+Do not install graphics or enable every phone service at once.  Preserve the
+first failing boundary and collect its previous-boot log before adding another
+layer.
+
+** Stage A: kernel, card, Wi-Fi, and SSH only
+
+Electrically remove the modem from this first boundary.  With the phone fully
+powered off and every cable disconnected, remove the battery and move privacy
+switch 1, the switch nearest the modem, to =off=.  Its =on= direction is toward
+the top of the phone.  Reinsert the battery only after the switch is settled.
+Disabling =eg25-manager= alone is insufficient because the powered EG25 still
+exists on the SoC's internal USB bus.  PINE64 specifically warns never to move
+this switch while powered because doing so can corrupt modem firmware.
+
+Confirm the image identity and that the modem manager is not running:
+
+#+begin_src sh
+uname -a
+cat /etc/os-release
+rc-status --all
+rc-update show default
+pgrep -af 'eg25|ModemManager' || true
+#+end_src
+
+The private Wi-Fi profile should connect automatically.  Keep a timestamped
+thirty-minute reachability record, preferably over Wi-Fi with USB unplugged:
+
+#+begin_src sh
+ping -D -i 10 -w 1800 PHONE_IP | tee pinephone-stage-a-ping.log
+#+end_src
+
+At the beginning, midpoint, and end, record on the phone:
+
+#+begin_src sh
+date
+uptime
+cat /sys/class/power_supply/axp20x-battery/capacity
+dmesg | tail -200
+#+end_src
+
+Any loss of both USB/LAN access, reboot, I/O error,
+RCU stall, watchdog, or unexplained battery collapse fails Stage A.  Do not
+enable the modem afterward.  Preserve the card for logs.  After a forced
+restart of the same diagnostic card, copy the bounded persistent logs before
+doing anything else:
+
+#+begin_src sh
+sudo ls -lh /var/log/messages*
+sudo tail -n 1000 /var/log/messages
+#+end_src
+
+Copy every rotated =/var/log/messages*= file to Thinky before another test.
+The current boot's =dmesg= and the serial console, if available, remain the
+sources for messages that had not reached disk.
+
+** Stage B: EG25 manager only
+
+After the unplugged Stage A window passes, power the phone fully off, disconnect
+every cable, remove the battery, return privacy switch 1 to =on=, and reinsert
+the battery.  Then boot and enable only its manager:
+
+#+begin_src sh
+sudo rc-update add eg25-manager default
+sudo rc-service eg25-manager start
+rc-service eg25-manager status
+#+end_src
+
+Repeat the thirty-minute monitor.  Specifically watch =dmesg= for EG25 USB
+disconnects, enumeration error =-110=, QMI timeouts, and network transmit
+watchdogs.
+
+** Stage C: ModemManager and cellular
+
+After Stage B passes:
+
+#+begin_src sh
+sudo apk add modemmanager
+sudo rc-update add modemmanager default
+sudo rc-service modemmanager start
+mmcli -L
+#+end_src
+
+Repeat the monitor before configuring mobile data or calls.  Then test mobile
+data, SMS, outgoing calls, incoming calls, suspend, and wake separately.  Do
+not add graphics until the modem remains stable through those tests.
+
+** Stage D: minimal graphical stack
+
+If Stages A through C pass, keep this v25.06 installation and build on it.  Add
+Sway and PGTK Emacs first, then Firefox, and Waydroid last.  Re-run awake,
+display-off, suspend, wake, plugged, and unplugged checks after each layer.
+
+* Current-card recovery
+
+The current edge SD card was deliberately left console-only with its graphical
+and modem services disabled.  After a physical restart, SSH should return on
+its existing Wi-Fi or WireGuard address.  To restore the stock phone shell on
+that card:
+
+#+begin_src sh
+sudo systemctl enable --now eg25-manager.service
+sudo systemctl enable --now ModemManager.service
+sudo systemctl enable --now greetd.service
+systemctl --no-pager --full status eg25-manager.service ModemManager.service greetd.service
+#+end_src
+
+This restores the previous software shape but does not fix the lower-level
+availability failure.  The temporary broad passwordless sudo rule also remains
+on that card and must be removed before treating it as a personal phone:
+
+#+begin_src sh
+sudo mv /etc/sudoers.d/99-user-nopasswd /root/99-user-nopasswd.disabled
+sudo visudo -c
+#+end_src
+
+* If Stage A still fails
+
+Stop changing distributions.  Stage A already removes the modem daemons,
+graphics, systemd, the 6.18 kernel, and the original SD card from the common
+failure set.  The next useful evidence is persistent hardware-level output:
+
+1. Repeat Stage A with a known-good replacement battery.  PINE64 specifies a
+   2800 mAh rated/3000 mAh typical pack and documents Samsung J7 2015
+   =EB-BJ700BBC= and =EB-BJ700BBE= replacements as compatible with every
+   PinePhone revision.  Do not substitute a similarly named J7 2016 battery.
+2. Photograph the board silkscreen while the battery is out.  The device tree's
+   “1.2” label is insufficient to distinguish every physical 1.2 subrevision.
+3. Capture the entire boot and failure over the hardware serial console.  With
+   the phone fully powered off and the battery removed, move privacy switch 6
+   to =off= to route the headphone jack to UART.  Use only a 3.3 V serial
+   adapter or PINE64 debug cable.  The PinePhone UART is 115200 baud, 8 data
+   bits, no parity, one stop bit; tip is phone RX, ring is phone TX, sleeve is
+   ground.  On Arch, =sudo pacman -S tio= followed by
+   =tio -b 115200 /dev/ttyUSB0= records output that survives Wi-Fi and USB
+   failure.  Restore switch 6 before testing calls or headphone audio.
+
+PINE64 warns against moving privacy switches while the phone is powered,
+especially the modem switch, because modem firmware can be corrupted.  Change
+them only with all power removed.  If the serial cursor and kernel output stop
+without a panic, test the replacement battery and board power first.  If a
+panic, RCU stall, storage error, or watchdog appears, preserve the complete
+serial transcript before another reboot; it determines whether a kernel
+backport is justified.
+
+If a second SD card, 6.13/OpenRC console, modem-off run, and replacement battery
+all fail, replacing the PinePhone mainboard or moving to different hardware is
+more rational than preparing a fourth phone image.

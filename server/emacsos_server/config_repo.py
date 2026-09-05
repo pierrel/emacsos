@@ -2,11 +2,11 @@
 
 A single file =agent.el= lives in a git repo at ``config_dir``.  The
 agent never touches git; the server commits each applied config and
-navigates history for rollback.  The server applies FIRST and commits
-only when the phone was reached, so HEAD-of-repo tracks what's actually
-on the phone.  The one exception is a commit FAILURE after a successful
-apply (`applied-but-unrecorded` in channel.py): the phone then has a
-config git doesn't, and that change isn't rollback-able from history.
+navigates history for rollback.  The server writes to the phone FIRST and
+commits only after confirmed atomic replacement, including for undo and
+restore.  HEAD is therefore the last server-recorded phone file.  It may lag
+the phone after an unconfirmed operation or a commit failure; those results
+explicitly require reconciliation before another persistent config change.
 
 Pure git + filesystem; no langgraph/assist imports, so this is
 unit-testable against a tmp repo with no mocks.  Design doc:
@@ -57,16 +57,15 @@ class ConfigVersion:
 class RollbackResult:
     ok: bool
     detail: str
-    version: ConfigVersion | None = None  # new HEAD after the revert
 
 
 def render(body: str) -> str:
     """The canonical agent.el file content for BODY: header (carrying the
     `lexical-binding: t` cookie) + body + `(provide 'agent)` footer.  This
-    is the SINGLE source of the file the phone loads AND the file git
-    commits — apply writes `render(body)` to the phone, git stores
-    `render(body)`, so the two never diverge and the phone always loads
-    with lexical-binding (closures behave as in the committed file)."""
+    is the SINGLE renderer for the file sent to the phone and the file git
+    records.  A confirmed-and-recorded apply therefore matches byte for byte
+    and the phone loads with lexical-binding (closures behave as in the
+    committed file)."""
     return _HEADER + body.strip("\n") + _FOOTER
 
 
@@ -152,8 +151,8 @@ class ConfigRepo:
         self._git("add", AGENT_FILE)
         self._git(*_GIT_IDENTITY, "commit", "-q", "-m", SCAFFOLD_SUMMARY)
 
-    def write_and_commit(self, body: str, summary: str) -> str:
-        """Replace agent.el's body, commit, return the commit sha."""
+    def write_and_commit(self, body: str, summary: str) -> str | None:
+        """Replace agent.el's body, commit, and return its sha when readable."""
         self.ensure()
         with open(self.agent_path, "w") as f:
             f.write(render(body))
@@ -168,7 +167,13 @@ class ConfigRepo:
         ).returncode == 0
         if not no_diff:
             self._git(*_GIT_IDENTITY, "commit", "-q", "-m", summary)
-        return self._git("rev-parse", "HEAD").stdout.strip()
+        try:
+            return self._git("rev-parse", "HEAD").stdout.strip()
+        except Exception:  # noqa: BLE001 — commit already succeeded
+            # The commit/no-diff operation already succeeded.  A follow-up
+            # metadata read must not be misreported as an unrecorded config.
+            log.exception("Config recorded but HEAD sha could not be read")
+            return None
 
     def current(self) -> ConfigVersion:
         self.ensure()
@@ -179,15 +184,22 @@ class ConfigRepo:
         return ConfigVersion(sha=sha, summary=summary, body=body)
 
     def rollback(self) -> RollbackResult:
-        """Revert the last apply (a NEW commit, so roll-forward stays
-        possible).  Returns the new HEAD's version to re-apply."""
+        """Record a revert of the last apply as a new commit."""
         self.ensure()
         # Need at least scaffold + one real apply to have something to
         # undo.  rev-list count: 1 == scaffold only.
         if self._commit_count() < 2:
             return RollbackResult(ok=False, detail="nothing to roll back (no config applied yet)")
         self._git(*_GIT_IDENTITY, "revert", "--no-edit", "HEAD")
-        return RollbackResult(ok=True, detail="reverted last apply", version=self.current())
+        return RollbackResult(ok=True, detail="reverted last apply")
+
+    def rollback_body(self) -> str | None:
+        """Return the body an undo would restore, without changing history."""
+        self.ensure()
+        if self._commit_count() < 2:
+            return None
+        full = self._git("show", f"HEAD^:{AGENT_FILE}").stdout
+        return _extract_body(full)
 
     def body_at(self, ref: str) -> str:
         """The agent body committed at REF (e.g. a sha from `history()`), with

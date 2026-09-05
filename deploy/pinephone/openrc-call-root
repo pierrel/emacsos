@@ -1,0 +1,228 @@
+#!/bin/sh
+# Fixed EG25 call mutations for the unprivileged EmacsOS session.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+ulimit -f 128
+export PATH
+
+lock=/run/emacsos-openrc-call.lock
+output=
+
+fail() {
+    printf 'error: %s\n' "$1"
+    exit 1
+}
+
+cleanup() {
+    [ -z "$output" ] || rm -f -- "$output"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || fail 'call helper must run as root'
+[ "$#" -ge 1 ] || fail 'missing operation'
+[ -x /usr/bin/mmcli ] || fail 'mmcli is unavailable'
+
+touch "$lock"
+chown root:root "$lock"
+chmod 0600 "$lock"
+exec 9>"$lock"
+flock -n -x 9 || fail 'another call operation is running'
+
+run_command() {
+    executable=$1
+    shift
+    output=$(mktemp /run/emacsos-call.XXXXXX)
+    if timeout -s TERM -k 1 12 "$executable" "$@" >"$output" 2>&1; then
+        return 0
+    else
+        status=$?
+        return "$status"
+    fi
+}
+
+run_mmcli() {
+    run_command /usr/bin/mmcli "$@"
+}
+
+run_gdbus() {
+    run_command /usr/bin/gdbus call --system "$@"
+}
+
+command_failure() {
+    command=$1
+    status=$2
+    detail=$(head -c 4096 "$output" | tr '\n' ' ')
+    rm -f -- "$output"
+    output=
+    [ -n "$detail" ] || detail="$command exited $status"
+    fail "$detail"
+}
+
+mmcli_failure() {
+    command_failure mmcli "$1"
+}
+
+modem_index() {
+    if run_mmcli -L; then :; else mmcli_failure "$?"; fi
+    modem=$(sed -n 's|.*Modem/\([0-9][0-9]*\).*|\1|p' "$output" | sed -n '1p')
+    rm -f -- "$output"
+    output=
+    [ -n "$modem" ] || fail 'no modem found'
+    printf '%s\n' "$modem"
+}
+
+valid_owner() {
+    case $1 in :[0-9]*.[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    case ${1#:} in *[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+}
+
+valid_call_path() {
+    prefix=/org/freedesktop/ModemManager1/Call/
+    case $1 in "$prefix"*) call_id=${1#"$prefix"} ;; *) return 1 ;; esac
+    case $call_id in ''|*[!0-9]*) return 1 ;; esac
+}
+
+owner_is_current() {
+    expected=$1
+    if run_gdbus --dest org.freedesktop.DBus \
+            --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.GetNameOwner \
+            org.freedesktop.ModemManager1; then
+        current=$(sed -n 's/.*\(:[0-9][0-9.]*\).*/\1/p' "$output" | sed -n '1p')
+        rm -f -- "$output"
+        output=
+        [ "$current" = "$expected" ]
+    else
+        rm -f -- "$output"
+        output=
+        return 1
+    fi
+}
+
+call_method() {
+    owner=$1
+    path=$2
+    method=$3
+    if run_gdbus --dest "$owner" --object-path "$path" \
+            --method "org.freedesktop.ModemManager1.Call.$method"; then
+        rm -f -- "$output"
+        output=
+    else
+        command_failure gdbus "$?"
+    fi
+}
+
+operation=$1
+shift
+case $operation in
+    dial)
+        [ -x /usr/bin/gdbus ] || fail 'gdbus is unavailable'
+        [ "$#" -eq 2 ] || fail 'dial requires owner and number'
+        owner=$1
+        number=$2
+        valid_owner "$owner" || fail 'invalid ModemManager owner'
+        case $number in +*) digits=${number#+} ;; *) digits=$number ;; esac
+        case $digits in ''|*[!0-9]*) fail 'invalid phone number' ;; esac
+        [ "${#digits}" -ge 5 ] && [ "${#digits}" -le 15 ] ||
+            fail 'invalid phone number'
+        owner_is_current "$owner" || fail 'ModemManager owner changed'
+        modem=$(modem_index)
+        modem_path=/org/freedesktop/ModemManager1/Modem/$modem
+        if run_gdbus --dest "$owner" --object-path "$modem_path" \
+                --method org.freedesktop.ModemManager1.Modem.Voice.CreateCall \
+                "{'number': <'$number'>}"; then
+            :
+        else
+            command_failure gdbus "$?"
+        fi
+        call_path=$(sed -n \
+            's|.*\(/org/freedesktop/ModemManager1/Call/[0-9][0-9]*\).*|\1|p' \
+            "$output" | sed -n '1p')
+        rm -f -- "$output"
+        output=
+        [ -n "$call_path" ] || fail 'could not create call'
+        # Give the asynchronous parent enough identity to preserve recovery
+        # controls if this helper dies after D-Bus Call.Start mutates the modem.
+        printf 'created-call-path: %s\n' "$call_path"
+        owner_is_current "$owner" ||
+            fail "call-path=$call_path; ModemManager owner changed"
+        if run_gdbus --dest "$owner" --object-path "$call_path" \
+                --method org.freedesktop.ModemManager1.Call.Start; then
+            :
+        else
+            start_status=$?
+            start_detail=$(head -c 4096 "$output" | tr '\n' ' ')
+            rm -f -- "$output"
+            output=
+            cleanup_status=0
+            cleanup_detail=
+            if run_gdbus --dest "$owner" --object-path "$call_path" \
+                    --method org.freedesktop.ModemManager1.Call.Hangup; then
+                :
+            else
+                cleanup_status=$?
+                cleanup_detail=$(head -c 4096 "$output" | tr '\n' ' ')
+                [ -n "$cleanup_detail" ] ||
+                    cleanup_detail="gdbus exited $cleanup_status"
+            fi
+            rm -f -- "$output"
+            output=
+            [ -n "$start_detail" ] || start_detail="gdbus exited $start_status"
+            if [ "$cleanup_status" -eq 0 ]; then
+                fail "call-path=$call_path; could not start call: $start_detail"
+            fi
+            fail "uncertain-call-path=$call_path; could not start call: $start_detail; cleanup failed: $cleanup_detail"
+        fi
+        printf 'dialing: %s\n' "$call_path"
+        ;;
+    answer)
+        [ -x /usr/bin/gdbus ] || fail 'gdbus is unavailable'
+        [ "$#" -eq 2 ] || fail 'answer requires owner and call path'
+        owner=$1
+        call_path=$2
+        valid_owner "$owner" || fail 'invalid ModemManager owner'
+        valid_call_path "$call_path" || fail 'invalid call path'
+        owner_is_current "$owner" || fail 'ModemManager owner changed'
+        printf 'answering-call-path: %s\n' "$call_path"
+        if run_gdbus --dest "$owner" --object-path "$call_path" \
+                --method org.freedesktop.ModemManager1.Call.Accept; then
+            rm -f -- "$output"
+            output=
+        else
+            answer_status=$?
+            answer_detail=$(head -c 4096 "$output" | tr '\n' ' ')
+            rm -f -- "$output"
+            output=
+            [ -n "$answer_detail" ] || answer_detail="gdbus exited $answer_status"
+            fail "uncertain-answer-call-path=$call_path; could not confirm answer: $answer_detail"
+        fi
+        printf 'answered: call active\n'
+        ;;
+    hangup)
+        if [ "$#" -eq 0 ]; then
+            modem=$(modem_index)
+            if run_mmcli -m "$modem" --voice-hangup-all; then
+                :
+            else
+                mmcli_failure "$?"
+            fi
+            printf 'hung-up: all calls ended\n'
+        else
+            [ -x /usr/bin/gdbus ] || fail 'gdbus is unavailable'
+            [ "$#" -eq 2 ] || fail 'hangup requires owner and call path'
+            owner=$1
+            call_path=$2
+            valid_owner "$owner" || fail 'invalid ModemManager owner'
+            valid_call_path "$call_path" || fail 'invalid call path'
+            owner_is_current "$owner" || fail 'ModemManager owner changed'
+            call_method "$owner" "$call_path" Hangup
+            printf 'hung-up: call ended\n'
+        fi
+        ;;
+    *) fail 'unknown operation' ;;
+esac
