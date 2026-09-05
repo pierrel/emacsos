@@ -32,7 +32,7 @@ pinephone-openrc-console:
 # Two targets:
 #
 #   phone-install   First-time setup, chat/Assist endpoint changes, and
-#                   Assist token rotation.  Persists across reboots:
+#                   Assist token or CA rotation.  Persists across reboots:
 #                   .el files + emacsos-init.el snippet land in
 #                   ~/.emacs.d/.  After the first run, add the
 #                   printed (load-file ...) line to the phone's own
@@ -55,7 +55,7 @@ PHONE_INIT_SNIPPET ?= ~/.emacs.d/emacsos-init.el
 DEV_BOX_URL ?= http://$(shell ip -4 -o addr show scope global 2>/dev/null | awk '{print $$4}' | cut -d/ -f1 | head -1):8765/chat
 ASSIST_WEB_API_URL ?= https://assist.invalid/api/v1/phone
 ASSIST_WEB_TOKEN_FILE ?= $(HOME)/.config/assist/phone-api-token
-ASSIST_WEB_CA_FILE ?= $(HOME)/deploy/assist/certs/rootCA.pem
+ASSIST_WEB_CA_FILE ?= $(HOME)/.local/share/mkcert/rootCA.pem
 phone-install:
 	@case "$(ASSIST_WEB_API_URL)" in https://assist.invalid/*) \
 	  echo "error: set ASSIST_WEB_API_URL to the real HTTPS phone API" >&2; exit 1;; \
@@ -70,7 +70,8 @@ phone-install:
 	  echo "error: ASSIST_WEB_TOKEN_FILE must contain one safe token" >&2; exit 1; }
 	@[ -f "$(ASSIST_WEB_CA_FILE)" ] && [ ! -L "$(ASSIST_WEB_CA_FILE)" ] && \
 	  [ "$$(stat -c '%s' "$(ASSIST_WEB_CA_FILE)")" -le 65536 ] && \
-	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -noout >/dev/null 2>&1 || { \
+	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -outform PEM 2>/dev/null | \
+	  cmp -s - "$(ASSIST_WEB_CA_FILE)" || { \
 	  echo "error: ASSIST_WEB_CA_FILE must be one bounded X.509 certificate" >&2; exit 1; }
 	@echo "→ Installing to phone:$(PHONE_EMACSOS_DIR)"
 	@echo "  chat URL: $(DEV_BOX_URL)"

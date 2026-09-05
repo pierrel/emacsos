@@ -244,9 +244,13 @@ grep -F '/usr/local/sbin/emacsos-openrc-boot-mode initialize' "$deploy_dir/openr
 grep -F 'expected=@@ADMIN_SHA256@@' "$deploy_dir/openrc-bootstrap-root" >/dev/null
 grep -F 'timeout -s TERM -k 1 10 sh -c' "$deploy_dir/openrc-bootstrap-root" >/dev/null
 grep -F 'timeout -s TERM -k 1 10 sh -c' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F "count=\$(grep -Fo '@DEPLOY_CLIENT_IP@'" \
+grep -F 'render_ipv4_template' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'deploy_client_ip=${SSH_CONNECTION%% *}' \
+grep -F "'@ASSIST_WEB_SERVER_IP@'" \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'ASSIST_WEB_SERVER_IP:?' \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'deploy_client_ip=\${SSH_CONNECTION%% *}' \
     "$deploy_dir/install-openrc-session.sh" \
     "$deploy_dir/update-openrc-session.sh" >/dev/null
 if grep -F 'cp -P' "$deploy_dir/openrc-bootstrap-root" \
@@ -258,7 +262,9 @@ grep -F 'phone_host=${PINEPHONE_HOST:?' "$deploy_dir/install-openrc-session.sh" 
 grep -F 'PasswordAuthentication=no' "$deploy_dir/install-openrc-session.sh" >/dev/null
 grep -F 'ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
-grep -F 'ASSIST_WEB_CA_FILE:-$HOME/deploy/assist/certs/rootCA.pem' \
+grep -F 'ASSIST_WEB_CA_FILE:-$HOME/.local/share/mkcert/rootCA.pem' \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'openssl x509 -in "$ca_file" -outform PEM' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'Assist Web token file must contain one safe token' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
@@ -322,6 +328,11 @@ grep -F 'emacos-initial-buffer-function #'"'"'emacos--chat-buffer' \
 grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F '"/etc/emacsos-openrc/assist-web-url"' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F '"/etc/emacsos-openrc/assist-web-ca.pem"' "$deploy_dir/openrc-init.el" >/dev/null
+if grep -F '(setq gnutls-trustfiles' "$deploy_dir/openrc-init.el" \
+        "$repo_dir/deploy/emacsos-init.el.in" >/dev/null; then
+    printf '%s\n' 'Assist CA trust escaped the request-local binding' >&2
+    exit 1
+fi
 grep -F 'emacos-assist-web-api-url' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'make-process' "$deploy_dir/openrc-init.el" >/dev/null
 if grep -Eq '/home/|192\.168\.' \

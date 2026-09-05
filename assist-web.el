@@ -20,6 +20,7 @@
 (defvar url-http-content-type)
 (defvar url-http-end-of-headers)
 (defvar url-http-response-status)
+(defvar gnutls-trustfiles)
 
 (defgroup emacos-assist-web nil
   "Assist Web thread client for EmacsOS."
@@ -34,6 +35,11 @@
   (expand-file-name "~/.config/emacsos/assist-web-token")
   "0600 file holding the Assist Web bearer token."
   :type 'file
+  :group 'emacos-assist-web)
+
+(defcustom emacos-assist-web-ca-file nil
+  "Optional CA certificate trusted only for Assist Web requests."
+  :type '(choice (const :tag "System trust only" nil) file)
   :group 'emacos-assist-web)
 
 (defcustom emacos-assist-web-cache-directory
@@ -196,6 +202,15 @@
       (error "Assist Web API URL must be HTTPS"))
     (concat (replace-regexp-in-string "/+\\'" "" emacos-assist-web-api-url)
             "/" (replace-regexp-in-string "\\`/+" "" path))))
+
+(defun emacos-assist-web--trustfiles ()
+  "Return GnuTLS trust files with the configured Assist CA first."
+  (let ((system-trust (and (boundp 'gnutls-trustfiles) gnutls-trustfiles)))
+    (if (and emacos-assist-web-ca-file
+             (file-readable-p emacos-assist-web-ca-file))
+        (cons emacos-assist-web-ca-file
+              (delete emacos-assist-web-ca-file system-trust))
+      system-trust)))
 
 (defun emacos-assist-web--valid-id-p (value)
   "Return non-nil when VALUE is a safe opaque Assist Web identifier."
@@ -410,9 +425,11 @@ ERROR rather than raising them from url-http's asynchronous callback."
 		(progn
                   (setq url (emacos-assist-web--endpoint path))
                   (setq response
-				(let ((url-mime-encoding-string "identity")
+			(let ((url-mime-encoding-string "identity")
                                       (url-debug nil)
-                                      (url-automatic-caching nil))
+                                      (url-automatic-caching nil)
+                                      (gnutls-trustfiles
+                                       (emacos-assist-web--trustfiles)))
                           (url-retrieve
                            url
                            (lambda (_status)
@@ -657,7 +674,9 @@ open until the run reaches a terminal state or observation is interrupted."
                    (response
                     (let ((url-mime-encoding-string "identity")
                           (url-debug nil)
-                          (url-automatic-caching nil))
+                          (url-automatic-caching nil)
+                          (gnutls-trustfiles
+                           (emacos-assist-web--trustfiles)))
                       (url-retrieve
                        (emacos-assist-web--endpoint
                         (format "threads/%s/runs/%s/events" thread-id run-id))

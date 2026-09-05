@@ -304,8 +304,12 @@ install the operator-supplied token as
 =/var/lib/emacsos-lab/.config/emacsos/assist-web-token= owned by
 =emacsos-lab= with mode =0600=. The secret is validated as a single bounded
 token but is deliberately excluded from the tracked payload manifest. The
-deployment also installs the operator-supplied public CA separately and adds
-that exact certificate to Emacs's GnuTLS trust set, so a fresh image can verify
-Assist's private HTTPS certificate. The legacy =phone-install= path likewise
-refuses its sentinel URL and requires an explicit HTTPS endpoint, private token
-file, and valid CA certificate.
+deployment uses the explicit certificate-covered =ASSIST_WEB_SERVER_IP= rather
+than coupling the API address to whichever LAN, USB, or WireGuard route carried
+the deployment. It also installs the one operator-supplied =ASSIST_WEB_CA_FILE= certificate
+at =/etc/emacsos-openrc/assist-web-ca.pem= and binds it only around Assist Web
+requests, so a fresh image can verify Assist's HTTPS server certificate without
+expanding trust for unrelated Emacs traffic. The legacy =phone-install= path
+uses =~/.config/emacsos/assist-web-ca.pem= and likewise refuses its sentinel URL
+unless it receives an explicit HTTPS endpoint, private token file, and valid
+single CA certificate.

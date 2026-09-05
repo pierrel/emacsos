@@ -13,7 +13,7 @@ boot_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=a0afde80621f9ec5ea74ba11fd8dd7383883a6deb935758e8a33679d60d21ff3
+manifest_hash=1366acec3d67ddb055895483239ac70a4221f8393523de8e62cbe98924a3b97a
 mutating=0
 committed=0
 restart_only=0
@@ -39,21 +39,23 @@ valid_ipv4() (
     done
 )
 
-render_client_ip_template() {
+render_ipv4_template() {
     source=$1
+    marker=$2
+    address=$3
     rendered=$snapshot/.rendered
-    count=$(grep -Fo '@DEPLOY_CLIENT_IP@' "$source" | wc -l)
+    count=$(grep -Fo "$marker" "$source" | wc -l)
     [ "$count" -eq 1 ] || fail "invalid deployment-address template: ${source##*/}"
     install -o root -g root -m 0600 /dev/null "$rendered"
     timeout -s TERM -k 1 10 sh -c \
-        'ulimit -f 2048; exec sed "s/@DEPLOY_CLIENT_IP@/$1/g" "$2"' sh \
-        "$deploy_client_ip" "$source" >"$rendered"
+        'ulimit -f 2048; exec sed "s/$1/$2/g" "$3"' sh \
+        "$marker" "$address" "$source" >"$rendered"
     [ -f "$rendered" ] && [ ! -L "$rendered" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$rendered")" = \
             'root:root:600:1:regular file' ] &&
         [ "$(stat -c '%s' "$rendered")" -le 1048576 ] ||
         fail 'unsafe rendered template'
-    ! grep -F '@DEPLOY_CLIENT_IP@' "$rendered" >/dev/null ||
+    ! grep -F "$marker" "$rendered" >/dev/null ||
         fail 'deployment-address template was not fully rendered'
     mv -f -- "$rendered" "$source"
 }
@@ -202,6 +204,8 @@ trap 'exit 1' HUP INT TERM
 [ "${SUDO_USER-}" = user ] || fail 'must be authorized by the recovery user'
 deploy_client_ip=${DEPLOY_CLIENT_IP-}
 valid_ipv4 "$deploy_client_ip" || fail 'invalid deployment client address'
+assist_web_server_ip=${ASSIST_WEB_SERVER_IP-}
+valid_ipv4 "$assist_web_server_ip" || fail 'invalid Assist Web server address'
 
 touch "$lock"
 chown root:root "$lock"
@@ -265,9 +269,11 @@ LC_ALL=C awk 'NR == 1 { ok = ($0 == "-----BEGIN CERTIFICATE-----"); next } $0 !=
     "$snapshot/assist-web-ca.pem" || fail 'invalid Assist Web CA certificate'
 [ "$(stat -c '%s' "$snapshot/assist-web-ca.pem")" -le 65536 ] ||
     fail 'oversized Assist Web CA certificate'
-render_client_ip_template "$snapshot/openrc-chat-url"
-render_client_ip_template "$snapshot/openrc-assist-web-url"
-render_client_ip_template "$snapshot/openrc-emacs-server.nft"
+render_ipv4_template "$snapshot/openrc-chat-url" '@DEPLOY_CLIENT_IP@' "$deploy_client_ip"
+render_ipv4_template "$snapshot/openrc-assist-web-url" '@ASSIST_WEB_SERVER_IP@' \
+    "$assist_web_server_ip"
+render_ipv4_template "$snapshot/openrc-emacs-server.nft" '@DEPLOY_CLIENT_IP@' \
+    "$deploy_client_ip"
 
 for directory in /usr/local/share/emacsos-openrc /usr/local/sbin \
     /etc/nftables.d /etc/doas.d; do

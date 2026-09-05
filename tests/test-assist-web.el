@@ -59,6 +59,17 @@
   (should-not (emacos-assist-web--safe-token-p "token\r\nInjected: yes"))
   (should-not (emacos-assist-web--safe-token-p "")))
 
+(ert-deftest test-assist-web-ca-extends-trust-only-through-request-binding ()
+  (let ((ca (make-temp-file "assist-web-ca-")))
+    (unwind-protect
+        (cl-progv '(gnutls-trustfiles) '(("system-ca"))
+          (let ((emacos-assist-web-ca-file ca))
+            (should (equal (emacos-assist-web--trustfiles)
+                           (list ca "system-ca")))
+            (should (equal (symbol-value 'gnutls-trustfiles)
+                           '("system-ca")))))
+      (delete-file ca))))
+
 (ert-deftest test-assist-web-accepts-server-bounded-sealed-record-identifiers ()
   (let* ((sealed (concat "c-" (make-string 240 ?A)))
          (snapshot
