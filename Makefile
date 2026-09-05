@@ -55,6 +55,7 @@ PHONE_INIT_SNIPPET ?= ~/.emacs.d/emacsos-init.el
 DEV_BOX_URL ?= http://$(shell ip -4 -o addr show scope global 2>/dev/null | awk '{print $$4}' | cut -d/ -f1 | head -1):8765/chat
 ASSIST_WEB_API_URL ?= https://assist.invalid/api/v1/phone
 ASSIST_WEB_TOKEN_FILE ?= $(HOME)/.config/assist/phone-api-token
+ASSIST_WEB_CA_FILE ?= $(HOME)/deploy/assist/certs/rootCA.pem
 phone-install:
 	@case "$(ASSIST_WEB_API_URL)" in https://assist.invalid/*) \
 	  echo "error: set ASSIST_WEB_API_URL to the real HTTPS phone API" >&2; exit 1;; \
@@ -67,13 +68,18 @@ phone-install:
 	  $$0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } \
 	  END { exit !(NR == 1 && ok) }' "$(ASSIST_WEB_TOKEN_FILE)" || { \
 	  echo "error: ASSIST_WEB_TOKEN_FILE must contain one safe token" >&2; exit 1; }
+	@[ -f "$(ASSIST_WEB_CA_FILE)" ] && [ ! -L "$(ASSIST_WEB_CA_FILE)" ] && \
+	  [ "$$(stat -c '%s' "$(ASSIST_WEB_CA_FILE)")" -le 65536 ] && \
+	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -noout >/dev/null 2>&1 || { \
+	  echo "error: ASSIST_WEB_CA_FILE must be one bounded X.509 certificate" >&2; exit 1; }
 	@echo "→ Installing to phone:$(PHONE_EMACSOS_DIR)"
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
 	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
-	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token"
+	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
+	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token && chmod 0644 ~/.config/emacsos/assist-web-ca.pem"
 	sed -e "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" \
 	    -e "s|@@ASSIST_WEB_API_URL@@|$(ASSIST_WEB_API_URL)|g" deploy/emacsos-init.el.in \
 	  | ssh $(PINEPHONE_HOST) "cat > $(PHONE_INIT_SNIPPET)"

@@ -1318,10 +1318,16 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                            (message "Send failed. Retry keeps the same message: %s"
                                     error))
                        (condition-case problem
-                           (let ((thread-id (emacos-assist-web--require-id
-                                             (alist-get 'thread_id value)))
-                                 (run-id (emacos-assist-web--require-id
-                                          (alist-get 'run_id value))))
+                           (let* ((thread-id (emacos-assist-web--require-id
+                                              (alist-get 'thread_id value)))
+                                  (run-id (emacos-assist-web--require-id
+                                           (alist-get 'run_id value)))
+                                  ;; Resolve another canonical owner before this
+                                  ;; draft acquires the returned thread id.
+                                  (canonical
+                                   (and (not existing-thread-id)
+                                        (emacos-assist-web--thread-buffer
+                                         thread-id))))
                              (when (and existing-thread-id
                                         (not (equal existing-thread-id thread-id)))
                                (error "Assist Web send changed thread identity"))
@@ -1329,11 +1335,15 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                    emacos-assist-web--run-id run-id
                                    emacos-assist-web--pending-accepted-p t)
                              (unless existing-thread-id
-                               (if-let ((canonical
-                                        (emacos-assist-web--thread-buffer thread-id)))
+                               (if canonical
                                    (unless (eq canonical buffer)
                                      (let ((draft buffer))
                                        (with-current-buffer canonical
+                                         ;; Invalidate callbacks started before this
+                                         ;; buffer became the accepted run's owner.
+                                         (cl-incf emacos-assist-web--refresh-generation)
+                                         (cl-incf emacos-assist-web--send-generation)
+                                         (cl-incf emacos-assist-web--stream-generation)
                                          (setq emacos-assist-web--run-id run-id
                                                emacos-assist-web--pending-key key
                                                emacos-assist-web--submitted-text text

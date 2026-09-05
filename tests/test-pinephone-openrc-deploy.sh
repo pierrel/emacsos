@@ -258,6 +258,8 @@ grep -F 'phone_host=${PINEPHONE_HOST:?' "$deploy_dir/install-openrc-session.sh" 
 grep -F 'PasswordAuthentication=no' "$deploy_dir/install-openrc-session.sh" >/dev/null
 grep -F 'ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'ASSIST_WEB_CA_FILE:-$HOME/deploy/assist/certs/rootCA.pem' \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'Assist Web token file must contain one safe token' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'assist-web-token' \
@@ -279,6 +281,10 @@ token_backup_line=${token_backup_line%%:*}
 [ "$token_check_line" -lt "$token_backup_line" ]
 if grep -F 'assist-web-token' "$deploy_dir/openrc-manifest.sha256" >/dev/null; then
     printf '%s\n' 'secret token must not be pinned in the public manifest' >&2
+    exit 1
+fi
+if grep -F 'assist-web-ca.pem' "$deploy_dir/openrc-manifest.sha256" >/dev/null; then
+    printf '%s\n' 'operator CA must not be pinned in the public manifest' >&2
     exit 1
 fi
 
@@ -315,6 +321,7 @@ grep -F 'emacos-initial-buffer-function #'"'"'emacos--chat-buffer' \
     "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F '"/etc/emacsos-openrc/assist-web-url"' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F '"/etc/emacsos-openrc/assist-web-ca.pem"' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'emacos-assist-web-api-url' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'make-process' "$deploy_dir/openrc-init.el" >/dev/null
 if grep -Eq '/home/|192\.168\.' \

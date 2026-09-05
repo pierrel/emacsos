@@ -32,6 +32,11 @@ printf '%s\n' test-assist-web-token \
     >/home/user/.cache/emacsos-openrc-stage/assist-web-token
 chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-token
 chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-token
+printf '%s\n' '-----BEGIN CERTIFICATE-----' dGVzdA== \
+    '-----END CERTIFICATE-----' \
+    >/home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
+chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "apk $*" >>/tmp/apk-log' 'exit 0' \
     >/usr/bin/apk
@@ -297,6 +302,10 @@ fi
     'http://198.51.100.10:8765/chat' ]
 [ "$(cat /etc/emacsos-openrc/assist-web-url)" = \
     'https://198.51.100.10:5050/api/v1/phone' ]
+[ "$(cat /etc/emacsos-openrc/assist-web-ca.pem)" = \
+    "$(printf '%s\n' '-----BEGIN CERTIFICATE-----' dGVzdA== '-----END CERTIFICATE-----')" ]
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/emacsos-openrc/assist-web-ca.pem)" = \
+    'root:root:644:1:regular file' ]
 [ "$(cat /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
     test-assist-web-token ]
 [ "$(stat -c '%U:%G:%a:%h:%F' \

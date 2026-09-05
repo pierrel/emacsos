@@ -1212,6 +1212,7 @@
                       ((symbol-function 'emacos-assist-web--observe-run)
                        (lambda (buffer) (setq observed buffer))))
               (emacos-assist-web-send)
+              (switch-to-buffer draft)
               (funcall callback
                        '((thread_id . "thread-new") (run_id . "run-new")) nil)))
           (should-not (buffer-live-p draft))
@@ -1219,6 +1220,9 @@
           (should (eq emacos--assist-active-surface canonical))
           (with-current-buffer canonical
             (should (equal emacos-assist-web--run-id "run-new"))
+            (should (= emacos-assist-web--refresh-generation 1))
+            (should (= emacos-assist-web--send-generation 1))
+            (should (= emacos-assist-web--stream-generation 1))
             (should (= (how-many "you> hello" (point-min) (point-max)) 1))))
       (when (buffer-live-p draft) (kill-buffer draft))
       (when (buffer-live-p canonical) (kill-buffer canonical))

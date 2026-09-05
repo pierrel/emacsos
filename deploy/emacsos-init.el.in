@@ -93,6 +93,11 @@
 ;; `emacos-assist-web-token-file'; the token is deliberately not generated into
 ;; this public configuration snippet.
 (setq emacos-assist-web-api-url "@@ASSIST_WEB_API_URL@@")
+(let ((ca-file (expand-file-name "~/.config/emacsos/assist-web-ca.pem")))
+  (when (file-readable-p ca-file)
+    (require 'gnutls)
+    (setq gnutls-trustfiles
+          (cons ca-file (delete ca-file gnutls-trustfiles)))))
 
 ;; TCP server so emacsclient from the dev box can reach this daemon.
 ;; (server-running-p) is idempotent: skip if some earlier init already

@@ -548,6 +548,11 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
                 (insert-file-contents url-file)
                 (string-trim (buffer-string)))
             "https://assist.invalid/api/v1/phone")))
+  (let ((ca-file "/etc/emacsos-openrc/assist-web-ca.pem"))
+    (when (file-readable-p ca-file)
+      (require 'gnutls)
+      (setq gnutls-trustfiles
+            (cons ca-file (delete ca-file gnutls-trustfiles)))))
   (defvar emacos-agent-file "/var/lib/emacsos-lab/.emacs.d/emacsos/agent.el"
     "Persistent agent configuration applied by Assist.")
   (require 'server)

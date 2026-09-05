@@ -11,11 +11,18 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 deploy_dir=$repo_dir/deploy/pinephone
 stage=/home/user/.cache/emacsos-openrc-update
 token_file=${ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token}
+ca_file=${ASSIST_WEB_CA_FILE:-$HOME/deploy/assist/certs/rootCA.pem}
 
 [ -f "$token_file" ] && [ ! -L "$token_file" ] &&
     LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
         "$token_file" || {
     printf '%s\n' 'Assist Web token file must contain one safe token' >&2
+    exit 1
+}
+[ -f "$ca_file" ] && [ ! -L "$ca_file" ] &&
+    [ "$(stat -c '%s' "$ca_file")" -le 65536 ] &&
+    openssl x509 -in "$ca_file" -noout >/dev/null 2>&1 || {
+    printf '%s\n' 'ASSIST_WEB_CA_FILE must be one bounded X.509 certificate' >&2
     exit 1
 }
 
@@ -52,6 +59,7 @@ scp -q "$@" "$repo_dir/os.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
     "$repo_dir/emacos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
     "$phone_host:$stage/"
 scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
+scp -q "$@" "$ca_file" "$phone_host:$stage/assist-web-ca.pem"
 ssh -T "$@" "$phone_host" "chmod 0600 '$stage'/*"
 ssh -T "$@" "$phone_host" \
     'deploy_client_ip=${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP="$deploy_client_ip" /bin/sh' \
