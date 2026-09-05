@@ -142,14 +142,15 @@ rather than pushing it forward.")
 
 ;; The chat stream engine is buffer-agnostic: handlers render into the
 ;; buffer that initiated the current stream, not the literal *chat*.  That
-;; buffer is the *chat* scratch OR a file-backed `emacos-assist-mode' buffer.
+;; buffer is the *chat* scratch, a file-backed `emacos-assist-mode' buffer, or
+;; a canonical `emacos-assist-web-mode' buffer.
 ;; The single server-wide stream lock means only one stream is ever in
 ;; flight, so this global safely names its target for the duration.
 (defvar emacos--chat-stream-buffer nil
   "Buffer the in-flight stream renders into; set at SEND.  See above.")
 
-;; Defined in emacos-assist.el (required by os.el alongside chat).  Resolved
-;; at call time — chat.el is the generic engine; the .assist surface plugs in.
+;; Defined by the two Assist surfaces required by os.el alongside chat.
+;; Resolved at call time so chat.el remains the generic send engine.
 (declare-function emacos-assist--surface-context "emacos-assist")
 (declare-function emacos-assist--save "emacos-assist")
 (declare-function emacos-assist-web-send "assist-web")
@@ -986,15 +987,14 @@ scratch, a file-backed `emacos-assist-mode' buffer, or a canonical
       b)))
 
 (defun emacos--chat-on-top-p ()
-  "Non-nil when a chat surface (*chat* or a .assist buffer) is on top."
+  "Non-nil when a local, file-backed, or web Assist surface is on top."
   (and (emacos--chat-surface-on-top) t))
 
 (defun emacos--chat-button ()
-  "Utility-row Chat/SEND button: SEND when *chat* is already on top, else
-open *chat*.  The always-present third utility button doubles as the
-home-app affordance (open chat) and — once you're in chat — the
-most-used action (send).  While a stream is in flight, `emacos--chat-send'
-refuses with a hint and the command list shows ABORT."
+  "Utility-row Chat/SEND button for the active Assist surface.
+Open local chat when no Assist surface is on top.  Otherwise send through the
+surface-specific command.  While a stream is active, its send command refuses
+a second request."
   (interactive)
   (let ((surface (emacos--chat-surface-on-top)))
     (if surface
@@ -1005,8 +1005,7 @@ refuses with a hint and the command list shows ABORT."
       (emacos--chat-show-top-buffer))))
 
 (defun emacos--chat-button-label ()
-  "Label for the utility-row Chat/SEND button: \"SEND\" when *chat* is on
-top (the button sends), else \"Chat\" (it opens chat)."
+  "Return \"SEND\" on an Assist surface and \"Chat\" elsewhere."
   (if (emacos--chat-on-top-p) "SEND" "Chat"))
 
 (provide 'chat)

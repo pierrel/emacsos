@@ -1,7 +1,7 @@
 #+title: Assist web threads in EmacsOS
 #+date: 2026-09-03
 
-State: Proposed
+State: Step 1 API merged; Step 2 client in progress
 
 * Product requirement
 
@@ -14,9 +14,7 @@ when Assist is temporarily unreachable.
 * User flow
 
 1. From any EmacsOS buffer, the user invokes =emacos-assist-web-open-thread=.
-   =C-c C-t= and =M-x emacos-assist-web-open-thread= are the entry points. The phone
-   deliberately supports one modified key at a time, so prefix chords are not
-   used.
+   =C-c C-a t= and =M-x emacos-assist-web-open-thread= are the entry points.
 2. The minibuffer offers a completion list of cached and freshly fetched web
    threads.  Each candidate is displayed as =*assist DESCRIPTION - REPO*=.
    =TAB= opens the ordinary completion list, so a user can tap an item from the
@@ -36,42 +34,36 @@ when Assist is temporarily unreachable.
      opens the assigned canonical thread.
    - =Refresh threads= explicitly refreshes the chooser cache.  Opening a
      thread also refreshes that thread's transcript.  No background list polling.
-   - =Diff= shows the thread's current unmerged diff in an Emacs diff buffer.
-   - =Files= opens dired rooted at the local worktree that corresponds to the
-     selected thread.
-   - =Pins= opens the thread's pinned assistant responses; each pin links back
-     to its response.
-   - =Pin response= pins the response at point, and =Unpin= removes it.
-6. Server-supplied file references in assistant responses are buttons.
-   Activating one opens that path immediately in the thread's local worktree.
-   Arbitrary prose that merely resembles a filename is not made clickable. A
-   nonexistent or out-of-worktree reference produces a small visible error and
-   never opens an arbitrary phone path.
+   - =Send= submits the prompt exactly once and displays a durable run status.
+   - =Older history= deliberately loads the next bounded page.
+   - =Abort= attempts to cancel an unclaimed run; it otherwise honestly stops
+     local observation and leaves the canonical server result untouched.
+6. Diff, files, response-file links, and client-local pins are later delivery
+   steps. This first usable client never exposes a command which merely says it
+   is unavailable.
 
 =New thread= is also a top-level phone action, not an action that requires an
-existing thread. It is bound globally to =C-c C-n= and available through
+existing thread. It is bound globally to =C-c C-a n= and available through
 =M-x=. On a first run with no cache, it fetches the
 repository and harness catalog asynchronously, then opens its two completion
 prompts. Thus a repository with no existing thread is an ordinary first-use
 case, not a dead end.
 
-Within a thread, all actions use conventional direct =C-c C-…= bindings or
-=M-x=, never a second command-button UI: =C-c C-r= refreshes, =C-c C-d= shows
-Diff, =C-c C-f= opens Files, =C-c C-p= opens Pins, =C-c C-i= pins the assistant
-response at point, =C-c C-o= loads older history, =C-c C-n= creates a new
-thread, and =C-c C-a= attempts to abort an unclaimed run. File paths and the
-=Unpin= affordance are clickable references to the corresponding objects.
+All Assist Web commands use the conventional =C-c C-a= prefix and are also
+available through =M-x=; there is no second command-button UI. =C-c C-a t=
+opens a thread, =C-c C-a n= starts a new thread, =C-c C-a r= refreshes the
+thread catalog, =C-c
+C-a s= sends, =C-c C-a o= loads older history, and =C-c C-a a= attempts to
+abort an unclaimed run.
 
 The thread buffer must retain the normal EmacsOS property that chat stays
-readable while Assist runs and has a visible =ABORT= control.  It shows durable
-queued/running status, then refreshes the canonical final response atomically;
+readable while Assist runs and has an =Abort= command. It shows durable
+queued/running status, then requests and replaces the canonical final response;
 v1 does not project speculative model tokens. Existing web features with a
-direct chat analogue remain available: status/progress,
-queued-message visibility, prior-history loading, thread rename, and a clear
-indication of unread or failed work.  Browser-only features with no phone value
-in v1, including deletion, merge, schedules, map rendering, review line
-comments, and capture management, stay on the web rather than becoming a
-second UI to maintain.
+direct chat analogue remain available: status and prior-history loading. Thread
+rename, unread presentation, failed-work detail, and browser-only features
+including deletion, merge, schedules, map rendering, review line comments, and
+capture management stay on the web rather than becoming a second UI to maintain.
 
 * Requirements
 
@@ -88,7 +80,7 @@ second UI to maintain.
   and a normalized search key. Normalization removes only leading emoji and
   whitespace, never text in the middle of a title or meaningful punctuation.
 - The first use may show cached entries immediately and refresh on request;
-  a failed refresh leaves the previous cache visible with its age.
+  a failed refresh leaves the previous cache visibly marked as cached.
 - Creating a thread presents repository and harness choices through the same
   completion UI, even when the selected repository has no existing thread.
   A cache miss first fetches that catalog asynchronously, then opens an empty
@@ -104,8 +96,9 @@ second UI to maintain.
 - Sending and run observation use the existing Assist run lifecycle.  A retry or
   reconnect never silently duplicates a user message.
 - The client keeps a durable, atomically written, size-bounded local snapshot of each successfully received
-  thread list and thread transcript.  When disconnected it opens that snapshot
-  read-only, labels it as stale, and preserves a drafted message locally.
+  thread list and thread transcript.  When disconnected it opens the cached
+  transcript read-only, labels it as stale, and preserves an editable drafted
+  message locally.
   Sending resumes only after the user explicitly retries once connectivity is
   restored; v1 does not auto-send a queue of offline prompts.
 - A stream that is interrupted is visibly incomplete and can be refreshed.
@@ -133,14 +126,11 @@ second UI to maintain.
 
 ** Pins
 
-- Pins are durable per-thread Assist data, keyed by stable assistant-response
-  identifiers.  They are not browser-local state and do not store copied HTML.
-- A pin stores the response identifier and enough immutable text to remain
-  legible after a later history compaction.  The Pins buffer exposes source
-  thread, timestamp, response excerpt, full text, and a link to the chat
-  position.
-- Pin and unpin are explicit user actions.  Offline changes are not invented
-  or merged automatically; the client reports that the service is unavailable.
+- Pins are client-local UI state keyed by stable assistant-response identifiers.
+  They do not create a server API, persistence layer, or cross-device sync.
+- A later client-side Pins buffer may retain the response identifier and its
+  visible text locally. It remains out of this step; a stale or compacted
+  server history never authorizes a background pin mutation.
 
 ** Interaction and performance
 
@@ -156,26 +146,29 @@ second UI to maintain.
 * Design boundary
 
 Assist Web owns thread truth: identifiers, descriptions, repositories,
-harnesses, lifecycle, messages, response identifiers, pins, diffs, and the
-authoritative worktree/branch mapping.  It will expose a small authenticated
-versioned client API for these resources.  It must return structured data and
+harnesses, lifecycle, messages, response identifiers, diffs, and the
+authoritative worktree/branch mapping.  It exposes a small authenticated
+versioned client API for these resources.  It returns structured data and
 bounded streaming events, not HTML intended for the browser.
 
 EmacsOS owns presentation and local caches: completion, chat buffers, link
-buttons, snapshots, local repositories, dired, and the touch affordances.  It
-does not reimplement Assist scheduling, thread state, merge rules, or diff
-generation.  The current =chat.el= streaming surface should be generalized
-only where its rendering and cancellation behavior are shared; the existing
-single-conversation EmacsOS server remains intact until a web-thread client has
-fully replaced that use case.
+buttons, snapshots, local repositories, dired, touch affordances, and any
+future local pins.  It does not reimplement Assist scheduling, thread state,
+merge rules, or diff generation.  The current =chat.el= streaming surface
+should be generalized only where its rendering and cancellation behavior are
+shared; the existing single-conversation EmacsOS server remains intact until a
+web-thread client has fully replaced that use case.
 
 The API is reached only through the phone's existing protected network path and
 HTTPS with normal certificate validation. It requires a distinct phone bearer
 token in the =Authorization= header, constant-time server comparison, strict
 thread-id/path validation, bounded request and response sizes, and no secret in
-a URL, command line, or transcript. The server performs all authorization
-before it resolves a thread, file, worktree, or pin. WireGuard is transport,
-not authorization.
+a URL, command line, or transcript. The client applies the same identifier
+validation before constructing a cache path or endpoint, bounds an in-flight
+JSON response before it can consume phone memory, and retains only one bounded
+unfinished SSE record while it consumes status events. The server performs all
+authorization before it resolves a thread, file, worktree, or pin. WireGuard is
+transport, not authorization.
 
 * Proposed client API
 
@@ -193,7 +186,6 @@ framework route layout.
   the original run; reusing it for different content is rejected.
 - Fetch the authoritative diff and a safe manifest of thread-worktree paths.
   The server never returns a host path, arbitrary remote URL, or command.
-- List, create, and delete response pins by stable response id.
 
 * Acceptance scenarios
 
@@ -208,8 +200,9 @@ framework route layout.
    intentional retry after reconnection.
 5. =Diff= agrees with the web thread's diff.  =Files= and a response file link
    open only the matching local worktree path.
-6. Pinning a response on the phone appears in Pins and after re-entering the
-   thread; removing it removes it from both views.
+6. Client-local pins are deferred. They will never call a server pin endpoint
+   or synchronize with browser local storage unless Pierre explicitly changes
+   that boundary.
 7. A malformed thread id, response id, or file link cannot access another
    thread, a host file, or an unbounded response.
 
@@ -218,18 +211,56 @@ framework route layout.
 - Editing files locally and synchronizing them to the web worktree.
 - Automatic background refresh, automatic retries, or offline submission.
 - Recreating the full browser dashboard or its administrative screens.
-- Sharing pins with browser local storage.  Pins move to Assist-owned data
-  instead.
+- Server-owned or cross-device pins.
 - Replacing Firefox for web-only features.
 
 * Delivery order
 
 1. Build the authenticated structured read API and cache-backed Emacs chooser.
+   *Complete:* merged as Assist PR #263.
 2. Enter/read existing threads, then send/observe exactly once with abort and
-   reconnect handling.
+   reconnect handling. *Current step.*
 3. Add authoritative diff, worktree mapping, local read-only repository cache,
    dired, and response file links.
-4. Add durable pins and the Pins buffer.
+4. Consider a client-local Pins buffer.
 5. Evaluate whether local edits should become a separately designed sync
    feature.  Do not quietly turn browser worktrees into a bidirectional sync
    system.
+
+* Step 2 implementation plan
+
+1. Keep =assist-web.el= as a thin asynchronous client of the merged phone API.
+   Retain only the cached catalog, canonical snapshot/history, draft, send,
+   run-observation, and abort surfaces for this step. The currently prototyped
+   workspace, diff, file-link, and pin commands belong to later delivery steps
+   and must not be exposed or tested as Step 2 behavior.
+2. Give each thread buffer its own request and stream state. A small global
+   coordinator may reserve the single active observed run, but it cannot own a
+   buffer's process or parser state. Every completion, error, abort, buffer
+   kill, and network disconnect releases the reservation exactly once.
+3. Render cached snapshots immediately as read-only and visibly stale. Fetches
+   and event observation happen through asynchronous =url-retrieve= callbacks;
+   the status-only API stream updates a visible status line in the buffer and a
+   terminal event starts an asynchronous canonical refresh. A successful refresh
+   replaces the transcript as one render; a failed refresh leaves the prior view
+   intact. It deliberately does not invent token streaming.
+4. Persist a pending message's exact text and idempotency key together. Retry
+   sends that exact pair only; editing the draft first clears the retry identity
+   and mints a new key. Failed observation leaves the pending response visibly
+   incomplete and offers refresh, never silently resubmission.
+5. Merge an older page only after checking its opaque cursor and chronology.
+   Keep the server's byte-bounded =next_before= cursor from the older page, so
+   pagination never skips messages the server omitted under its response bound.
+6. Cover cached-open, stale/offline behavior, duplicate-title buffers,
+   idempotent retry/edit behavior, terminal/error stream teardown, history
+   merging, and abort in ERT. Run =make test-elisp=, =make test-server=, and
+   the live-phone smoke before the EmacsOS PR.
+
+* Design review disposition
+
+- The status stream contains lifecycle updates, not assistant token text. A
+  speculative incremental transcript would contradict the API and this step's
+  canonical-refresh contract, so it is deliberately rejected.
+- Workspace snapshot publication, dired restrictions, and file-link refresh
+  remain real later-step concerns but are out of Step 2 rather than partially
+  shipping an unsafe or slow approximation.

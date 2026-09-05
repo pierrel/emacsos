@@ -33,7 +33,10 @@ REPO_DIR="$(cd "$SERVER_DIR/.." && pwd)"
 IMAGE="emacsos-phone-sim"
 CONTAINER="emacsos-phone-sim-$$"
 PHONE_PORT=12345
-SERVER_PORT=8765
+# A local development server can legitimately occupy the default port.  The
+# smoke server is isolated, so give callers a deterministic non-default escape
+# hatch without changing its production default.
+SERVER_PORT="${EMACSOS_SMOKE_SERVER_PORT:-8765}"
 TEST_MSG="hello from simulation"
 CHAT_MSG="hi from chat.el"
 

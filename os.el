@@ -801,11 +801,6 @@ rather than only M-x."
         nil)
        ((and buf (eq buf (get-buffer emacos-net--buffer-name)))
         (emacos-net--command-set))
-       ((and buf (boundp 'emacos-assist-web--workspace-read-only)
-             (buffer-local-value 'emacos-assist-web--workspace-read-only buf))
-        '(("Open" . dired-find-file)
-          ("Up" . dired-up-directory)
-          ("Refresh" . revert-buffer)))
        ((emacos--mode-commands-for mode))
        (t emacos-global-commands))))))
 
