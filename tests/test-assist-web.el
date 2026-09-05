@@ -79,6 +79,29 @@
                            (list ca "system-ca")))))
       (delete-file ca))))
 
+(ert-deftest test-assist-web-closes-only-idle-connections-for-its-origin ()
+  (let* ((emacos-assist-web-api-url
+          "https://10.0.0.1:5050/api/v1/phone")
+         (url-http-open-connections (make-hash-table :test #'equal))
+         (assist (make-pipe-process :name "assist-web-idle" :noquery t))
+         (other (make-pipe-process :name "other-idle" :noquery t)))
+    (unwind-protect
+        (progn
+          (puthash '("10.0.0.1" . 5050) (list assist)
+                   url-http-open-connections)
+          (puthash '("example.net" . 443) (list other)
+                   url-http-open-connections)
+          (emacos-assist-web--close-idle-origin-connections)
+          (should-not (process-live-p assist))
+          (should-not (gethash '("10.0.0.1" . 5050)
+                               url-http-open-connections))
+          (should (process-live-p other))
+          (should (equal (gethash '("example.net" . 443)
+                                  url-http-open-connections)
+                         (list other))))
+      (when (process-live-p assist) (delete-process assist))
+      (when (process-live-p other) (delete-process other)))))
+
 (ert-deftest test-assist-web-accepts-server-bounded-sealed-record-identifiers ()
   (let* ((sealed (concat "c-" (make-string 240 ?A)))
          (snapshot

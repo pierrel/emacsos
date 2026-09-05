@@ -19,6 +19,7 @@
 (declare-function emacos--render-page "os")
 (defvar url-http-content-type)
 (defvar url-http-end-of-headers)
+(defvar url-http-open-connections)
 (defvar url-http-response-status)
 (defvar url-http-attempt-keepalives)
 (defvar gnutls-trustfiles)
@@ -217,6 +218,18 @@
         (cons emacos-assist-web-ca-file
               (cl-remove emacos-assist-web-ca-file system-trust :test #'equal))
       system-trust)))
+
+(defun emacos-assist-web--close-idle-origin-connections ()
+  "Close pooled URL connections for the configured Assist origin."
+  (let* ((parsed (url-generic-parse-url emacos-assist-web-api-url))
+         (key (cons (url-host parsed) (url-port parsed))))
+    (when (hash-table-p url-http-open-connections)
+      (dolist (process (copy-sequence
+                        (gethash key url-http-open-connections)))
+        (when (processp process)
+          (set-process-query-on-exit-flag process nil)
+          (delete-process process)))
+      (remhash key url-http-open-connections))))
 
 (defun emacos-assist-web--valid-id-p (value)
   "Return non-nil when VALUE is a safe opaque Assist Web identifier."
@@ -437,6 +450,7 @@ ERROR rather than raising them from url-http's asynchronous callback."
                                       (url-http-attempt-keepalives nil)
                                       (gnutls-trustfiles
                                        (emacos-assist-web--trustfiles)))
+                          (emacos-assist-web--close-idle-origin-connections)
                           (url-retrieve
                            url
                            (lambda (_status)
@@ -685,6 +699,7 @@ open until the run reaches a terminal state or observation is interrupted."
                           (url-http-attempt-keepalives nil)
                           (gnutls-trustfiles
                            (emacos-assist-web--trustfiles)))
+                      (emacos-assist-web--close-idle-origin-connections)
                       (url-retrieve
                        (emacos-assist-web--endpoint
                         (format "threads/%s/runs/%s/events" thread-id run-id))
