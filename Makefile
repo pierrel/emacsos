@@ -70,6 +70,7 @@ phone-install:
 	  echo "error: ASSIST_WEB_TOKEN_FILE must contain one safe token" >&2; exit 1; }
 	@[ -f "$(ASSIST_WEB_CA_FILE)" ] && [ ! -L "$(ASSIST_WEB_CA_FILE)" ] && \
 	  [ "$$(stat -c '%s' "$(ASSIST_WEB_CA_FILE)")" -le 65536 ] && \
+	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -noout >/dev/null 2>&1 && \
 	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -outform PEM 2>/dev/null | \
 	  cmp -s - "$(ASSIST_WEB_CA_FILE)" || { \
 	  echo "error: ASSIST_WEB_CA_FILE must be one bounded X.509 certificate" >&2; exit 1; }

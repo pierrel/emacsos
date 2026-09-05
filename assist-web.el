@@ -20,6 +20,7 @@
 (defvar url-http-content-type)
 (defvar url-http-end-of-headers)
 (defvar url-http-response-status)
+(defvar url-http-attempt-keepalives)
 (defvar gnutls-trustfiles)
 
 (defgroup emacos-assist-web nil
@@ -205,11 +206,16 @@
 
 (defun emacos-assist-web--trustfiles ()
   "Return GnuTLS trust files with the configured Assist CA first."
-  (let ((system-trust (and (boundp 'gnutls-trustfiles) gnutls-trustfiles)))
+  (let* ((configured (and (boundp 'gnutls-trustfiles) gnutls-trustfiles))
+         (system-trust (if (functionp configured)
+                           (funcall configured)
+                         configured)))
+    (unless (listp system-trust)
+      (error "GnuTLS trust configuration must return a list"))
     (if (and emacos-assist-web-ca-file
              (file-readable-p emacos-assist-web-ca-file))
         (cons emacos-assist-web-ca-file
-              (delete emacos-assist-web-ca-file system-trust))
+              (cl-remove emacos-assist-web-ca-file system-trust :test #'equal))
       system-trust)))
 
 (defun emacos-assist-web--valid-id-p (value)
@@ -428,6 +434,7 @@ ERROR rather than raising them from url-http's asynchronous callback."
 			(let ((url-mime-encoding-string "identity")
                                       (url-debug nil)
                                       (url-automatic-caching nil)
+                                      (url-http-attempt-keepalives nil)
                                       (gnutls-trustfiles
                                        (emacos-assist-web--trustfiles)))
                           (url-retrieve
@@ -675,6 +682,7 @@ open until the run reaches a terminal state or observation is interrupted."
                     (let ((url-mime-encoding-string "identity")
                           (url-debug nil)
                           (url-automatic-caching nil)
+                          (url-http-attempt-keepalives nil)
                           (gnutls-trustfiles
                            (emacos-assist-web--trustfiles)))
                       (url-retrieve

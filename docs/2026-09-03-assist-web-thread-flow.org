@@ -298,9 +298,8 @@ HTTP headers, and individual SSE records. SSE is accepted only after a 2xx
 =text/event-stream= response, and the final process buffer is retained long
 enough to parse a terminal event even when the URL library detaches it.
 
-The v25.06/OpenRC installer and updater deploy =assist-web.el=, render the
-Assist endpoint from the deployment client's protected-network address, and
-install the operator-supplied token as
+The v25.06/OpenRC installer and updater deploy =assist-web.el= and install the
+operator-supplied token as
 =/var/lib/emacsos-lab/.config/emacsos/assist-web-token= owned by
 =emacsos-lab= with mode =0600=. The secret is validated as a single bounded
 token but is deliberately excluded from the tracked payload manifest. The
@@ -308,8 +307,9 @@ deployment uses the explicit certificate-covered =ASSIST_WEB_SERVER_IP= rather
 than coupling the API address to whichever LAN, USB, or WireGuard route carried
 the deployment. It also installs the one operator-supplied =ASSIST_WEB_CA_FILE= certificate
 at =/etc/emacsos-openrc/assist-web-ca.pem= and binds it only around Assist Web
-requests, so a fresh image can verify Assist's HTTPS server certificate without
-expanding trust for unrelated Emacs traffic. The legacy =phone-install= path
+requests with HTTP connection reuse disabled, so a fresh image can verify
+Assist's HTTPS server certificate without expanding trust for unrelated Emacs
+traffic. The legacy =phone-install= path
 uses =~/.config/emacsos/assist-web-ca.pem= and likewise refuses its sentinel URL
 unless it receives an explicit HTTPS endpoint, private token file, and valid
 single CA certificate.

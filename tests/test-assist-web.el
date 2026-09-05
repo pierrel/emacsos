@@ -70,6 +70,15 @@
                            '("system-ca")))))
       (delete-file ca))))
 
+(ert-deftest test-assist-web-ca-supports-function-valued-system-trust ()
+  (let ((ca (make-temp-file "assist-web-ca-")))
+    (unwind-protect
+        (cl-progv '(gnutls-trustfiles) '((lambda () '("system-ca")))
+          (let ((emacos-assist-web-ca-file ca))
+            (should (equal (emacos-assist-web--trustfiles)
+                           (list ca "system-ca")))))
+      (delete-file ca))))
+
 (ert-deftest test-assist-web-accepts-server-bounded-sealed-record-identifiers ()
   (let* ((sealed (concat "c-" (make-string 240 ?A)))
          (snapshot
@@ -219,7 +228,7 @@
   (let ((target (generate-new-buffer " *assist-web-target*"))
         (source (generate-new-buffer " *assist-web-source*"))
         (emacos-assist-web-api-url "https://assist.invalid/api/v1/phone")
-        process finished interrupted callback)
+        process finished interrupted callback keepalive trustfiles)
     (unwind-protect
         (progn
           (setq process (make-pipe-process :name "assist-web-callback-order"
@@ -233,7 +242,9 @@
                      (lambda () "token"))
                     ((symbol-function 'url-retrieve)
                      (lambda (_url cb &rest _)
-                       (setq callback cb)
+                       (setq callback cb
+                             keepalive url-http-attempt-keepalives
+                             trustfiles gnutls-trustfiles)
                        (set-process-filter
                         process
                         (lambda (_active _bytes)
@@ -246,6 +257,8 @@
                                         (copy-marker (point-min))))
                           (funcall callback nil)))
                        source))
+                    ((symbol-function 'emacos-assist-web--trustfiles)
+                     (lambda () '("assist-ca" "system-ca")))
                     ((symbol-function 'emacos-assist-web--stream-finish)
                      (lambda (buffer)
                        (setq finished t)
@@ -258,7 +271,9 @@
                      "HTTP/1.1 200 OK\r\n\r\n")
             (sleep-for 0.01))
           (should finished)
-          (should-not interrupted))
+          (should-not interrupted)
+          (should-not keepalive)
+          (should (equal trustfiles '("assist-ca" "system-ca"))))
       (when (process-live-p process) (delete-process process))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -304,19 +319,25 @@
 (ert-deftest test-assist-web-json-request-disables-redirects-and-encoding ()
   (let ((emacos-assist-web--requests nil)
         (response (generate-new-buffer " *assist-web-request*"))
-        encoding)
+        encoding keepalive trustfiles)
     (unwind-protect
         (cl-letf (((symbol-function 'emacos-assist-web--read-token)
                    (lambda () "token"))
                   ((symbol-function 'url-retrieve)
                    (lambda (&rest _)
-                     (setq encoding url-mime-encoding-string)
+                     (setq encoding url-mime-encoding-string
+                           keepalive url-http-attempt-keepalives
+                           trustfiles gnutls-trustfiles)
                      response))
+                  ((symbol-function 'emacos-assist-web--trustfiles)
+                   (lambda () '("assist-ca" "system-ca")))
                   ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
           (emacos-assist-web--request "GET" "threads" nil #'ignore)
           (with-current-buffer response
             (should (= url-max-redirections 0)))
-          (should (equal encoding "identity")))
+          (should (equal encoding "identity"))
+          (should-not keepalive)
+          (should (equal trustfiles '("assist-ca" "system-ca"))))
       (when (buffer-live-p response) (kill-buffer response)))))
 
 (ert-deftest test-assist-web-json-request-has-a-global-concurrency-bound ()

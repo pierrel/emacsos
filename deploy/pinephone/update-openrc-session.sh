@@ -22,6 +22,7 @@ assist_web_server_ip=${ASSIST_WEB_SERVER_IP:?set ASSIST_WEB_SERVER_IP to the cer
 }
 [ -f "$ca_file" ] && [ ! -L "$ca_file" ] &&
     [ "$(stat -c '%s' "$ca_file")" -le 65536 ] &&
+    openssl x509 -in "$ca_file" -noout >/dev/null 2>&1 &&
     openssl x509 -in "$ca_file" -outform PEM 2>/dev/null | cmp -s - "$ca_file" || {
     printf '%s\n' 'ASSIST_WEB_CA_FILE must be one bounded X.509 certificate' >&2
     exit 1

@@ -266,6 +266,8 @@ grep -F 'ASSIST_WEB_CA_FILE:-$HOME/.local/share/mkcert/rootCA.pem' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'openssl x509 -in "$ca_file" -outform PEM' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'openssl x509 -in "$ca_file" -noout' \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'Assist Web token file must contain one safe token' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'assist-web-token' \
