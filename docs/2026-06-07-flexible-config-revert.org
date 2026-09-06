@@ -1,0 +1,387 @@
+#+title: Flexible (targeted, conversational) Config Revert
+#+date: 2026-06-07
+
+The rich, conversational half of the config-undo story.  Today undo is strictly ONE-LEVEL: the phone
+ROLLBACK button calls =ConfigRepo.rollback()= → =git revert --no-edit HEAD=, undoing only the most
+recent =apply_config=.  *That button stays exactly as-is* — it's the quick "undo the thing I just
+did" fast path and that's all it needs to be.  This layer adds a TARGETED, NL-driven path from
+=*chat*=: "revert the cursor color change but keep the font change", "undo the last two things",
+"revert the change about X".  The agent surfaces the apply history to itself, maps the user's
+words to a past commit, and reverts just that commit — history-preserving so roll-forward stays
+possible, honest when a later change makes a clean revert impossible.
+
+Builds directly on:
+- [[file:2026-05-21-config-apply-rollback.org][2026-05-21-config-apply-rollback.org]] — the git-backed =ConfigRepo=, =apply_config=, the
+  one-level =rollback()=, the apply-then-commit invariant, the =applied= event that re-arms the
+  phone ROLLBACK button, and the honest result-prefix contract (=applied:= / =applied-but-broken:=
+  / =applied-but-unrecorded:= / =error:=).  That doc explicitly stubbed =ConfigRepo.history()= and
+  deferred the "roll-forward affordance + history view" — this IS that follow-up.
+- [[file:2026-05-22-conversation-history.org][2026-05-22-conversation-history.org]] — the persistent =/chat= conversation that lets the user
+  say "the cursor change" and have it mean something.
+- The now-shipped =get_config= tool (roadmap prerequisite "Agent can't read current config after
+  =/clear=") — the agent already has a reliable, memory-independent read path to the committed
+  config; this layer adds the analogous read path to the change *history*.
+
+Authoritative spec: =roadmap.org:168= ("Flexible config change management (revert any past change
+via chat)").  Per that spec we *deliberately skip* any intermediate "N-level only" chat-revert
+step and go straight to targeted revert; this single item subsumes "chat-revert" + "N-level" +
+"targeted".
+
+This is a SMALL slice.  Explicitly NOT in scope (see "Out of scope / next layers"): a phone-side
+history-view screen, per-feature module split, diff/body surfacing in the history tool, interactive
+conflict resolution, and unifying the phone button's revert ordering with the chat path.
+
+* TL;DR — decisions
+
+1. *Two new top-level agent tools* on =EMACS_TOOLS=:
+   - =get_config_history()= — reads =ConfigRepo.history()=, returns the change list newest-first as
+     =vSHORT — summary= lines (=empty:= when only the scaffold exists; =error:= on read failure).
+     Pairs with =get_config= (verb_noun, both reads).
+   - =revert_config(ref: str)= — reverts the ONE named commit, re-applies the result live to the
+     phone, returns =reverted:= / =reverted-but-broken:= / =reverted-but-unrecorded:= / =error:=.
+     Pairs with =apply_config= (verb_noun, both mutations).
+2. *Single =ref=, not a list.*  "Undo the last two things" / "a chosen set" is delivered by the
+   model issuing N single-ref reverts, each independently checkable — not by a =list[str]= arg.
+   This is the highest-leverage decision: it removes ALL multi-sha machinery (ordering, range
+   parsing, the =--no-commit=-collapse question) and matches how a small model reliably emits tool
+   args (a checkable scalar, not a JSON array).
+3. *Staged-revert trio* on =ConfigRepo= keeps git ownership where it belongs and the tool thin:
+   =stage_revert(ref) -> RevertPlan=, =commit_staged(summary) -> ConfigVersion=, =abort_staged()=.
+   The tool sequences repo+phone; =ConfigRepo= stays pure git/fs and unit-testable with no phone.
+4. *Apply-then-commit*, identical to =apply_config=: =stage_revert= produces the reverted body
+   WITHOUT committing (=git revert --no-commit=), the tool applies it to the phone, then
+   =commit_staged= records it only if the phone received it.  Preserves the "no phantom commit;
+   HEAD == phone" invariant.
+5. *Reuse the =applied= event* (widen the derivation to also watch =revert_config=) so the phone's
+   one-level ROLLBACK button re-arms after a chat revert — giving a free "undo my revert"
+   roll-forward fast path.  No new event, no new endpoint.
+6. *Extend the existing =config-apply= skill* with a "reverting a past change" section; keep the
+   one-level phone button untouched.
+7. *Behavior eval lives in emacsos* (it needs both assist's =AgentHarness=/=select_assistant_model=
+   AND emacsos's =EMACS_TOOLS=/skill; only emacsos imports both).
+
+* Why these choices (the design questions)
+
+** Q1 — How does the agent see the history? (=get_config_history=, a separate tool)
+
+The agent needs the list of past changes to map "the cursor change" → a commit.  =git log= already
+IS that list: each =apply_config= commits with its SUMMARY as the message, so no new persistence is
+needed (=roadmap.org:185=).  =ConfigRepo.history()= already returns =ConfigVersion(sha, summary,
+body="")= newest-first — it was stubbed in the 2026-05-21 doc precisely "for a future history-view
+affordance".  This is that future; reuse it (don't add a parallel method).
+
+*Separate tool, NOT folded into =get_config=.*  =get_config='s contract is tight and pinned by
+three tests: "the current SAVED body to build on … one read is enough … does not change within a
+turn."  History is a different question with a different shape (a list of =vSHORT — summary=, not a
+body).  Folding the two muddies a docstring the small model currently keys on cleanly and widens the
+surface the model can misuse.  The revert workflow is genuinely two reads with two purposes
+(=get_config_history= to find the ref; =revert_config= to act), which maps to two tools naturally.
+
+*Keep =history()= thin (=body=""=).*  The SUMMARY is the v1 discriminator for NL→commit mapping
+("make the cursor blue" is what the user is referring to).  Reading N commit bodies would be wasted
+git work; per-commit diff/body surfacing is deferred (add only if an eval shows the model can't
+disambiguate by summary alone).
+
+*Scaffold-exclusion lives in =history()= (repo), not the prompt.*  The =scaffold: empty agent
+config= commit is a git implementation detail (the repo needs a HEAD before the first apply;
+=rollback()= already treats =_commit_count() < 2= as "nothing to undo").  Excluding it is a
+repo-semantics decision — "what counts as a user-meaningful version" — so do it once in =history()=
+(drop the root commit) and every consumer gets the clean list.  Relying on the small model to skip
+the scaffold by recognizing its summary string would be fragile, and it would let the model offer
+"scaffold" as a revertable change.  =vSHORT= formatting, by contrast, stays in the TOOL (it's
+user-facing presentation, the same split =apply_config= already uses — the tool builds =v{short}=,
+not =write_and_commit=).
+
+** Q2 — Why a single =ref=, not =refs: list[str]=?
+
+The spec says "revert just that commit … or a chosen set/range".  Both a list arg and N single-ref
+calls satisfy "a chosen set".  We choose single-ref because:
+
+- *Small-model arg fidelity.*  This is a Qwen-class reasoning model; it gets a checkable scalar arg
+  right almost always, but JSON arrays are where malformed args show up (a stringified list as one
+  element, a bare string where a list was expected).  Every such slip reverts the wrong thing or
+  nothing.  CLAUDE.md's "checkable tool-arg constraint" principle points straight at the scalar.
+- *"Undo the last two things" needs the model to issue two reverts, not a list.*  Two calls → two
+  =reverted: (vSHORT)= results the model can individually verify; a conflict on the second doesn't
+  poison the first.  This is strictly more legible than an atomic multi-revert.
+- *It dissolves the hardest design questions.*  No multi-sha ordering, no range parsing, no
+  "=git revert --no-commit A B= collapses to one commit?" dilemma.  Each call reverts exactly one
+  commit into exactly one revert commit.  Simplest possible shape.
+
+Trade-off (accepted): N single-ref reverts are not atomic — reverting B can succeed while A then
+conflicts.  That is the HONEST outcome ("undid the font change; couldn't cleanly undo the cursor
+change — a later change touched it"), and it's better than refusing to undo B because A conflicts.
+If eval ever shows a real need for all-or-nothing multi-revert, add it then — not speculatively.
+
+*Ref normalization.*  =revert_config= must accept what the model actually echoes: a bare =vSHORT=,
+the bare hex (=SHORT=), OR the whole matched line (=vSHORT — make cursor blue=, which small models
+love to paste back).  Normalize by stripping an optional leading =v= and taking the leading hex
+token, ignoring any trailing = — summary=.  Skipping this turns a CORRECT match into
+=error: no such change= — an eval failure that looks like a model bug but is a parser bug.
+
+** Q3 — The repo/tool boundary: a staged-revert trio
+
+Keeping =ConfigRepo= the sole owner of git/fs is the load-bearing invariant of that module (pure,
+no langgraph/assist imports, unit-testable against a tmp repo with no mocks).  So the tool must not
+issue raw =git revert= / =--abort= / body-extraction.  But the commit decision depends on the phone
+apply result, which only the *tool* knows.  The clean boundary is a staged pair (mirroring the
+stage→commit shape =write_and_commit= already implies):
+
+#+begin_example
+@dataclass(frozen=True)
+class RevertPlan:
+    ok: bool
+    detail: str
+    body: str          # the proposed reverted body to ship to the phone (when ok)
+
+ConfigRepo.stage_revert(ref: str) -> RevertPlan
+    # ensure(); resolve ref; `git revert --no-commit <sha>`.
+    #   on conflict OR empty-revert: `git revert --abort`, return ok=False with an honest detail.
+    #   on success: read the staged worktree body, return ok=True + body. Tree left staged.
+ConfigRepo.commit_staged(summary: str) -> ConfigVersion
+    # commit whatever stage_revert staged (empty-commit guard as in write_and_commit). New HEAD.
+ConfigRepo.abort_staged() -> None
+    # `git revert --abort` — for the apply-unreachable path (staged but must not record).
+#+end_example
+
+The tool then reads as thin as =apply_config=:
+
+#+begin_example
+plan = repo.stage_revert(ref)
+if not plan.ok: return f"error: {plan.detail}"        # conflict/empty/unknown-ref — nothing changed
+ar = apply_to_phone(ctx, render(plan.body))
+if ar.status == "unreachable":
+    repo.abort_staged(); return "error: phone unreachable: ... (do not retry — surface to user)"
+ver = repo.commit_staged(summary)                      # may raise -> reverted-but-unrecorded
+... classify ar.status into reverted: / reverted-but-broken:
+#+end_example
+
+*Rejected: a callback-into-ConfigRepo transactional method.*  Passing =apply_to_phone= into
+=ConfigRepo= would drag the phone concern into the pure-git module and break its no-stub
+unit-testability — it re-couples exactly what this boundary decouples.  The tool sequences;
+=ConfigRepo= stays pure.
+
+*Contract constraint to state loudly:* every other =ConfigRepo= public method begins with
+=ensure()= (which hard-resets the tree).  =commit_staged= / =abort_staged= MUST NOT call =ensure()=
+— it would blow away the staged revert.  =stage_revert= calls =ensure()= once, up front.
+
+** Q4 — Honest result contract (4 prefixes, symmetric with =apply_config=)
+
+=revert_config= returns one of (match the FULL prefix up to the colon):
+- =reverted: <summary> (now vSHORT) — loaded cleanly on the phone; you can roll back from the chat
+  UI= — clean success, committed + live.
+- =reverted-but-broken: <summary> (vSHORT) — committed as the new config but it errored while
+  loading (<detail>); roll back or send a corrected config= — committed + HEAD, =load_error= on the
+  phone (analogue of =applied-but-broken:=).
+- =reverted-but-unrecorded: loaded on the phone but the server failed to record it in git
+  (<err>); the change is live but cannot be rolled back from history= — apply succeeded,
+  =commit_staged= raised.  Reachable BECAUSE the commit is last (apply-then-commit); excluded from
+  the =applied= event (no clean HEAD to re-arm against), exactly as =applied-but-unrecorded:= is.
+- =error: ...= — nothing changed.  Three sub-cases, each with the next action spelled out:
+  - conflict: =error: can't cleanly revert vSHORT — a later change touched the same thing (nothing
+    was changed; do not retry — tell the user, or revert the later change first)=.  This wording is
+    deliberate: =error:= already means "nothing happened" to the model, but elsewhere =error:= from
+    =eval_elisp= invites a *retry* — so the conflict result must carry an explicit imperative (the
+    same shape the unreachable case uses: =(do not retry — surface to user)=), not just a
+    state description.  Keeping the =error:= prefix also means LoopDetection Pattern A
+    (same-tool-same-error ≥2) backs up a model that ignores the imperative and re-tries the same
+    ref.
+  - unreachable: =error: phone unreachable: ... (do not retry — surface to user)= — nothing
+    committed (=abort_staged= ran).
+  - unknown ref: =error: no such change: <ref>=.
+
+Why four, symmetric with =apply_config='s four: the apply-then-commit ordering produces the same
+state machine (stage → apply → commit), so the failure modes line up one-to-one and the skill
+teaches ONE mental model for both apply and revert.
+
+** Q5 — Event wiring: reuse =applied=, no new endpoint
+
+This is agent-driven (NL→commit mapping needs the model, which only runs in =/chat=), so there is
+*no new endpoint* — =revert_config= is just another tool inside a =/chat= turn, already serialized
+behind =_STREAM_LOCK= (so its git op can't race the phone button's =/rollback= or an
+=apply_config= commit).  Contrast the phone button's model-less =POST /rollback=, which stays
+exactly as-is.
+
+The =applied= event (derived in =app.py= from the =apply_config= ToolMessage prefix) re-arms the
+phone's ROLLBACK button.  After a targeted revert the new HEAD IS the phone's current config, and
+the button should now undo *this revert* (roll-forward).  So we want the same re-arm.  Extend the
+derivation to a 2-tuple membership check — match =apply_config= with =("applied:",
+"applied-but-broken:")= AND =revert_config= with =("reverted:", "reverted-but-broken:")=.  Exclude
+the =*-unrecorded:= variants (no clean HEAD to re-arm against — same reasoning the existing code
+already applies to =applied-but-unrecorded:=).  Spell the prefixes in full so =reverted-but-
+unrecorded:= can't sneak in via a =reverted= =startswith=.
+
+*Rejected (for v1): a separate =reverted= event.*  The clean-interfaces review argued the =applied=
+event name is inaccurate for a revert.  True, but: (a) the MODEL never sees the event — it's a
+UI-stream artifact derived from the ToolMessage; the model sees =reverted:=, distinct vocabulary;
+(b) the PHONE only needs "HEAD moved → re-arm ROLLBACK", which is exactly correct after a revert;
+(c) the user-visible differentiation already rides in the =detail= string, which
+=emacos--chat-handle-applied= renders verbatim, so the transcript already shows =[reverted: …]=
+with zero phone code.  A sibling event would mean a new client handler + event-table entry + ERT
+for a cosmetic internal-name gain.  Deferred; revisit only if the user wants the transcript to
+treat reverts visually differently.  (We will update the =emacos--chat-handle-applied= docstring
+wording to "applied or reverted" — a comment-only change.)
+
+** Q6 — =revert_config= must be top-level
+
+Same non-negotiable as =apply_config=: =app.py= derives the =applied= event by scanning the
+*top-level* message stream for the ToolMessage prefix.  Bury =revert_config= in a sub-agent and the
+event silently never fires and the phone ROLLBACK button never re-arms.  It goes in =EMACS_TOOLS=
+alongside =apply_config=.
+
+Tool-config plumbing: =revert_config= reaches the phone, so it takes =config: RunnableConfig= and
+reads =PhoneContext= (the same guard as =eval_elisp=/=apply_config=).  =get_config_history= does
+NOT reach the phone (reads the server-side git repo only), so it takes NO =RunnableConfig= param —
+mirroring =get_config='s explicit "no phone identity to thread through" comment.
+
+* New / changed surface (per file)
+
+- =config_repo.py=
+  - Rename =RollbackResult= → =RevertResult= (fields unchanged: =ok=, =detail=, =version=); a
+    targeted revert is not a "rollback".  =rollback()= the *method* keeps its name (it's the
+    genuinely rollback-shaped button op); update its return annotation + the =app.py= call site.
+  - New frozen =RevertPlan(ok, detail, body)= for the staged (pre-commit) case.
+  - =history(limit)=: exclude the root/scaffold commit (drop the initial commit from the log range);
+    keep =body=""=.
+  - New =stage_revert(ref) -> RevertPlan=, =commit_staged(summary) -> ConfigVersion=,
+    =abort_staged()= (the staged trio; =ensure()= only in =stage_revert=).
+- =channel.py=
+  - New tools =get_config_history()= and =revert_config(ref, config)=; add both to =EMACS_TOOLS=.
+  - =get_config_history= formats =v{sha[:7]} — {summary}= lines over =history()=; =empty:= /
+    =error:= as documented.
+  - =revert_config= orchestrates the staged trio + =apply_to_phone= per Q3, returns the 4-prefix
+    contract per Q4.
+- =app.py=
+  - Widen the =applied=-event derivation to a 2-tool / explicit-prefix-set membership check (Q5).
+    The =seen_applied= dedupe set is keyed by =tc_id= (unique per tool call regardless of tool), so
+    one set still suffices.
+- =skills/config-apply/SKILL.md=
+  - Add a "Reverting a past change" section: call =get_config_history= → match a summary line to the
+    user's words → call =revert_config= with that =vSHORT= → report by prefix (conflict ⇒ tell the
+    user it can't be cleanly reverted because a later change touched it; do not retry).  Examples
+    must be shaped DIFFERENTLY from the eval prompts (no verbatim "revert the cursor color but keep
+    the font") so the eval probes generalization, not lexical proximity.
+- =chat.el=
+  - Comment-only: update =emacos--chat-handle-applied= docstring to "applied or reverted".  No logic
+    change (the detail string already renders =[reverted: …]= and re-arms the button).
+
+* Accepted divergence (call it out, don't silently introduce)
+
+The phone button's =_do_rollback= path is *commit-then-apply* (=rollback()= auto-commits via
+=git revert --no-edit=, then =apply_to_phone= loads the new HEAD).  The new chat path is
+*apply-then-commit* (Q4), matching =apply_config= and better preserving "HEAD == phone" (the button
+path currently commits even if the later phone apply fails — a latent phantom-commit on an
+unreachable phone).  Unifying =_do_rollback= onto the staged trio is the right cleanup but widens
+this PR's scope into the button path; *deferred* to a focused follow-up.  v1 keeps =rollback()= /
+=_do_rollback= as-is.  Documented here so the two orderings are a known, intentional state, not an
+accident.
+
+* Test approach
+
+** ConfigRepo unit tests (server/tests/test_config_repo.py — extend; pure git+fs, no mocks)
+- =stage_revert= + =commit_staged= of a single past commit keeps the other change (apply A=cursor,
+  B=font; revert A → body has font, not cursor; A's commit still in the log ⇒ roll-forward
+  possible).
+- revert-of-a-revert rolls the change forward.
+- conflict: two applies touching the same line such that reverting the older mid-stack conflicts ⇒
+  =stage_revert= returns =ok=False=, detail mentions can't-cleanly-revert, AND
+  =git status --porcelain= is empty + HEAD unchanged (proves =--abort= ran).
+- empty/degenerate revert (reverting something already undone) ⇒ =ok=False=, no empty commit
+  created (=rev-list --count= unchanged), tree clean.
+- unknown ref ⇒ =ok=False=, no-such-change detail.
+- =history()= excludes the scaffold/root commit.
+- the =write_and_commit= no-diff guard still holds after a revert (identical re-apply no-ops).
+- =commit_staged=/=abort_staged= do NOT call =ensure()= (a staged revert survives to the commit).
+
+** Tool / endpoint tests (server/tests/test_channel.py, test_chat_endpoint.py — extend; mock apply_to_phone)
+- =revert_config= happy (=reverted:= + a new commit present), =reverted-but-broken:= (mock
+  =apply_to_phone= → =load_error=), conflict (=error:= + nothing committed + tree clean),
+  unreachable (=error:= + staged work aborted, HEAD == pre-revert), unknown ref, and ref
+  normalization (=vSHORT=, =SHORT=, and the whole echoed =vSHORT — summary= line all resolve).
+- =get_config_history= returns =vSHORT — summary= lines (scaffold absent), =empty:= on
+  scaffold-only.  Both new tools present in =EMACS_TOOLS=.
+- =test_chat_endpoint=: a scripted =revert_config= ToolMessage with =reverted:= content ⇒ exactly
+  one =applied= event (=broken=False=); =reverted-but-broken:= ⇒ =broken=True=;
+  =reverted-but-unrecorded:= ⇒ NO event; de-dup across stream modes.
+
+** chat.el ERT (tests/test-chat.el — extend)
+- =emacos--chat-handle-applied= with a =reverted:= detail renders =[reverted: …]= and arms ROLLBACK.
+
+** Small-model behavior eval (NL→commit mapping) — lives in EMACSOS
+There is no config-apply behavior eval today (config behavior is only smoke-tested + unit-mocked).
+This is emacsos's *first* model-dependent eval.  It must live here, not in assist: it needs BOTH
+assist's =select_assistant_model= / =AgentHarness= AND emacsos's =EMACS_TOOLS= + =config-apply=
+skill, and only emacsos imports both (assist must never depend on emacsos; emacsos already imports
+=assist.thread= in tests).  Mirror the assist skill-loading evals (=edd/eval/test_elisp_skill.py=,
+=test_domain_skills.py=): build an agent with =EMACS_TOOLS= + the skill source wired in (as
+=app.py='s =_build_thread= does), a REAL tmp =ConfigRepo= seeded with a known history, and a
+stubbed =apply_to_phone= (no live phone).  Assert:
+- seeded [apply cursor, apply font]; prompt "undo the change that set the cursor color, leave the
+  rest" (phrasing NOT mirrored from the skill) ⇒ agent loads the config-apply skill, calls
+  =get_config_history=, then =revert_config= with the CURSOR ref (not the font ref) ⇒ the repo body
+  lost the cursor line, kept the font line.
+- seeded three applies; "undo the last two things" ⇒ =revert_config= called for the two newest refs.
+- anti-test: a plain apply request does NOT call =revert_config=.
+Cadence per the standing rules: this uses the single llama.cpp slot — run 3/5/10 and avoid the
+11p–3a nightly-eval window.
+
+** Smoke (server/simulation/run.sh — extend after the rollback smoke)
+A =/chat= turn driving a targeted revert against an isolated config dir: apply two observable vars,
+"undo the first change", assert a =reverted=/=applied= event AND independently =emacsclient -e= that
+the first var is gone and the second survives + =agent.el= reflects it.  Plus one conflict-honesty
+smoke (force a conflict ⇒ assert =error=, NOT a false =reverted=).
+
+* Risks & edge cases
+
+1. *Small model picks the wrong commit.*  Mitigated by =get_config_history= giving it the actual
+   summaries it wrote, the skill's match-then-revert workflow, and the behavior eval gating
+   regressions.  Residual: a wrong revert is itself undoable via the re-armed one-level ROLLBACK
+   button, and the user can ask again.  Self-correcting.
+2. *Model pastes the whole history line as the ref.*  Handled by ref normalization (Q2).
+3. *Conflict.*  =stage_revert= =--abort=s and reports honestly; the imperative wording + the
+   =error:= prefix (LoopDetection Pattern A) stop a blind retry.
+4. *Empty/degenerate revert.*  Caught and reported honestly; never creates an empty commit (which
+   would break the next =git revert= — the documented hazard).
+5. *Unreachable phone after staging.*  =abort_staged= discards the uncommitted revert; nothing is
+   recorded; =error: ... (do not retry)=.  HEAD stays == phone.
+6. *Commit fails after a live apply* (=reverted-but-unrecorded:=).  Rare; reported honestly, no
+   event, no rollback target — same handling as =applied-but-unrecorded:=.
+7. *Reverting across a =/clear=.*  The git history is independent of the conversation checkpoint, so
+   =get_config_history= / =revert_config= still work after New chat — a feature.  The user's NL
+   reference ("that thing") may be unresolvable from summaries alone post-=/clear=; the skill says
+   match the user's words to a summary line, and the model can list/ask.  Acceptable.
+8. *Concurrent phone-button =/rollback= vs chat revert.*  Both serialize on =_STREAM_LOCK=; the
+   second queues.  No git race.
+9. *=ensure()= eating a concurrent dirty tree.*  =stage_revert='s =ensure()= hard-reset is safe —
+   the repo is server-owned and the lock guarantees no other op is mid-write — but
+   =commit_staged=/=abort_staged= must NOT call it (Q3).
+10. *Scaffold targeted ("undo everything").*  Scaffold is excluded from =get_config_history=, so the
+    model can't pick it; "undo everything" = reverting each listed change in turn, landing back at
+    the empty-config scaffold body, which is the correct floor.
+
+* Out of scope / next layers
+
+- *Phone-side history-view screen.*  =get_config_history= is a MODEL affordance, not a 320×240
+  screen.  (No new page.)
+- *=refs: list[str]= / atomic multi-revert.*  Single-ref + N calls covers "set/range" (Q2); add
+  atomicity only if an eval shows a real need.
+- *Diff / body surfacing in the history tool.*  Summary is the v1 discriminator (Q1); add
+  per-commit detail only if the model can't disambiguate.
+- *Interactive conflict resolution.*  A conflicting revert is reported honestly and abandoned
+  (=--abort=); no 3-way merge, no partial revert.
+- *Unifying =_do_rollback= onto the staged trio* (the apply-then-commit ordering).  Accepted
+  divergence for v1; focused follow-up.
+- *Per-feature module split* (=init.el= + modules).  Single =agent.el=, whole-file model unchanged.
+- *New endpoint.*  Agent-driven only; the phone button stays one-level =/rollback=.
+
+* Implementation sequence
+
+1. =config_repo.py=: rename =RollbackResult=→=RevertResult=, add =RevertPlan=, the staged trio,
+   scaffold-exclusion in =history()=.  Land the ConfigRepo unit tests (pure, fast).
+2. =channel.py=: =get_config_history= + =revert_config= + =EMACS_TOOLS=.  Tool tests
+   (mock =apply_to_phone=).
+3. =app.py=: widen the =applied=-event derivation.  Endpoint tests.
+4. =skills/config-apply/SKILL.md=: revert section (eval-alignment-aware examples).  =chat.el=
+   docstring touch + ERT.
+5. Behavior eval (emacsos), then smoke.  Eval cadence 3/5/10, outside 11p–3a.
+6. Phase-3 Copilot review loop after the branch builds green.

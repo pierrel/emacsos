@@ -281,6 +281,12 @@ deferred with the WireGuard/away-phone work.
 
 ** TODO Flexible config change management (revert any past change via chat)
 
+Design scoped 2026-06-07:
+[[file:docs/2026-06-07-flexible-config-revert.org][docs/2026-06-07-flexible-config-revert.org]]
+(two tools =get_config_history= + single-ref =revert_config=; staged-revert
+trio on =ConfigRepo=; apply-then-commit; reuse the =applied= event; behavior
+eval in emacsos).
+
 The next experiment *immediately after* conversation history — we go
 straight here, deliberately skipping any intermediate "N-level only"
 chat-revert step.
@@ -310,7 +316,12 @@ So this single item subsumes what was once "chat-revert" + "N-level" +
 "targeted": the one-level phone button is the fast path; this is the
 rich, conversational path, and it's where we head next.
 
-*** TODO Agent can't read current config after =/clear= (prerequisite)
+*** DONE Agent can't read current config after =/clear= (prerequisite)
+
+Shipped: the =get_config= tool (=channel.py=) reads the committed config body
+straight from the git repo, so the agent no longer relies on conversation
+memory — =/clear= is safe AND there's no stale-setting resurrection.  Unblocks
+the flexible-config revert above.
 
 Surfaced 2026-05-23 by a live "set the cursor blue" turn right after a
 =/clear= ("New chat").  =apply_config= replaces the whole config file, so
