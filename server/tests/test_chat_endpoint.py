@@ -498,6 +498,18 @@ def test_skill_sources_has_call_skill_with_phone_local_confirmation():
     assert "never synthesize the confirmation actions" in text
 
 
+def test_skill_sources_has_sms_skill_with_phone_local_confirmation():
+    """The SMS skill stages exact content and reserves sending for phone taps."""
+    import emacsos_server.app as app_mod
+    path = os.path.join(app_mod._SKILLS_DIR, "sms", "SKILL.md")
+    assert os.path.exists(path)
+    text = open(path).read()
+    assert "emacos-send-message" in text
+    assert "confirmation-required: confirm on phone" in text
+    assert "It does not send." in text
+    assert "Never synthesize confirmation actions." in " ".join(text.split())
+
+
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):
     """The checkpointer is built once and reused — two turns share it, so
     the conversation accumulates in one threads.db."""

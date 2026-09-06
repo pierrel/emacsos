@@ -14,6 +14,7 @@ sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-suspend-root" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/openrc-call-root" \
+    "$deploy_dir/openrc-sms-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-boot-mode" \
     "$deploy_dir/openrc-install-root" \
@@ -28,13 +29,13 @@ manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
     openrc-session-power openrc-process-group openrc-suspend-root \
-    openrc-call-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el; do
+for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
 cp -- "$deploy_dir/openrc-manifest.sha256" "$manifest_stage/"
@@ -60,10 +61,12 @@ openrc-network-root
 openrc-process-group
 openrc-session
 openrc-session-power
+openrc-sms-root
 openrc-suspend-root
 openrc-sway.config
 os.el
 phone-call.el
+phone-sms.el
 waydroid-container-wrapper
 waydroid-container.conf
 waydroid-container.service'
@@ -232,6 +235,10 @@ grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager stop' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F "/usr/bin/python3 -I -c 'import dbus'" \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "case \$digits in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null

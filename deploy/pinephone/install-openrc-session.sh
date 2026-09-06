@@ -60,6 +60,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/openrc-suspend-root" \
     "$deploy_dir/openrc-call-root" \
+    "$deploy_dir/openrc-sms-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-chat-url" \
     "$deploy_dir/openrc-assist-web-url" \
@@ -77,6 +78,7 @@ scp -q "$@" \
     "$repo_dir/emacos-assist.el" \
     "$repo_dir/network.el" \
     "$repo_dir/phone-call.el" \
+    "$repo_dir/phone-sms.el" \
     "$phone_host:$stage/"
 scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
 scp -q "$@" "$ca_file" "$phone_host:$stage/assist-web-ca.pem"

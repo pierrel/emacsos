@@ -882,13 +882,15 @@ utility row's Chat/SEND button (`emacos--chat-button'), so the most-used
 action is one tap away on every screen.  Plain (LABEL . CMD) conses;
 dynamic — re-derived on every `emacos--render-page', so the first button
 flips with `emacos--chat-in-flight' / the confirm state and ROLLBACK
-appears/disappears with `emacos--chat-can-rollback'."
+appears/disappears with `emacos--chat-can-rollback'.  New message remains the
+second entry so outbound SMS is directly reachable from the default screen."
   (append
    (list (cond
           (emacos--chat-in-flight (cons "ABORT" #'emacos--chat-abort))
           (emacos--chat-confirm-pending
            (cons "Confirm clear?" #'emacos--chat-new-chat))
-          (t (cons "New chat" #'emacos--chat-new-chat))))
+          (t (cons "New chat" #'emacos--chat-new-chat)))
+         (cons "New message" #'emacos-send-message))
    ;; ROLLBACK last — rarely used, and only available after an apply.  Relabels
    ;; to "Confirm rollback?" once armed (`emacos--chat-rollback-pending').
    (when emacos--chat-can-rollback

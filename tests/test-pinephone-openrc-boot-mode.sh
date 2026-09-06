@@ -54,6 +54,7 @@ install -o root -g root -m 0755 /dev/null /etc/init.d/emacsos-ui
 printf '%s\n' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     >/etc/doas.d/95-emacsos-ui.conf
 chown root:root /etc/doas.d/95-emacsos-ui.conf

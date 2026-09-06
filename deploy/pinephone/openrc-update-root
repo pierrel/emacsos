@@ -13,7 +13,7 @@ boot_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=1da96350ab0601e2a4fce6f2540acf3038954dbec973a156ecd38590c1f09aa3
+manifest_hash=2202e6008602f67d38f05d8cca7de86a76d5ed6f3f3bb88be8cb6aec18ea96b6
 mutating=0
 committed=0
 restart_only=0
@@ -146,11 +146,13 @@ cleanup() {
                 /usr/local/share/emacsos-openrc/emacos-assist.el 0644
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
             restore_file phone-call.el /usr/local/share/emacsos-openrc/phone-call.el 0644
+            restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
             restore_file openrc-suspend-root \
                 /usr/local/sbin/emacsos-openrc-suspend 0755
             restore_file openrc-boot-mode \
                 /usr/local/sbin/emacsos-openrc-boot-mode 0755
             restore_file openrc-call-root /usr/local/sbin/emacsos-openrc-call 0755
+            restore_file openrc-sms-root /usr/local/sbin/emacsos-openrc-sms 0755
             restore_file openrc-network-root \
                 /usr/local/sbin/emacsos-openrc-network 0755
             restore_file openrc-chat-url /etc/emacsos-openrc/chat-url 0644
@@ -227,7 +229,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|openrc-call-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -237,7 +239,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 27 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 29 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
@@ -246,7 +248,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
-    emacos-assist.el network.el phone-call.el openrc-call-root \
+    emacos-assist.el network.el phone-call.el phone-sms.el openrc-call-root openrc-sms-root \
     openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
     install -o root -g root -m 0600 /dev/null "$snapshot/$name"
@@ -297,9 +299,11 @@ for target in /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/emacos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
+    /usr/local/share/emacsos-openrc/phone-sms.el \
     /usr/local/share/emacsos-openrc/dtach-shell.el \
     /usr/local/share/emacsos-openrc/dtach-shell-init.el \
     /usr/local/sbin/emacsos-openrc-call \
+    /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /etc/emacsos-openrc/chat-url \
     /etc/emacsos-openrc/assist-web-url \
@@ -319,6 +323,10 @@ done
 [ -x /usr/bin/doas ] && [ -x /usr/bin/callaudiocli ] && \
     [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
+apk add --simulate py3-dbus >/dev/null
+apk add py3-dbus >/dev/null
+[ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
+    /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
@@ -355,9 +363,11 @@ for pair in \
     'emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     'network.el:/usr/local/share/emacsos-openrc/network.el' \
     'phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el' \
+    'phone-sms.el:/usr/local/share/emacsos-openrc/phone-sms.el' \
     'openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend' \
     'openrc-boot-mode:/usr/local/sbin/emacsos-openrc-boot-mode' \
     'openrc-call-root:/usr/local/sbin/emacsos-openrc-call' \
+    'openrc-sms-root:/usr/local/sbin/emacsos-openrc-sms' \
     'openrc-network-root:/usr/local/sbin/emacsos-openrc-network' \
     'openrc-chat-url:/etc/emacsos-openrc/chat-url' \
     'openrc-assist-web-url:/etc/emacsos-openrc/assist-web-url' \
@@ -379,6 +389,7 @@ install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
 printf '%s\n' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     >"$doas_tmp"
 chown root:root "$doas_tmp"
@@ -391,7 +402,7 @@ doas_tmp=
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el \
+for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -406,6 +417,8 @@ install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
+install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \
+    /usr/local/sbin/emacsos-openrc-sms
 install -o root -g root -m 0755 "$snapshot/openrc-network-root" \
     /usr/local/sbin/emacsos-openrc-network
 if [ ! -d /etc/emacsos-openrc ]; then
@@ -441,6 +454,7 @@ cmp -s "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
+cmp -s "$snapshot/openrc-sms-root" /usr/local/sbin/emacsos-openrc-sms
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
 cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
 cmp -s "$snapshot/openrc-chat-url" /etc/emacsos-openrc/chat-url
@@ -456,7 +470,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el \
+for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done

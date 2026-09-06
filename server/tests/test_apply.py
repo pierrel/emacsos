@@ -47,7 +47,7 @@ def test_build_apply_expr_uses_phone_defvar_and_loads():
 
 # --- classification ---
 # call_emacs returns Emacs' PRINTED form; a string result comes back
-# QUOTED (verified live: `emacsclient -e '"x"'` prints `"x"`).  The
+# QUOTED (verified live with `"x"` supplied to `emacsclient -e` on stdin).  The
 # mocks below use the quoted form to match the real wire — apply.py must
 # strip the read-syntax quotes before classifying, or a quoted
 # "load-error: ..." gets misread as applied.

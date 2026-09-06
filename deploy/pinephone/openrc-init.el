@@ -2,6 +2,8 @@
 
 ;; Assist-first PinePhone session with an optional synthetic lab status page.
 
+(require 'json)
+
 (setq inhibit-startup-screen t
       inhibit-startup-message t
       initial-scratch-message nil
@@ -251,6 +253,75 @@ every agent-config load."
 
 (defvar emacos-call--call-owner nil
   "Unique owner of the tracked call or pathless recovery state.")
+
+(defun emacsos-pinephone-sms-result (status success)
+  "Return the strict terminal SMS STATUS, or conservative unknown."
+  (cond
+   ((and success (string= status "sent")) "sent")
+   ((and (not success)
+         (string-match-p
+          "\\`not-sent:\\(?:input-timeout\\|invalid-input\\|busy\\|no-modem\\|multiple-modems\\|dbus-unavailable\\|time-limit\\)\\'"
+          status))
+    status)
+   ((and (not success)
+         (string-match-p
+          "\\`unknown:\\(?:create-failed\\|send-failed\\|time-limit\\|dbus-unavailable\\)\\'"
+          status))
+    status)
+   (t "unknown:dbus-unavailable")))
+
+(defun emacsos-pinephone-sms-finished
+    (process _event completion stderr-buffer)
+  "Report terminal SMS PROCESS status through COMPLETION and clean buffers."
+  (when (memq (process-status process) '(exit signal))
+    (let* ((buffer (process-buffer process))
+           (raw-status (if (buffer-live-p buffer)
+                           (with-current-buffer buffer (buffer-string))
+                         ""))
+           (status (if (string-match "\\`\\([^\n]*\\)\n\\'" raw-status)
+                       (match-string 1 raw-status)
+                     ""))
+           (result (emacsos-pinephone-sms-result
+                    status (zerop (process-exit-status process)))))
+      (unwind-protect
+          (condition-case err
+              (funcall completion result)
+            (error
+             (message "emacos-sms: completion failed: %s"
+                      (error-message-string err))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))))))
+
+(defun emacsos-pinephone-sms-operation (number body completion)
+  "Send NUMBER and BODY to the fixed root helper through bounded stdin."
+  (let ((buffer (generate-new-buffer " *emacsos-sms*"))
+        (stderr-buffer (generate-new-buffer " *emacsos-sms-stderr*"))
+        process)
+    (condition-case nil
+        (progn
+          (setq process
+                (make-process
+                 :name "emacsos-sms"
+                 :buffer buffer
+                 :stderr stderr-buffer
+                 :command '("/usr/bin/doas" "-n"
+                            "/usr/local/sbin/emacsos-openrc-sms")
+                 :connection-type 'pipe
+                 :coding 'utf-8-unix
+                 :noquery t
+                 :sentinel (lambda (proc event)
+                             (emacsos-pinephone-sms-finished
+                              proc event completion stderr-buffer))))
+          (process-send-string
+           process
+           (json-encode `((number . ,number) (text . ,body))))
+          (process-send-eof process)
+          "pending: SMS requested")
+      (error
+       (when (process-live-p process) (delete-process process))
+       (when (buffer-live-p buffer) (kill-buffer buffer))
+       (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
+       "unknown:dbus-unavailable"))))
 
 (defun emacsos-pinephone-call-result (operation status success)
   "Normalize helper STATUS, preserving uncertain dial and answer identity."
@@ -533,6 +604,7 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
         emacos-call-operation-function #'emacsos-pinephone-call-operation
         emacos-call-audio-function #'emacsos-pinephone-call-audio
         emacos-call-wake-function #'emacsos-pinephone-wake-display
+        emacos-sms-operation-function #'emacsos-pinephone-sms-operation
         emacos-call-control-gap-lines 1)
   (let ((url-file "/etc/emacsos-openrc/chat-url"))
     (setq emacos-chat-server-url

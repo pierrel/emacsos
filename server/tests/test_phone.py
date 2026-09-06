@@ -10,6 +10,8 @@ Two concerns:
 from __future__ import annotations
 
 import subprocess
+import shutil
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +19,7 @@ import pytest
 from emacsos_server.phone import (
     AuthFileParseError,
     AuthInfo,
+    MAX_EXPRESSION_BYTES,
     call_emacs,
     parse_auth_file,
 )
@@ -73,7 +76,7 @@ def test_uses_caller_host_not_posted_host():
     captured = {}
 
     def fake_run(cmd, **_kwargs):
-        # cmd layout: [emacsclient, -q, -f, <auth path>, -e, <expr>]
+        # cmd layout: [emacsclient, -q, -f, <auth path>, -e]
         with open(cmd[3]) as f:
             captured["auth"] = f.read()
         return MagicMock(returncode=0, stdout="ok\n", stderr="")
@@ -103,11 +106,13 @@ def test_returns_failure_on_unparseable_auth():
     m.assert_not_called()
 
 
-def test_passes_expr_and_auth_path_to_emacsclient():
+def test_passes_expr_on_stdin_and_auth_path_to_emacsclient():
     captured = {}
 
-    def fake_run(cmd, **_kwargs):
+    def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        captured["input"] = kwargs["input"]
+        captured["encoding"] = kwargs["encoding"]
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("subprocess.run", side_effect=fake_run):
@@ -125,7 +130,25 @@ def test_passes_expr_and_auth_path_to_emacsclient():
     assert captured["cmd"][1] == "-q"
     assert captured["cmd"][2] == "-f"
     assert captured["cmd"][4] == "-e"
-    assert captured["cmd"][5] == '(message "hi")'
+    assert len(captured["cmd"]) == 5
+    assert captured["input"] == '(message "hi")\n'
+    assert captured["encoding"] == "utf-8"
+    assert '(message "hi")' not in captured["cmd"]
+
+
+def test_rejects_oversized_expression_before_starting_emacsclient():
+    with patch("subprocess.run") as run:
+        ok, error = call_emacs(
+            "0.0.0.0:1234 1\nsecret\n",
+            "1.2.3.4",
+            "x" * (MAX_EXPRESSION_BYTES + 1),
+        )
+    assert not ok
+    assert error == (
+        f"elisp expression is {MAX_EXPRESSION_BYTES + 1} bytes; "
+        f"max {MAX_EXPRESSION_BYTES}"
+    )
+    run.assert_not_called()
 
 
 def test_returns_failure_on_nonzero_exit():
@@ -162,6 +185,45 @@ def test_returns_failure_when_binary_missing():
         )
     assert not ok
     assert "not found" in err
+
+
+@pytest.mark.skipif(
+    not shutil.which("emacs") or not shutil.which("emacsclient"),
+    reason="Emacs client/server integration binaries unavailable",
+)
+def test_expression_on_stdin_reaches_real_tcp_emacs_server(tmp_path):
+    """Pin emacsclient's surprising no-argument `-e` stdin contract."""
+    tmp_path.chmod(0o700)
+    auth_path = tmp_path / "stdin-test"
+    expression = (
+        "(progn (require 'server) "
+        "(setq server-use-tcp t server-host \"127.0.0.1\" "
+        f"server-auth-dir {str(tmp_path)!r} server-name \"stdin-test\") "
+        "(server-start) (while t (accept-process-output nil 0.1)))"
+    )
+    # Python repr uses single quotes, which are not Lisp strings.
+    expression = expression.replace(repr(str(tmp_path)),
+                                    '"' + str(tmp_path).replace('"', '\\"') + '"')
+    server = subprocess.Popen(
+        ["emacs", "-Q", "--batch", "--eval", expression],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not auth_path.exists() and time.monotonic() < deadline:
+            if server.poll() is not None:
+                pytest.fail("test Emacs server exited before writing its auth file")
+            time.sleep(0.05)
+        assert auth_path.exists()
+        ok, output = call_emacs(
+            auth_path.read_text(), "127.0.0.1", "(+ 20 22)", timeout=2
+        )
+        assert ok
+        assert output == "42"
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
 
 
 # --- is_unreachable classifier ---
