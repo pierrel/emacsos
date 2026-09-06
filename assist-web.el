@@ -189,11 +189,10 @@
       (string-trim (buffer-string)))))
 
 (defun emacos-assist-web--safe-token-p (token)
-  "Return non-nil when TOKEN is nonempty and cannot inject an HTTP header."
+  "Return non-nil when TOKEN matches the provisioned bearer-token contract."
   (and (stringp token)
        (<= (length token) 512)
-       (not (string-empty-p token))
-       (not (string-match-p "[\r\n]" token))))
+       (string-match-p "\\`[A-Za-z0-9._~-]+\\'" token)))
 
 (defun emacos-assist-web--endpoint (path)
   "Join API PATH without accepting a caller-controlled host."

@@ -5,6 +5,10 @@ set -eu
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 deploy_dir=$repo_dir/deploy/pinephone
 
+grep -F 'PINEPHONE_HOST ?= phone' "$repo_dir/Makefile" >/dev/null
+grep -F 'ssh -t $(PINEPHONE_HOST) emacsclient -f server -t' \
+    "$repo_dir/Makefile" >/dev/null
+
 sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-suspend-root" \

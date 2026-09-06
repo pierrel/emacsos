@@ -57,6 +57,8 @@
 (ert-deftest test-assist-web-token-cannot-inject-a-header ()
   (should (emacos-assist-web--safe-token-p "0123abcd._~-"))
   (should-not (emacos-assist-web--safe-token-p "token\r\nInjected: yes"))
+  (should-not (emacos-assist-web--safe-token-p "token with spaces"))
+  (should-not (emacos-assist-web--safe-token-p "token:colon"))
   (should-not (emacos-assist-web--safe-token-p "")))
 
 (ert-deftest test-assist-web-ca-extends-trust-only-through-request-binding ()

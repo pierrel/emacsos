@@ -1,6 +1,6 @@
 .PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge
 
-PINEPHONE_HOST ?= phoney
+PINEPHONE_HOST ?= phone
 export PINEPHONE_HOST
 
 local-connect-server:
