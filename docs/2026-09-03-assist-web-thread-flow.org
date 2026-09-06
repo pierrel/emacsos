@@ -1,7 +1,7 @@
 #+title: Assist web threads in EmacsOS
 #+date: 2026-09-03
 
-State: Step 1 API merged; Step 2 client implemented and under final review
+State: Step 1 API merged; Step 2 client deployed for phone testing and PR review
 
 * Product requirement
 
