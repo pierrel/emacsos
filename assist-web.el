@@ -419,7 +419,7 @@ ERROR rather than raising them from url-http's asynchronous callback."
     (if token-error
         (funcall callback nil token-error)
       (if (not (emacos-assist-web--safe-token-p token))
-        (funcall callback nil "Assist Web token is missing")
+        (funcall callback nil "Assist Web token is missing or invalid")
       (if (>= (length emacos-assist-web--requests)
               emacos-assist-web-max-concurrent-requests)
           (funcall callback nil "Too many Assist Web requests are already running")
@@ -684,7 +684,7 @@ Response headers and each individual event are bounded; the stream remains
 open until the run reaches a terminal state or observation is interrupted."
   (let ((token (emacos-assist-web--read-token)))
     (if (not (emacos-assist-web--safe-token-p token))
-        (emacos-assist-web--stream-interrupted buffer "token missing")
+        (emacos-assist-web--stream-interrupted buffer "token missing or invalid")
       (with-current-buffer buffer
         (condition-case error
             (let* ((generation (cl-incf emacos-assist-web--stream-generation))

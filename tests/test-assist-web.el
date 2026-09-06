@@ -321,6 +321,19 @@
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-stream-reports-an-invalid-token ()
+  (let (interrupted)
+    (with-temp-buffer
+      (let ((target (current-buffer)))
+        (cl-letf (((symbol-function 'emacos-assist-web--read-token)
+                   (lambda () "invalid token"))
+                  ((symbol-function 'emacos-assist-web--stream-interrupted)
+                   (lambda (buffer status)
+                     (setq interrupted (list buffer status)))))
+          (emacos-assist-web--observe-run target)
+          (should (equal interrupted
+                         (list target "token missing or invalid"))))))))
+
 (ert-deftest test-assist-web-event-parser-bounds-each-record-not-whole-callback ()
   (let ((target (generate-new-buffer " *assist-web-target*"))
         (source (generate-new-buffer " *assist-web-source*"))
@@ -410,6 +423,16 @@
        (lambda (value error) (setq result (list value error)))))
     (should (equal result
                    '(nil "Too many Assist Web requests are already running")))))
+
+(ert-deftest test-assist-web-json-request-reports-an-invalid-token ()
+  (let (result)
+    (cl-letf (((symbol-function 'emacos-assist-web--read-token)
+               (lambda () "invalid token")))
+      (emacos-assist-web--request
+       "GET" "threads" nil
+       (lambda (value error) (setq result (list value error)))))
+    (should (equal result
+                   '(nil "Assist Web token is missing or invalid")))))
 
 (ert-deftest test-assist-web-raw-filter-bounds-an-unterminated-header ()
   (let ((emacos-assist-web-max-header-bytes 8) forwarded rejected)
