@@ -5,9 +5,9 @@ set -eu
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 deploy_dir=$repo_dir/deploy/pinephone
 
-grep -F 'PINEPHONE_HOST ?= phone' "$repo_dir/Makefile" >/dev/null
-grep -F 'ssh -t $(PINEPHONE_HOST) emacsclient -f server -t' \
-    "$repo_dir/Makefile" >/dev/null
+default_phone_host=$(env -u PINEPHONE_HOST make -s -f "$repo_dir/Makefile" -pn \
+    2>/dev/null | awk -F ' = ' '$1 == "PINEPHONE_HOST" { print $2; exit }')
+[ "$default_phone_host" = phone ]
 
 sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \

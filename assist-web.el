@@ -183,10 +183,13 @@
   "Return the bearer token without exposing it in a message or URL."
   (when (file-readable-p emacos-assist-web-token-file)
     (with-temp-buffer
-      ;; One byte beyond the accepted limit lets validation reject an
-      ;; oversized file without ever loading it into this small process.
-      (insert-file-contents-literally emacos-assist-web-token-file nil 0 513)
-      (string-trim (buffer-string)))))
+      ;; Two bytes beyond the token limit distinguish one optional final LF
+      ;; from an oversized or multi-line file without an unbounded read.
+      (insert-file-contents-literally emacos-assist-web-token-file nil 0 514)
+      (let ((contents (buffer-string)))
+        (if (string-suffix-p "\n" contents)
+            (substring contents 0 -1)
+          contents)))))
 
 (defun emacos-assist-web--safe-token-p (token)
   "Return non-nil when TOKEN matches the provisioned bearer-token contract."

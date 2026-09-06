@@ -61,6 +61,24 @@
   (should-not (emacos-assist-web--safe-token-p "token:colon"))
   (should-not (emacos-assist-web--safe-token-p "")))
 
+(ert-deftest test-assist-web-token-reader-removes-only-one-final-newline ()
+  (let ((file (make-temp-file "assist-web-token-")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "safe-token\n"))
+          (let ((emacos-assist-web-token-file file))
+            (should (equal (emacos-assist-web--read-token) "safe-token")))
+          (with-temp-file file
+            (insert (make-string 512 ?A) "\nX"))
+          (let* ((emacos-assist-web-token-file file)
+                 (token (emacos-assist-web--read-token)))
+            (should-not (emacos-assist-web--safe-token-p token)))
+          (with-temp-file file (insert " leading-space"))
+          (let* ((emacos-assist-web-token-file file)
+                 (token (emacos-assist-web--read-token)))
+            (should-not (emacos-assist-web--safe-token-p token))))
+      (delete-file file))))
+
 (ert-deftest test-assist-web-ca-extends-trust-only-through-request-binding ()
   (let ((ca (make-temp-file "assist-web-ca-")))
     (unwind-protect
