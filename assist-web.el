@@ -401,9 +401,9 @@ are rejected before URL-FILTER can redirect or decompress them."
                         (funcall fail process
                                  "Assist Web encoded responses are not accepted"))
                       (setq position (match-end 0))))
-                (setq header nil))))))
+                (setq header nil)))))))
         (when (and (not failed) (functionp url-filter))
-          (funcall url-filter process bytes)))))))
+          (funcall url-filter process bytes))))))
 
 (defun emacos-assist-web--request (method path payload callback &optional headers)
   "Send METHOD to PATH with optional JSON PAYLOAD and HEADERS.

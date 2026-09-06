@@ -327,6 +327,22 @@
     (should-not forwarded)
     (should (equal rejected "Assist Web encoded responses are not accepted"))))
 
+(ert-deftest test-assist-web-raw-filter-forwards-body-chunks-after-headers ()
+  (let (forwarded rejected)
+    (let ((filter
+           (emacos-assist-web--guarded-filter
+            (lambda (_process bytes) (push bytes forwarded))
+            (lambda (_process problem) (setq rejected problem)))))
+      (funcall filter nil
+               "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+      (funcall filter nil "{\"threads\":[]}")
+      (funcall filter nil "\n"))
+    (should-not rejected)
+    (should (equal (nreverse forwarded)
+                   '("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+                     "{\"threads\":[]}"
+                     "\n")))))
+
 (ert-deftest test-assist-web-raw-filter-checks-every-content-encoding-header ()
   (let (forwarded rejected)
     (funcall
