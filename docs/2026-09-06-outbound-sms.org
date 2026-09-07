@@ -219,3 +219,11 @@ confirmation UI is a separate cross-cutting design, not an SMS-only layer.
 - No automatic retry after creation: that can duplicate a real message.
 - No strict leading-plus requirement: the shared call primitive already accepts
   domestic digit strings, while the agent guidance still prefers E.164.
+
+* Live result
+
+On 2026-09-07 Pierre confirmed the deployed phone flow worked end to end: the
+proposal was reviewed locally, confirmed with the second Send tap, and sent by
+the PinePhone modem.  The earlier failed attempt occurred while the modem was
+not registered; the follow-up guard now rejects that state before SMS creation
+as =not-sent:no-service=.
