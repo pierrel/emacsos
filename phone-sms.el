@@ -17,7 +17,7 @@
   "Seconds allowed between the two Send taps.")
 
 (defconst emacos-sms--terminal-code-re
-  "\\`\\(?:input-timeout\\|invalid-input\\|busy\\|no-modem\\|multiple-modems\\|dbus-unavailable\\|create-failed\\|send-failed\\|time-limit\\)\\'"
+  "\\`\\(?:input-timeout\\|invalid-input\\|busy\\|no-modem\\|multiple-modems\\|no-service\\|dbus-unavailable\\|create-failed\\|send-failed\\|time-limit\\)\\'"
   "Finite error-code grammar emitted by the PinePhone helper.")
 
 (defcustom emacos-sms-operation-function nil

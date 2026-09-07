@@ -87,7 +87,10 @@ class Bus:
         self.messaging = Messaging(self)
         self.sms = SmsObject()
         self.manager = Manager({
-            "/org/freedesktop/ModemManager1/Modem/3": {SMS.MESSAGING: {}},
+            "/org/freedesktop/ModemManager1/Modem/3": {
+                SMS.MESSAGING: {},
+                SMS.THREE_GPP: {"RegistrationState": 1},
+            },
         })
 
     def get_name_owner(self, name):
@@ -169,6 +172,14 @@ class HelperTests(unittest.TestCase):
         bus.get_object = fail_modem_proxy
         self.assertEqual(SMS.send_sms(bus, "+14155550123", "hi"),
                          "not-sent:dbus-unavailable")
+
+    def test_unregistered_modem_never_creates_an_sms(self):
+        bus = Bus()
+        bus.manager.objects["/org/freedesktop/ModemManager1/Modem/3"][
+            SMS.THREE_GPP]["RegistrationState"] = 2
+        self.assertEqual(SMS.send_sms(bus, "+14155550123", "hi"),
+                         "not-sent:no-service")
+        self.assertIsNone(bus.messaging.created)
 
     def test_create_or_send_failure_is_unknown(self):
         bus = Bus()

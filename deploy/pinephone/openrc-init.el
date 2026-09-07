@@ -260,7 +260,7 @@ every agent-config load."
    ((and success (string= status "sent")) "sent")
    ((and (not success)
          (string-match-p
-          "\\`not-sent:\\(?:input-timeout\\|invalid-input\\|busy\\|no-modem\\|multiple-modems\\|dbus-unavailable\\|time-limit\\)\\'"
+          "\\`not-sent:\\(?:input-timeout\\|invalid-input\\|busy\\|no-modem\\|multiple-modems\\|no-service\\|dbus-unavailable\\|time-limit\\)\\'"
           status))
     status)
    ((and (not success)

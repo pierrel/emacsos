@@ -18,8 +18,14 @@ MM_NAME = "org.freedesktop.ModemManager1"
 MM_ROOT = "/org/freedesktop/ModemManager1"
 OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
 MESSAGING = "org.freedesktop.ModemManager1.Modem.Messaging"
+THREE_GPP = "org.freedesktop.ModemManager1.Modem.Modem3gpp"
 SMS = "org.freedesktop.ModemManager1.Sms"
 LOCK_PATH = "/run/emacsos-openrc-sms.lock"
+
+# ModemManager's 3GPP values which can carry an SMS: home, roaming, and the
+# LTE variants that explicitly retain SMS service.  Do not create an SMS
+# object while the radio is searching, denied, or only emergency-capable.
+SMS_READY_REGISTRATION_STATES = frozenset((1, 5, 6, 7, 9, 10))
 
 
 class InputTimeout(Exception):
@@ -60,7 +66,7 @@ def send_sms(bus, number, text, attempt=None):
             return "not-sent:dbus-unavailable"
         manager = dbus.Interface(bus.get_object(owner, MM_ROOT), OBJECT_MANAGER)
         objects = manager.GetManagedObjects(timeout=10)
-        modems = [str(path) for path, interfaces in objects.items()
+        modems = [(str(path), interfaces) for path, interfaces in objects.items()
                   if MESSAGING in interfaces]
     except InputTimeout:
         raise
@@ -71,8 +77,16 @@ def send_sms(bus, number, text, attempt=None):
     if len(modems) != 1:
         return "not-sent:multiple-modems"
 
+    modem_path, modem_interfaces = modems[0]
     try:
-        messaging = dbus.Interface(bus.get_object(owner, modems[0]), MESSAGING)
+        registered = int(modem_interfaces[THREE_GPP]["RegistrationState"])
+    except (KeyError, TypeError, ValueError):
+        return "not-sent:no-service"
+    if registered not in SMS_READY_REGISTRATION_STATES:
+        return "not-sent:no-service"
+
+    try:
+        messaging = dbus.Interface(bus.get_object(owner, modem_path), MESSAGING)
     except InputTimeout:
         raise
     except Exception:
