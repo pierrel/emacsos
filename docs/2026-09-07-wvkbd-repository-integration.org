@@ -1,0 +1,87 @@
+#+title: wvkbd repository and build integration
+#+date: 2026-09-07
+
+* Goal
+
+Make the keyboard implementation an ordinary, independently versioned project in
+the agentic workspace before changing its input behavior.  Pierre's fork keeps an
+upstream-tracking =main= branch.  Its =emacsos= customization branch begins at the
+v0.16 tag used by the PinePhone.  EmacsOS can then build and install a distinctly
+named =wvkbd-emacos= binary without overwriting the packaged
+=/usr/bin/wvkbd-mobintl= fallback.
+
+This phase does not implement modifier-swipe gestures, select the custom binary in
+the boot session, or deploy anything to the live phone.
+
+* Lineage
+
+This setup follows [[file:2026-08-31-pinephone-emacsos-session.org][PinePhone EmacsOS session]], which records the working v25.06
+OpenRC session and its installed wvkbd 0.16 baseline.  It changes only source and
+build ownership: wvkbd becomes a pinned sibling repository rather than an opaque
+distribution package.
+
+* Decisions
+
+1. Add =pierrel/wvkbd= as the workspace's =wvkbd/= submodule.  The fork has
+   =jjsullivan5196/wvkbd= as its explicit =upstream= remote.  Fork =main= follows
+   upstream's current default branch; the workspace submodule follows and pins
+   the fork's =emacsos= integration branch.
+2. Use the cross-repository coordination lane =emacsos=.  Both the wvkbd and
+   EmacsOS worktrees therefore use an =emacsos= branch.  The wvkbd branch is rooted
+   at upstream tag v0.16 even though fork =main= advances with upstream.
+3. Let wvkbd's existing Makefile accept a caller-selected output name while keeping
+   =wvkbd-${LAYOUT}= as its default.  EmacsOS builds =LAYOUT=mobintl= with
+   =BIN=wvkbd-emacos=, so no layout source is copied merely to rename the program.
+4. Build for =aarch64-linux-musl= inside one digest-pinned Alpine 3.22 arm64
+   container.  The source mount is read-only and is copied into disposable writable
+   container storage before compilation.  The only retained product is the executable
+   under EmacsOS's ignored =.build/wvkbd/= directory.  EmacsOS records the exact
+   accepted wvkbd commit; the script requires that commit, a clean source tree, the
+   expected ELF architecture and musl interpreter, and the exact output filename.
+5. A separate explicit phone-install target copies that verified artifact to
+   =/usr/local/bin/wvkbd-emacos=.  It neither replaces nor removes
+   =/usr/bin/wvkbd-mobintl=.  The current OpenRC session continues launching the
+   packaged binary until the gesture implementation and live validation are ready.
+
+* Interfaces and failure behavior
+
+- =WVKBD_REPO_DIR= selects the sibling checkout; its default is =../wvkbd=.
+- =deploy/pinephone/wvkbd-revision= is the standalone EmacsOS source pin.  Changing
+  the keyboard requires an intentional update to that file and to the agentic
+  submodule gitlink.
+- =make wvkbd-build= creates only =.build/wvkbd/wvkbd-emacos= and prints its
+  checksum.
+- =make wvkbd-phone-install= requires a successful build, transfers to a unique
+  user-owned staging file, verifies the checksum remotely, then creates and verifies
+  a root-owned temporary file beside the destination before atomically renaming it to
+  =/usr/local/bin/wvkbd-emacos=.  Both temporary paths are cleaned on every handled
+  exit.  Failure before the rename leaves both installed keyboards unchanged.
+- A host without arm64 container execution fails before building and prints the
+  one-time binfmt setup command.  It never silently emits a host-architecture
+  keyboard.
+
+* Verification
+
+1. Confirm fork topology, default branch, upstream remote, and exact v0.16 branch
+   base through Git and GitHub metadata.
+2. Run the containerized build and inspect the artifact with =file= and =readelf=.
+3. Exercise negative build paths for a missing repository, a dirty repository, and a
+   source checkout that differs from the recorded revision.
+4. Dry-run the phone installation recipe and assert that its destination is
+   =/usr/local/bin/wvkbd-emacos= and it never writes
+   =/usr/bin/wvkbd-mobintl=.
+5. Run the EmacsOS deterministic suites affected by Makefile and deploy plumbing.
+6. Run the mandatory local review lenses to convergence.  Do not deploy or open a
+   pull request in this setup phase.
+
+* Next implementation phase
+
+Write a separate interaction design for delayed ordinary-key emission in the wvkbd
+=emacsos= branch: release without a vertical gesture emits the base key; a short
+upward gesture emits =Control+key=; a short downward gesture emits =Alt+key=.  That
+design must define eligible keys, jitter and direction thresholds, latching,
+cancellation, balanced key events, holds/repeat, and visible pending feedback.
+After automated and manual custom-binary checks, update the OpenRC launcher with an
+explicit packaged-binary fallback for absence or startup failure, then validate the
+gesture and failure paths on the real phone before making the custom binary the
+normal session keyboard.
