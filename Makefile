@@ -1,7 +1,21 @@
-.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge
+.PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install test-wvkbd-build
 
 PINEPHONE_HOST ?= phone
 export PINEPHONE_HOST
+
+WVKBD_REPO_DIR ?= $(CURDIR)/../wvkbd
+WVKBD_BUILD_DIR ?= $(CURDIR)/.build/wvkbd
+WVKBD_ARTIFACT := $(WVKBD_BUILD_DIR)/wvkbd-emacos
+
+wvkbd-build:
+	WVKBD_REPO_DIR="$(WVKBD_REPO_DIR)" WVKBD_BUILD_DIR="$(WVKBD_BUILD_DIR)" \
+		deploy/pinephone/build-wvkbd-emacos.sh
+
+wvkbd-phone-install: wvkbd-build
+	deploy/pinephone/install-wvkbd-emacos.sh "$(WVKBD_ARTIFACT)"
+
+test-wvkbd-build:
+	WVKBD_REPO_DIR="$(WVKBD_REPO_DIR)" tests/test-wvkbd-build.sh
 
 local-connect-server:
 	ssh -t $(PINEPHONE_HOST) emacsclient -f server -t

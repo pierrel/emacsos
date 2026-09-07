@@ -1,0 +1,61 @@
+#!/bin/sh
+# Transfer and install the reviewed keyboard without replacing the stock package.
+
+set -eu
+umask 077
+
+phone_host=${PINEPHONE_HOST:?set PINEPHONE_HOST to the SSH profile}
+artifact=${1:?pass the wvkbd-emacos artifact}
+[ "$#" -eq 1 ] || { printf '%s\n' 'expected one artifact path' >&2; exit 1; }
+[ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -x "$artifact" ] || {
+    printf '%s\n' 'artifact must be a regular executable' >&2
+    exit 1
+}
+[ "$(stat -c '%s' "$artifact")" -le 16777216 ] || {
+    printf '%s\n' 'artifact is too large' >&2
+    exit 1
+}
+file "$artifact" | grep -Eq 'ELF 64-bit LSB (pie )?executable, ARM aarch64' || {
+    printf '%s\n' 'artifact is not an AArch64 ELF executable' >&2
+    exit 1
+}
+readelf -l "$artifact" |
+    grep -F 'Requesting program interpreter: /lib/ld-musl-aarch64.so.1' \
+        >/dev/null || {
+    printf '%s\n' 'artifact does not use the AArch64 musl interpreter' >&2
+    exit 1
+}
+expected=$(sha256sum "$artifact")
+expected=${expected%% *}
+repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+root_helper=$repo_dir/deploy/pinephone/install-wvkbd-emacos-root
+stage=
+
+set -- -o User=user -o BatchMode=yes -o PreferredAuthentications=publickey \
+    -o PubkeyAuthentication=yes -o PasswordAuthentication=no \
+    -o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no -o ConnectTimeout=10 \
+    -o ServerAliveInterval=5 -o ServerAliveCountMax=3
+
+cleanup() {
+    [ -z "$stage" ] || ssh -T "$@" "$phone_host" "rm -f -- '$stage'" \
+        >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+stage=$(ssh -T "$@" "$phone_host" \
+    'umask 077; install -d -m 0700 /home/user/.cache; mktemp /home/user/.cache/wvkbd-emacos.XXXXXX')
+printf '%s\n' "$stage" |
+    grep -Eq '^/home/user/\.cache/wvkbd-emacos\.[A-Za-z0-9]{6}$' || {
+    printf '%s\n' 'phone returned an unsafe staging path' >&2
+    exit 1
+}
+scp -q "$@" "$artifact" "$phone_host:$stage"
+ssh -T "$@" "$phone_host" "chmod 0600 '$stage'"
+ssh -T "$@" "$phone_host" \
+    "exec sudo -n /usr/bin/env SUDO_USER=user WVKBD_STAGE='$stage' WVKBD_SHA256='$expected' /bin/sh" \
+    <"$root_helper"
+
+printf 'Installed %s as /usr/local/bin/wvkbd-emacos; stock /usr/bin/wvkbd-mobintl is unchanged.\n' \
+    "$expected"
