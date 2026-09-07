@@ -9,6 +9,16 @@ default_phone_host=$(env -u PINEPHONE_HOST make -s -f "$repo_dir/Makefile" -pn \
     2>/dev/null | awk -F ' = ' '$1 == "PINEPHONE_HOST" { print $2; exit }')
 [ "$default_phone_host" = phone ]
 
+dry_run=$(make -s -n -f "$repo_dir/Makefile" phone-install \
+    ASSIST_WEB_API_URL=https://203.0.113.8:5050/api/v1/phone \
+    ASSIST_WEB_TOKEN_FILE=/tmp/token ASSIST_WEB_CA_FILE=/tmp/ca 2>&1)
+case $dry_run in
+    *'overriding recipe for target'*)
+        printf '%s\n' 'phone deployment Makefile has a malformed recipe' >&2
+        exit 1
+        ;;
+esac
+
 sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-suspend-root" \

@@ -78,7 +78,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
 	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token && chmod 0644 ~/.config/emacsos/assist-web-ca.pem"
@@ -92,7 +92,7 @@ scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-
 
 local-deploy:
 	ssh $(PINEPHONE_HOST) mkdir -p $(PHONE_EMACSOS_DIR)
-scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
 	# run -- the snippet re-applies both chat and Assist Web API URLs,
 	# which their reloaded defcustoms would otherwise reset.  Conditional
