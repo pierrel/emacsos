@@ -16,17 +16,27 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
-    openrc-call-root openrc-network-root openrc-chat-url openrc-emacs-server.nft \
+    openrc-call-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
     waydroid-container-wrapper; do
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el emacos-assist.el network.el phone-call.el; do
+for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
+printf '%s\n' test-assist-web-token \
+    >/home/user/.cache/emacsos-openrc-stage/assist-web-token
+chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-token
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-token
+printf '%s\n' '-----BEGIN CERTIFICATE-----' dGVzdA== \
+    '-----END CERTIFICATE-----' \
+    >/home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
+chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "apk $*" >>/tmp/apk-log' 'exit 0' \
     >/usr/bin/apk
@@ -156,7 +166,7 @@ chown root:root /etc/inittab
 chmod 0644 /etc/inittab
 
 touch /tmp/fail-ui
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
     printf '%s\n' 'injected UI failure was accepted' >&2
     exit 1
@@ -187,7 +197,7 @@ fi
 rm -f /tmp/fail-ui
 
 touch /tmp/fail-ui-stuck
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>/tmp/stuck-error; then
     printf '%s\n' 'injected unquiesced UI failure was accepted' >&2
     exit 1
@@ -228,7 +238,7 @@ deluser emacsos-lab
 delgroup emacsos-lab 2>/dev/null || true
 
 touch /tmp/fail-modemmanager
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
     printf '%s\n' 'injected modem failure was accepted' >&2
     exit 1
@@ -247,12 +257,12 @@ if getent passwd emacsos-lab >/dev/null; then
 fi
 rm -f /tmp/fail-modemmanager
 
-if DEPLOY_CLIENT_IP=not-an-address SUDO_USER=user \
+if DEPLOY_CLIENT_IP=not-an-address ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
     printf '%s\n' 'invalid deployment client address was accepted' >&2
     exit 1
 fi
-DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root
 [ "$(/usr/local/sbin/emacsos-openrc-boot-mode status)" = ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
@@ -268,7 +278,7 @@ grep -F 'rc-service modemmanager start' /tmp/rc-service-log >/dev/null
 grep -F 'rc-update add emacsos-ui default' /tmp/rc-update-log >/dev/null
 grep -F 'rc-update add eg25-manager default' /tmp/rc-update-log >/dev/null
 grep -F 'rc-update add modemmanager default' /tmp/rc-update-log >/dev/null
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
     printf '%s\n' 'second fresh-only install was accepted' >&2
     exit 1
@@ -290,6 +300,17 @@ fi
     'root:root:600:1:regular file' ]
 [ "$(cat /etc/emacsos-openrc/chat-url)" = \
     'http://198.51.100.10:8765/chat' ]
+[ "$(cat /etc/emacsos-openrc/assist-web-url)" = \
+    'https://203.0.113.8:5050/api/v1/phone' ]
+[ "$(cat /etc/emacsos-openrc/assist-web-ca.pem)" = \
+    "$(printf '%s\n' '-----BEGIN CERTIFICATE-----' dGVzdA== '-----END CERTIFICATE-----')" ]
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/emacsos-openrc/assist-web-ca.pem)" = \
+    'root:root:644:1:regular file' ]
+[ "$(cat /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
+    test-assist-web-token ]
+[ "$(stat -c '%U:%G:%a:%h:%F' \
+    /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
+    'emacsos-lab:emacsos-lab:600:1:regular file' ]
 grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 grep -F 'iifname "wg0" tcp dport 8766' \
@@ -297,8 +318,13 @@ grep -F 'iifname "wg0" tcp dport 8766' \
 grep -F 'tcp dport 8766 drop' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 if grep -F '@DEPLOY_CLIENT_IP@' /etc/emacsos-openrc/chat-url \
+    /etc/emacsos-openrc/assist-web-url \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null; then
     printf '%s\n' 'installed deployment template retained its placeholder' >&2
+    exit 1
+fi
+if grep -F '@ASSIST_WEB_SERVER_IP@' /etc/emacsos-openrc/assist-web-url >/dev/null; then
+    printf '%s\n' 'installed Assist URL retained its server placeholder' >&2
     exit 1
 fi
 
@@ -319,13 +345,14 @@ mv /etc/nftables.d/49-emacsos-callback.nft \
     /etc/nftables.d/95-emacsos-callback.nft
 rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/chat.el \
+    /usr/local/share/emacsos-openrc/assist-web.el \
     /usr/local/share/emacsos-openrc/emacos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-network
 touch /tmp/fail-ui-once
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-update-root >/dev/null 2>&1; then
     printf '%s\n' 'injected legacy migration failure was accepted' >&2
     exit 1
@@ -335,10 +362,12 @@ fi
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 [ -f /run/emacsos-ui/ready ]
 
-DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
 [ -f /etc/emacsos-openrc/chat-url ]
+[ -f /etc/emacsos-openrc/assist-web-url ]
+cmp -s /repo/assist-web.el /usr/local/share/emacsos-openrc/assist-web.el
 cmp -s /source/openrc-init.el /usr/local/share/emacsos-openrc/init.el
 cmp -s /source/openrc-sway.config \
     /usr/local/share/emacsos-openrc/sway.config
@@ -356,7 +385,7 @@ printf '%s\n' old-power-after >/usr/local/share/emacsos-openrc/session-power
 chmod 0755 /usr/local/share/emacsos-openrc/session
 chmod 0755 /usr/local/share/emacsos-openrc/session-power
 touch /tmp/fail-ui-once
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-update-root >/dev/null 2>&1; then
     printf '%s\n' 'injected update failure was accepted' >&2
     exit 1
@@ -368,7 +397,7 @@ fi
 
 printf '%s\n' old-session-stop >/usr/local/share/emacsos-openrc/session
 touch /tmp/fail-ui-once-and-leak
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-update-root >/tmp/update-stop.out 2>&1; then
     printf '%s\n' 'unquiesced update rollback was accepted' >&2
     exit 1
@@ -383,7 +412,7 @@ rm -rf -- /var/tmp/emacsos-openrc-backup.*
 
 printf '%s\n' old-session-start >/usr/local/share/emacsos-openrc/session
 printf '%s\n' 2 >/tmp/fail-ui-count
-if DEPLOY_CLIENT_IP=198.51.100.10 SUDO_USER=user \
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-update-root >/tmp/update-start.out 2>&1; then
     printf '%s\n' 'failed rollback restart was accepted' >&2
     exit 1

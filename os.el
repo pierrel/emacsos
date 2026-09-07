@@ -742,15 +742,15 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 
 ;;; Top-buffer command set (feeds the command list)
 
-;; Defined in chat.el (required at the bottom of this file).  Forward-
-;; declared so the byte-compiler doesn't warn about the free variable /
-;; unknown functions in `emacos--top-commands' and the utility row;
-;; resolved at call time, after the require.
+;; Defined in chat.el (required at the bottom of this file).  Forward-declared
+;; so the byte-compiler can resolve the generic chat surface at load time.
 (defvar emacos--chat-buffer-name)
 (declare-function emacos--chat-command-set "chat")
 (declare-function emacos--chat-show-top-buffer "chat")
 (declare-function emacos--chat-button "chat")
 (declare-function emacos--chat-button-label "chat")
+
+;; Defined by the file-backed Assist surface loaded at the bottom of this file.
 (declare-function emacos-assist--command-set "emacos-assist")
 
 ;; Defined in network.el (required at the bottom of this file).
@@ -771,7 +771,8 @@ buffer — the contents of the command list band.  One `cond':
 an active minibuffer → nil (you're typing into a prompt; the list
 stays empty); the *chat* buffer (by identity) →
 `emacos--chat-command-set'; a major mode with a command set →
-`emacos--mode-commands-for'; everything else → `emacos-global-commands'
+`emacos--mode-commands-for' (the web client deliberately returns nil);
+everything else → `emacos-global-commands'
 so a plain text buffer still has Save/Undo/Find File one tap away
 rather than only M-x."
   (cond
@@ -794,6 +795,9 @@ rather than only M-x."
         ;; `current-buffer', so without this wrap the buffer-local read
         ;; sees nil and "Forget" never relabels — caught live 2026-05-30.
         (with-current-buffer buf (emacos-assist--command-set)))
+       ((and buf (with-current-buffer buf
+                   (derived-mode-p 'emacos-assist-web-mode)))
+        nil)
        ((and buf (eq buf (get-buffer emacos-net--buffer-name)))
         (emacos-net--command-set))
        ((emacos--mode-commands-for mode))
@@ -1106,6 +1110,7 @@ an in-progress render."
              (file-name-directory (or load-file-name buffer-file-name)))
 (require 'chat)
 (require 'emacos-assist)
+(require 'assist-web)
 (require 'network)
 (require 'phone-call)
 

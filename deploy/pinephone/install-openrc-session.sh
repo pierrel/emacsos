@@ -12,6 +12,26 @@ deploy_dir=$repo_dir/deploy/pinephone
 stage=/home/user/.cache/emacsos-openrc-stage
 bootstrap=/home/user/.cache/emacsos-openrc-bootstrap
 bootstrap_local=
+token_file=${ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token}
+ca_file=${ASSIST_WEB_CA_FILE:-$HOME/.local/share/mkcert/rootCA.pem}
+assist_web_server_ip=${ASSIST_WEB_SERVER_IP:?set ASSIST_WEB_SERVER_IP to the certificate-covered Assist address}
+
+[ -f "$token_file" ] && [ ! -L "$token_file" ] &&
+    LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
+        "$token_file" || {
+    printf '%s\n' 'Assist Web token file must contain one safe token' >&2
+    exit 1
+}
+[ -f "$ca_file" ] && [ ! -L "$ca_file" ] &&
+    [ "$(stat -c '%s' "$ca_file")" -le 65536 ] &&
+    openssl x509 -in "$ca_file" -noout >/dev/null 2>&1 &&
+    openssl x509 -in "$ca_file" -outform PEM 2>/dev/null | cmp -s - "$ca_file" || {
+    printf '%s\n' 'ASSIST_WEB_CA_FILE must be one bounded X.509 certificate' >&2
+    exit 1
+}
+case $assist_web_server_ip in
+    ''|*[!0-9.]*) printf '%s\n' 'ASSIST_WEB_SERVER_IP must be an IPv4 address' >&2; exit 1 ;;
+esac
 
 cleanup() {
     [ -z "$bootstrap_local" ] || rm -f -- "$bootstrap_local"
@@ -42,6 +62,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-chat-url" \
+    "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/openrc-boot-mode" \
@@ -52,10 +73,13 @@ scp -q "$@" \
 scp -q "$@" \
     "$repo_dir/os.el" \
     "$repo_dir/chat.el" \
+    "$repo_dir/assist-web.el" \
     "$repo_dir/emacos-assist.el" \
     "$repo_dir/network.el" \
     "$repo_dir/phone-call.el" \
     "$phone_host:$stage/"
+scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
+scp -q "$@" "$ca_file" "$phone_host:$stage/assist-web-ca.pem"
 scp -q "$@" "$deploy_dir/openrc-install-root" "$phone_host:$bootstrap/"
 ssh -T "$@" "$phone_host" \
     "chmod 0600 '$bootstrap/openrc-install-root' && chmod 0600 '$stage'/*"
@@ -70,7 +94,7 @@ if grep -F '@@ADMIN_SHA256@@' "$bootstrap_local" >/dev/null; then
     exit 1
 fi
 ssh -T "$@" "$phone_host" \
-    'deploy_client_ip=${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP="$deploy_client_ip" /bin/sh' \
+    "deploy_client_ip=\${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP=\"\$deploy_client_ip\" ASSIST_WEB_SERVER_IP='$assist_web_server_ip' /bin/sh" \
     <"$bootstrap_local"
 rm -f -- "$bootstrap_local"
 bootstrap_local=

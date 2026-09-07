@@ -1,10 +1,10 @@
 .PHONY: start start-server local-connect-server local-deploy phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge
 
-PINEPHONE_HOST ?= phoney
+PINEPHONE_HOST ?= phone
 export PINEPHONE_HOST
 
 local-connect-server:
-	ssh -t phone emacsclient -f server -t
+	ssh -t $(PINEPHONE_HOST) emacsclient -f server -t
 
 test-pinephone-scripts:
 	tests/test-pinephone-diagnostic-recovery.sh
@@ -31,8 +31,8 @@ pinephone-openrc-console:
 #
 # Two targets:
 #
-#   phone-install   First-time setup AND any time the chat URL or
-#                   init snippet changes.  Persists across reboots:
+#   phone-install   First-time setup, chat/Assist endpoint changes, and
+#                   Assist token or CA rotation.  Persists across reboots:
 #                   .el files + emacsos-init.el snippet land in
 #                   ~/.emacs.d/.  After the first run, add the
 #                   printed (load-file ...) line to the phone's own
@@ -53,28 +53,51 @@ PHONE_INIT_SNIPPET ?= ~/.emacs.d/emacsos-init.el
 # install time, e.g.:
 #   make phone-install DEV_BOX_URL=http://dev.lan:8765/chat
 DEV_BOX_URL ?= http://$(shell ip -4 -o addr show scope global 2>/dev/null | awk '{print $$4}' | cut -d/ -f1 | head -1):8765/chat
-
+ASSIST_WEB_API_URL ?= https://assist.invalid/api/v1/phone
+ASSIST_WEB_TOKEN_FILE ?= $(HOME)/.config/assist/phone-api-token
+ASSIST_WEB_CA_FILE ?= $(HOME)/.local/share/mkcert/rootCA.pem
 phone-install:
+	@case "$(ASSIST_WEB_API_URL)" in https://assist.invalid/*) \
+	  echo "error: set ASSIST_WEB_API_URL to the real HTTPS phone API" >&2; exit 1;; \
+	  https://*) ;; \
+	  *) echo "error: ASSIST_WEB_API_URL must use HTTPS" >&2; exit 1;; \
+	esac
+	@[ -f "$(ASSIST_WEB_TOKEN_FILE)" ] && [ ! -L "$(ASSIST_WEB_TOKEN_FILE)" ] || { \
+	  echo "error: missing regular ASSIST_WEB_TOKEN_FILE" >&2; exit 1; }
+	@LC_ALL=C awk 'NR == 1 && length($$0) >= 1 && length($$0) <= 512 && \
+	  $$0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } \
+	  END { exit !(NR == 1 && ok) }' "$(ASSIST_WEB_TOKEN_FILE)" || { \
+	  echo "error: ASSIST_WEB_TOKEN_FILE must contain one safe token" >&2; exit 1; }
+	@[ -f "$(ASSIST_WEB_CA_FILE)" ] && [ ! -L "$(ASSIST_WEB_CA_FILE)" ] && \
+	  [ "$$(stat -c '%s' "$(ASSIST_WEB_CA_FILE)")" -le 65536 ] && \
+	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -noout >/dev/null 2>&1 && \
+	  openssl x509 -in "$(ASSIST_WEB_CA_FILE)" -outform PEM 2>/dev/null | \
+	  cmp -s - "$(ASSIST_WEB_CA_FILE)" || { \
+	  echo "error: ASSIST_WEB_CA_FILE must be one bounded X.509 certificate" >&2; exit 1; }
 	@echo "→ Installing to phone:$(PHONE_EMACSOS_DIR)"
 	@echo "  chat URL: $(DEV_BOX_URL)"
-	ssh phone "mkdir -p $(PHONE_EMACSOS_DIR)"
-	scp os.el chat.el emacos-assist.el network.el phone-call.el phone:$(PHONE_EMACSOS_DIR)/
-	sed "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" deploy/emacsos-init.el.in \
-	  | ssh phone "cat > $(PHONE_INIT_SNIPPET)"
+	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
+	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
+	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
+	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token && chmod 0644 ~/.config/emacsos/assist-web-ca.pem"
+	sed -e "s|@@CHAT_URL@@|$(DEV_BOX_URL)|g" \
+	    -e "s|@@ASSIST_WEB_API_URL@@|$(ASSIST_WEB_API_URL)|g" deploy/emacsos-init.el.in \
+	  | ssh $(PINEPHONE_HOST) "cat > $(PHONE_INIT_SNIPPET)"
 	@echo
 	@echo "✓ Installed.  If this is the first run, add ONE line to phone's init.el:"
 	@echo "    (load-file \"$(PHONE_INIT_SNIPPET)\")"
 	@echo "  then bounce the phone's emacs (or run \`make local-deploy\` to hot-reload now)."
 
 local-deploy:
-	ssh phone mkdir -p $(PHONE_EMACSOS_DIR)
-	scp os.el chat.el emacos-assist.el network.el phone-call.el phone:$(PHONE_EMACSOS_DIR)/
+	ssh $(PINEPHONE_HOST) mkdir -p $(PHONE_EMACSOS_DIR)
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
-	# run -- the snippet re-applies (setq emacos-chat-server-url ...)
-	# which would otherwise be reset back to the defcustom default
-	# when chat.el is reloaded.  Conditional so a fresh phone (no
-	# phone-install yet) still gets a working code reload.
-	ssh phone emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
+	# run -- the snippet re-applies both chat and Assist Web API URLs,
+	# which their reloaded defcustoms would otherwise reset.  Conditional
+	# so a fresh phone still gets a working code reload.
+	ssh $(PINEPHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 # Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
 # docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific
@@ -167,7 +190,7 @@ playground-install:
 	@echo "✓ playground files installed to phone:$(PHONE_PLAYGROUND_DIR)/"
 
 test-elisp:
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-network.el -l tests/test-call.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \
