@@ -234,6 +234,8 @@ render_ipv4_template "$snapshot/openrc-emacs-server.nft" '@DEPLOY_CLIENT_IP@' \
     [ ! -L /usr/local/sbin/emacsos-openrc-suspend ] || fail 'suspend helper already exists'
 [ ! -e /usr/local/sbin/emacsos-openrc-call ] &&
     [ ! -L /usr/local/sbin/emacsos-openrc-call ] || fail 'call helper already exists'
+[ ! -e /usr/local/sbin/emacsos-openrc-sms ] &&
+    [ ! -L /usr/local/sbin/emacsos-openrc-sms ] || fail 'SMS helper already exists'
 [ ! -e /usr/local/sbin/emacsos-openrc-network ] &&
     [ ! -L /usr/local/sbin/emacsos-openrc-network ] ||
     fail 'network helper already exists'

@@ -150,7 +150,7 @@ earlier swap-page design (the bottom window showed ONE of
 KBD/CMD/MODE/CHAT at a time, auto/pinned) was *rejected on review* —
 it hid the keyboard.  As built: the T9 keyboard is ALWAYS visible; a
 *command list* under it shows up to 10 of the top buffer's mode commands
-(=*chat*= → SEND + CLEAR/ABORT; a mode in =emacos-mode-commands= → its
+(=*chat*= → New chat/ABORT/New message; a mode in =emacos-mode-commands= → its
 set; everything else → =emacos-global-commands=); a persistent utility
 row =[QUIT] [M-x] [Chat]= keeps escape, manual command entry, and the
 chat app one tap away.  The list follows the top buffer via
@@ -561,15 +561,17 @@ screen, raw-AT answer, and call-state dismissal.  Pierre confirmed the phone can
 receive and answer real calls.  PR #34 intentionally adds a separate headless
 voice-assistant watcher/bridge; SMS forwarding remains separate and unchanged.
 
-** TODO Text messaging
-Needs "3G antenna".
+** PARTIAL Text messaging
 
-Send/receive SMS via the modem (=mmcli --messaging-*= over raw =AT+CMGS/+CMGR= PDU
-wrangling).  A per-contact conversation buffer, compose via the keyboard, receive
-through the shared modem-watcher (same bridge as Phone answering).  Persist threads
-as org under the agent's dir — greppable, and the agent can read/act on them.  No
-audio dependency, so this is the easiest cellular feature and the first end-to-end
-proof the modem stack works.  Depends on: Cellular modem, the shared modem-watcher.
+Confirmed outbound SMS is shipped: a user or local chat agent stages an exact
+recipient and body, the phone shows the proposal, and two physical taps send it
+through a bounded ModemManager D-Bus helper.  The helper reports sent, not-sent,
+or unknown without leaking message content.  It deliberately does not add a
+conversation UI, inbound SMS, or automatic retry.
+
+Remaining: receive SMS through the shared modem-watcher, persistent per-contact
+conversation buffers, and agent-assisted handling of those threads.  Raw AT/PDU
+work is not required for the shipped outbound path.
 
 ** TODO Modeline status bar (time / date / battery / signal)
 Display things like the date, time and battery percentage. Consider removing most of

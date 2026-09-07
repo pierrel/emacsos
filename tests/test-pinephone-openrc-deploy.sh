@@ -245,6 +245,8 @@ grep -F 'timeout -s TERM -k 2 30 rc-service modemmanager stop' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     "$deploy_dir/openrc-install-root" >/dev/null
+grep -F "fail 'SMS helper already exists'" \
+    "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "/usr/bin/python3 -I -c 'import dbus'" \
