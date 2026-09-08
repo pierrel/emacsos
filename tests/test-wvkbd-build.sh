@@ -9,9 +9,13 @@ artifact=$build_dir/wvkbd-emacos
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
 
-sh -n "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" \
+for script in \
+    "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos.sh" \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root"
+do
+    sh -n "$script"
+done
 grep -Fx '1ac7c8642e0327dde653f109a69e477f53e04dc5' \
     "$repo_dir/deploy/pinephone/wvkbd-revision" >/dev/null
 make_output=$(make -C "$wvkbd_dir" -n BIN=wvkbd-emacos LAYOUT=mobintl)
