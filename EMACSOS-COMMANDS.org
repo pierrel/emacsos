@@ -1,20 +1,20 @@
 #+title: EmacsOS commands and keys
 
-Use the on-screen =M-x= button, type a command name, then press =RET=.
-The command list above the keyboard changes with the current buffer.  Its
-buttons call the same Emacs commands listed here.
+Swipe downward from =x= on the modifier-swipe keyboard to type =Meta+x=, then
+type a command name and press =RET=.  Run =M-x emacos-open-command-reference=
+to return to this file.
 
 * Applications
 
 | Action | M-x command |
 |--------+-------------|
-| Start or switch to Firefox | =emacsos-pinephone-open-firefox= |
-| Quit Firefox started by EmacsOS | =emacsos-pinephone-quit-firefox= |
-| Start or switch to Android | =emacsos-pinephone-open-waydroid= |
-| Stop Android | =emacsos-pinephone-stop-waydroid= |
+| Start or switch to Firefox | =emacsos-firefox-start= |
+| Quit Firefox started by EmacsOS | =emacsos-firefox-quit= |
+| Start or switch to Android | =emacsos-android-start= |
+| Stop Android | =emacsos-android-quit= |
 
-Use =Alt+Tab= to move between full-screen applications.  The on-screen =Chat=
-button returns to the ordinary EmacsOS chat buffer; there it becomes =SEND=.
+Use =Alt+Tab= to move between full-screen applications.  Return to ordinary
+chat with =M-x emacos--chat-show-top-buffer=.
 
 * Chat and messages
 
@@ -61,59 +61,9 @@ Assist Web also uses the =C-c C-a= prefix:
 The modeline network, call, SMS, and keyboard labels are touch controls for
 their current status or action.
 
-* On-screen command list
-
-The command list changes with the buffer.  These labels are shortcuts to the
-listed =M-x= commands.
-
-=Dtach= (=dtach-shell=) is prepended to the ordinary-chat and fallback lists.
-Ordinary chat changes =New chat= to =Confirm clear?= after the first tap and
-shows =ROLLBACK= only when a configuration rollback is available.  The network
-page shows state-dependent =Wifi on/off= and =Cell on/off= controls plus
-=Refresh=.  Assist Web buffers deliberately show no parallel command list;
-their commands use =M-x= or the =C-c C-a= prefix above.
-
-| Buffer | Label | Command |
-|--------+-------+---------|
-| Plain or other buffer | Save | =save-buffer= |
-| Plain or other buffer | Undo | =undo= |
-| Plain or other buffer | Find File | =find-file= |
-| Plain or other buffer | Switch Buffer | =switch-to-buffer= |
-| Plain or other buffer | New message | =emacos-send-message= |
-| Plain or other buffer | Net | =emacos-net-show= |
-| Ordinary chat | New chat | =emacos--chat-new-chat= |
-| Ordinary chat | ABORT | =emacos--chat-abort= |
-| Ordinary chat | New message | =emacos-send-message= |
-| File-backed chat | New file | =emacos-assist-new-file= |
-| File-backed chat | Forget | =emacos-assist-forget= |
-| Org | Heading | =org-insert-heading= |
-| Org | TODO | =org-todo= |
-| Org | Export | =org-export-dispatch= |
-| Emacs Lisp | Eval Buffer | =eval-buffer= |
-| Emacs Lisp | Eval Last Sexp | =eval-last-sexp= |
-| Dired | Open | =dired-find-file= |
-| Dired | Up | =dired-up-directory= |
-| Dired | Rename | =dired-do-rename= |
-| Dired | Copy | =dired-do-copy= |
-| Dired | Delete | =dired-do-delete= |
-| Dired | Refresh | =revert-buffer= |
-| Code | Save | =save-buffer= |
-| Code | Comment | =comment-line= |
-| Code | Goto Line | =goto-line= |
-| Code | Search | =isearch-forward= |
-| Code | Replace | =query-replace= |
-| Code | Next Error | =next-error= |
-| Code | Xref Def | =xref-find-definitions= |
-| Text | Save | =save-buffer= |
-| Text | Search | =isearch-forward= |
-| Text | Replace | =query-replace= |
-| Text | Spell | =ispell-buffer= |
-| Text | Fill | =fill-paragraph= |
-| Text | Goto Line | =goto-line= |
-
-Magit buffers add the usual =magit-stage=, =magit-unstage=,
-=magit-commit-create=, =magit-push=, =magit-pull=, =magit-fetch=,
-=magit-branch=, =magit-log=, =magit-diff=, and =magit-refresh= commands.
+Ordinary chat, editing, and Assist buffers have no separate Emacs control
+pane.  Call and SMS confirmation controls appear temporarily only while those
+safety-critical flows are active.
 
 * Files and terminals
 

@@ -13,7 +13,6 @@
       (kill-buffer emacos--chat-buffer-name)))
   (setq emacos--chat-in-flight nil
         emacos--assist-active-surface nil
-        emacos--chat-can-rollback nil
         emacos--chat-confirm-pending nil
         emacos--chat-rollback-pending nil
         emacos--chat-process nil
@@ -370,22 +369,6 @@ bot line if a stream was open (start handler had run)."
     (should raw-filter-called)
     (should-not drained)))
 
-;;; Command-list integration
-
-(ert-deftest chat-test-command-set-shows-abort-when-in-flight ()
-  "The chat command set's first button is \"New chat\" when idle and ABORT
-while a stream is in flight (re-derived on every render).  New message stays
-second.  SEND moved to the utility-row Chat/SEND button."
-  (chat-test--reset)
-  (require 'os)
-  (let ((emacos--chat-in-flight nil))
-    (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("New chat" "New message"))))
-  (let ((emacos--chat-in-flight t))
-    (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("ABORT" "New message"))))
-  (setq emacos--chat-in-flight nil))
-
 ;;; Chat/SEND utility button (emacos--chat-button)
 
 (ert-deftest chat-test-button-sends-when-chat-on-top ()
@@ -431,7 +414,7 @@ second.  SEND moved to the utility-row Chat/SEND button."
           (should (eq (window-buffer w)
                       (get-buffer emacos--chat-buffer-name))))))))
 
-;;; Rollback UI
+;;; Rollback command
 
 (ert-deftest chat-test-endpoint-derives-rollback-url ()
   "The /rollback URL is derived from the configured /chat URL so they
@@ -450,12 +433,11 @@ share one host:port."
     (should (equal no-auth "{}"))))
 
 
-(ert-deftest chat-test-applied-event-offers-rollback ()
+(ert-deftest chat-test-applied-event-notes-success ()
   (chat-test--reset)
   (emacos--chat-buffer)  ; init so the note has a prompt to insert above
   (emacos--chat-handle-applied
    (list :type "applied" :detail "blue cursor (vabc123)" :broken :false))
-  (should emacos--chat-can-rollback)
   (with-current-buffer emacos--chat-buffer-name
     (should (string-match-p "blue cursor" (buffer-string)))
     ;; A non-broken apply must NOT be flagged BROKEN (JSON false parses
@@ -468,53 +450,16 @@ share one host:port."
   (emacos--chat-buffer)
   (emacos--chat-handle-applied
    (list :type "applied" :detail "x (vabc123)" :broken t))
-  (should emacos--chat-can-rollback)
   (with-current-buffer emacos--chat-buffer-name
     (should (string-match-p "BROKEN" (buffer-string)))
     (should (string-match-p "inspect failure" (buffer-string)))
     (should-not (string-match-p "consider rolling back" (buffer-string)))))
 
 
-(ert-deftest chat-test-rollback-in-command-set-gated-on-can-rollback ()
-  "ROLLBACK appears in the chat command set only after an apply, and as
-the LAST entry (rarely used)."
-  (chat-test--reset)
-  (let ((emacos--chat-in-flight nil)
-        (emacos--chat-can-rollback nil))
-    (should-not (member "ROLLBACK" (mapcar #'car (emacos--chat-command-set)))))
-  (let ((emacos--chat-in-flight nil)
-        (emacos--chat-can-rollback t))
-    (let ((labels (mapcar #'car (emacos--chat-command-set))))
-      (should (member "ROLLBACK" labels))
-      (should (equal (car (last labels)) "ROLLBACK")))))  ; at the very bottom
-
-
-(ert-deftest chat-test-rollback-callback-clears-flag-on-reached ()
-  "A reached rollback (applied/load_error) consumes the one-level undo."
-  (chat-test--reset)
-  (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t)
-  (with-temp-buffer
-    (insert "HTTP/1.1 200 OK\n\n{\"status\":\"applied\",\"detail\":\"ok: loaded\"}")
-    (emacos--chat-rollback-callback nil))
-  (should-not emacos--chat-can-rollback))
-
-
-(ert-deftest chat-test-rollback-callback-keeps-flag-on-noop ()
-  "A noop rollback (nothing to roll back) leaves ROLLBACK available."
-  (chat-test--reset)
-  (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t)
-  (with-temp-buffer
-    (insert "HTTP/1.1 200 OK\n\n{\"status\":\"noop\",\"detail\":\"nothing to roll back\"}")
-    (emacos--chat-rollback-callback nil))
-  (should emacos--chat-can-rollback))
-
 (ert-deftest chat-test-rollback-first-tap-arms ()
-  "First ROLLBACK tap only ARMS the two-tap confirm — it must NOT POST."
+  "First rollback invocation only arms confirmation; it must not POST."
   (chat-test--reset)
   (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t)
   (let ((posted nil))
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (&rest _) (setq posted t) nil)))
@@ -523,11 +468,10 @@ the LAST entry (rarely used)."
     (should-not posted)))
 
 (ert-deftest chat-test-rollback-second-tap-posts-and-disarms ()
-  "Armed, a second ROLLBACK tap POSTs to /rollback and disarms."
+  "Armed, a second rollback invocation POSTs and disarms."
   (chat-test--reset)
   (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t
-        emacos--chat-rollback-pending t)  ; armed → this tap fires
+  (setq emacos--chat-rollback-pending t)  ; armed → this invocation fires
   (let ((posted-url nil)
         (emacos-chat-server-url "http://10.0.0.5:8765/chat"))
     (cl-letf (((symbol-function 'url-retrieve)
@@ -537,11 +481,10 @@ the LAST entry (rarely used)."
     (should-not emacos--chat-rollback-pending)))
 
 (ert-deftest chat-test-rollback-refuses-in-flight ()
-  "A ROLLBACK tap while a stream is in flight neither arms nor POSTs."
+  "Rollback during a stream neither arms nor POSTs."
   (chat-test--reset)
   (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t
-        emacos--chat-in-flight t)
+  (setq emacos--chat-in-flight t)
   (let ((posted nil))
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (&rest _) (setq posted t) nil)))
@@ -549,18 +492,8 @@ the LAST entry (rarely used)."
     (should-not posted)
     (should-not emacos--chat-rollback-pending)))
 
-(ert-deftest chat-test-rollback-command-set-relabels-when-armed ()
-  "Armed, the command set shows \"Confirm rollback?\" instead of ROLLBACK."
-  (chat-test--reset)
-  (let ((emacos--chat-in-flight nil)
-        (emacos--chat-can-rollback t)
-        (emacos--chat-rollback-pending t))
-    (let ((labels (mapcar #'car (emacos--chat-command-set))))
-      (should (member "Confirm rollback?" labels))
-      (should-not (member "ROLLBACK" labels)))))
-
 (ert-deftest chat-test-rollback-disarmed-by-other-tap ()
-  "Tapping any other button disarms a pending ROLLBACK confirm."
+  "Another EmacsOS button action disarms pending rollback."
   (chat-test--reset)
   (emacos--chat-buffer)
   (setq emacos--chat-rollback-pending t)
@@ -568,18 +501,15 @@ the LAST entry (rarely used)."
   (should-not emacos--chat-rollback-pending))
 
 (ert-deftest chat-test-rollback-arming-reset-by-new-apply ()
-  "A new apply (sets can-rollback) clears any stale armed rollback so the
-button reads ROLLBACK, not Confirm rollback?."
+  "A new apply clears stale pending rollback confirmation."
   (chat-test--reset)
   (emacos--chat-buffer)
   (setq emacos--chat-rollback-pending t)
   (emacos--chat-handle-applied '(:detail "applied: set x" :broken nil))
-  (should emacos--chat-can-rollback)
   (should-not emacos--chat-rollback-pending))
 
 (ert-deftest chat-test-new-chat-first-tap-arms ()
-  "First tap only ARMS the two-tap confirm (relabels to Confirm clear?):
-it must NOT clear or POST anything yet."
+  "First invocation only arms; it must not clear or POST anything yet."
   (chat-test--reset)
   (emacos--chat-buffer)
   (let ((forgot nil)
@@ -594,7 +524,7 @@ it must NOT clear or POST anything yet."
     (should-not reinit)))
 
 (ert-deftest chat-test-new-chat-second-tap-confirms ()
-  "Armed, a second tap clears for real (forget + reset transcript) and
+  "Armed, a second invocation clears for real (forget + reset transcript) and
 disarms."
   (chat-test--reset)
   (emacos--chat-buffer)
@@ -610,23 +540,22 @@ disarms."
     (should forgot)
     (should reinit)))
 
-(ert-deftest chat-test-new-chat-resets-rollback-flag ()
-  "Confirming New chat (via init-buffer) hides ROLLBACK: a fresh/cleared
-transcript shouldn't dangle the button without context."
+(ert-deftest chat-test-new-chat-resets-rollback-confirmation ()
+  "Confirming New chat clears a pending rollback confirmation."
   (chat-test--reset)
   (emacos--chat-buffer)
-  (setq emacos--chat-can-rollback t
-        emacos--chat-confirm-pending t)   ; armed → this tap confirms
+  (setq emacos--chat-rollback-pending t
+        emacos--chat-confirm-pending t)   ; armed → this invocation confirms
   (cl-letf (((symbol-function 'emacos--chat-forget-server) #'ignore))
     (emacos--chat-new-chat))
-  (should-not emacos--chat-can-rollback))
+  (should-not emacos--chat-rollback-pending))
 
 (ert-deftest chat-test-new-chat-posts-to-clear-endpoint ()
-  "The confirming tap fires a POST to the server's /clear endpoint (so the
+  "The confirming invocation POSTs to the server's /clear endpoint (so the
 agent forgets the conversation), and clears the transcript regardless."
   (chat-test--reset)
   (emacos--chat-buffer)
-  (setq emacos--chat-confirm-pending t)   ; armed → this tap confirms
+  (setq emacos--chat-confirm-pending t)   ; armed → this invocation confirms
   (let ((emacos-chat-server-url "http://10.0.0.5:8765/chat")
         (posted '())
         (resp nil)
@@ -649,7 +578,7 @@ agent forgets the conversation), and clears the transcript regardless."
 
 (ert-deftest chat-test-new-chat-refuses-in-flight ()
   "New chat is a no-op while a stream is in flight: it must not POST
-/clear, wipe the transcript, NOR arm the confirm (tap ABORT first)."
+/clear, wipe the transcript, NOR arm the confirm (abort first)."
   (chat-test--reset)
   (emacos--chat-buffer)
   (let ((emacos--chat-in-flight t)
@@ -660,18 +589,8 @@ agent forgets the conversation), and clears the transcript regardless."
     (should-not called)
     (should-not emacos--chat-confirm-pending)))
 
-(ert-deftest chat-test-command-set-armed-shows-confirm ()
-  "Armed, the first command-list button relabels to Confirm clear?;
-unarmed (and not in flight) it's New chat."
-  (chat-test--reset)
-  (let ((emacos--chat-in-flight nil))
-    (setq emacos--chat-confirm-pending t)
-    (should (equal (caar (emacos--chat-command-set)) "Confirm clear?"))
-    (setq emacos--chat-confirm-pending nil)
-    (should (equal (caar (emacos--chat-command-set)) "New chat"))))
-
 (ert-deftest chat-test-forget-callback-kills-response-buffer ()
-  "The /clear response buffer must be killed so repeated New-chat taps
+  "The /clear response buffer must be killed so repeated New-chat commands
 don't leak ` *http*' buffers."
   (chat-test--reset)
   (let ((resp (generate-new-buffer " *clear-resp*")))

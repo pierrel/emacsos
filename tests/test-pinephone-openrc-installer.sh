@@ -41,12 +41,6 @@ chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
-    'if [ -e /tmp/race-command-reference ]; then' \
-    '  rm -f /tmp/race-command-reference' \
-    '  printf "%s\\n" raced-user-file >/home/user/EMACSOS-COMMANDS.org' \
-    '  chown user:user /home/user/EMACSOS-COMMANDS.org' \
-    '  chmod 0600 /home/user/EMACSOS-COMMANDS.org' \
-    'fi' \
     'exit 0' \
     >/usr/bin/apk
 printf '%s\n' '#!/bin/sh' \
@@ -74,11 +68,17 @@ printf '%s\n' '#!/bin/sh' \
     '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
+    '  if [ -e /tmp/race-command-reference ]; then' \
+    '    rm -f /tmp/race-command-reference' \
+    '    printf "%s\\n" raced-user-file >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+    '    chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+    '    chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+    '  fi' \
     '  if [ -e /tmp/race-command-reference-directory ]; then' \
     '    rm -f /tmp/race-command-reference-directory' \
-    '    rm -f /home/user/EMACSOS-COMMANDS.org' \
-    '    mkdir /home/user/EMACSOS-COMMANDS.org' \
-    '    chown user:user /home/user/EMACSOS-COMMANDS.org' \
+    '    rm -f /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+    '    mkdir /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+    '    chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
     '    exit 1' \
     '  fi' \
     '  if [ -e /tmp/fail-ui-once ]; then' \
@@ -164,7 +164,7 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
 done
 printf '%s\n' '#!/bin/sh' \
     'case ${2-} in' \
-    '  *EMACSOS-COMMANDS.org*) exec /bin/cat /home/user/EMACSOS-COMMANDS.org ;;' \
+    '  *EMACSOS-COMMANDS.org*) exec /bin/cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ;;' \
     '  *) exit 0 ;;' \
     'esac' >/usr/bin/python3
 chmod 0755 /usr/bin/python3
@@ -207,7 +207,7 @@ fi
 [ ! -e /usr/local/libexec/emacsos-waydroid-container ]
 [ ! -e /etc/doas.d/95-emacsos-ui.conf ]
 [ ! -e /var/lib/emacsos-openrc-state ]
-[ ! -e /home/user/EMACSOS-COMMANDS.org ]
+[ ! -e /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ]
 if getent passwd emacsos-lab >/dev/null; then
     printf '%s\n' 'failed install retained the lab user' >&2
     exit 1
@@ -289,15 +289,12 @@ if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=use
     printf '%s\n' 'fresh install overwrote a raced command reference' >&2
     exit 1
 fi
-[ "$(cat /home/user/EMACSOS-COMMANDS.org)" = raced-user-file ]
-[ "$(stat -c '%U:%G:%a:%h:%F' /home/user/EMACSOS-COMMANDS.org)" = \
-    'user:user:600:1:regular file' ]
 [ ! -e /usr/local/share/emacsos-openrc ]
 if getent passwd emacsos-lab >/dev/null; then
     printf '%s\n' 'raced reference install retained the lab user' >&2
     exit 1
 fi
-rm -f /home/user/EMACSOS-COMMANDS.org
+[ ! -e /var/lib/emacsos-lab ]
 
 if DEPLOY_CLIENT_IP=not-an-address ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
@@ -354,9 +351,9 @@ fi
 [ "$(stat -c '%U:%G:%a:%h:%F' \
     /var/lib/emacsos-lab/.config/emacsos/assist-web-token)" = \
     'emacsos-lab:emacsos-lab:600:1:regular file' ]
-cmp -s /repo/EMACSOS-COMMANDS.org /home/user/EMACSOS-COMMANDS.org
-[ "$(stat -c '%U:%G:%a:%h:%F' /home/user/EMACSOS-COMMANDS.org)" = \
-    'user:user:600:1:regular file' ]
+cmp -s /repo/EMACSOS-COMMANDS.org /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+[ "$(stat -c '%U:%G:%a:%h:%F' /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = \
+    'emacsos-lab:emacsos-lab:600:1:regular file' ]
 grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
     /etc/nftables.d/49-emacsos-callback.nft >/dev/null
 grep -F 'iifname "wg0" tcp dport 8766' \
@@ -430,9 +427,9 @@ grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config
 printf '%s\n' old-power-after >/usr/local/share/emacsos-openrc/session-power
-printf '%s\n' old-reference >/home/user/EMACSOS-COMMANDS.org
-chown user:user /home/user/EMACSOS-COMMANDS.org
-chmod 0600 /home/user/EMACSOS-COMMANDS.org
+printf '%s\n' old-reference >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chmod 0755 /usr/local/share/emacsos-openrc/session
 chmod 0755 /usr/local/share/emacsos-openrc/session-power
 touch /tmp/fail-ui-once
@@ -444,14 +441,14 @@ fi
 [ "$(cat /usr/local/share/emacsos-openrc/session)" = old-session ]
 [ "$(cat /usr/local/share/emacsos-openrc/sway.config)" = old-sway-after ]
 [ "$(cat /usr/local/share/emacsos-openrc/session-power)" = old-power-after ]
-[ "$(cat /home/user/EMACSOS-COMMANDS.org)" = old-reference ]
-[ "$(stat -c '%U:%G:%a:%h:%F' /home/user/EMACSOS-COMMANDS.org)" = \
-    'user:user:600:1:regular file' ]
+[ "$(cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = old-reference ]
+[ "$(stat -c '%U:%G:%a:%h:%F' /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = \
+    'emacsos-lab:emacsos-lab:600:1:regular file' ]
 [ -f /run/emacsos-ui/ready ]
 
-printf '%s\n' old-reference-directory-race >/home/user/EMACSOS-COMMANDS.org
-chown user:user /home/user/EMACSOS-COMMANDS.org
-chmod 0600 /home/user/EMACSOS-COMMANDS.org
+printf '%s\n' old-reference-directory-race >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 touch /tmp/race-command-reference-directory
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-update-root >/tmp/update-reference-race.out 2>&1; then
@@ -461,11 +458,11 @@ fi
 grep -F 'command reference rollback failed' /tmp/update-reference-race.out >/dev/null
 grep -F 'rollback backup retained at /var/tmp/emacsos-openrc-backup.' \
     /tmp/update-reference-race.out >/dev/null
-[ -d /home/user/EMACSOS-COMMANDS.org ]
+[ -d /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ]
 [ -f /run/emacsos-ui/ready ]
-rm -rf /home/user/EMACSOS-COMMANDS.org /var/tmp/emacsos-openrc-backup.*
-install -o user -g user -m 0600 /repo/EMACSOS-COMMANDS.org \
-    /home/user/EMACSOS-COMMANDS.org
+rm -rf /var/lib/emacsos-lab/EMACSOS-COMMANDS.org /var/tmp/emacsos-openrc-backup.*
+install -o emacsos-lab -g emacsos-lab -m 0600 /repo/EMACSOS-COMMANDS.org \
+    /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 
 printf '%s\n' old-session-stop >/usr/local/share/emacsos-openrc/session
 touch /tmp/fail-ui-once-and-leak

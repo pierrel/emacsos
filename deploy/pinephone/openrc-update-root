@@ -14,7 +14,7 @@ doas_tmp=
 reference_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=74c9cdd56f16dcb0264753c74fe6d57ba7d4604876ea1c9b09a9d1123a78a9bb
+manifest_hash=95c01b7705ff06ff9eeb2c841d4cf9aefc82bb45b88fc66788ca6c66d07e5e97
 mutating=0
 committed=0
 restart_only=0
@@ -119,15 +119,15 @@ restore_file() {
 }
 
 restore_reference() {
-    target=/home/user/EMACSOS-COMMANDS.org
+    target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
     if [ -f "$backup/EMACSOS-COMMANDS.org" ]; then
-        reference_tmp=$(mktemp /home/.emacsos-command-reference.XXXXXX)
+        reference_tmp=$(mktemp /var/lib/.emacsos-command-reference.XXXXXX)
         install -o root -g root -m 0600 "$backup/EMACSOS-COMMANDS.org" \
             "$reference_tmp"
         cmp -s "$backup/EMACSOS-COMMANDS.org" "$reference_tmp" &&
             [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_tmp")" = \
                 'root:root:600:1:regular file' ] &&
-            chown user:user "$reference_tmp" &&
+            chown emacsos-lab:emacsos-lab "$reference_tmp" &&
             mv -fT -- "$reference_tmp" "$target" || {
             printf '%s\n' \
                 'emacsos-openrc-update: command reference rollback failed' >&2
@@ -383,11 +383,11 @@ if [ -e "$token_target" ] || [ -L "$token_target" ]; then
             'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
         fail 'unsafe installed Assist Web token'
 fi
-reference_target=/home/user/EMACSOS-COMMANDS.org
+reference_target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 if [ -e "$reference_target" ] || [ -L "$reference_target" ]; then
     [ -f "$reference_target" ] && [ ! -L "$reference_target" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_target")" = \
-            'user:user:600:1:regular file' ] ||
+            'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
         fail 'unsafe installed command reference'
 fi
 for pair in \
@@ -422,12 +422,12 @@ for pair in \
 done
 if [ -e "$reference_target" ]; then
     install -o root -g root -m 0600 /dev/null "$backup/EMACSOS-COMMANDS.org"
-    su user -s /usr/bin/python3 -c '
+    su emacsos-lab -s /usr/bin/python3 -c '
 import os
 import stat
 import sys
 
-path = "/home/user/EMACSOS-COMMANDS.org"
+path = "/var/lib/emacsos-lab/EMACSOS-COMMANDS.org"
 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
 info = os.fstat(fd)
 if (
@@ -513,14 +513,14 @@ install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /var/lib/emacsos-lab/.config /var/lib/emacsos-lab/.config/emacsos
 install -o emacsos-lab -g emacsos-lab -m 0600 "$snapshot/assist-web-token" \
     /var/lib/emacsos-lab/.config/emacsos/assist-web-token
-reference_tmp=$(mktemp /home/.emacsos-command-reference.XXXXXX)
+reference_tmp=$(mktemp /var/lib/.emacsos-command-reference.XXXXXX)
 install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org" \
     "$reference_tmp"
 cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"
 [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_tmp")" = \
     'root:root:600:1:regular file' ]
-chown user:user "$reference_tmp"
-mv -fT -- "$reference_tmp" /home/user/EMACSOS-COMMANDS.org
+chown emacsos-lab:emacsos-lab "$reference_tmp"
+mv -fT -- "$reference_tmp" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 reference_tmp=
 install -o root -g root -m 0644 "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft

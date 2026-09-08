@@ -38,7 +38,7 @@
     (setq emacsos-pinephone-firefox-process nil)
     (message "Firefox is closed.")))
 
-(defun emacsos-pinephone-open-firefox ()
+(defun emacsos-firefox-start ()
   "Start Firefox or focus its existing window."
   (interactive)
   (if (and emacsos-pinephone-firefox-process
@@ -66,7 +66,7 @@
                                 #'emacsos-pinephone-firefox-finished))
       (message "Firefox could not start."))))
 
-(defun emacsos-pinephone-quit-firefox ()
+(defun emacsos-firefox-quit ()
   "Quit the Firefox process started by this Emacs session."
   (interactive)
   (if (and emacsos-pinephone-firefox-process
@@ -96,7 +96,7 @@
         (message "Android is stopped.")
       (message "Android did not stop cleanly."))))
 
-(defun emacsos-pinephone-open-waydroid ()
+(defun emacsos-android-start ()
   "Start Waydroid or focus its existing full-screen window."
   (interactive)
   (cond
@@ -127,7 +127,7 @@
                                 #'emacsos-pinephone-waydroid-finished))
       (message "Android could not start.")))))
 
-(defun emacsos-pinephone-stop-waydroid ()
+(defun emacsos-android-quit ()
   "Stop the Waydroid session and its Android container."
   (interactive)
   (message "Stopping Android...")
@@ -152,8 +152,8 @@
 (defun emacsos-pinephone-enforce-frame-layout ()
   "Keep the Emacs frame inside the space reserved above wvkbd.
 Agent config is shared with devices that legitimately use `fullboth'.  On the
-PinePhone that frame state hides the Emacs control pane behind the external
-layer-shell keyboard, so the platform restores its maximized layout after
+PinePhone that frame state hides Emacs content behind the external layer-shell
+keyboard, so the platform restores its maximized layout after
 every agent-config load."
   (set-frame-parameter nil 'fullscreen 'maximized))
 

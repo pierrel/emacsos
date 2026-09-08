@@ -10,7 +10,7 @@ stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 reference_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=74c9cdd56f16dcb0264753c74fe6d57ba7d4604876ea1c9b09a9d1123a78a9bb
+manifest_hash=95c01b7705ff06ff9eeb2c841d4cf9aefc82bb45b88fc66788ca6c66d07e5e97
 committed=0
 mutating=0
 lab_group_created=0
@@ -170,8 +170,8 @@ flock -n -x 9 || fail 'install lock is busy'
 [ -d "$stage" ] && [ ! -L "$stage" ] || fail 'staging directory is absent'
 [ "$(stat -c '%U:%G:%a:%h:%F' "$stage")" = 'user:user:700:2:directory' ] ||
     fail 'unsafe staging directory'
-[ ! -e /home/user/EMACSOS-COMMANDS.org ] &&
-    [ ! -L /home/user/EMACSOS-COMMANDS.org ] ||
+[ ! -e /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ] &&
+    [ ! -L /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ] ||
     fail 'command reference already exists'
 
 count=0
@@ -392,7 +392,7 @@ install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /var/lib/emacsos-lab/.config /var/lib/emacsos-lab/.config/emacsos
 install -o emacsos-lab -g emacsos-lab -m 0600 "$snapshot/assist-web-token" \
     /var/lib/emacsos-lab/.config/emacsos/assist-web-token
-reference_tmp=$(mktemp /home/.emacsos-command-reference.XXXXXX)
+reference_tmp=$(mktemp /var/lib/.emacsos-command-reference.XXXXXX)
 install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org" \
     "$reference_tmp"
 cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"
@@ -489,10 +489,10 @@ rm -f -- /run/emacsos-openrc-proof
 
 # Nothing after publication can fail the transaction.  Mask catchable signals
 # across the no-clobber link and commit flag so cleanup never needs to unlink a
-# path controlled by the recovery user.
+# path controlled by the graphical Emacs user.
 trap '' HUP INT TERM
-chown user:user "$reference_tmp"
-ln -- "$reference_tmp" /home/user/EMACSOS-COMMANDS.org || {
+chown emacsos-lab:emacsos-lab "$reference_tmp"
+ln -- "$reference_tmp" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org || {
     trap 'exit 1' HUP INT TERM
     fail 'command reference appeared during install'
 }

@@ -299,16 +299,17 @@ for root in openrc-install-root openrc-update-root; do
         "$deploy_dir/$root" >/dev/null
     grep -F 'cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"' \
         "$deploy_dir/$root" >/dev/null
-    grep -F 'mktemp /home/.emacsos-command-reference.XXXXXX' \
+    grep -F 'mktemp /var/lib/.emacsos-command-reference.XXXXXX' \
         "$deploy_dir/$root" >/dev/null
-    grep -F 'chown user:user "$reference_tmp"' "$deploy_dir/$root" >/dev/null
-    if grep -F 'cmp -s "$snapshot/EMACSOS-COMMANDS.org" /home/user/EMACSOS-COMMANDS.org' \
+    grep -F 'chown emacsos-lab:emacsos-lab "$reference_tmp"' \
+        "$deploy_dir/$root" >/dev/null
+    if grep -F 'cmp -s "$snapshot/EMACSOS-COMMANDS.org" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
             "$deploy_dir/$root" >/dev/null; then
         printf '%s\n' 'root verifier follows the mutable command reference' >&2
         exit 1
     fi
 done
-grep -F 'ln -- "$reference_tmp" /home/user/EMACSOS-COMMANDS.org' \
+grep -F 'ln -- "$reference_tmp" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "trap '' HUP INT TERM" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'restore_reference' \
@@ -316,8 +317,8 @@ grep -F 'restore_reference' \
 grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'source.read(65537)' "$deploy_dir/openrc-update-root" >/dev/null
-for command in emacsos-pinephone-open-firefox emacsos-pinephone-quit-firefox \
-    emacsos-pinephone-open-waydroid emacsos-pinephone-stop-waydroid \
+for command in emacsos-firefox-start emacsos-firefox-quit \
+    emacsos-android-start emacsos-android-quit \
     emacos--chat-show-top-buffer emacos-send-message emacos-call emacos-answer \
     emacos-hang-up emacos-net-show dtach-shell; do
     grep -F "$command" "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null

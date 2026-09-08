@@ -6,10 +6,10 @@
                              (file-name-directory load-file-name)))
 
 (ert-deftest emacsos-openrc-lifecycle-actions-are-commands ()
-  (dolist (command '(emacsos-pinephone-open-firefox
-                     emacsos-pinephone-quit-firefox
-                     emacsos-pinephone-open-waydroid
-                     emacsos-pinephone-stop-waydroid))
+  (dolist (command '(emacsos-firefox-start
+                     emacsos-firefox-quit
+                     emacsos-android-start
+                     emacsos-android-quit))
     (should (commandp command))))
 
 (ert-deftest emacsos-openrc-fixed-input-marker-is-inserted ()
@@ -408,7 +408,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-open-firefox)
+      (emacsos-firefox-start)
       (should (equal call-arguments
                      '("/usr/bin/timeout" nil nil nil
                        "-s" "TERM" "-k" "1" "3"
@@ -426,7 +426,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-quit-firefox)
+      (emacsos-firefox-quit)
       (should (equal signaled '(tracked SIGTERM)))
       (should (equal message-text "Closing Firefox...")))))
 
@@ -438,7 +438,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-quit-firefox)
+      (emacsos-firefox-quit)
       (should-not signaled)
       (should (equal message-text "Firefox is not open.")))))
 
@@ -451,7 +451,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-quit-firefox)
+      (emacsos-firefox-quit)
       (should-not emacsos-pinephone-firefox-process)
       (should (equal message-text "Firefox is not open.")))))
 
@@ -462,7 +462,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-open-firefox)
+      (emacsos-firefox-start)
       (should-not emacsos-pinephone-firefox-process)
       (should (equal message-text "Firefox could not start.")))))
 
@@ -493,7 +493,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-open-waydroid)
+      (emacsos-android-start)
       (should (equal call-arguments
                      '("/usr/bin/timeout" nil nil nil
                        "-s" "TERM" "-k" "1" "3"
@@ -510,7 +510,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-open-waydroid)
+      (emacsos-android-start)
       (should-not started)
       (should (equal message-text "Android images are not installed.")))))
 
@@ -523,7 +523,7 @@
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq message-text (apply #'format format-string args)))))
-      (emacsos-pinephone-open-waydroid)
+      (emacsos-android-start)
       (should-not emacsos-pinephone-waydroid-process)
       (should (equal message-text "Android could not start.")))))
 

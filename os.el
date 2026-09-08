@@ -1,6 +1,6 @@
 ;;; os.el --- EmacsOS -*- lexical-binding: t -*-
 
-(require 'seq)  ; seq-take, used by `emacos--render-commands'
+(require 'seq)  ; seq-filter, used by the modifier keyboard
 
 (defgroup emacsos nil
   "EmacsOS: malleable, agent-customizable, local-first phone OS."
@@ -8,9 +8,10 @@
   :prefix "emacos-")
 
 (defcustom emacos-use-internal-keyboard t
-  "Whether the control pane renders EmacsOS's built-in text keyboard.
-Set this to nil on devices that provide a compositor-level keyboard; the
-utility, context-command, and call-control surfaces remain available."
+  "Whether EmacsOS renders its built-in text keyboard and utility row.
+Set this to nil on devices that provide a compositor-level keyboard.  Such
+devices have no ordinary control window; one appears temporarily only when a
+buffer supplies a safety-critical `emacos--keyboard-plane'."
   :type 'boolean
   :group 'emacsos)
 
@@ -24,6 +25,14 @@ utility, context-command, and call-control surfaces remain available."
   "Function returning the top buffer shown when EmacsOS starts."
   :type 'function
   :group 'emacsos)
+
+(defun emacos-open-command-reference ()
+  "Open the EmacsOS command reference from the current user's home."
+  (interactive)
+  (let ((path (expand-file-name "EMACSOS-COMMANDS.org" "~/")))
+    (unless (file-readable-p path)
+      (user-error "EmacsOS command reference is not installed"))
+    (find-file path)))
 
 ;; Disable chrome
 (setq inhibit-startup-screen t
@@ -142,29 +151,19 @@ future render that swaps a window's buffer would reintroduce the loop
 hazard, and on a phone an infinite re-render bricks the device — so the
 guard is kept even though nothing can trip it now.")
 
-(defvar emacos--last-commands 'unset
-  "The command set `emacos--render-commands' last rendered.
-The follower re-renders only when the top buffer's derived command set
-actually changes, so transient buffers (*Completions*, *Help*) don't
-flicker the command list — the keyboard itself never moves.")
-
 (defvar-local emacos--keyboard-plane nil
   "Buffer-local override for the keyboard surface: a render function, or nil.
-The bottom `*keyboard*' window is the phone's touch CONTROL PLANE, reactive
-to the top buffer (like the command list).  When the top buffer sets this to
-a function, `emacos--render-page' calls it to paint `*keyboard*' INSTEAD of
-the T9 keyboard/action/utility/command bands — the function runs with
-`*keyboard*' as `current-buffer'.  nil (the default) means the normal keyboard
-when `emacos-use-internal-keyboard' is non-nil, or only utility and command
-rows when an external keyboard supplies text entry.  A call buffer sets this
-to paint proposal, status, answer, or hang-up controls (see phone-call.el).")
+When the top buffer sets this to a function, `emacos--render-page' paints a
+temporary `*keyboard*' control window with that function.  nil means the
+built-in keyboard and utility row when `emacos-use-internal-keyboard' is
+non-nil, or no control window when an external keyboard supplies text entry.
+Call and SMS buffers use temporary planes for local confirmation controls.")
 
 (defvar emacos--last-plane 'unset
   "The keyboard plane `emacos--render-page' last rendered.
-Tracked alongside `emacos--last-commands' so the follower re-renders on a
-PLANE change even when the derived command set is unchanged — two buffers
-can both fall to `emacos-global-commands' yet need different planes (e.g.
-*scratch* vs the *call* screen), so a plane swap must force a render.")
+The window-buffer follower re-renders only when this plane changes, except
+that the built-in modifier keyboard also re-renders on every buffer change
+while a modifier is active because keymaps are buffer-local.")
 
 (defun emacos--target ()
   "Return the editing window (not the keyboard).
@@ -305,10 +304,9 @@ whole point of capturing :window at arm time; honor it at fire time."
               (unwind-protect
                   (with-selected-window w
                     (call-interactively binding))
-                ;; Mirror emacos--run-command's post-action refresh:
-                ;; re-render when the command-set changed (the follower
-                ;; on a top-buffer swap will do its own render).
-                (unless (equal (emacos--top-commands) emacos--last-commands)
+                ;; Mirror emacos--run-command's post-action refresh when an
+                ;; in-place command changes the buffer's special plane.
+                (unless (eq (emacos--top-keyboard-plane) emacos--last-plane)
                   (emacos--render-page))
                 (emacos--refocus)))))))))
 
@@ -592,27 +590,17 @@ the letter-key `substring').  Pure — testable off the device."
     s))
 
 (defvar emacos--confirm-disarm-functions nil
-  "Abnormal hook of disarm functions for two-tap-confirm features.
-Each registered function receives (ACTION ARG) — the button being
-tapped (ARG is the command, ACTION is usually `emacos--run-command').
-Each disarm-fn should clear its own pending-armed state and re-render,
-UNLESS the (ACTION ARG) pair IS the armed command itself (in which
-case the user is performing the confirming second tap and arming must
-persist into that handler's check).
-
-The phone touchscreen can't tap modal y-or-n-p / GUI dialogs, so every
-destructive command instead uses the in-row two-tap pattern: first tap
-arms (relabels its button to \"Confirm X?\"), second tap fires.  Any
-other button tap cancels the pending arm via this hook — so the armed
-state can't linger across unrelated interactions.  Add a disarm-fn from
-the feature's own file (chat.el for New-chat, emacos-assist.el for
-Forget, etc.); the shared disarm rail keeps os.el out of the loop.")
+  "Abnormal hook for disarming pending confirmation actions.
+Each registered function receives (ACTION ARG) from an EmacsOS button.
+It clears its own pending state unless the pair represents its confirming
+second action.  Touchscreen call/SMS controls use a two-tap confirmation;
+destructive M-x commands use two invocations.  Feature files register their
+own disarm functions so shared button actions cancel stale pending state.")
 
 (defun emacos--maybe-cancel-confirm (action arg)
-  "Run `emacos--confirm-disarm-functions' with the tapped (ACTION ARG).
-Each registered disarm-fn decides whether the current tap matches its
-armed command (= confirming second tap, keep armed) or not (disarm).
-No-op when nothing is armed, which is the common case."
+  "Run `emacos--confirm-disarm-functions' with button ACTION and ARG.
+Each registered function decides whether this is its confirming action or an
+unrelated action that disarms it.  No-op when nothing is pending."
   (run-hook-with-args 'emacos--confirm-disarm-functions action arg))
 
 (defun emacos--btn (label action &optional arg height bg)
@@ -625,8 +613,8 @@ default gray background — used to accent a high-priority affordance (the
 Chat button) so it reads as the app, not plumbing."
   (insert-text-button
    label
-   ;; Every tap first cancels any pending two-tap confirm (unless it IS the
-   ;; armed command) — see `emacos--maybe-cancel-confirm' — then runs ACTION.
+   ;; Every tap first offers pending confirmations a chance to disarm, then
+   ;; runs ACTION.
    'action (lambda (_)
              (emacos--maybe-cancel-confirm action arg)
              (if arg (funcall action arg) (funcall action)))
@@ -643,18 +631,12 @@ Chat button) so it reads as the app, not plumbing."
 
 (defun emacos--run-command (cmd)
   "Run CMD interactively in the target (editing) window, then refresh.
-The control surface is always shown, so unlike the old swap model
-there is no page to force/restore.  Re-render only when CMD actually
-changed the command set: an in-place `M-x <mode>' won't fire
-`window-buffer-change-functions', so the follower can't catch it — but
-a CMD that swaps the top buffer DOES fire the hook, so rendering here
-unconditionally would render twice (and flicker).  Comparing against
-`emacos--last-commands' covers the in-place case, leaves buffer swaps
-to the follower, and skips the render entirely when nothing changed.
+Re-render only when CMD changes the current buffer's special keyboard plane;
+buffer swaps are handled by `window-buffer-change-functions'.
 `unwind-protect' keeps the refresh+refocus even when CMD throws (a bad
 find-file path, a user-error, an aborted kill-buffer query).
 
-A3: M-x and command-list buttons commit any armed-tap first.  Safe
+A3: utility buttons commit any armed tap first.  Safe
 under re-entrancy: `emacos--commit-armed-tap' clears armed-tap BEFORE
 firing, so the inner `emacos--run-command' (for the armed binding) hits
 a no-op commit at its own top."
@@ -664,103 +646,18 @@ a no-op commit at its own top."
       (unwind-protect
           (with-selected-window w
             (call-interactively cmd))
-        (unless (equal (emacos--top-commands) emacos--last-commands)
+        (unless (eq (emacos--top-keyboard-plane) emacos--last-plane)
           (emacos--render-page))
         (emacos--refocus)))))
 
-;;; Mode-specific commands
-
-(defvar emacos-mode-commands
-  '((org-mode
-     ("Heading" . org-insert-heading)
-     ("TODO"    . org-todo)
-     ("Export"  . org-export-dispatch))
-    (emacs-lisp-mode
-     ("Eval Buffer"    . eval-buffer)
-     ("Eval Last Sexp" . eval-last-sexp))
-    (dired-mode
-     ("Open"   . dired-find-file)
-     ("Up"     . dired-up-directory)
-     ("Rename" . dired-do-rename)
-     ("Copy"   . dired-do-copy)
-     ("Delete" . dired-do-delete)
-     ("Refresh" . revert-buffer))
-    (magit-status-mode
-     ("Stage"   . magit-stage)
-     ("Unstage" . magit-unstage)
-     ("Commit"  . magit-commit-create)
-     ("Push"    . magit-push)
-     ("Pull"    . magit-pull)
-     ("Fetch"   . magit-fetch)
-     ("Branch"  . magit-branch)
-     ("Log"     . magit-log)
-     ("Diff"    . magit-diff)
-     ("Refresh" . magit-refresh))
-    ;; prog-mode is a common ancestor: code buffers without their own
-    ;; entry walk up to here.  Indent is intentionally omitted — the
-    ;; keyboard's TAB button already runs `indent-for-tab-command'.
-    (prog-mode
-     ("Save"       . save-buffer)
-     ("Comment"    . comment-line)
-     ("Goto Line"  . goto-line)
-     ("Search"     . isearch-forward)
-     ("Replace"    . query-replace)
-     ("Next Error" . next-error)
-     ("Xref Def"   . xref-find-definitions))
-    (text-mode
-     ("Save"      . save-buffer)
-     ("Search"    . isearch-forward)
-     ("Replace"   . query-replace)
-     ("Spell"     . ispell-buffer)
-     ("Fill"      . fill-paragraph)
-     ("Goto Line" . goto-line)))
-  "Alist mapping major modes to lists of (LABEL . COMMAND) pairs.
-Command-centric modes (where the user invokes commands more than they
-type) belong here.  A mode absent from this alist falls back to
-`emacos-global-commands' in the command list (see `emacos--top-commands').
-Order each list by PRIORITY: the command list shows up to
-`emacos--max-commands' (earlier = kept), one per row; the rest are
-reachable via M-x.  Grow this incrementally.")
-
-(defvar emacos-global-commands
-  '(("Save"          . save-buffer)
-    ("Undo"          . undo)
-    ("Find File"     . find-file)
-    ("Switch Buffer" . switch-to-buffer)
-    ("New message"   . emacos-send-message)
-    ("Net"           . emacos-net-show))
-  "Command-list fallback for buffers whose major mode has no entry in
-`emacos-mode-commands'.  Keeps the universal actions (save, undo, open,
-switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
-~20 multi-taps.  Ordered by priority (the list shows up to
-`emacos--max-commands').")
-
-(defun emacos--mode-commands-for (mode)
-  "Return the command list for MODE, walking up parent modes."
-  (let ((m mode) result)
-    (while (and m (not result))
-      (setq result (cdr (assq m emacos-mode-commands)))
-      (setq m (get m 'derived-mode-parent)))
-    result))
-
-;;; Top-buffer command set (feeds the command list)
-
 ;; Defined in chat.el (required at the bottom of this file).  Forward-declared
-;; so the byte-compiler can resolve the generic chat surface at load time.
-(defvar emacos--chat-buffer-name)
-(declare-function emacos--chat-command-set "chat")
+;; so the byte-compiler can resolve the built-in keyboard utility row.
 (declare-function emacos--chat-show-top-buffer "chat")
 (declare-function emacos--chat-button "chat")
 (declare-function emacos--chat-button-label "chat")
 
-;; Defined by the file-backed Assist surface loaded at the bottom of this file.
-(declare-function emacos-assist--command-set "emacos-assist")
-
 ;; Defined in network.el (required at the bottom of this file).
-(defvar emacos-net--buffer-name)
-(declare-function emacos-net--command-set "network")
 (declare-function emacos-net-mode-line-string "network")
-(declare-function emacos-net-show "network")
 (declare-function emacos-net--ensure-timer "network")
 (declare-function emacos-net--refresh "network")
 
@@ -770,44 +667,6 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 (declare-function emacos-send-message "phone-sms")
 (declare-function emacos-sms-mode-line-string "phone-sms")
 (declare-function emacos-sms-show-status "phone-sms")
-
-(defun emacos--top-commands ()
-  "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
-buffer — the contents of the command list band.  One `cond':
-an active minibuffer → nil (you're typing into a prompt; the list
-stays empty); the *chat* buffer (by identity) →
-`emacos--chat-command-set'; a major mode with a command set →
-`emacos--mode-commands-for' (the web client deliberately returns nil);
-everything else → `emacos-global-commands'
-so a plain text buffer still has Save/Undo/Find File one tap away
-rather than only M-x."
-  (cond
-   ((active-minibuffer-window) nil)
-   (t
-    (let* ((target (emacos--target))
-           (buf (and target (window-buffer target)))
-           (mode (if buf (buffer-local-value 'major-mode buf)
-                   'fundamental-mode)))
-      (cond
-       ((and buf (eq buf (get-buffer emacos--chat-buffer-name)))
-        (emacos--chat-command-set))
-       ((and buf (with-current-buffer buf
-                   (derived-mode-p 'emacos-assist-mode)))
-        ;; Run `emacos-assist--command-set' INSIDE the .assist buffer:
-        ;; it reads `emacos-assist--forget-confirm-pending', which is
-        ;; buffer-local to each .assist file (a "Confirm forget?" arm
-        ;; on one .assist file mustn't bleed into another's command list).
-        ;; The render call site has the *keyboard* buffer as
-        ;; `current-buffer', so without this wrap the buffer-local read
-        ;; sees nil and "Forget" never relabels — caught live 2026-05-30.
-        (with-current-buffer buf (emacos-assist--command-set)))
-       ((and buf (with-current-buffer buf
-                   (derived-mode-p 'emacos-assist-web-mode)))
-        nil)
-       ((and buf (eq buf (get-buffer emacos-net--buffer-name)))
-        (emacos-net--command-set))
-       ((emacos--mode-commands-for mode))
-       (t emacos-global-commands))))))
 
 (defun emacos--top-keyboard-plane ()
   "Return the TOP buffer's `emacos--keyboard-plane' (a render fn), or nil.
@@ -820,21 +679,16 @@ buffer's control plane.  Otherwise reads the editing window's buffer."
            (buffer-local-value 'emacos--keyboard-plane buf)))))
 
 (defun emacos--on-window-buffer-change (_frame)
-  "Re-render when the top buffer changes the command set, OR when a
-modifier is active (the keymap filter is per-buffer; two buffers with
-the same command-set can still have different active keymaps via minor
-modes).  Registered on `window-buffer-change-functions'.  No-ops while
-a render is in progress (the `emacos--in-render' re-entry guard) and,
-when no modifier is active, when the derived command set is unchanged —
-so transient buffers (*Completions*, *Help*) don't flicker the command
-list."
+  "Re-render when the top buffer changes its special keyboard plane.
+When the built-in keyboard has an active modifier, also re-render for every
+buffer change because the filtered bindings depend on buffer-local keymaps.
+No-op while a render is in progress."
   (unless (or emacos--in-render
               (and (null emacos--modifier)
-                   (equal (emacos--top-commands) emacos--last-commands)
                    (eq (emacos--top-keyboard-plane) emacos--last-plane)))
     (emacos--render-page)))
 
-;;; Surface renderers (the four bands of the composite)
+;;; Surface renderers
 ;;
 ;; All buttons share the same label font (`emacos--btn-label-scale') and
 ;; the same tap-target height (`emacos--btn-vpad' box padding); the
@@ -852,7 +706,7 @@ non-tappable), preserving positional muscle memory.  An armed character
 (when `emacos--armed-tap' names this group) is face-stacked in bold
 yellow inside its button label.
 
-The action keys, utility row, and command list are separate bands —
+The action keys and utility row are separate bands —
 see `emacos--render-page'."
   (let* ((win        (get-buffer-window (current-buffer)))
          (win-w      (if win (window-body-width win) 20))
@@ -1004,74 +858,65 @@ between \"Chat\" and \"SEND\" accordingly.  CAPS lives on the action row
                  emacos--btn-label-scale "dodger blue")
     (insert "\n")))
 
-;; Cap on the command list.  No mode currently has this many; it's a
-;; bound so a future over-long set can't run the (scrollable but finite)
-;; keyboard off the bottom.
-(defconst emacos--max-commands 10)
-
-(defun emacos--render-commands ()
-  "Render up to `emacos--max-commands' of the top buffer's commands, ONE
-PER ROW as same-height buttons (the keyboard window scrolls, so this can
-run past the fold).  Caches the FULL derived set in `emacos--last-commands'
-so the follower can no-op when the set is unchanged."
-  (let ((commands (emacos--top-commands)))
-    (setq emacos--last-commands commands)
-    (dolist (entry (seq-take commands emacos--max-commands))
-      (emacos--btn (concat " " (car entry) " ") #'emacos--run-command
-                   (cdr entry) emacos--btn-label-scale)
-      (insert "\n"))))
-
 ;;; Render dispatch
 
+(defun emacos--ensure-control-window ()
+  "Return the `*keyboard*' window, creating it below the editing window."
+  (or (get-buffer-window "*keyboard*" (selected-frame))
+      (let* ((target (or (emacos--target) (selected-window)))
+             (total (window-total-height target))
+             (percent (max 1 (min 99 emacos-control-window-percent)))
+             (height (max 1 (/ (* total percent) 100)))
+             (window (split-window target (- total height) 'below)))
+        (set-window-buffer window (get-buffer-create "*keyboard*"))
+        (set-window-dedicated-p window t)
+        (set-window-parameter window 'no-other-window t)
+        (set-window-parameter window 'no-delete-other-windows t)
+        (setq emacos--target-window target)
+        window)))
+
+(defun emacos--remove-control-window ()
+  "Delete the temporary external-keyboard control window and its buffer."
+  (when-let ((window (get-buffer-window "*keyboard*" (selected-frame))))
+    (set-window-parameter window 'no-delete-other-windows nil)
+    (set-window-dedicated-p window nil)
+    (delete-window window))
+  (when-let ((buffer (get-buffer "*keyboard*")))
+    (unless (get-buffer-window buffer t)
+      (kill-buffer buffer))))
+
 (defun emacos--render-page ()
-  "Render the *keyboard* window.  When the TOP buffer declares a keyboard
-plane (`emacos--keyboard-plane'), paint that instead — the touch control
-plane is reactive to what's on top (a call buffer shows call controls).
-Otherwise paint the utility row and top-buffer commands, preceded by the T9
-keyboard and action row when `emacos-use-internal-keyboard' is non-nil.  Binds
-`emacos--in-render'
-for the duration so the window-buffer-change follower can't recurse into
-an in-progress render."
-  (let* ((buf (get-buffer-create "*keyboard*"))
-         (emacos--in-render t)
-         (plane (emacos--top-keyboard-plane)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (if plane
-            (progn
-              (funcall plane)
-              ;; A plane has no command band, so `emacos--render-commands' (which
-              ;; sets `emacos--last-commands') didn't run.  Sync it to the top
-              ;; buffer's set anyway: the follower's skip guard is an AND of
-              ;; command-compare AND plane-compare, so a later follower fire
-              ;; while the plane is still up would otherwise re-render off a
-              ;; stale (pre-call) command set even though the plane is unchanged.
-              (setq emacos--last-commands (emacos--top-commands)))
-          (when emacos-use-internal-keyboard
-            (emacos--render-keyboard)
-            (emacos--render-action-row))
-          (emacos--render-utility-row)
-          (emacos--render-commands))
-        ;; Record the rendered plane ONLY after the render succeeds (mirrors how
-        ;; `emacos--last-commands' is set during the render): if `(funcall plane)'
-        ;; above signals, `emacos--last-plane' stays unchanged so the follower
-        ;; doesn't treat the half-painted surface as "already rendered".
-        (setq emacos--last-plane plane))
-      (setq buffer-read-only t)
-      (setq-local cursor-type nil)
-      (setq-local mode-line-format nil)
-      (setq-local truncate-lines t)
-      (setq-local auto-hscroll-mode nil)
-      (setq-local line-spacing 0)
-      ;; Only reset hscroll when *keyboard* is actually displayed.
-      ;; The load-time follower can reach render before the keyboard
-      ;; window exists (eg. a buffer change between os.el load and
-      ;; `emacos--init' creating the split), where `get-buffer-window'
-      ;; is nil and `set-window-hscroll' would error.
-      (when-let ((kw (get-buffer-window buf)))
-        (set-window-hscroll kw 0))
-      (goto-char (point-min)))))
+  "Render the built-in keyboard or a temporary safety-control plane.
+With an external keyboard and no special `emacos--keyboard-plane', delete the
+control window and its buffer so ordinary content owns the whole Emacs area.
+Bind `emacos--in-render' so window changes caused here cannot recurse."
+  (let ((emacos--in-render t)
+        (plane (emacos--top-keyboard-plane)))
+    (if (and (not emacos-use-internal-keyboard) (null plane))
+        (progn
+          (emacos--remove-control-window)
+          (setq emacos--last-plane nil))
+      (let* ((window (emacos--ensure-control-window))
+             (buffer (window-buffer window)))
+        (with-current-buffer buffer
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (if plane
+                (funcall plane)
+              (emacos--render-keyboard)
+              (emacos--render-action-row)
+              (emacos--render-utility-row))
+            ;; Record only after a successful render so a failed plane remains
+            ;; eligible for the next explicit refresh.
+            (setq emacos--last-plane plane))
+          (setq buffer-read-only t)
+          (setq-local cursor-type nil)
+          (setq-local mode-line-format nil)
+          (setq-local truncate-lines t)
+          (setq-local auto-hscroll-mode nil)
+          (setq-local line-spacing 0)
+          (set-window-hscroll window 0)
+          (goto-char (point-min)))))))
 
 ;;; Initialization
 
@@ -1080,19 +925,10 @@ an in-progress render."
   (set-frame-name "EmacsOS")
   ;; Main editing buffer
   (switch-to-buffer (funcall emacos-initial-buffer-function))
-  ;; Split: top = editor, bottom = keyboard
-  (let* ((total (window-total-height))
-         (percent (max 1 (min 99 emacos-control-window-percent)))
-         (kbd-height (max 1 (/ (* total percent) 100)))
-         (kw (split-window nil (- total kbd-height) 'below)))
-    (set-window-buffer kw (get-buffer-create "*keyboard*"))
-    (set-window-dedicated-p kw t)
-    (set-window-parameter kw 'no-other-window t)
-    (set-window-parameter kw 'no-delete-other-windows t)
-    (setq emacos--target-window (selected-window)))
-  ;; Render after the window is visible so dimensions are known.  The
-  ;; command list derives from the top buffer at render time, and the
-  ;; follower hook (registered at load time, below) keeps it in sync.
+  (setq emacos--target-window (selected-window))
+  ;; The built-in keyboard creates its persistent window here.  External
+  ;; keyboards leave ordinary content unsplit; call/SMS planes create a
+  ;; temporary control window on demand.
   (emacos--render-page)
   ;; Prime the network poller so the modeline status segment is live from
   ;; boot, not only after the first *network* visit.
