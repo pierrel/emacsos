@@ -35,14 +35,15 @@ utility, context-command, and call-control surfaces remain available."
 
 ;; Global, minimal modeline: the EmacsOS label + device-supplied segments + a
 ;; tappable cell/wifi status segment (`emacos-net-mode-line-string', network.el)
-;; + a tappable in-call badge (`emacos-call-mode-line-string', phone-call.el —
-;; empty unless a call is active), shown on every top (editing) buffer.  Replaces
+;; + tappable hidden call/SMS badges (`emacos-call-mode-line-string',
+;; phone-call.el; `emacos-sms-mode-line-string', phone-sms.el), shown on every
+;; top (editing) buffer only while their status screen is hidden.  Replaces
 ;; the stock clutter (buffer position, minor modes, encoding); the *keyboard*
 ;; buffer overrides this to nil on each render (`emacos--render-page').
 ;; time/date/battery are left for the "Modeline status bar" roadmap item to
 ;; append here.  Set at load time (not in `emacos--init') so a hot-reload
-;; re-applies it.  Both `:eval's resolve their functions at redisplay, after
-;; the `(require 'network)' / `(require 'phone-call)' at the bottom of this file.
+;; re-applies it.  The `:eval's resolve their functions at redisplay, after
+;; the module `require's at the bottom of this file.
 (defvar emacos-platform-mode-line-segments nil
   "Additional mode-line segments supplied by the device bootstrap.
 Each entry must be valid `mode-line-format' data.  The platform sets this
@@ -52,7 +53,8 @@ before loading EmacsOS so the segment also survives a live reload of os.el.")
               (append '(" EmacsOS  ")
                       emacos-platform-mode-line-segments
                       '((:eval (emacos-net-mode-line-string))
-                        (:eval (emacos-call-mode-line-string)))))
+                        (:eval (emacos-call-mode-line-string))
+                        (:eval (emacos-sms-mode-line-string)))))
 
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;
@@ -725,6 +727,7 @@ reachable via M-x.  Grow this incrementally.")
     ("Undo"          . undo)
     ("Find File"     . find-file)
     ("Switch Buffer" . switch-to-buffer)
+    ("New message"   . emacos-send-message)
     ("Net"           . emacos-net-show))
   "Command-list fallback for buffers whose major mode has no entry in
 `emacos-mode-commands'.  Keeps the universal actions (save, undo, open,
@@ -764,6 +767,9 @@ switch) one tap away on a T9 keyboard, where `M-x find-file RET' is
 ;; Defined in phone-call.el (required at the bottom of this file).
 (declare-function emacos-call--watcher-ensure "phone-call")
 (declare-function emacos-call-mode-line-string "phone-call")
+(declare-function emacos-send-message "phone-sms")
+(declare-function emacos-sms-mode-line-string "phone-sms")
+(declare-function emacos-sms-show-status "phone-sms")
 
 (defun emacos--top-commands ()
   "Return the command list ((LABEL . CMD) ...) for the TOP (editing)
@@ -1113,6 +1119,7 @@ an in-progress render."
 (require 'assist-web)
 (require 'network)
 (require 'phone-call)
+(require 'phone-sms)
 
 (provide 'os)
 ;;; os.el ends here

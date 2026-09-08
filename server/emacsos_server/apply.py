@@ -43,9 +43,8 @@ APPLY_TIMEOUT_SECONDS = 15.0
 # phone-side defvar and only falls back to this literal.
 DEFAULT_PHONE_AGENT_FILE = "~/.emacs.d/emacsos/agent.el"
 
-# Refuse to ship a config so large it'd overflow the emacsclient argv
-# (which would surface as an opaque "unreachable" failure).  Far above
-# any realistic single-file config.
+# Bound one config mutation even though the shared emacsclient transport now
+# carries its expression on stdin.  Far above any realistic single-file config.
 MAX_BODY_BYTES = 100_000
 
 

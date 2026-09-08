@@ -1,0 +1,229 @@
+#+title: Confirmed outbound SMS
+#+date: 2026-09-06
+
+* Objective
+
+Let a person or the local EmacsOS chat agent prepare an exact SMS recipient and
+body, show the complete proposal on the phone, and send it only after a second
+local confirmation in the ordinary public flow.  Keep interpretation in the
+existing agent and modem authority in one narrow local helper.  An ordinary
+agent response stages rather than sends the message.
+
+This phase covers direct Emacs use and the phone's local =*chat*= agent through
+its existing =eval_elisp= capability.  The Assist Web thread client deployed by
+the separate =emacs-thread-web-flow= lane cannot yet invoke phone-local actions;
+a general client-action bridge is a separate design rather than an SMS-specific
+server endpoint.
+
+* User flow
+
+1. The user taps =New message= from the ordinary controls, invokes
+   =emacos-send-message= with a concrete number and body, or asks the local chat
+   agent to resolve a recipient and prepare that message.  =New message= remains
+   directly available on the default =*chat*= screen.
+2. Emacs opens a read-only =*SMS*= buffer showing the exact number and full body.
+   The phone keyboard plane offers =Cancel= and =Send=.
+3. The first Send tap arms the same control for 15 seconds and changes it to
+   =Confirm send?=.  Any other command, restaging, expiry, target-buffer
+   change, or loss of the SMS buffer disarms it.  The user scrolls or reads a
+   long proposal before arming.
+4. The second consecutive physical tap consumes that authorization before I/O
+   and begins one asynchronous modem operation.  The proposal cannot be edited
+   or sent twice while it is pending.
+5. If the SMS screen is still visible, it ends in =Sent=, =Not sent=, or
+   =Status unknown=.  If the user switched elsewhere while sending, completion
+   leaves that screen alone and shows a phone-global =SMS= modeline badge that
+   opens the retained result.  Done then returns to the screen from which it was
+   opened.  An unknown result must be dismissed before another proposal can be
+   staged and is never retried automatically because the modem may already have
+   accepted it.
+
+The deterministic primitive accepts only =+?[0-9]{5,15}=, matching the existing
+call primitive.  The skill prefers canonical E.164 numbers after contact
+resolution.  The body must be nonempty, contain no NUL, and encode to at most
+4096 UTF-8 bytes.  No normalization, quote replacement, or segmentation guess
+changes the text.
+
+* Design
+
+** Local primitive and confirmation UI
+
+Add =phone-sms.el= as a sibling of =phone-call.el=.  Its public command
+=emacos-send-message= only validates and stages a new immutable proposal.  A
+buffer-local keyboard plane and the existing global confirmation-disarm hook
+provide the two-tap boundary.  A proposal-ID-guarded =post-command-hook= covers
+keyboard, minibuffer, scroll, and focus commands that do not pass through a
+phone button; exactly the first arming command skips that hook once, matching
+the call UI.  Sending is asynchronous so D-Bus or modem delay
+cannot stall Emacs.  Each completion is bound to a monotonically increasing
+proposal identity; a late completion cannot alter a newer proposal.
+
+The screen shows the exact recipient and full body in a scrollable, read-only
+buffer.  Nonprinting C0/C1 and Unicode bidirectional control characters are
+shown as explicit =\u{XXXX}= tokens, and literal backslashes are doubled, so
+distinct sent bytes cannot produce the same authorization preview.  Ordinary
+visible Unicode and emoji remain unchanged.  The original bytes are still the
+bytes sent.  The screen does not claim an
+SMS-segment count, because GSM-7 versus UCS-2 encoding belongs to the
+modem/network and an estimate would be misleading.
+
+The platform operation seam is one function taking recipient, body, and a
+completion callback.  The default reports that transport is unavailable.  The
+PinePhone initializer installs the privileged adapter.  No =mmcli= fallback is
+added to shared Elisp.
+
+** Existing agent boundary
+
+Add an =sms= skill to the existing phone agent.  It resolves names through the
+phone's contact search, asks when more than one number remains, and invokes the
+deterministic primitive with the exact chosen number and requested text through
+=eval_elisp=.  It must describe the result as a staged proposal and may never
+claim that the message was sent.
+
+The general =eval_elisp= transport currently puts its expression in
+=emacsclient='s argv.  Preserve the tool API and result behavior, but invoke
+=emacsclient -e= without an argv expression and write the expression to stdin.
+Reject expressions over 256,000 UTF-8 bytes before starting =emacsclient=.
+This generic correction keeps SMS content and future sensitive expressions out
+of process listings without inventing an SMS tool or wire protocol.
+
+** Privileged PinePhone helper
+
+Install one root-owned =/usr/local/sbin/emacsos-openrc-sms= Python helper and
+grant =emacsos-lab= passwordless =doas= permission for exactly that command with
+no arguments.  The Emacs adapter starts it with fixed argv and sends a JSON
+object containing exactly =number= and =text= through stdin.  The helper caps
+that wire form at 32 KiB, enough for worst-case JSON escaping of a valid
+4096-byte body.
+
+The helper:
+
+- rejects arguments, non-root execution, oversized input, extra/missing JSON
+  keys, invalid numbers, empty/NUL bodies, and bodies over 4096 UTF-8 bytes;
+- holds one nonblocking root-owned operation lock;
+- resolves and captures ModemManager's unique D-Bus owner, uses the installed
+  Python D-Bus binding in-process against only that owner, never a shell or
+  subprocess, and requires exactly one current object exposing the Messaging
+  interface;
+- creates the SMS and invokes =Send= with bounded D-Bus calls;
+- emits only a small fixed status grammar, never recipient, body, secret, or raw
+  exception; and
+- deletes the created object only after confirmed send, on a best-effort basis.
+
+The helper tracks whether =Create= was attempted and emits exactly one newline-
+terminated terminal result: =sent= only after ModemManager's =Send= method
+returns successfully, =not-sent:CODE= before invoking =Create=, or
+=unknown:CODE= from the =Create= invocation onward because a lost reply cannot
+prove whether creation occurred.  =CODE= is one token from a finite documented
+allowlist.  A missing, duplicate, or malformed terminal result is
+conservatively =Status unknown=.  The adapter does not retry any result.
+
+A process-wide alarm bounds stdin acquisition and every later stage.  The
+helper parses the complete bounded request before taking its nonblocking modem
+lock, so an incomplete pipe cannot hold the shared operation lock.
+
+The phone's atomic OpenRC payload gains the helper, =phone-sms.el=, the explicit
+=py3-dbus= dependency, exact hashes, size/count checks, backup/rollback
+coverage, and the exact doas rule.  Separately, the remote EmacsOS server
+deployment gains the generic =phone.py= transport correction and the SMS skill;
+the running server must be restarted and verified before agent staging works.
+The installer installs and imports =py3-dbus= during preflight, before any
+transactional UI/payload mutation.  No listener, network route, or tracked
+credential is added.
+
+* Threat model
+
+New untrusted inputs are the agent/user number and body and the helper's stdin.
+Their only privileged sink is ModemManager D-Bus.  Validation occurs in both
+Elisp and the root helper; the helper constructs a D-Bus dictionary and never
+forms a command line.  Text is bounded before JSON parsing and after UTF-8
+encoding.  Fixed argv, stdin transport, controlled status output, and redacted
+errors keep content out of process listings and logs.
+
+The public agent flow creates one phone-global visible proposal and does not
+invoke the confirmation handlers.  Confirmation is proposal-specific, expires,
+requires the SMS buffer to remain the active target, disarms on unrelated input,
+and is consumed before modem I/O.  Serialization prevents overlapping sends.
+The terminal result makes irreducible delivery ambiguity explicit and prevents
+a retry from duplicating a message.  There is no new network endpoint or
+authorization token.
+
+As in the already shipped call-confirmation design, this contains accidental
+or instruction-missing use of the advertised public command.  The current
+full-trust =eval_elisp= and file-backed =execute= authorities can deliberately
+invoke internal Lisp or the existing exact =doas= command; Emacs cannot prove
+physical event provenance.  This change does not claim a hostile-agent security
+boundary.  Removing universal device-code authority or introducing a trusted
+confirmation UI is a separate cross-cutting design, not an SMS-only layer.
+
+* Implementation plan
+
+1. Move generic =eval_elisp= expressions from argv to stdin and pin the unchanged
+   result/error contract in server tests plus a real local Emacs daemon/
+   =emacsclient= integration test.
+2. Implement =phone-sms.el= with validation, immutable proposal identity,
+   two-tap confirmation, asynchronous completion, and terminal states; add it
+   to the shared and PinePhone load paths.
+3. Implement and adversarially test the stdin-only D-Bus helper and PinePhone
+   async adapter, including malformed/oversized input, extra keys, lock
+   contention, multiple modems, pre-Create failure, and ambiguity from a
+   Create attempt onward.
+4. Extend the atomic OpenRC manifest, installer, updater, rollback, ownership,
+   dependency, and doas contracts for both new installed files.
+5. Add the remote-server agent skill and tests proving contact-resolution/
+   disambiguation, exact text preservation, staging language, and absence of a
+   new server tool.  Deploy and restart that server separately from the phone.
+6. Run ERT, server tests, PinePhone script tests, byte compilation, deterministic
+   smoke, and the full local review loop to convergence.
+7. Rebase after the currently deployed thread-client change lands.  Deploy the
+   combined payload through the phone transaction, stage a harmless proposal,
+   inspect the captured screen and process argv, and verify cancel/expiry.  A
+   live SMS send waits for Pierre's local two-tap confirmation.
+
+* Acceptance
+
+- Direct and agent-created proposals render the exact recipient and full body.
+- Invalid or oversized data never reaches the helper; independently malformed
+  helper input never reaches D-Bus.
+- One tap never sends.  A second consecutive tap sends once; cancel, expiry,
+  restage, unrelated input, and buffer loss all disarm.
+- Emacs stays responsive throughout a delayed or failed modem operation.
+- Process argv, doas/OpenRC/helper stdout and stderr, and operational journals
+  contain neither recipient nor body.  The requested message necessarily
+  remains in the user's chat transcript/checkpoint.
+- Confirmed send, definite pre-Create failure, and uncertainty from a Create
+  attempt onward render distinct terminal states and never auto-retry.
+- The local agent resolves a contact and stages, rather than sends, the proposal.
+- One phone-global proposal/operation exists even if multiple views or late
+  callbacks are present; hidden buffers cannot arm or compete.
+- The SMS screen has Cancel before sending, no controls while sending, and one
+  Done control after a terminal result.  Cancel and Done restore the previously
+  visible top buffer.  Hidden completion never steals the active screen;
+  the phone-global =SMS= badge opens the retained result and makes Done return
+  to that current screen.  An unknown result remains inspectable until Done.
+- Direct use is available as a normal =New message= command that prompts for
+  recipient and body, then enters the same immutable preview.  There is no
+  second compose surface.
+- The Assist Web client exposes no SMS action while local =*chat*= can stage.
+- Existing calls, chat, Firefox, Waydroid, networking, boot recovery, and the
+  Raspberry Pi defaults remain unchanged.
+
+* Design decisions rejected
+
+- No SMS-specific HTTP/API tool: it would duplicate =eval_elisp= and create a
+  second authorization surface.
+- No server-side PIN/store or automatic send: confirmation and proposal state
+  belong to the local client.
+- No reuse of the legacy =sms_forward.send_sms=: it sends immediately, rewrites
+  quote characters, and passes content in process arguments.
+- No automatic retry after creation: that can duplicate a real message.
+- No strict leading-plus requirement: the shared call primitive already accepts
+  domestic digit strings, while the agent guidance still prefers E.164.
+
+* Live result
+
+On 2026-09-07 Pierre confirmed the deployed phone flow worked end to end: the
+proposal was reviewed locally, confirmed with the second Send tap, and sent by
+the PinePhone modem.  The earlier failed attempt occurred while the modem was
+not registered; the follow-up guard now rejects that state before SMS creation
+as =not-sent:no-service=.

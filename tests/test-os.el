@@ -12,6 +12,11 @@
 (require 'cl-lib)
 (require 'os)
 
+(ert-deftest test-os-default-modeline-includes-sms-status ()
+  "Every ordinary EmacsOS buffer exposes pending SMS status."
+  (should (member '(:eval (emacos-sms-mode-line-string))
+                  (default-value 'mode-line-format))))
+
 ;;; emacos--mode-commands-for (parent walk)
 
 (ert-deftest test-os-mode-commands-direct ()
@@ -103,11 +108,11 @@ never an empty list — so a plain text buffer keeps them one tap away."
                   ((symbol-function 'window-buffer) (lambda (_) chat-buf)))
           (let ((emacos--chat-in-flight nil))
             (should (equal (mapcar #'car (emacos--top-commands))
-                           '("New chat"))))
+                           '("New chat" "New message"))))
           ;; In flight, the abort path must surface via top-commands.
           (let ((emacos--chat-in-flight t))
             (should (equal (mapcar #'car (emacos--top-commands))
-                           '("ABORT")))))
+                           '("ABORT" "New message")))))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer chat-buf)))))
 
@@ -163,14 +168,14 @@ compares against the full set)."
 (ert-deftest test-os-chat-command-set-idle ()
   (let ((emacos--chat-in-flight nil))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("New chat")))))
+                   '("New chat" "New message")))))
 
 (ert-deftest test-os-chat-command-set-in-flight-shows-abort ()
   "The abort path must survive mid-stream: in flight, the second button
 is ABORT, not New chat."
   (let ((emacos--chat-in-flight t))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("ABORT")))))
+                   '("ABORT" "New message")))))
 
 ;;; emacos--unit-width (pure per-unit width math)
 

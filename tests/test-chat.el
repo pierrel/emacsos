@@ -374,16 +374,16 @@ bot line if a stream was open (start handler had run)."
 
 (ert-deftest chat-test-command-set-shows-abort-when-in-flight ()
   "The chat command set's first button is \"New chat\" when idle and ABORT
-while a stream is in flight (re-derived on every render).  SEND is no
-longer in this list — it moved to the utility-row Chat/SEND button."
+while a stream is in flight (re-derived on every render).  New message stays
+second.  SEND moved to the utility-row Chat/SEND button."
   (chat-test--reset)
   (require 'os)
   (let ((emacos--chat-in-flight nil))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("New chat"))))
+                   '("New chat" "New message"))))
   (let ((emacos--chat-in-flight t))
     (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("ABORT"))))
+                   '("ABORT" "New message"))))
   (setq emacos--chat-in-flight nil))
 
 ;;; Chat/SEND utility button (emacos--chat-button)

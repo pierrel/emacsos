@@ -78,7 +78,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
 	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token && chmod 0644 ~/.config/emacsos/assist-web-ca.pem"
@@ -92,12 +92,12 @@ phone-install:
 
 local-deploy:
 	ssh $(PINEPHONE_HOST) mkdir -p $(PHONE_EMACSOS_DIR)
-	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
 	# run -- the snippet re-applies both chat and Assist Web API URLs,
 	# which their reloaded defcustoms would otherwise reset.  Conditional
 	# so a fresh phone still gets a working code reload.
-	ssh $(PINEPHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
+	ssh $(PINEPHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-sms.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
 
 # Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
 # docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific
@@ -190,7 +190,7 @@ playground-install:
 	@echo "✓ playground files installed to phone:$(PHONE_PLAYGROUND_DIR)/"
 
 test-elisp:
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

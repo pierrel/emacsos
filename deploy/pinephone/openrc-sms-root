@@ -1,0 +1,175 @@
+#!/usr/bin/python3 -I
+"""Bounded root helper for one exact outbound ModemManager SMS."""
+
+import fcntl
+import json
+import os
+import re
+import signal
+import sys
+
+import dbus
+
+MAX_REQUEST_BYTES = 32768
+MAX_BODY_BYTES = 4096
+NUMBER_RE = re.compile(r"\+?[0-9]{5,15}\Z")
+SMS_PATH_RE = re.compile(r"/org/freedesktop/ModemManager1/SMS/[0-9]+\Z")
+MM_NAME = "org.freedesktop.ModemManager1"
+MM_ROOT = "/org/freedesktop/ModemManager1"
+OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
+MESSAGING = "org.freedesktop.ModemManager1.Modem.Messaging"
+THREE_GPP = "org.freedesktop.ModemManager1.Modem.Modem3gpp"
+SMS = "org.freedesktop.ModemManager1.Sms"
+LOCK_PATH = "/run/emacsos-openrc-sms.lock"
+
+# ModemManager's 3GPP values which can carry an SMS: home, roaming, and the
+# LTE variants that explicitly retain SMS service.  Do not create an SMS
+# object while the radio is searching, denied, or only emergency-capable.
+SMS_READY_REGISTRATION_STATES = frozenset((1, 5, 6, 7, 9, 10))
+
+
+class InputTimeout(Exception):
+    """The request writer did not complete within the input deadline."""
+
+
+def _alarm(_signum, _frame):
+    raise InputTimeout()
+
+
+def parse_request(raw):
+    """Return validated ``(number, text)`` from bounded JSON bytes."""
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError("oversized")
+    value = json.loads(raw.decode("utf-8"))
+    if not isinstance(value, dict) or set(value) != {"number", "text"}:
+        raise ValueError("shape")
+    number, text = value["number"], value["text"]
+    if not isinstance(number, str) or not NUMBER_RE.fullmatch(number):
+        raise ValueError("number")
+    if (not isinstance(text, str) or not text or "\0" in text or
+            len(text.encode("utf-8")) > MAX_BODY_BYTES):
+        raise ValueError("text")
+    return number, text
+
+
+def _emit(status):
+    """Emit one controlled terminal line without request or exception data."""
+    sys.stdout.write(status + "\n")
+    sys.stdout.flush()
+
+
+def send_sms(bus, number, text, attempt=None):
+    """Send exact NUMBER/TEXT through one captured ModemManager owner."""
+    try:
+        owner = str(bus.get_name_owner(MM_NAME))
+        if not re.fullmatch(r":[0-9]+\.[0-9]+", owner):
+            return "not-sent:dbus-unavailable"
+        manager = dbus.Interface(bus.get_object(owner, MM_ROOT), OBJECT_MANAGER)
+        objects = manager.GetManagedObjects(timeout=10)
+        modems = [(str(path), interfaces) for path, interfaces in objects.items()
+                  if MESSAGING in interfaces]
+    except InputTimeout:
+        raise
+    except Exception:
+        return "not-sent:dbus-unavailable"
+    if not modems:
+        return "not-sent:no-modem"
+    if len(modems) != 1:
+        return "not-sent:multiple-modems"
+
+    modem_path, modem_interfaces = modems[0]
+    try:
+        registered = int(modem_interfaces[THREE_GPP]["RegistrationState"])
+    except (KeyError, TypeError, ValueError):
+        return "not-sent:no-service"
+    if registered not in SMS_READY_REGISTRATION_STATES:
+        return "not-sent:no-service"
+
+    try:
+        messaging = dbus.Interface(bus.get_object(owner, modem_path), MESSAGING)
+    except InputTimeout:
+        raise
+    except Exception:
+        return "not-sent:dbus-unavailable"
+
+    try:
+        if attempt is not None:
+            attempt["create"] = True
+        path = str(messaging.Create(
+            dbus.Dictionary({"number": dbus.String(number),
+                             "text": dbus.String(text)}, signature="sv"),
+            timeout=15))
+    except InputTimeout:
+        raise
+    except Exception:
+        # Create may have reached ModemManager even if its reply was lost.
+        return "unknown:create-failed"
+    if not SMS_PATH_RE.fullmatch(path):
+        return "unknown:create-failed"
+
+    try:
+        dbus.Interface(bus.get_object(owner, path), SMS).Send(timeout=30)
+    except InputTimeout:
+        raise
+    except Exception:
+        return "unknown:send-failed"
+
+    # A successful Send call means ModemManager accepted the message.  It does
+    # not prove carrier or recipient delivery.  Cleanup cannot change that.
+    try:
+        messaging.Delete(dbus.ObjectPath(path), timeout=10)
+    except Exception:
+        pass
+    return "sent"
+
+
+def main():
+    """Validate stdin, serialize modem mutation, and emit one terminal result."""
+    if os.geteuid() != 0 or len(sys.argv) != 1:
+        _emit("not-sent:invalid-input")
+        return 2
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(3)
+    try:
+        raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+        number, text = parse_request(raw)
+    except InputTimeout:
+        _emit("not-sent:input-timeout")
+        return 2
+    except (UnicodeError, ValueError, TypeError):
+        _emit("not-sent:invalid-input")
+        return 2
+    finally:
+        signal.alarm(0)
+
+    attempt = {"create": False}
+    try:
+        signal.alarm(60)
+        lock_file = open(LOCK_PATH, "a+b")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            status = "not-sent:busy"
+        else:
+            try:
+                bus = dbus.SystemBus()
+            except InputTimeout:
+                raise
+            except Exception:
+                status = "not-sent:dbus-unavailable"
+            else:
+                status = send_sms(bus, number, text, attempt)
+    except InputTimeout:
+        status = ("unknown:time-limit" if attempt["create"]
+                  else "not-sent:time-limit")
+    except Exception:
+        status = ("unknown:dbus-unavailable" if attempt["create"]
+                  else "not-sent:dbus-unavailable")
+    finally:
+        signal.alarm(0)
+    _emit(status)
+    return 0 if status == "sent" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

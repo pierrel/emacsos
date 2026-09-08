@@ -18,6 +18,9 @@ from typing import Iterator
 
 log = logging.getLogger(__name__)
 
+MAX_EXPRESSION_BYTES = 256_000
+"""Largest Elisp expression accepted by the shared phone transport."""
+
 
 class AuthFileParseError(ValueError):
     """Raised when the posted auth file does not parse."""
@@ -84,10 +87,17 @@ def call_emacs(
 ) -> tuple[bool, str]:
     """Send an elisp expression to the phone.
 
-    Returns ``(ok, output_or_error)``.  ``ok`` is False if the auth
-    file is unparseable, emacsclient exited non-zero, timed out, or
-    could not be invoked.
+    Returns ``(ok, output_or_error)``.  ``ok`` is False if the expression is
+    oversized, the auth file is unparseable, emacsclient exited non-zero,
+    timed out, or could not be invoked.
     """
+    expression_bytes = len(expr.encode("utf-8"))
+    if expression_bytes > MAX_EXPRESSION_BYTES:
+        return (
+            False,
+            f"elisp expression is {expression_bytes} bytes; "
+            f"max {MAX_EXPRESSION_BYTES}",
+        )
     try:
         with _auth_file(auth_contents, phone_host) as path:
             # `-q` suppresses emacsclient's "connected to remote socket
@@ -98,9 +108,11 @@ def call_emacs(
             # agent reads `"connected to remote socket at 1.2.3.4\\n3"`
             # and may echo the diagnostic in its reply.
             result = subprocess.run(
-                [emacsclient, "-q", "-f", path, "-e", expr],
+                [emacsclient, "-q", "-f", path, "-e"],
+                input=expr + "\n",
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout,
             )
     except AuthFileParseError as e:

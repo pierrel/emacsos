@@ -16,7 +16,7 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
-    openrc-call-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
@@ -24,7 +24,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el; do
+for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
@@ -146,6 +146,8 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     alsaucm callaudiocli mmcli gdbus; do
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
+printf '%s\n' '#!/bin/sh' 'exit 0' >/usr/bin/python3
+chmod 0755 /usr/bin/python3
 install -d -o root -g root -m 0750 /etc/doas.d
 install -d -o root -g root -m 0755 /etc/init.d /usr/local/sbin
 install -d -o root -g root -m 0755 /etc/nftables.d
@@ -176,6 +178,7 @@ fi
 [ ! -e /usr/local/sbin/emacsos-openrc-boot-mode ]
 [ ! -e /usr/local/sbin/emacsos-openrc-suspend ]
 [ ! -e /usr/local/sbin/emacsos-openrc-call ]
+[ ! -e /usr/local/sbin/emacsos-openrc-sms ]
 [ ! -e /usr/local/sbin/emacsos-openrc-network ]
 [ ! -e /etc/emacsos-openrc ]
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ]
@@ -208,6 +211,7 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /usr/local/sbin/emacsos-openrc-call ]
+[ -x /usr/local/sbin/emacsos-openrc-sms ]
 [ -x /usr/local/sbin/emacsos-openrc-network ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
@@ -230,6 +234,7 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/libexec/emacsos-waydroid-container \
     /usr/local/sbin/emacsos-openrc-suspend \
     /usr/local/sbin/emacsos-openrc-call \
+    /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/sbin/emacsos-openrc-boot-mode \
     /etc/nftables.d/49-emacsos-callback.nft \
@@ -295,6 +300,7 @@ fi
     "$(printf '%s\n' \
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
         'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
+        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
     'root:root:600:1:regular file' ]
@@ -349,7 +355,9 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/emacos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
+    /usr/local/share/emacsos-openrc/phone-sms.el \
     /usr/local/sbin/emacsos-openrc-call \
+    /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
