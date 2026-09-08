@@ -8,6 +8,12 @@ build_dir=$repo_dir/.build/wvkbd-test
 artifact=$build_dir/wvkbd-emacos
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+build_image=$(awk -F "'" '$1 == "image=" && NF == 3 { print $2 }' \
+    "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh")
+[ -n "$build_image" ] && [ "$(printf '%s\n' "$build_image" | wc -l)" -eq 1 ] || {
+    printf '%s\n' 'could not read the pinned keyboard build image' >&2
+    exit 1
+}
 
 for script in \
     "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" \
@@ -56,8 +62,7 @@ readelf -l "$artifact" |
 
 docker run --rm \
     -v "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root:/root-helper:ro" \
-    -v "$artifact:/artifact:ro" \
-    alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
+    -v "$artifact:/artifact:ro" "$build_image" \
     /bin/sh -ec '
         adduser -D user
         install -d -o user -g user -m 0700 /home/user/.cache
