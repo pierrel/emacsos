@@ -541,7 +541,7 @@ every agent-config load."
   "Return non-nil when PID is the expected isolated keyboard process."
   (let* ((default-directory "/")
          (attributes (and pid (process-attributes (string-to-number pid)))))
-    (and (equal (alist-get 'comm attributes) "wvkbd-mobintl")
+    (and (equal (alist-get 'comm attributes) "wvkbd-emacos")
          (equal (alist-get 'user attributes) "emacsos-lab"))))
 
 (defun emacsos-pinephone-find-wvkbd-pid ()
@@ -550,7 +550,7 @@ every agent-config load."
     (with-temp-buffer
       (when (zerop (call-process "/usr/bin/pgrep" nil t nil
                                 "-u" "emacsos-lab" "-f"
-                                "^/usr/bin/wvkbd-mobintl -H 300 -L 300$"))
+                                "^/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300$"))
         (let ((pids (split-string (buffer-string) "\n" t)))
           (and (= (length pids) 1) (car pids)))))))
 

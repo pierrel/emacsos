@@ -131,9 +131,14 @@ grep -F 'rm -f -- "$runtime/failure"' \
     "$deploy_dir/openrc-session" >/dev/null
 grep -F 'grep -Fx t "$probe_file"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'Goodix Capacitive TouchScreen' "$deploy_dir/openrc-session" >/dev/null
-grep -F '/usr/bin/wvkbd-mobintl -H 300 -L 300' "$deploy_dir/openrc-session" >/dev/null
+grep -F '/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300' \
+    "$deploy_dir/openrc-session" >/dev/null
+if grep -F '/usr/bin/wvkbd-mobintl' "$deploy_dir/openrc-session" >/dev/null; then
+    printf '%s\n' 'OpenRC session still launches the stock keyboard' >&2
+    exit 1
+fi
 grep -F 'export EMACSOS_WVKBD_PID=$keyboard_pid' "$deploy_dir/openrc-session" >/dev/null
-keyboard_line=$(grep -nF '/usr/bin/wvkbd-mobintl -H 300 -L 300' \
+keyboard_line=$(grep -nF '/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300' \
     "$deploy_dir/openrc-session")
 keyboard_line=${keyboard_line%%:*}
 emacs_line=$(grep -nF '/usr/bin/emacs -Q --load "$root/init.el" &' \
