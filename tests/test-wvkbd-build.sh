@@ -14,8 +14,8 @@ sh -n "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root"
 grep -Fx '6bc2052a6a83254efc838265bde45004d4446a22' \
     "$repo_dir/deploy/pinephone/wvkbd-revision" >/dev/null
-make -C "$wvkbd_dir" -n BIN=wvkbd-emacos LAYOUT=mobintl |
-    grep -F ' -o wvkbd-emacos ' >/dev/null
+make_output=$(make -C "$wvkbd_dir" -n BIN=wvkbd-emacos LAYOUT=mobintl)
+printf '%s\n' "$make_output" | grep -F ' -o wvkbd-emacos ' >/dev/null
 grep -F 'target=/usr/local/bin/wvkbd-emacos' \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root" >/dev/null
 if grep -F 'target=/usr/bin/wvkbd-mobintl' \
