@@ -121,6 +121,9 @@ and complexity without improving the phone's normal assistant output.
 - =assist-web.el= validates unique message ids, formats canonical records, keeps
   loaded history during recent-page refreshes, and restores logical point and
   viewport anchors across its full redraw.
+- =deploy/pinephone/openrc-manifest.sha256= pins the changed modules so the
+  hash-checked OpenRC update installs them into its persistent root-owned module
+  directory.
 - The code adds no package dependency.  It uses built-in faces, text
   properties, markers, and visual-line mode only.
 
@@ -160,13 +163,17 @@ finding was rejected or deferred.
 * Deployment sequencing
 
 The phone currently runs the custom keyboard recorded by EmacsOS commit
-=5ba9300= and wvkbd commit =1ac7c86=.  This branch starts from EmacsOS =main=
-because feature lanes must not stack.  Deployment will wait for the active
-phone reservation and coordinate with the keyboard and command-surface lanes.
-Only after proving the deploy command cannot replace the supervised wvkbd
-binary/process will the changed Emacs client files be hot-loaded.  The keyboard
-process and checksum are verified again afterward.  No merge occurs without
-Pierre's approval.
+=5ba9300= and wvkbd commit =1ac7c86=, plus the separately reviewed command
+surface commit =043790d=.  This review branch starts from EmacsOS =main=
+because feature lanes must not stack.  Deployment uses a temporary, unpushed
+integration branch from the exact verified combined live commit =7c6b0fb= and
+applies this review commit on top.  The full hash-pinned OpenRC update then
+installs all three features together into the root-owned persistent module
+directory.  Combined deployment tests must pass before the update; the OpenRC
+init, command reference, keyboard binary/process, and installed conversation
+module hashes are verified afterward.  The temporary integration ancestry
+does not enter this feature's pull request.  No merge occurs without Pierre's
+approval.
 
 * Lineage
 
