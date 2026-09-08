@@ -11,12 +11,14 @@ snapshot=
 backup=
 boot_tmp=
 doas_tmp=
+reference_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=9eac92d6379d6602790fc073521082b4f810b1e721357265b3bca88bc18395fc
+manifest_hash=95c01b7705ff06ff9eeb2c841d4cf9aefc82bb45b88fc66788ca6c66d07e5e97
 mutating=0
 committed=0
 restart_only=0
+reference_restore_failed=0
 config_dir_created=0
 token_parent_dir_created=0
 token_config_dir_created=0
@@ -116,6 +118,31 @@ restore_file() {
     fi
 }
 
+restore_reference() {
+    target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+    if [ -f "$backup/EMACSOS-COMMANDS.org" ]; then
+        reference_tmp=$(mktemp /var/lib/.emacsos-command-reference.XXXXXX)
+        install -o root -g root -m 0600 "$backup/EMACSOS-COMMANDS.org" \
+            "$reference_tmp"
+        cmp -s "$backup/EMACSOS-COMMANDS.org" "$reference_tmp" &&
+            [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_tmp")" = \
+                'root:root:600:1:regular file' ] &&
+            chown emacsos-lab:emacsos-lab "$reference_tmp" &&
+            mv -fT -- "$reference_tmp" "$target" || {
+            printf '%s\n' \
+                'emacsos-openrc-update: command reference rollback failed' >&2
+            return 1
+        }
+        reference_tmp=
+    elif [ -e "$target" ] || [ -L "$target" ]; then
+        [ -f "$target" ] && [ ! -L "$target" ] && rm -f -- "$target" || {
+            printf '%s\n' \
+                'emacsos-openrc-update: command reference rollback failed' >&2
+            return 1
+        }
+    fi
+}
+
 retain_backup() {
     retained=$backup
     backup=
@@ -164,6 +191,7 @@ cleanup() {
                 chown emacsos-lab:emacsos-lab \
                     /var/lib/emacsos-lab/.config/emacsos/assist-web-token
             fi
+            restore_reference || reference_restore_failed=1
             [ "$token_config_dir_created" -eq 0 ] ||
                 rmdir /var/lib/emacsos-lab/.config/emacsos 2>/dev/null || true
             [ "$token_parent_dir_created" -eq 0 ] ||
@@ -182,6 +210,9 @@ cleanup() {
                     'emacsos-openrc-update: rollback UI failed to start' >&2
                 retain_backup
             fi
+            if [ "$reference_restore_failed" -eq 1 ] && [ -n "$backup" ]; then
+                retain_backup
+            fi
         fi
     elif [ "$restart_only" -eq 1 ] && [ "$committed" -eq 0 ]; then
         if stop_ui >/dev/null 2>&1; then
@@ -197,6 +228,7 @@ cleanup() {
     [ -z "$backup" ] || rm -rf -- "$backup"
     [ -z "$boot_tmp" ] || rm -f -- "$boot_tmp"
     [ -z "$doas_tmp" ] || rm -f -- "$doas_tmp"
+    [ -z "$reference_tmp" ] || rm -f -- "$reference_tmp"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -229,7 +261,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -239,7 +271,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 29 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 30 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
@@ -248,7 +280,8 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
-    emacos-assist.el network.el phone-call.el phone-sms.el openrc-call-root openrc-sms-root \
+    emacos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
+    openrc-call-root openrc-sms-root \
     openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
     install -o root -g root -m 0600 /dev/null "$snapshot/$name"
@@ -350,6 +383,13 @@ if [ -e "$token_target" ] || [ -L "$token_target" ]; then
             'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
         fail 'unsafe installed Assist Web token'
 fi
+reference_target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+if [ -e "$reference_target" ] || [ -L "$reference_target" ]; then
+    [ -f "$reference_target" ] && [ ! -L "$reference_target" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_target")" = \
+            'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
+        fail 'unsafe installed command reference'
+fi
 for pair in \
     'openrc-init.el:/usr/local/share/emacsos-openrc/init.el' \
     'dtach-shell.el:/usr/local/share/emacsos-openrc/dtach-shell.el' \
@@ -380,6 +420,38 @@ for pair in \
     target=${pair#*:}
     [ ! -e "$target" ] || install -o root -g root -m 0600 "$target" "$backup/$name"
 done
+if [ -e "$reference_target" ]; then
+    install -o root -g root -m 0600 /dev/null "$backup/EMACSOS-COMMANDS.org"
+    su emacsos-lab -s /usr/bin/python3 -c '
+import os
+import stat
+import sys
+
+path = "/var/lib/emacsos-lab/EMACSOS-COMMANDS.org"
+fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+info = os.fstat(fd)
+if (
+    not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.getuid()
+    or info.st_gid != os.getgid()
+    or stat.S_IMODE(info.st_mode) != 0o600
+    or info.st_nlink != 1
+):
+    raise SystemExit("unsafe command reference")
+with os.fdopen(fd, "rb") as source:
+    content = source.read(65537)
+if len(content) > 65536:
+    raise SystemExit("oversized command reference")
+sys.stdout.buffer.write(content)
+' \
+        >"$backup/EMACSOS-COMMANDS.org"
+    [ -f "$backup/EMACSOS-COMMANDS.org" ] &&
+        [ ! -L "$backup/EMACSOS-COMMANDS.org" ] &&
+        [ "$(stat -c '%U:%G:%h:%F' "$backup/EMACSOS-COMMANDS.org")" = \
+            'root:root:1:regular file' ] &&
+        [ "$(stat -c '%s' "$backup/EMACSOS-COMMANDS.org")" -le 65536 ] ||
+        fail 'unsafe command reference backup'
+fi
 
 mutating=1
 restart_only=0
@@ -441,6 +513,15 @@ install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /var/lib/emacsos-lab/.config /var/lib/emacsos-lab/.config/emacsos
 install -o emacsos-lab -g emacsos-lab -m 0600 "$snapshot/assist-web-token" \
     /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+reference_tmp=$(mktemp /var/lib/.emacsos-command-reference.XXXXXX)
+install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org" \
+    "$reference_tmp"
+cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"
+[ "$(stat -c '%U:%G:%a:%h:%F' "$reference_tmp")" = \
+    'root:root:600:1:regular file' ]
+chown emacsos-lab:emacsos-lab "$reference_tmp"
+mv -fT -- "$reference_tmp" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+reference_tmp=
 install -o root -g root -m 0644 "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 rm -f -- /etc/nftables.d/95-emacsos-callback.nft

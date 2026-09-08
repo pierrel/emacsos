@@ -142,48 +142,15 @@ decision; under MOD, caps is ignored and canonical lowercase keys
 go to the keymap walker).  Full design + decisions in
 [[file:docs/2026-05-27-modifier-keys.org][2026-05-27-modifier-keys.org]].
 
-** DONE Dynamic keyboard surface based on top buffer
+** DONE Ordinary UI has no Emacs control pane
 
-Shipped as the *single keyboard + commands combo*
-([[file:docs/2026-05-21-keyboard-ergonomics.org][docs/2026-05-21-keyboard-ergonomics.org]], §"Rework", PR #11).  An
-earlier swap-page design (the bottom window showed ONE of
-KBD/CMD/MODE/CHAT at a time, auto/pinned) was *rejected on review* —
-it hid the keyboard.  As built: the T9 keyboard is ALWAYS visible; a
-*command list* under it shows up to 10 of the top buffer's mode commands
-(=*chat*= → New chat/ABORT/New message; a mode in =emacos-mode-commands= → its
-set; everything else → =emacos-global-commands=); a persistent utility
-row =[QUIT] [M-x] [Chat]= keeps escape, manual command entry, and the
-chat app one tap away.  The list follows the top buffer via
-=window-buffer-change-functions=.  (Layout v2: uniform button height,
-scrollable; DEL (1/3) + SPC (2/3); CAPS/TAB/RET with double-wide RET;
-QUIT = smart escape that clears popup/minibuffer clutter off the top.)
-
-Remaining follow-ups (the combo makes these safe to grow incrementally
-— the global-commands fallback means an un-enriched mode still works):
-
-*** TODO Enrich =emacos-mode-commands= for more modes
-
-Today: org, emacs-lisp, dired.  Add magit, prog-mode/text-mode
-defaults, etc.  Order each list by priority — the command list shows up
-to =emacos--max-commands= (10), one per row (overflow → M-x).  React on
-the phone to decide which commands earn a slot.
-
-*** TODO Transient-buffer derivation ignore-list
-
-The command list re-derives on =window-buffer-change=; transient popups
-(=*Completions*=, =*Help*=) briefly on top can flip it.  The
-unchanged-set no-op absorbs most, but a popup whose mode has a command
-set would flicker.  Add an ignore-list (or special-mode skip) if it's
-annoying live.
-
-*** TODO Chat button doubles as SEND inside *chat*; drop the SEND button
-
-The utility row's =Chat= button switches the top window to =*chat*=.
-When you're ALREADY in =*chat*=, "go to chat" is a no-op — so make the
-=Chat= button SEND the current input instead, and remove the dedicated
-SEND entry from the chat command list.  Net: one fewer button, and the
-most-used chat action moves to the always-present utility row.  =Chat= =
-"open chat" when elsewhere, "send" when already in =*chat*=.
+The original built-in T9 keyboard and later keyboard/command combination are
+recorded in [[file:docs/2026-05-21-keyboard-ergonomics.org][the historical keyboard design]].  The PinePhone now uses the compositor
+modifier-swipe keyboard, so ordinary chat, editing, and Assist buffers give the
+whole Emacs area to content.  =Meta+x= reaches every interactive command; no
+per-buffer command list or persistent utility pane remains.  A temporary
+control window appears only for call and SMS confirmations, then is deleted.
+See [[file:docs/2026-09-08-remove-control-pane.org][the corrective design]].
 
 ** DONE Tab button on the keyboard
 
@@ -285,11 +252,10 @@ The next experiment *immediately after* conversation history — we go
 straight here, deliberately skipping any intermediate "N-level only"
 chat-revert step.
 
-Today config undo is strictly one-level: the phone ROLLBACK button calls
+Today =M-x emacos--chat-rollback= is strictly one-level: it calls
 =config_repo.rollback()= → =git revert --no-edit HEAD=, undoing only the
-most recent =apply_config=.  *That one-level button stays as-is* — it's
-the quick "undo the thing I just did" fast path, and it's all the button
-needs to be.
+most recent =apply_config=.  It remains the quick "undo the thing I just did"
+path.
 
 The full system is conversational and *targeted*: "revert the change
 about X, where X is any past apply" — e.g. "undo the cursor color change
@@ -486,11 +452,10 @@ section of each landed experiment's design doc:
 
 * Usability
 
-These add EmacsOS's first device-side system-integration layer: today =os.el= is
-pure UI (keyboard, command list, =*chat*=) and shells out to nothing.  The EmacsOS
-way is elisp wrapping the system CLIs (=call-process= / =start-process=), surfaced
-as dedicated buffers/modes that plug into the always-visible keyboard +
-=emacos-mode-commands= list.  Dependency order isn't the list order below:
+These add EmacsOS's first device-side system-integration layer.  The EmacsOS
+way is elisp wrapping system CLIs (=call-process= / =start-process=), surfaced
+as dedicated buffers and ordinary interactive commands.  Dependency order
+isn't the list order below:
 *Numbers* unblocks Wifi (passwords) and Phone calling (dialing), and the three
 cellular items block on the "Actual phone build" hardware.  Text messaging is the
 cheapest cellular win (no audio), so it's the natural first proof the modem works.
@@ -500,7 +465,7 @@ I need a mode for seeing and connecting to wifi.
 
 A =emacos-wifi-mode= buffer (=tabulated-list-mode=) that scans and lists SSIDs with
 signal + security, shows the current connection, and offers Connect / Disconnect /
-Forget as =emacos-mode-commands= entries; passphrase entry runs through the existing
+Forget as interactive commands; passphrase entry runs through the existing
 keyboard into a masked minibuffer prompt.  Back it with the image's network stack —
 confirm whether that's =nmcli= (NetworkManager) or =wpa_cli= (=wpa_supplicant=);
 prefer =nmcli= (far easier to script, and saved-network + auto-reconnect come free),

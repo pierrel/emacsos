@@ -45,7 +45,8 @@ for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el; do
+for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+    EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
 cp -- "$deploy_dir/openrc-manifest.sha256" "$manifest_stage/"
@@ -54,7 +55,8 @@ manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
-expected='assist-web.el
+expected='EMACSOS-COMMANDS.org
+assist-web.el
 chat.el
 dtach-shell-init.el
 dtach-shell.el
@@ -288,6 +290,42 @@ if grep -F 'cp -P' "$deploy_dir/openrc-bootstrap-root" \
 fi
 grep -F 'phone_host=${PINEPHONE_HOST:?' "$deploy_dir/install-openrc-session.sh" >/dev/null
 grep -F 'PasswordAuthentication=no' "$deploy_dir/install-openrc-session.sh" >/dev/null
+for client in install-openrc-session.sh update-openrc-session.sh; do
+    grep -F '"$repo_dir/EMACSOS-COMMANDS.org"' "$deploy_dir/$client" >/dev/null
+done
+grep -F 'EMACSOS-COMMANDS.org' "$deploy_dir/openrc-manifest.sha256" >/dev/null
+for root in openrc-install-root openrc-update-root; do
+    grep -F 'install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org"' \
+        "$deploy_dir/$root" >/dev/null
+    grep -F 'cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"' \
+        "$deploy_dir/$root" >/dev/null
+    grep -F 'mktemp /var/lib/.emacsos-command-reference.XXXXXX' \
+        "$deploy_dir/$root" >/dev/null
+    grep -F 'chown emacsos-lab:emacsos-lab "$reference_tmp"' \
+        "$deploy_dir/$root" >/dev/null
+    if grep -F 'cmp -s "$snapshot/EMACSOS-COMMANDS.org" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+            "$deploy_dir/$root" >/dev/null; then
+        printf '%s\n' 'root verifier follows the mutable command reference' >&2
+        exit 1
+    fi
+done
+grep -F 'ln -- "$reference_tmp" /var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
+    "$deploy_dir/openrc-install-root" >/dev/null
+grep -F "trap '' HUP INT TERM" "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'restore_reference' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'source.read(65537)' "$deploy_dir/openrc-update-root" >/dev/null
+for command in emacsos-firefox-start emacsos-firefox-quit \
+    emacsos-android-start emacsos-android-quit \
+    emacos--chat-show-top-buffer emacos-send-message emacos-call emacos-answer \
+    emacos-hang-up emacos-net-show dtach-shell; do
+    grep -F "$command" "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
+done
+grep -F '=C-c C-a=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
+grep -F '=C-c d=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
+grep -F '=Alt+Tab=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 grep -F 'ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token' \
     "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'ASSIST_WEB_CA_FILE:-$HOME/.local/share/mkcert/rootCA.pem' \
@@ -365,6 +403,12 @@ if grep -F '(setq gnutls-trustfiles' "$deploy_dir/openrc-init.el" \
 fi
 grep -F 'emacos-assist-web-api-url' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'make-process' "$deploy_dir/openrc-init.el" >/dev/null
+if grep -E 'openrc-home|openrc-buffer|status-marker|pinephone-set-status|pinephone-insert-button|Lab home' \
+        "$deploy_dir/openrc-init.el" \
+        "$repo_dir/tests/test-pinephone-openrc-init.el" >/dev/null; then
+    printf '%s\n' 'obsolete Lab Home surface remains' >&2
+    exit 1
+fi
 if grep -Eq '/home/|192\.168\.' \
         "$deploy_dir/openrc-init.el" \
         "$deploy_dir/openrc-session" \

@@ -77,25 +77,12 @@ trailing empty prompt is harmless and reused).  No-op when unmodified."
       (save-buffer))))
 
 (defvar-local emacos-assist--forget-confirm-pending nil
-  "Non-nil when Forget has been tapped once and awaits a confirming
-second tap — the button relabels to \"Confirm forget?\".  Cleared by
-the confirming tap (`emacos-assist-forget'), or by tapping anything
-else (`emacos-assist--maybe-disarm-forget' on
-`emacos--confirm-disarm-functions').  Buffer-local because each
-.assist file has its own pending state.
+  "Non-nil when Forget awaits a confirming second command invocation.
+Cleared by `emacos-assist-forget' or by another EmacsOS button action.
+Buffer-local because each .assist file has its own pending state.
 
 This replaced a `y-or-n-p' modal that couldn't be tapped on the
 phone touchscreen — mirrors the same fix New-chat got in PR f0ae7f3.")
-
-(defun emacos-assist--command-set ()
-  "Command-list entries for a .assist buffer: ABORT while streaming, else
-New file + Forget (relabeled to \"Confirm forget?\" when armed)."
-  (if emacos--chat-in-flight
-      (list (cons "ABORT" #'emacos--chat-abort))
-    (list (cons "New file" #'emacos-assist-new-file)
-          (if emacos-assist--forget-confirm-pending
-              (cons "Confirm forget?" #'emacos-assist-forget)
-            (cons "Forget" #'emacos-assist-forget)))))
 
 ;;; Commands
 
@@ -111,13 +98,10 @@ New file + Forget (relabeled to \"Confirm forget?\" when armed)."
   "Forget this conversation on the server (delete its checkpoint) behind
 a TWO-TAP confirm.  The .assist file stays on disk as a transcript.
 
-The clear is irreversible (the server-side checkpoint is gone), so the
-FIRST tap only ARMS: the button relabels to \"Confirm forget?\"
-\(`emacos-assist--forget-confirm-pending').  A SECOND tap fires the
-/forget POST.  Tapping ANYTHING ELSE cancels the pending confirm via
-`emacos-assist--maybe-disarm-forget' on
-`emacos--confirm-disarm-functions'.  Tap-only — no minibuffer or GUI
-dialog, both of which fought the touchscreen
+The clear is irreversible, so the first invocation arms and reports the
+command to run again.  The second invocation fires the /forget POST.  Another
+EmacsOS button action cancels the pending confirmation.  No minibuffer or GUI
+dialog is used
 \(see [[file:../memory/feedback_phone_no_modals.md][feedback_phone_no_modals]])."
   (interactive)
   (cond
@@ -134,12 +118,10 @@ dialog, both of which fought the touchscreen
       (setq emacos-assist--forget-confirm-pending nil)
       (emacos-assist--post-forget old-tid)
       (emacos-assist--wipe-buffer))
-    (message "forgot the conversation; this chat is fresh")
-    (when (fboundp 'emacos--render-page) (emacos--render-page)))
+    (message "forgot the conversation; this chat is fresh"))
    (t
-    ;; First tap: arm, and re-render so the button relabels.
     (setq emacos-assist--forget-confirm-pending t)
-    (when (fboundp 'emacos--render-page) (emacos--render-page)))))
+    (message "Run emacos-assist-forget again to confirm forget"))))
 
 (defun emacos-assist--wipe-buffer ()
   "Reset this .assist buffer to a fresh-conversation state and persist:
@@ -159,9 +141,8 @@ chat is fresh on both sides.  Mirrors `emacos--chat-new-chat' →
   (emacos-assist--save))
 
 (defun emacos-assist--maybe-disarm-forget (action arg)
-  "Disarm `emacos-assist--forget-confirm-pending' on any button that
-ISN'T the Forget command itself.  The Forget command-list button runs
-through `emacos--run-command' with `emacos-assist-forget' as ARG.
+  "Disarm `emacos-assist--forget-confirm-pending' on another button action.
+An invocation through `emacos--run-command' identifies its command as ARG.
 
 The pending flag is buffer-local; check it in the .assist buffer
 where it lives (the top-buffer / target window) — not whatever buffer
@@ -174,8 +155,7 @@ emacs happens to be current when the tap arrives.  Registered on
                (not (and (eq action #'emacos--run-command)
                          (eq arg #'emacos-assist-forget))))
       (with-current-buffer buf
-        (setq emacos-assist--forget-confirm-pending nil))
-      (when (fboundp 'emacos--render-page) (emacos--render-page)))))
+        (setq emacos-assist--forget-confirm-pending nil)))))
 
 (add-hook 'emacos--confirm-disarm-functions
           #'emacos-assist--maybe-disarm-forget)

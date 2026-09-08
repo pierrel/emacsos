@@ -1,6 +1,6 @@
 ;;; openrc-init.el --- PinePhone EmacsOS bootstrap  -*- lexical-binding: t; -*-
 
-;; Assist-first PinePhone session with an optional synthetic lab status page.
+;; Assist-first PinePhone session with application lifecycle commands.
 
 (require 'json)
 
@@ -17,20 +17,11 @@
   (when (fboundp mode)
     (funcall mode -1)))
 
-(defconst emacsos-pinephone-openrc-buffer "*EmacsOS*"
-  "Editable PinePhone lab status buffer.")
-
 (defvar emacsos-pinephone-firefox-process nil
   "Firefox process started from the PinePhone EmacsOS session.")
 
-(defvar emacsos-pinephone-firefox-status-marker nil
-  "Marker at the start of the Firefox status shown on the home screen.")
-
 (defvar emacsos-pinephone-waydroid-process nil
   "Waydroid process started from the PinePhone EmacsOS session.")
-
-(defvar emacsos-pinephone-waydroid-status-marker nil
-  "Marker at the start of the Waydroid status shown on the home screen.")
 
 (defconst emacsos-pinephone-waydroid-config "/var/lib/waydroid/waydroid.cfg"
   "File created when the Android images have been initialized.")
@@ -38,57 +29,56 @@
 (defconst emacsos-pinephone-cell-connection "emacsos-cellular"
   "NetworkManager profile managed by the PinePhone network helper.")
 
-(require 'button)
 (require 'subr-x)
 
-(defvar emacsos-pinephone-button-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map button-map)
-    (define-key map [mouse-1] #'push-button)
-    map))
-
-(defun emacsos-pinephone-set-status (marker text)
-  "Replace the visible status at MARKER with TEXT."
-  (when (and (markerp marker) (marker-buffer marker))
-    (with-current-buffer (marker-buffer marker)
-      (save-excursion
-        (goto-char marker)
-        (delete-region (line-beginning-position) (line-end-position))
-        (insert text)))))
-
 (defun emacsos-pinephone-firefox-finished (process _event)
-  "Show when the tracked Firefox PROCESS has finished."
+  "Report when the tracked Firefox PROCESS has finished."
   (when (and (eq process emacsos-pinephone-firefox-process)
              (memq (process-status process) '(exit signal)))
     (setq emacsos-pinephone-firefox-process nil)
-    (emacsos-pinephone-set-status
-     emacsos-pinephone-firefox-status-marker "Firefox is closed.")))
+    (message "Firefox is closed.")))
 
-(defun emacsos-pinephone-open-firefox ()
-  "Start the lab Firefox profile or focus its existing window."
+(defun emacsos-firefox-start ()
+  "Start Firefox or focus its existing window."
   (interactive)
   (if (and emacsos-pinephone-firefox-process
            (process-live-p emacsos-pinephone-firefox-process))
       (progn
-        (emacsos-pinephone-set-status
-         emacsos-pinephone-firefox-status-marker "Switching to Firefox...")
-        (if (zerop (call-process "/usr/bin/swaymsg" nil nil nil
-                                 "-s" (getenv "SWAYSOCK")
-                                 "[app_id=\"firefox\"] focus"))
-            (emacsos-pinephone-set-status
-             emacsos-pinephone-firefox-status-marker "Firefox is open.")
-          (emacsos-pinephone-set-status
-           emacsos-pinephone-firefox-status-marker
-           "Firefox window is not ready.")))
-    (emacsos-pinephone-set-status
-     emacsos-pinephone-firefox-status-marker "Starting Firefox...")
-    (redisplay t)
+        (message "Switching to Firefox...")
+        (if (let ((status
+                   (call-process "/usr/bin/timeout" nil nil nil
+                                 "-s" "TERM" "-k" "1" "3"
+                                 "/usr/bin/swaymsg" "-s" (getenv "SWAYSOCK")
+                                 "[app_id=\"firefox\"] focus")))
+              (and (integerp status) (zerop status)))
+            (message "Firefox is open.")
+          (message "Firefox window is not ready.")))
+    (message "Starting Firefox...")
     (setq emacsos-pinephone-firefox-process
-          (start-process "emacsos-firefox" nil "/usr/bin/firefox"
-                         "--new-instance" "about:blank"))
-    (set-process-query-on-exit-flag emacsos-pinephone-firefox-process nil)
-    (set-process-sentinel emacsos-pinephone-firefox-process
-                          #'emacsos-pinephone-firefox-finished)))
+          (condition-case nil
+              (start-process "emacsos-firefox" nil "/usr/bin/firefox"
+                             "--new-instance" "about:blank")
+            (file-error nil)))
+    (if emacsos-pinephone-firefox-process
+        (progn
+          (set-process-query-on-exit-flag emacsos-pinephone-firefox-process nil)
+          (set-process-sentinel emacsos-pinephone-firefox-process
+                                #'emacsos-pinephone-firefox-finished))
+      (message "Firefox could not start."))))
+
+(defun emacsos-firefox-quit ()
+  "Quit the Firefox process started by this Emacs session."
+  (interactive)
+  (if (and emacsos-pinephone-firefox-process
+           (process-live-p emacsos-pinephone-firefox-process))
+      (condition-case nil
+          (progn
+            (signal-process emacsos-pinephone-firefox-process 'SIGTERM)
+            (message "Closing Firefox..."))
+        (error
+         (setq emacsos-pinephone-firefox-process nil)
+         (message "Firefox is not open.")))
+    (message "Firefox is not open.")))
 
 (defun emacsos-pinephone-waydroid-finished (process _event)
   "Show the result when the tracked Waydroid PROCESS finishes."
@@ -96,118 +86,56 @@
              (memq (process-status process) '(exit signal)))
     (setq emacsos-pinephone-waydroid-process nil)
     (if (zerop (process-exit-status process))
-        (emacsos-pinephone-set-status
-         emacsos-pinephone-waydroid-status-marker "Android is stopped.")
-      (emacsos-pinephone-set-status
-       emacsos-pinephone-waydroid-status-marker
-       "Android failed to start. Check /var/lib/waydroid/waydroid.log."))))
-
-(defun emacsos-pinephone-waydroid-output (process output)
-  "Update the home when Waydroid PROCESS emits readiness in OUTPUT."
-  (let ((text (concat (or (process-get process 'emacsos-output-tail) "")
-                      output)))
-    (when (and (eq process emacsos-pinephone-waydroid-process)
-               (string-match-p "Android with user 0 is ready" text))
-      (emacsos-pinephone-set-status
-       emacsos-pinephone-waydroid-status-marker "Android is open."))
-    (process-put process 'emacsos-output-tail
-                 (substring text (max 0 (- (length text) 64))))))
+        (message "Android is stopped.")
+      (message "Android failed to start. Check /var/lib/waydroid/waydroid.log."))))
 
 (defun emacsos-pinephone-waydroid-stop-finished (process _event)
-  "Update the home when the Waydroid stop PROCESS finishes."
+  "Report when the Waydroid stop PROCESS finishes."
   (when (memq (process-status process) '(exit signal))
     (if (zerop (process-exit-status process))
-        (emacsos-pinephone-set-status
-         emacsos-pinephone-waydroid-status-marker "Android is stopped.")
-      (emacsos-pinephone-set-status
-       emacsos-pinephone-waydroid-status-marker
-       "Android did not stop cleanly."))))
+        (message "Android is stopped.")
+      (message "Android did not stop cleanly."))))
 
-(defun emacsos-pinephone-open-waydroid ()
+(defun emacsos-android-start ()
   "Start Waydroid or focus its existing full-screen window."
   (interactive)
   (cond
    ((not (file-exists-p emacsos-pinephone-waydroid-config))
-    (emacsos-pinephone-set-status
-     emacsos-pinephone-waydroid-status-marker
-     "Android images are not installed."))
+    (message "Android images are not installed."))
    ((and emacsos-pinephone-waydroid-process
          (process-live-p emacsos-pinephone-waydroid-process))
-    (emacsos-pinephone-set-status
-     emacsos-pinephone-waydroid-status-marker "Switching to Android...")
-    (if (zerop (call-process "/usr/bin/swaymsg" nil nil nil
-                             "-s" (getenv "SWAYSOCK")
-                             "[app_id=\"Waydroid\"] focus"))
-        (emacsos-pinephone-set-status
-         emacsos-pinephone-waydroid-status-marker "Android is open.")
-      (emacsos-pinephone-set-status
-       emacsos-pinephone-waydroid-status-marker
-       "Android window is not ready.")))
+    (message "Switching to Android...")
+    (if (let ((status
+               (call-process "/usr/bin/timeout" nil nil nil
+                             "-s" "TERM" "-k" "1" "3"
+                             "/usr/bin/swaymsg" "-s" (getenv "SWAYSOCK")
+                             "[app_id=\"Waydroid\"] focus")))
+          (and (integerp status) (zerop status)))
+        (message "Android is open.")
+      (message "Android window is not ready.")))
    (t
-    (emacsos-pinephone-set-status
-     emacsos-pinephone-waydroid-status-marker
-     "Starting Android. The first start can take two minutes...")
-    (redisplay t)
+    (message "Starting Android. The first start can take two minutes...")
     (setq emacsos-pinephone-waydroid-process
-          (start-process "emacsos-waydroid" nil "/usr/bin/waydroid"
-                         "show-full-ui"))
-    (set-process-query-on-exit-flag emacsos-pinephone-waydroid-process nil)
-    (set-process-filter emacsos-pinephone-waydroid-process
-                        #'emacsos-pinephone-waydroid-output)
-    (set-process-sentinel emacsos-pinephone-waydroid-process
-                          #'emacsos-pinephone-waydroid-finished))))
+          (condition-case nil
+              (start-process "emacsos-waydroid" nil "/usr/bin/waydroid"
+                             "show-full-ui")
+            (file-error nil)))
+    (if emacsos-pinephone-waydroid-process
+        (progn
+          (set-process-query-on-exit-flag emacsos-pinephone-waydroid-process nil)
+          (set-process-sentinel emacsos-pinephone-waydroid-process
+                                #'emacsos-pinephone-waydroid-finished))
+      (message "Android could not start.")))))
 
-(defun emacsos-pinephone-stop-waydroid ()
+(defun emacsos-android-quit ()
   "Stop the Waydroid session and its Android container."
   (interactive)
-  (emacsos-pinephone-set-status
-   emacsos-pinephone-waydroid-status-marker "Stopping Android...")
+  (message "Stopping Android...")
   (let ((process (start-process "emacsos-waydroid-stop" nil
                                 "/usr/bin/waydroid" "session" "stop")))
     (set-process-query-on-exit-flag process nil)
     (set-process-sentinel process
                           #'emacsos-pinephone-waydroid-stop-finished)))
-
-(defun emacsos-pinephone-insert-button (label action)
-  "Insert a touch-operable button named LABEL that invokes ACTION."
-  (insert-text-button label
-                      'action (lambda (_button) (funcall action))
-                      'follow-link t
-                      'keymap emacsos-pinephone-button-map
-                      'face '(:box (:line-width 4 :style released-button)
-                                   :height 1.25 :weight bold)))
-
-(defun emacsos-pinephone-openrc-home ()
-  "Show the minimal editable PinePhone home."
-  (interactive)
-  (let ((buffer (get-buffer-create emacsos-pinephone-openrc-buffer)))
-    (with-current-buffer buffer
-      (unless (> (buffer-size) 0)
-        (insert "EmacsOS\n\n")
-        (insert "The minimal PinePhone session is running.\n")
-        (insert "Tap the keyboard below and type here.\n\n")
-        (emacsos-pinephone-insert-button "  Open Firefox  "
-                                         #'emacsos-pinephone-open-firefox)
-        (insert "\n\n")
-        (setq emacsos-pinephone-firefox-status-marker (point-marker))
-        (insert "Firefox is closed.\n\n")
-        (emacsos-pinephone-insert-button "  Open Android  "
-                                         #'emacsos-pinephone-open-waydroid)
-        (insert "\n\n")
-        (emacsos-pinephone-insert-button "  Stop Android  "
-                                         #'emacsos-pinephone-stop-waydroid)
-        (insert "\n\n")
-        (setq emacsos-pinephone-waydroid-status-marker (point-marker))
-        (insert "Android is stopped.\n\nAlt+Tab returns here.\n\n"))
-      (text-mode)
-      (visual-line-mode 1)
-      (setq-local truncate-lines nil
-                  word-wrap t)
-      (goto-char (point-min)))
-    (switch-to-buffer buffer)
-    (goto-char (point-min))
-    (set-window-start (selected-window) (point-min))
-    buffer))
 
 (defun emacsos-pinephone-record-synthetic-input ()
   "Insert the fixed marker used by the automated input smoke."
@@ -224,8 +152,8 @@
 (defun emacsos-pinephone-enforce-frame-layout ()
   "Keep the Emacs frame inside the space reserved above wvkbd.
 Agent config is shared with devices that legitimately use `fullboth'.  On the
-PinePhone that frame state hides the Emacs control pane behind the external
-layer-shell keyboard, so the platform restores its maximized layout after
+PinePhone that frame state hides Emacs content behind the external layer-shell
+keyboard, so the platform restores its maximized layout after
 every agent-config load."
   (set-frame-parameter nil 'fullscreen 'maximized))
 
@@ -632,12 +560,6 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
   (set-face-attribute 'default nil :height 140)
   (require 'os)
   (load "/usr/local/share/emacsos-openrc/dtach-shell-init.el" nil nil t)
-  (setq emacos-global-commands
-        (append '(("Firefox" . emacsos-pinephone-open-firefox)
-                  ("Android" . emacsos-pinephone-open-waydroid)
-                  ("Stop Android" . emacsos-pinephone-stop-waydroid)
-                  ("Lab home" . emacsos-pinephone-openrc-home))
-                emacos-global-commands))
   (emacsos-pinephone-load-agent-config emacos-agent-file))
 
 (provide 'emacsos-pinephone-openrc-init)

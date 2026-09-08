@@ -260,7 +260,7 @@ def test_apply_config_commit_failure_is_unrecorded(tmp_path):
                                   config=cfg)
     assert out.startswith("applied-but-unrecorded:")
     assert "disk full" in out
-    # Must NOT masquerade as a clean apply (which would offer a bad rollback).
+    # Must not masquerade as a clean apply whose history can be rolled back.
     assert not out.startswith("applied:")
 
 

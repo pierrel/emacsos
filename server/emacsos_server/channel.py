@@ -161,8 +161,8 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     good, not for experimenting.
 
     Returns one of:
-    - `applied: ...` — committed and loaded cleanly.  The user gets a
-      ROLLBACK affordance in the chat UI; tell them it's applied.
+    - `applied: ...` — committed and loaded cleanly.  The user can run the
+      phone's `emacos--chat-rollback` command; tell them it's applied.
     - `applied-but-broken: ...` — committed as the new config but it
       errored while loading or restoring platform state on the phone.  Tell
       the user and suggest
@@ -226,7 +226,7 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     version = f" (v{sha[:7]})" if sha else ""
     if ar.status == "applied":
         return (f"applied: {summary}{version} — loaded cleanly on the "
-                "phone; the user can roll back from the chat UI")
+                "phone; the user can run M-x emacos--chat-rollback")
     # load_error: HEAD is the new saved config, but loading or platform
     # finalization failed.  Remediation depends on the tagged phase.
     return (f"applied-but-broken: {summary}{version} — committed as the "
@@ -418,10 +418,7 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
                     f"({e}); do not retry; reconcile the phone file with "
                     "history before another persistent config change")
     if status == "applied":
-        # Don't promise the chat-UI ROLLBACK button: it's enabled only by the
-        # `applied` event app.py derives from apply_config, not revert_config —
-        # so it won't appear after a conversational revert.  The user undoes
-        # again by asking (another revert_config), not by tapping.
+        # Conversational revert remains available for another targeted undo.
         return f"{verb}: loaded cleanly on the phone"
     # load_error: the phone wrote the saved file, but the runtime state may be
     # only partially changed when loading or platform finalization errored.
@@ -443,6 +440,5 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
 # `apply_config` in particular must stay a TOP-LEVEL tool (not buried in a
 # sub-agent's toolset): app.py derives the `applied` event by watching the
 # top-level message stream for apply_config's ToolMessage.  Move it into
-# a sub-agent and the result stops surfacing — the event silently never
-# fires and the ROLLBACK button never appears.
+# a sub-agent and the result stops surfacing in the transcript.
 EMACS_TOOLS = [eval_elisp, apply_config, get_config, config_history, revert_config]

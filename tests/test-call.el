@@ -2001,6 +2001,7 @@ button itself keeps it."
               (lambda (&rest _) (get-buffer emacos-call--incoming-buffer)))
              ((symbol-function 'set-window-buffer)
               (lambda (w b &rest _) (when (eq w 'win) (setq ,restored-var b))))
+             ((symbol-function 'emacos--render-page) #'ignore)
              ((symbol-function 'kill-buffer) (lambda (&rest _) nil)))
      (get-buffer-create emacos-call--incoming-buffer)
      ,@body))
@@ -2038,7 +2039,8 @@ stays `active', so the modeline badge appears) and disarms a pending hang-up."
                 ((symbol-function 'window-buffer)
                  (lambda (&rest _) (get-buffer emacos-call--active-buffer)))
                 ((symbol-function 'set-window-buffer)
-                 (lambda (w b &rest _) (when (eq w 'win) (setq restored b)))))
+                 (lambda (w b &rest _) (when (eq w 'win) (setq restored b))))
+                ((symbol-function 'emacos--render-page) #'ignore))
         (emacos-call--back)
         (should (eq restored prev))               ; returned to pre-call buffer
         (should (eq emacos-call--state 'active))   ; call still running

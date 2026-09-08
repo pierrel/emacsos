@@ -1,0 +1,76 @@
+#+title: Remove the everyday control pane
+#+date: 2026-09-08
+
+* Goal
+
+Correct two failed acceptance criteria from
+[[file:2026-09-07-command-surface.org][PinePhone command surface]].  Deleting Lab Home did not delete the separate
+=*keyboard*= command/control window: ordinary chat still showed its utility and
+per-buffer command rows above the compositor keyboard.  The command reference
+was also published to the recovery account's home instead of the graphical
+Emacs account's home, so it was not naturally visible from Emacs.
+
+Ordinary chat, editing, and Assist buffers must use the full Emacs area above
+the external keyboard with no generic control window.  Commands remain
+available through =M-x= and ordinary documented keys.  The one installed
+reference belongs in graphical Emacs's actual =$HOME=.
+
+* Design
+
+1. Delete the per-buffer command-list model, renderer, mode/global command
+   tables, adapters, and tests.  Remove the obsolete dtach advice that injected
+   into those lists.  Existing interactive commands and normal keymaps remain.
+2. When =emacos-use-internal-keyboard= is nil, do not create an everyday
+   =*keyboard*= window.  If a call or SMS buffer supplies a safety-critical
+   keyboard plane, create the control window for that flow alone.  Delete its
+   window and buffer as soon as the top buffer has no special plane.  The
+   built-in keyboard configuration retains its keyboard and utility rows, but
+   no configuration renders a generic per-buffer command list.
+3. Add =M-x emacos-open-command-reference=.  It opens
+   =~/EMACSOS-COMMANDS.org=, using the graphical process's real home instead of
+   a hard-coded account path.  No new global key is needed because =M-x= is the
+   canonical surface and the external modifier-swipe keyboard emits =Meta+x=.
+   Rename the application commands to the discoverable
+   =emacsos-firefox-start=, =emacsos-firefox-quit=,
+   =emacsos-android-start=, and =emacsos-android-quit=.  Typing the application
+   name in =M-x= completion now finds both lifecycle actions without aliases or
+   duplicate implementations.
+4. Install the single reference copy at
+   =/var/lib/emacsos-lab/EMACSOS-COMMANDS.org= as
+   =emacsos-lab:emacsos-lab= mode 0600.  Retain the old recovery-home copy only
+   as migration residue when it already exists; the updater must not delete a
+   mutable user-owned file through an unsafe pathname race.  Fresh installs
+   create only the graphical-home copy.  Live correction removes the known
+   unchanged old deployed copy after separately verifying its exact content and
+   inode under the deployment reservation.
+
+* Interfaces and safety boundaries
+
+The ordinary command interface is =M-x= plus each mode's existing keymap.  The
+dynamic control-window interface is reduced to the existing buffer-local
+=emacos--keyboard-plane= used by call and SMS confirmation.  A plane transition
+owns window creation and cleanup; there is no persistent empty or utility-only
+pane.
+
+The reference publisher continues to verify a root-owned temporary copy before
+publication and never reads the final mutable path for commit verification.
+The temporary file lives in root-owned =/var/lib= on the destination filesystem,
+outside the graphical user's writable home, so the running UI cannot replace it
+before publication.  Update backup reads run as =emacsos-lab= with
+=O_NOFOLLOW=, nonblocking I/O, exact metadata validation, and the existing
+64 KiB bound.
+
+* Verification
+
+ERT proves that external-keyboard ordinary buffers have no =*keyboard*= buffer
+or window; entering a call/SMS plane creates it; returning to an ordinary buffer
+deletes it; and the internal keyboard still renders without command-list rows.
+It also proves the command-list symbols and adapters are absent and the
+reference-opening command resolves through =$HOME=.
+
+Installer/update shell tests prove the sole fresh destination, owner, mode,
+atomic publication, bounded backup, and rollback.  The live deployment must be
+integrated on top of the native Markdown renderer and modifier-swipe keyboard.
+After a clean restart, inspect the window topology and screenshot: one content
+window above external wvkbd, no =*keyboard*= buffer, formatted chat preserved,
+and the live Emacs process can open and read its command reference.

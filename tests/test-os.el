@@ -1,12 +1,7 @@
 ;;; test-os.el --- Tests for the os.el keyboard surface -*- lexical-binding: t -*-
 
-;; Covers the pure pieces of the keyboard: `emacos--top-commands' (the
-;; command set for the top buffer), `emacos--mode-commands-for'
-;; parent-walking, the pure width helper (`emacos--unit-width'), the
-;; follower's change-detection guard, the chat command set,
-;; `emacos--tap-tab' / `emacos--tap-quit' dispatch, and the utility row.
-;; Hook firing and real window geometry are validated by a live phone
-;; pass, not here.
+;; Covers the keyboard's pure width and modifier helpers, temporary control
+;; plane lifecycle, follower guard, built-in utility row, and tap dispatch.
 
 (require 'ert)
 (require 'cl-lib)
@@ -17,165 +12,29 @@
   (should (member '(:eval (emacos-sms-mode-line-string))
                   (default-value 'mode-line-format))))
 
-;;; emacos--mode-commands-for (parent walk)
+(ert-deftest test-os-command-list-surface-is-absent ()
+  (dolist (symbol '(emacos--render-commands emacos--top-commands
+                    emacos--mode-commands-for emacos--chat-command-set
+                    emacos-assist--command-set emacos-net--command-set))
+    (should-not (fboundp symbol)))
+  (dolist (symbol '(emacos-mode-commands emacos-global-commands
+                    emacos--last-commands emacos--max-commands))
+    (should-not (boundp symbol))))
 
-(ert-deftest test-os-mode-commands-direct ()
-  (should (equal (emacos--mode-commands-for 'org-mode)
-                 (cdr (assq 'org-mode emacos-mode-commands)))))
-
-(ert-deftest test-os-mode-commands-parent-walk ()
-  "A mode derived from emacs-lisp-mode resolves to the elisp set even
-though only the parent is in the alist."
-  (define-derived-mode test-os--child-elisp emacs-lisp-mode "ChildEl")
-  (unwind-protect
-      (should (equal (emacos--mode-commands-for 'test-os--child-elisp)
-                     (cdr (assq 'emacs-lisp-mode emacos-mode-commands))))
-    (put 'test-os--child-elisp 'derived-mode-parent nil)))
-
-(ert-deftest test-os-mode-commands-unknown-is-nil ()
-  (should-not (emacos--mode-commands-for 'fundamental-mode)))
-
-(ert-deftest test-os-mode-commands-prog-mode-walk ()
-  "A code buffer with no own entry walks up to the prog-mode set."
-  (define-derived-mode test-os--child-prog prog-mode "ChildProg")
-  (unwind-protect
-      (should (equal (emacos--mode-commands-for 'test-os--child-prog)
-                     (cdr (assq 'prog-mode emacos-mode-commands))))
-    (put 'test-os--child-prog 'derived-mode-parent nil)))
-
-(ert-deftest test-os-mode-commands-text-mode-walk ()
-  "A text buffer with no own entry walks up to the text-mode set."
-  (define-derived-mode test-os--child-text text-mode "ChildText")
-  (unwind-protect
-      (should (equal (emacos--mode-commands-for 'test-os--child-text)
-                     (cdr (assq 'text-mode emacos-mode-commands))))
-    (put 'test-os--child-text 'derived-mode-parent nil)))
-
-(ert-deftest test-os-mode-commands-magit-is-data-only ()
-  "magit-status-mode resolves to its command set WITHOUT magit loaded —
-the alist is data; entries only ever fire when the user is in that mode
-(so the package is already loaded).  Regression guard: don't add a
-`require' to the alist definition."
-  (let ((set (emacos--mode-commands-for 'magit-status-mode)))
-    (should set)
-    (should (equal (caar set) "Stage"))
-    (should (<= (length set) emacos--max-commands))))
-
-;;; emacos--top-commands (the command set for the top buffer)
-
-(ert-deftest test-os-top-commands-minibuffer-is-empty ()
-  "An active minibuffer means you're typing a prompt — empty command set."
-  (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () 'mb)))
-    (should-not (emacos--top-commands))))
-
-(ert-deftest test-os-top-commands-fundamental-falls-back-to-globals ()
-  "A mode with no command set shows the global commands (Save/Undo/...),
-never an empty list — so a plain text buffer keeps them one tap away."
-  (with-temp-buffer
-    (fundamental-mode)
-    (let ((buf (current-buffer)))
-      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
-                ((symbol-function 'emacos--target) (lambda () 'w))
-                ((symbol-function 'window-buffer) (lambda (_) buf)))
-        (should (equal (emacos--top-commands) emacos-global-commands))))))
-
-(ert-deftest test-os-top-commands-org-is-org-set ()
-  (with-temp-buffer
-    (let ((buf (current-buffer)))
-      (setq-local major-mode 'org-mode)
-      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
-                ((symbol-function 'emacos--target) (lambda () 'w))
-                ((symbol-function 'window-buffer) (lambda (_) buf)))
-        (should (equal (emacos--top-commands)
-                       (cdr (assq 'org-mode emacos-mode-commands))))))))
-
-(ert-deftest test-os-top-commands-dired-is-dired-set ()
-  (with-temp-buffer
-    (let ((buf (current-buffer)))
-      (setq-local major-mode 'dired-mode)
-      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
-                ((symbol-function 'emacos--target) (lambda () 'w))
-                ((symbol-function 'window-buffer) (lambda (_) buf)))
-        (should (equal (emacos--top-commands)
-                       (cdr (assq 'dired-mode emacos-mode-commands))))))))
-
-(ert-deftest test-os-top-commands-chat-buffer-idle ()
-  "The *chat* buffer (by identity) derives to the chat command set."
-  (let ((chat-buf (get-buffer-create emacos--chat-buffer-name)))
+(ert-deftest test-os-open-command-reference-uses-current-home ()
+  (let ((home (make-temp-file "emacos-reference-home" t))
+        (process-environment (copy-sequence process-environment))
+        opened)
     (unwind-protect
-        (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacos--target) (lambda () 'w))
-                  ((symbol-function 'window-buffer) (lambda (_) chat-buf)))
-          (let ((emacos--chat-in-flight nil))
-            (should (equal (mapcar #'car (emacos--top-commands))
-                           '("New chat" "New message"))))
-          ;; In flight, the abort path must surface via top-commands.
-          (let ((emacos--chat-in-flight t))
-            (should (equal (mapcar #'car (emacos--top-commands))
-                           '("ABORT" "New message")))))
-      (let ((kill-buffer-query-functions nil))
-        (kill-buffer chat-buf)))))
-
-(ert-deftest test-os-top-commands-assist-reads-buffer-local-confirm-pending ()
-  "`emacos-assist--forget-confirm-pending' is buffer-local to each
-.assist buffer.  `emacos--top-commands' must call
-`emacos-assist--command-set' INSIDE that buffer so the buffer-local
-value is read — otherwise the keyboard's render-time `current-buffer'
-\(the *keyboard* buffer) yields the global nil, the command-set
-returns \"Forget\" instead of \"Confirm forget?\", and the two-tap
-relabel never shows.  Caught live 2026-05-30."
-  (require 'emacos-assist)
-  (with-temp-buffer
-    (emacos-assist-mode)
-    (setq emacos-assist--forget-confirm-pending t)
-    (let ((assist-buf (current-buffer))
-          (keyboard-buf (get-buffer-create "*keyboard*")))
-      (unwind-protect
-          (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
-                    ((symbol-function 'emacos--target) (lambda () 'w))
-                    ((symbol-function 'window-buffer) (lambda (_) assist-buf)))
-            ;; Simulate the render-time call site: `current-buffer' is the
-            ;; keyboard buffer (where `--render-keyboard' inserts), NOT the
-            ;; .assist file.  The fix is `with-current-buffer assist-buf'
-            ;; around `(emacos-assist--command-set)' inside top-commands.
-            (with-current-buffer keyboard-buf
-              (let ((emacos--chat-in-flight nil))
-                (should (assoc "Confirm forget?" (emacos--top-commands))))))
-        (kill-buffer keyboard-buf)))))
-
-(ert-deftest test-os-top-commands-capped-at-max ()
-  "The command list shows at most `emacos--max-commands' (the renderer
-caps it); a mode with more entries than that is truncated by the
-renderer, but `emacos--top-commands' returns the full set (the follower
-compares against the full set)."
-  (let ((emacos-mode-commands
-         (list (cons 'fundamental-mode
-                     (cl-loop for i from 1 to 15
-                              collect (cons (format "C%d" i) #'ignore))))))
-    (with-temp-buffer
-      (fundamental-mode)
-      (let ((buf (current-buffer)))
-        (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacos--target) (lambda () 'w))
-                  ((symbol-function 'window-buffer) (lambda (_) buf)))
-          (should (= (length (emacos--top-commands)) 15))
-          (should (= (length (seq-take (emacos--top-commands)
-                                       emacos--max-commands))
-                     10)))))))
-
-;;; emacos--chat-command-set (dynamic: New chat idle / ABORT in flight)
-
-(ert-deftest test-os-chat-command-set-idle ()
-  (let ((emacos--chat-in-flight nil))
-    (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("New chat" "New message")))))
-
-(ert-deftest test-os-chat-command-set-in-flight-shows-abort ()
-  "The abort path must survive mid-stream: in flight, the second button
-is ABORT, not New chat."
-  (let ((emacos--chat-in-flight t))
-    (should (equal (mapcar #'car (emacos--chat-command-set))
-                   '("ABORT" "New message")))))
+        (progn
+          (setenv "HOME" home)
+          (let ((path (expand-file-name "EMACSOS-COMMANDS.org" home)))
+            (with-temp-file path (insert "commands"))
+            (cl-letf (((symbol-function 'find-file)
+                       (lambda (file) (setq opened file))))
+              (emacos-open-command-reference))
+            (should (equal opened path))))
+      (delete-directory home t))))
 
 ;;; emacos--unit-width (pure per-unit width math)
 
@@ -322,86 +181,58 @@ so a follow-up tap can complete the gesture."
             (should emacos--last-space-time)))
       (let ((kill-buffer-query-functions nil)) (kill-buffer buf)))))
 
-;;; Two-tap New-chat confirm: disarm-on-other-tap (emacos--maybe-cancel-confirm)
+;;; Pending confirmations: disarm on another EmacsOS button action
 
 (ert-deftest test-os-maybe-cancel-confirm-disarms-on-other-command ()
-  "Tapping a DIFFERENT command-list entry (run-command + other cmd) while
-armed cancels the confirm and re-renders."
-  (let ((emacos--chat-confirm-pending t) (rendered nil))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
-      (emacos--maybe-cancel-confirm #'emacos--run-command #'save-buffer))
-    (should-not emacos--chat-confirm-pending)
-    (should rendered)))
+  "A different utility action cancels pending confirmation."
+  (let ((emacos--chat-confirm-pending t))
+    (emacos--maybe-cancel-confirm #'emacos--run-command #'save-buffer)
+    (should-not emacos--chat-confirm-pending)))
 
 (ert-deftest test-os-maybe-cancel-confirm-disarms-on-keyboard-tap ()
   "Tapping any keyboard key (a direct action, not run-command) while armed
 cancels the confirm."
-  (let ((emacos--chat-confirm-pending t) (rendered nil))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
-      (emacos--maybe-cancel-confirm #'emacos--tap-key "abc"))
+  (let ((emacos--chat-confirm-pending t))
+    (emacos--maybe-cancel-confirm #'emacos--tap-key "abc")
     (should-not emacos--chat-confirm-pending)))
 
 (ert-deftest test-os-maybe-cancel-confirm-keeps-armed-on-newchat-tap ()
-  "Re-tapping the New-chat command itself (run-command + emacos--chat-new-chat)
-must NOT disarm — that tap is the confirming second tap."
-  (let ((emacos--chat-confirm-pending t) (rendered nil))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
-      (emacos--maybe-cancel-confirm #'emacos--run-command #'emacos--chat-new-chat))
-    (should emacos--chat-confirm-pending)
-    (should-not rendered)))
+  "A New-chat invocation through an EmacsOS button remains confirmable."
+  (let ((emacos--chat-confirm-pending t))
+    (emacos--maybe-cancel-confirm #'emacos--run-command #'emacos--chat-new-chat)
+    (should emacos--chat-confirm-pending)))
 
 (ert-deftest test-os-maybe-cancel-confirm-noop-when-unarmed ()
-  "Nothing armed → no-op, no spurious re-render (the common path on every
-tap)."
-  (let ((emacos--chat-confirm-pending nil) (rendered nil))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t))))
-      (emacos--maybe-cancel-confirm #'emacos--tap-key "abc"))
-    (should-not rendered)))
+  "Nothing armed remains a no-op."
+  (let ((emacos--chat-confirm-pending nil))
+    (emacos--maybe-cancel-confirm #'emacos--tap-key "abc")
+    (should-not emacos--chat-confirm-pending)))
 
-;;; Follower: re-render only when the command set changed
-
-(ert-deftest test-os-follower-rerenders-on-command-set-change ()
+(ert-deftest test-os-follower-noop-when-plane-unchanged ()
   (let ((rendered nil)
         (emacos--in-render nil)
-        (emacos--last-commands '(("OLD" . old))))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-commands) (lambda () '(("NEW" . new)))))
-      (emacos--on-window-buffer-change nil)
-      (should rendered))))
-
-(ert-deftest test-os-follower-noop-when-command-set-unchanged ()
-  (let ((rendered nil)
-        (emacos--in-render nil)
-        (emacos--last-commands '(("SAME" . same)))
         (emacos--last-plane nil))
     (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-commands) (lambda () '(("SAME" . same))))
               ((symbol-function 'emacos--top-keyboard-plane) (lambda () nil)))
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
 
 (ert-deftest test-os-follower-rerenders-on-plane-change ()
-  "A keyboard-plane change forces a re-render even when the command set is
-identical — two buffers can both fall to the global set yet need different
-planes (e.g. *scratch* vs the *call* screen)."
+  "A keyboard-plane change creates or removes the temporary control window."
   (let ((rendered nil)
         (emacos--in-render nil)
-        (emacos--last-commands '(("SAME" . same)))
         (emacos--last-plane nil))
     (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-commands) (lambda () '(("SAME" . same))))
               ((symbol-function 'emacos--top-keyboard-plane) (lambda () #'ignore)))
       (emacos--on-window-buffer-change nil)
       (should rendered))))
 
 (ert-deftest test-os-follower-noop-during-render ()
   "Re-entry guard (the brick-insurance): the follower bails when a render
-is already in progress, even if the command set differs."
-  (let ((rendered nil)
-        (emacos--in-render t)
-        (emacos--last-commands '(("OLD" . old))))
+is already in progress, even if the plane differs."
+  (let ((rendered nil) (emacos--in-render t))
     (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-commands) (lambda () '(("NEW" . new)))))
+              ((symbol-function 'emacos--top-keyboard-plane) (lambda () #'ignore)))
       (emacos--on-window-buffer-change nil)
       (should-not rendered))))
 
@@ -409,11 +240,10 @@ is already in progress, even if the command set differs."
 
 (ert-deftest test-os-render-page-uses-plane-when-set ()
   "When the top buffer declares a keyboard plane, render-page paints THAT into
-*keyboard* instead of the T9/action/utility/command bands."
+*keyboard* instead of the keyboard and utility rows."
   (unwind-protect       ; *keyboard* is a shared global buffer — clean it up even on failure
       (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
-                 (lambda () (lambda () (insert "PLANE-SENTINEL"))))
-                ((symbol-function 'emacos--top-commands) (lambda () nil)))
+                 (lambda () (lambda () (insert "PLANE-SENTINEL")))))
         (emacos--render-page)
         (with-current-buffer "*keyboard*"
           (let ((s (buffer-string)))
@@ -425,8 +255,7 @@ is already in progress, even if the command set differs."
   "With no plane on the top buffer, render-page paints the normal keyboard
 \(the utility row's QUIT is present, no plane content)."
   (unwind-protect
-      (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
-                ((symbol-function 'emacos--top-commands) (lambda () nil)))
+      (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil)))
         (emacos--render-page)
         (with-current-buffer "*keyboard*"
           (let ((s (buffer-string)))
@@ -434,22 +263,33 @@ is already in progress, even if the command set differs."
             (should-not (string-match-p "PLANE-SENTINEL" s)))))
     (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
-(ert-deftest test-os-render-page-external-keyboard-keeps-controls ()
-  "An external keyboard removes only text-entry rows, not Emacs controls."
+(ert-deftest test-os-render-page-external-keyboard-removes-control-window ()
+  "An external keyboard leaves ordinary Emacs content unsplit."
   (let ((emacos-use-internal-keyboard nil)
         (text-rows 0))
     (unwind-protect
         (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
-                  ((symbol-function 'emacos--top-commands) (lambda () nil))
                   ((symbol-function 'emacos--render-keyboard)
                    (lambda () (cl-incf text-rows)))
                   ((symbol-function 'emacos--render-action-row)
                    (lambda () (cl-incf text-rows))))
           (emacos--render-page)
           (should (= text-rows 0))
+          (should-not (get-buffer "*keyboard*")))
+      (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
+
+(ert-deftest test-os-render-page-external-keyboard-keeps-special-plane ()
+  "Call/SMS safety planes still get a temporary control window."
+  (let ((emacos-use-internal-keyboard nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
+                   (lambda () (lambda () (insert "SAFETY")))))
+          (emacos--render-page)
+          (should (get-buffer-window "*keyboard*"))
           (with-current-buffer "*keyboard*"
-            (should (string-match-p "QUIT" (buffer-string)))
-            (should (string-match-p "SEND\\|Chat" (buffer-string)))))
+            (should (equal (buffer-string) "SAFETY"))))
+      (when (get-buffer-window "*keyboard*")
+        (delete-window (get-buffer-window "*keyboard*")))
       (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
 
 ;;; Utility row: QUIT + M-x + Chat (the mode button lives on the action row)
@@ -994,21 +834,15 @@ was nothing to clear (saves cycles)."
         (should (= renders 1))
         (should-not emacos--armed-tap)))))
 
-;;; Follower under MOD re-renders on buffer change regardless of command-set
+;;; Follower under MOD re-renders on every buffer change
 
-(ert-deftest test-os-follower-rerenders-under-modifier-even-if-set-same ()
-  "Under MOD, the keymap filter is per-buffer (minor modes vary even
-when the major-mode command set doesn't).  The follower must re-render
-on buffer change when modifier is active, regardless of whether
-top-commands changed."
+(ert-deftest test-os-follower-rerenders-under-modifier-even-if-plane-same ()
+  "Under MOD, keymap filtering is buffer-local, so every change re-renders."
   (let ((rendered nil)
         (emacos--in-render nil)
-        (emacos--last-commands '(("SAME" . same)))
         (emacos--modifier 'C))
     (cl-letf (((symbol-function 'emacos--render-page)
-               (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-commands)
-               (lambda () '(("SAME" . same)))))
+               (lambda () (setq rendered t))))
       (emacos--on-window-buffer-change nil)
       (should rendered))))
 

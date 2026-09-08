@@ -1,0 +1,88 @@
+#+title: EmacsOS commands and keys
+
+Swipe downward from =x= on the modifier-swipe keyboard to type =Meta+x=, then
+type a command name and press =RET=.  Run =M-x emacos-open-command-reference=
+to return to this file.
+
+* Applications
+
+| Action | M-x command |
+|--------+-------------|
+| Start or switch to Firefox | =emacsos-firefox-start= |
+| Quit Firefox started by EmacsOS | =emacsos-firefox-quit= |
+| Start or switch to Android | =emacsos-android-start= |
+| Stop Android | =emacsos-android-quit= |
+
+Use =Alt+Tab= to move between full-screen applications.  Return to ordinary
+chat with =M-x emacos--chat-show-top-buffer=.
+
+* Chat and messages
+
+| Action | M-x command |
+|--------+-------------|
+| Return to ordinary chat | =emacos--chat-show-top-buffer= |
+| Start a new ordinary chat | =emacos--chat-new-chat= |
+| Stop the current ordinary-chat response | =emacos--chat-abort= |
+| Open an Assist Web thread | =emacos-assist-web-open-thread= |
+| Start an Assist Web thread | =emacos-assist-web-new-thread= |
+| Send from an Assist Web thread | =emacos-assist-web-send= |
+| Refresh an Assist Web thread | =emacos-assist-web-refresh-thread= |
+| Refresh the Assist Web thread list | =emacos-assist-web-refresh-threads= |
+| Load older Assist Web messages | =emacos-assist-web-load-older= |
+| Stop an Assist Web response | =emacos-assist-web-abort= |
+| Start a file-backed chat | =emacos-assist-new-file= |
+| Forget a file-backed chat checkpoint | =emacos-assist-forget= |
+| Compose an SMS | =emacos-send-message= |
+
+Assist Web also uses the =C-c C-a= prefix:
+
+| Key | Action |
+|-----+--------|
+| =C-c C-a t= | Open thread |
+| =C-c C-a n= | New thread |
+| =C-c C-a r= | Refresh thread list |
+| =C-c C-a g= | Refresh current thread |
+| =C-c C-a s= | Send |
+| =C-c C-a o= | Load older messages |
+| =C-c C-a a= | Abort response |
+
+* Phone and network
+
+| Action | M-x command |
+|--------+-------------|
+| Stage a call for confirmation | =emacos-call= |
+| Answer the ringing call | =emacos-answer= |
+| Hang up | =emacos-hang-up= |
+| Open network controls | =emacos-net-show= |
+| Toggle Wi-Fi | =emacos-net-toggle-wifi= |
+| Toggle cellular data | =emacos-net-toggle-cell= |
+| Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
+
+The modeline network, call, SMS, and keyboard labels are touch controls for
+their current status or action.
+
+Ordinary chat, editing, and Assist buffers have no separate Emacs control
+pane.  Call and SMS confirmation controls appear temporarily only while those
+safety-critical flows are active.
+
+* Files and terminals
+
+| Action | Command or key |
+|--------+----------------|
+| Open a file | =M-x find-file= |
+| Switch buffer | =M-x switch-to-buffer= |
+| Save | =M-x save-buffer= |
+| Undo | =M-x undo= |
+| Open or choose a persistent terminal | =M-x dtach-shell= or =C-c d= |
+| Reconnect the current persistent terminal | =M-x dtach-shell-reconnect= or =C-c S-d= |
+
+* Hardware
+
+| Control | Action |
+|---------+--------|
+| Power button | Blank the display; press again to wake |
+| Volume button | Wake the display |
+| =Alt+Tab= | Move to the next full-screen application |
+
+When the custom modifier-swipe keyboard is active, swipe upward from a character
+for =Control+character= and downward for =Meta+character=.

@@ -404,16 +404,6 @@ Only meaningful once `make cellular-bringup' has created the connection."
   "Repaint the page only when it is on top (called from the refresh sentinel)."
   (when (emacos-net--shown-p) (emacos-net--render)))
 
-(defun emacos-net--command-set ()
-  "Dynamic command set for the `*network*' page (feeds the keyboard band).
-Labels flip with state, so this is derived fresh each render."
-  (list (cons (if (eq (emacos-net-state-wifi-on emacos-net--state) t) "Wifi off" "Wifi on")
-              #'emacos-net-toggle-wifi)
-        (cons (if (emacos-net-state-cell-on emacos-net--state)
-                  "Cell off" "Cell on")
-              #'emacos-net-toggle-cell)
-        (cons "Refresh" #'emacos-net--refresh)))
-
 (defun emacos-net-show ()
   "Show the `*network*' control page in the top window and refresh it."
   (interactive)

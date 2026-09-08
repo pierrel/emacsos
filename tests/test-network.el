@@ -169,25 +169,6 @@
     (should (get-text-property 0 'local-map s))
     (should (eq (get-text-property 0 'mouse-face s) 'mode-line-highlight))))
 
-;;; Dynamic command set
-
-(ert-deftest test-net-command-set-flips-with-state ()
-  (let ((emacos-net--state
-         (make-emacos-net-state :wifi-on t :active-iface 'wifi
-                                :cell-provisioned t :cell-on t)))
-    (should (assoc "Wifi off" (emacos-net--command-set)))
-    (should (assoc "Cell off" (emacos-net--command-set))))
-  (let ((emacos-net--state
-         (make-emacos-net-state :wifi-on nil :active-iface 'none :cell-provisioned t)))
-    (should (assoc "Wifi on" (emacos-net--command-set)))
-    (should (assoc "Cell on" (emacos-net--command-set)))))
-
-(ert-deftest test-net-command-set-entries-are-interactive ()
-  "Command-band entries run via `emacos--run-command' -> `call-interactively',
-so each must be `commandp' or the keyboard band errors on tap."
-  (dolist (entry (emacos-net--command-set))
-    (should (commandp (cdr entry)))))
-
 (ert-deftest test-net-cell-toggle-follows-profile-activity-not-default-route ()
   (let ((seen nil))
     (cl-letf (((symbol-function 'emacos-net--action)

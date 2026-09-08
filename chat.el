@@ -19,7 +19,6 @@
 
 ;; Defined in os.el (which `require's this file); resolved at call time.
 (declare-function emacos--target "os")
-(declare-function emacos--render-page "os")
 
 ;;; Customization
 
@@ -45,7 +44,7 @@ file, so a missing file is not fatal: SEND just omits the
 \"no response from server\".  Replaces the old sync-call total
 timeout (300s in the pre-streaming version).  No total-stream
 timeout exists by design — once the stream starts, the user owns
-the budget and can tap ABORT to cancel.  See design doc §6."
+the budget and can run `emacos--chat-abort' to cancel.  See design doc §6."
   :type 'integer
   :group 'emacsos)
 
@@ -64,27 +63,16 @@ the budget and can tap ABORT to cancel.  See design doc §6."
 (defvar emacos--assist-active-surface nil
   "Owner of the phone-wide Assist request slot, or nil when it is free.")
 
-(defvar emacos--chat-can-rollback nil
-  "Non-nil when the last turn applied a config (an `applied' event
-arrived), so the chat command list offers a ROLLBACK entry (at the
-bottom).  Cleared on a successful rollback (v1 is one-level undo —
-apply again to get a new rollback point).")
-
 (defvar emacos--chat-confirm-pending nil
-  "Non-nil when New chat has been tapped once and awaits a confirming
-second tap — the button relabels to \"Confirm clear?\".  Cleared by the
-confirming tap (`emacos--chat-new-chat'), or by tapping anything else
-\(`emacos--maybe-cancel-confirm' in os.el), so the armed state can't
-linger.  This tap-only guard replaced a minibuffer/GUI confirm that
-fought the touchscreen.")
+  "Non-nil when New chat was invoked once and awaits a second invocation.
+Cleared by the confirming `emacos--chat-new-chat' invocation or by another
+EmacsOS button action.  This command-based guard avoids a modal prompt.")
 
 (defvar emacos--chat-rollback-pending nil
-  "Non-nil when ROLLBACK has been tapped once and awaits a confirming second
-tap — the button relabels to \"Confirm rollback?\".  Rollback reverts the
-last applied config live on the phone, so it gets the same two-tap guard as
-New chat.  Cleared by the confirming tap (`emacos--chat-rollback'), by tapping
-anything else (`emacos--chat-maybe-disarm-confirm'), or when a new apply resets
-the rollback point.")
+  "Non-nil when rollback awaits a confirming second command invocation.
+Rollback reverts the last applied config live on the phone, so it gets the
+same two-action guard as New chat.  A different EmacsOS button action or a new
+apply clears the pending state.")
 
 (defvar emacos--chat-process nil
   "The url-retrieve process backing the in-flight stream, or nil.
@@ -211,10 +199,8 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
     buf))
 
 (defun emacos--chat-init-buffer (buf)
-  "Seed BUF with an empty read-only header and a fresh prompt.
-Also clears `emacos--chat-can-rollback' so a fresh / CLEARed transcript
-doesn't dangle a ROLLBACK button with no surrounding context."
-  (setq emacos--chat-can-rollback nil emacos--chat-rollback-pending nil)
+  "Seed BUF with an empty read-only header and a fresh prompt."
+  (setq emacos--chat-rollback-pending nil)
   (with-current-buffer buf
     ;; Chat is prose, not code — render the transcript + input in the
     ;; proportional `variable-pitch' face (the keyboard stays monospace
@@ -425,7 +411,7 @@ stream that started meanwhile."
 
 (defun emacos--chat-handle-applied (event)
   "Handle the `applied' event: the agent shipped a config to the phone.
-Note it in the transcript and offer a ROLLBACK button.  `:broken' t
+Note it in the transcript and enable the rollback command.  `:broken' t
 means it was committed but loading or platform finalization errored (a JSON
 false parses as the symbol `:false', so test for `t' explicitly)."
   (let ((detail (or (plist-get event :detail) "config applied"))
@@ -434,9 +420,7 @@ false parses as the symbol `:false', so test for `t' explicitly)."
      (if broken
          (format "[applied but BROKEN; inspect failure: %s]" detail)
        (format "[%s]" detail)))
-    (setq emacos--chat-can-rollback t emacos--chat-rollback-pending nil)
-    (when (fboundp 'emacos--render-page)
-      (emacos--render-page))))
+    (setq emacos--chat-rollback-pending nil)))
 
 (defun emacos--chat-stream-cleanup ()
   "Tear down per-stream state.  Idempotent: safe to call from any
@@ -467,10 +451,7 @@ of the terminal handlers (end, error, abort, watchdog)."
         emacos--chat-in-flight nil
         emacos--chat-process nil)
   (when (eq emacos--assist-active-surface 'chat)
-    (setq emacos--assist-active-surface nil))
-  ;; Re-render the keyboard page so CLEAR returns + ABORT goes away.
-  (when (fboundp 'emacos--render-page)
-    (emacos--render-page)))
+    (setq emacos--assist-active-surface nil)))
 
 (defconst emacos--chat-watchdog-quiet-secs 5.0
   "Watchdog grace window — see `emacos--chat-watchdog-tick'.")
@@ -756,10 +737,7 @@ sends its per-file thread id + the file's directory so the server keys a
               ;; via stream events (server always emits start/end/error)
               ;; or via the first-token timeout when nothing arrives.
               (set-process-filter
-               proc (emacos--chat-make-filter (process-filter proc)))
-              ;; Re-render the keyboard page so CLEAR -> ABORT.
-              (when (fboundp 'emacos--render-page)
-                (emacos--render-page)))
+               proc (emacos--chat-make-filter (process-filter proc))))
           (error
            (emacos--chat-handle-error
             (list :type "error"
@@ -767,53 +745,42 @@ sends its per-file thread id + the file's directory so the server keys a
                                   (error-message-string err))))))))))
 
 (defun emacos--chat-new-chat ()
-  "Clear the conversation behind a TWO-TAP confirm.
+  "Clear the conversation behind a two-invocation confirmation.
 
-The button lives on the always-present command list and is an easy
-mis-tap, and the clear is irreversible (it wipes the conversation AND the
-agent's working-dir memory).  So the FIRST tap only ARMS: the button
-relabels to \"Confirm clear?\" (`emacos--chat-confirm-pending').  A SECOND
-tap on it actually clears — POSTing /clear so the server forgets the
-conversation, then resetting the local transcript.  Tapping ANYTHING ELSE
-cancels the pending confirm (`emacos--maybe-cancel-confirm' in os.el), so
-the armed state can't linger.  Tap-only — no minibuffer or GUI dialog,
-both of which fought the touchscreen.
+The clear is irreversible: it wipes the conversation and the agent's
+working-directory memory.  The first invocation arms and reports what to run
+again; the second clears the server and local transcript.  Another EmacsOS
+button action cancels the arm.  No minibuffer or GUI confirmation is used.
 
-Refuses (without arming) while a stream is in flight — tap ABORT first.
+Refuses (without arming) while a stream is in flight; run
+`emacos--chat-abort' first.
 The /clear POST is fire-and-forget: the local transcript clears regardless
 of whether it succeeds.  This is the ONLY thing that makes the agent
 forget; the conversation otherwise persists across turns and restarts."
   (interactive)
   (cond
    (emacos--chat-in-flight
-    (message "chat: stream in flight; tap ABORT to cancel"))
+    (message "chat: stream in flight; run emacos--chat-abort to cancel"))
    (emacos--chat-confirm-pending
-    ;; Second tap: confirmed — clear for real.
+    ;; Second invocation: confirmed — clear for real.
     (setq emacos--chat-confirm-pending nil)
     (emacos--chat-forget-server)
     (emacos--chat-init-buffer (emacos--chat-buffer)))
    (t
-    ;; First tap: arm, and re-render so the button relabels to
-    ;; "Confirm clear?".
     (setq emacos--chat-confirm-pending t)
-    (when (fboundp 'emacos--render-page) (emacos--render-page)))))
+    (message "Run emacos--chat-new-chat again to confirm clear"))))
 
 (defun emacos--chat-maybe-disarm-confirm (action arg)
-  "Disarm a pending two-tap confirm (New chat OR ROLLBACK) when the user taps
-any button that ISN'T the armed one.  Command-list buttons run through
-`emacos--run-command' with the command function as ARG, so a tap on the armed
-command is `(emacos--run-command . <that fn>)`; every other tap clears the
-pending state and re-renders.  Registered on `emacos--confirm-disarm-functions'."
-  (let ((tapped (and (eq action #'emacos--run-command) arg))
-        (dirty nil))
+  "Disarm New chat or rollback confirmation on a different EmacsOS button.
+Utility and safety-control buttons run through `emacos--run-command' with the
+command function as ARG.  Registered on `emacos--confirm-disarm-functions'."
+  (let ((tapped (and (eq action #'emacos--run-command) arg)))
     (when (and emacos--chat-confirm-pending
                (not (eq tapped #'emacos--chat-new-chat)))
-      (setq emacos--chat-confirm-pending nil dirty t))
+      (setq emacos--chat-confirm-pending nil))
     (when (and emacos--chat-rollback-pending
                (not (eq tapped #'emacos--chat-rollback)))
-      (setq emacos--chat-rollback-pending nil dirty t))
-    (when (and dirty (fboundp 'emacos--render-page))
-      (emacos--render-page))))
+      (setq emacos--chat-rollback-pending nil))))
 
 (add-hook 'emacos--confirm-disarm-functions
           #'emacos--chat-maybe-disarm-confirm)
@@ -870,33 +837,6 @@ url-http state machine, so any sentinel-driven cleanup is unreliable."
   (interactive)
   (emacos--chat-terminate-stream "aborted"))
 
-;;; Command-list integration
-
-(defun emacos--chat-command-set ()
-  "Command-list entries for the *chat* buffer.  The first button is ABORT
-while a stream is in flight; otherwise New chat — which relabels to
-\"Confirm clear?\" once armed (`emacos--chat-confirm-pending', the two-tap
-guard).  ROLLBACK sits at the very bottom, only after a config apply
-(rarely used).  SEND is no longer here — it moved to the always-present
-utility row's Chat/SEND button (`emacos--chat-button'), so the most-used
-action is one tap away on every screen.  Plain (LABEL . CMD) conses;
-dynamic — re-derived on every `emacos--render-page', so the first button
-flips with `emacos--chat-in-flight' / the confirm state and ROLLBACK
-appears/disappears with `emacos--chat-can-rollback'.  New message remains the
-second entry so outbound SMS is directly reachable from the default screen."
-  (append
-   (list (cond
-          (emacos--chat-in-flight (cons "ABORT" #'emacos--chat-abort))
-          (emacos--chat-confirm-pending
-           (cons "Confirm clear?" #'emacos--chat-new-chat))
-          (t (cons "New chat" #'emacos--chat-new-chat)))
-         (cons "New message" #'emacos-send-message))
-   ;; ROLLBACK last — rarely used, and only available after an apply.  Relabels
-   ;; to "Confirm rollback?" once armed (`emacos--chat-rollback-pending').
-   (when emacos--chat-can-rollback
-     (list (cons (if emacos--chat-rollback-pending "Confirm rollback?" "ROLLBACK")
-                 #'emacos--chat-rollback)))))
-
 ;;; Rollback
 
 (defun emacos--chat-rollback ()
@@ -912,11 +852,8 @@ transcript by `emacos--chat-rollback-callback'."
    (emacos--chat-in-flight
     (message "chat: stream in flight; ABORT before rolling back"))
    ((not emacos--chat-rollback-pending)
-    ;; First tap: arm, and re-render so the button relabels to
-    ;; "Confirm rollback?".  Rollback reverts live config on the phone, so
-    ;; guard it behind a confirming second tap like New chat.
     (setq emacos--chat-rollback-pending t)
-    (when (fboundp 'emacos--render-page) (emacos--render-page)))
+    (message "Run emacos--chat-rollback again to confirm rollback"))
    (t
     ;; Second tap: confirmed — POST /rollback for real.
     (setq emacos--chat-rollback-pending nil)
@@ -964,19 +901,15 @@ repeated rollbacks don't leak ` *http*` buffers."
               (detail (or (plist-get result :detail) "")))
           (emacos--chat-note (format "[rollback %s: %s]" st detail)
                              (emacos--chat-buffer))
-          ;; A reached-and-recorded rollback (applied / load_error) consumes
-          ;; the undo; hide ROLLBACK until the next apply.  Other outcomes
-          ;; leave history unchanged and keep the same retry available.
+          ;; A reached-and-recorded rollback consumes pending confirmation.
           (when (member st '("applied" "load_error"))
-            (setq emacos--chat-can-rollback nil emacos--chat-rollback-pending nil))
-          (when (fboundp 'emacos--render-page)
-            (emacos--render-page)))
+            (setq emacos--chat-rollback-pending nil)))
       (when (buffer-live-p resp) (kill-buffer resp)))))
 
 (defun emacos--chat-show-top-buffer ()
   "Display *chat* in the editor (target) window.  Idempotent.
-Interactive so M-x can reach it; the Chat utility button reaches it via
-`emacos--chat-button' when *chat* isn't already on top."
+Interactive so M-x can reach it; the built-in keyboard's Chat utility button
+reaches it through `emacos--chat-button'."
   (interactive)
   (let ((buf (emacos--chat-buffer))
         (w (emacos--target)))
@@ -990,9 +923,7 @@ This recognizes the *chat* scratch, a file-backed `emacos-assist-mode'
 buffer, or a canonical `emacos-assist-web-mode' buffer for shared shell
 utilities; the web client has its own transport and parser.  Return nil for
 other buffers.  Uses `emacos--target' (the authority on \"what's on top\"),
-not `current-buffer'
-\(renders/callbacks run with *keyboard* current), so it agrees with
-`emacos--top-commands'."
+not `current-buffer' (safety-control renders can run with *keyboard* current)."
   (let* ((w (emacos--target))
          (b (and w (window-buffer w))))
     (when (and b

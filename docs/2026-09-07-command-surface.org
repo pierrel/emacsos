@@ -1,0 +1,111 @@
+#+title: PinePhone command surface
+#+date: 2026-09-07
+
+* Goal
+
+Delete the obsolete =*EmacsOS*= Lab Home and its Firefox and Android launcher
+buttons.  The ordinary =*chat*= buffer remains the startup and return surface.
+Application and device actions are ordinary interactive Emacs commands reached
+through =M-x=, with one readable command and keybinding reference installed in
+=/home/user=.
+
+* Lineage
+
+This design changes the launcher outcome recorded in
+[[file:2026-08-31-pinephone-emacsos-session.org][PinePhone EmacsOS session]].  That feasibility phase intentionally used a
+synthetic Lab Home with large Firefox and Android buttons.  The later
+[[file:2026-09-03-pinephone-assist-parity.org][PinePhone Assist parity]] design already made =*chat*= the initial buffer and
+proved the application lifecycle commands on the phone.  The old dated records
+remain historical and are not rewritten.
+
+* Design
+
+1. Remove the Lab Home buffer, its button renderer, its status markers, and the
+   four PinePhone entries appended to =emacos-global-commands=.  Existing
+   general, mode-specific, chat, network, and call controls are unchanged.
+2. Keep the already-interactive
+   =emacsos-pinephone-open-firefox=,
+   =emacsos-pinephone-open-waydroid=, and
+   =emacsos-pinephone-stop-waydroid= commands.  Replace their Lab Home status
+   writes with ordinary echo-area messages.  Add only the missing symmetric
+   =emacsos-pinephone-quit-firefox= command, which sends =SIGTERM= to the exact
+   Firefox process started and tracked by this Emacs session.  A missing or
+   concurrently closed tracked process is a harmless message.  A Firefox or
+   Waydroid executable launch failure leaves no tracked process and reports an
+   echo-area failure.  Delete the Waydroid output filter and readiness tail
+   because they existed only to update Lab Home.
+3. Retain =emacos-initial-buffer-function= as =emacos--chat-buffer=.  Returning
+   from a full-screen application with the existing compositor =Alt+Tab=
+   binding reveals an Emacs buffer; the existing persistent =Chat= button
+   returns directly to the ordinary chat buffer.  Do not add another Home
+   command or keybinding.
+4. Add =EMACSOS-COMMANDS.org= as the concise user reference for PinePhone
+   application, chat, Assist Web, call, network, terminal, keyboard, and
+   compositor commands and bindings.  The OpenRC install and update clients
+   include that fixed source file in the existing hash-pinned payload.  The
+   root install and update transactions install it as a regular mode-0600 file
+   owned by the recovery user at =/home/user/EMACSOS-COMMANDS.org=.  They
+   verify a root-owned temporary copy before publishing it; once published,
+   the recovery user may freely edit or replace the reference, so root does not
+   read the mutable final path during commit verification.  Update rollback
+   restores the prior bounded copy when the destination still accepts a file.
+   This is a recovery-user copy that Pierre can open over SSH; it is not a
+   second launcher surface and is not executable.
+
+* Interfaces and boundaries
+
+The command names above are the canonical application lifecycle interface for
+the user through =M-x=.  No server, agent skill, or wire-protocol interface
+changes.  The existing fixed root deployment helpers gain only publication and
+rollback of the repository-owned reference file; they do not expose a new
+callable action or interpret its contents.  Firefox launch still uses fixed
+=/usr/bin/firefox= arguments, focus invokes fixed Sway criteria through a
+three-second =timeout= so compositor IPC cannot indefinitely block Emacs,
+Android still uses fixed =/usr/bin/waydroid= arguments, and quit targets only
+the exact process object already owned by the session.  The deployment scripts
+publish one repository-owned documentation file to one fixed user-home path;
+no input controls either path.  The existing root transaction validates the
+staged file and destination type, snapshots it with the rest of the payload,
+serializes deployment with the existing install lock, and owns publication
+and rollback.  The command reference therefore cannot drift
+from the system payload because of a second client or a post-commit transfer
+failure.  Publication and rollback create and verify their temporary file in
+root-owned =/home=, keeping transfer on the destination filesystem.  Fresh
+installation uses a no-clobber hard link so a concurrently created user file is
+never overwritten.  Update replacement uses =mv -T=.  A raced non-file
+destination can make reference rollback fail, but cleanup continues, retains
+the rollback backup, and restores the UI rather than letting a user-owned path
+abort privileged cleanup.
+
+* Verification and deployment
+
+ERT proves that the four lifecycle functions are interactive, status is visible
+through =message= without a Lab Home, stale Firefox and Waydroid sentinels cannot
+clear replacement processes, and Firefox quit targets only the live tracked process.  Focus tests
+prove the bounded fixed Sway argument vectors, including a signaled-helper
+result on the Firefox path.  Launch and quit-race tests prove terminal failure
+messages and cleared process state.  Shell and transaction tests prove the
+reference contains selected command and binding names, both OpenRC client paths
+stage and publish it, and update rollback restores it from a bounded snapshot.
+They also prove that chat remains initial and the Lab Home implementation
+symbols are absent from current code and tests.  Run the full Elisp, server, and
+PinePhone script suites.
+
+The currently live phone runs the unmerged modifier-swipe keyboard source at
+=5ba9300=.  A full update from this main-based branch would replace that source,
+so it is forbidden.  Lab Home deletion must be validated after a clean EmacsOS
+service restart; hot-loading replacement functions cannot remove definitions or
+command entries already present in the process.  The keyboard work lands first,
+then this lane rebases, regenerates deployment hashes from the combined tree,
+and deploys the combined payload.  The parallel chat-formatting lane follows the
+same merge, rebase, hash, and deploy boundary rather than deploying its original
+main-based payload.
+
+* Tradeoffs
+
+Echo-area lifecycle messages are transient, unlike the deleted status page.
+That is intentional: =M-x= is the canonical surface and no duplicate dashboard
+state remains.  Firefox quit can control only the process this Emacs instance
+started; broad process discovery or process-name killing would add authority and
+risk for an unobserved recovery case.  Historical dated documents still mention
+Lab Home because they record what was built and tested at that time.
