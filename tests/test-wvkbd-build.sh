@@ -63,6 +63,9 @@ docker run --rm \
             /home/user/.cache/wvkbd-emacos.ABC123
         digest=$(sha256sum /home/user/.cache/wvkbd-emacos.ABC123)
         digest=${digest%% *}
+        install -m 0755 /bin/false /usr/bin/wvkbd-mobintl
+        stock=$(sha256sum /usr/bin/wvkbd-mobintl)
+        stock=${stock%% *}
         install -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
         original=$(sha256sum /usr/local/bin/wvkbd-emacos)
         original=${original%% *}
@@ -80,7 +83,8 @@ docker run --rm \
         [ -x /usr/local/bin/wvkbd-emacos ]
         [ "$(sha256sum /usr/local/bin/wvkbd-emacos)" = \
           "$digest  /usr/local/bin/wvkbd-emacos" ]
-        [ ! -e /usr/bin/wvkbd-mobintl ]
+        [ "$(sha256sum /usr/bin/wvkbd-mobintl)" = \
+          "$stock  /usr/bin/wvkbd-mobintl" ]
     '
 
 printf '%s\n' 'wvkbd build and atomic side-by-side install checks passed'
