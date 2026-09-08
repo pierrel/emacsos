@@ -56,7 +56,9 @@ readelf -l "$artifact" |
 
 docker run --rm \
     -v "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root:/root-helper:ro" \
-    -v "$artifact:/artifact:ro" alpine:3.22 /bin/sh -ec '
+    -v "$artifact:/artifact:ro" \
+    alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
+    /bin/sh -ec '
         adduser -D user
         install -d -o user -g user -m 0700 /home/user/.cache
         install -o user -g user -m 0600 /artifact \
