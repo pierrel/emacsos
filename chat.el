@@ -13,6 +13,7 @@
 ;; emacsos/docs/2026-05-17-streaming-responses.org.
 
 (require 'cl-lib)
+(require 'font-lock)
 (require 'json)
 (require 'url)
 (require 'url-http)
@@ -131,6 +132,233 @@ rather than pushing it forward.")
 
 (defconst emacos--chat-bot-prefix "bot> ")
 
+(defconst emacos--chat-presentation-max-bytes (* 256 1024)
+  "Largest single message body formatted synchronously on the phone.")
+
+(defface emacos-chat-user-role-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for the visible `you> ' role label."
+  :group 'emacsos)
+
+(defface emacos-chat-assistant-role-face
+  '((t :inherit font-lock-function-name-face :weight bold))
+  "Face for the visible `bot> ' role label."
+  :group 'emacsos)
+
+(defface emacos-chat-heading-face
+  '((t :inherit variable-pitch :weight bold :height 1.15))
+  "Face for Markdown heading text in a conversation."
+  :group 'emacsos)
+
+(defface emacos-chat-markup-face
+  '((t :inherit shadow))
+  "Face for visible Markdown punctuation."
+  :group 'emacsos)
+
+(defface emacos-chat-code-face
+  '((t :inherit (fixed-pitch font-lock-constant-face)))
+  "Face for inline and fenced Markdown code."
+  :group 'emacsos)
+
+(defface emacos-chat-quote-face
+  '((t :inherit font-lock-comment-face :slant italic))
+  "Face for Markdown block quotes."
+  :group 'emacsos)
+
+(defface emacos-chat-link-face
+  '((t :inherit font-lock-constant-face :underline nil))
+  "Neutral, inactive face for Markdown link labels."
+  :group 'emacsos)
+
+(defun emacos--chat-copy-raw (beg end delete)
+  "Return plain source text from BEG to END, deleting it when DELETE is non-nil."
+  (let ((text (buffer-substring-no-properties beg end)))
+    (when delete (delete-region beg end))
+    text))
+
+(defun emacos--chat-enable-presentation ()
+  "Enable phone-readable wrapping and raw copy/paste in the current buffer."
+  (visual-line-mode 1)
+  (setq-local truncate-lines nil
+              word-wrap t
+              filter-buffer-substring-function #'emacos--chat-copy-raw))
+
+(defun emacos--chat-add-face (beg end face)
+  "Append FACE to text from BEG to END through the inert font-lock channel."
+  (when (< beg end)
+    (font-lock-append-text-property beg end 'font-lock-face face)))
+
+(defun emacos--chat-match-verbatim-p ()
+  "Return non-nil when any part of the current match is already verbatim."
+  (text-property-not-all (match-beginning 0) (match-end 0)
+                         'emacos--chat-verbatim nil))
+
+(defun emacos--chat-present-markdown-1 (beg end)
+  "Apply the flat native Markdown presentation to BEG..END.
+
+The caller supplies one message body.  The grammar is intentionally small:
+triple-backtick fences; logical-line headings, lists, and quotes; then
+single-line non-nested code, links, bold, and italic.  Source characters are
+never replaced or hidden."
+  (when (and (<= beg end)
+             (<= (- (position-bytes end) (position-bytes beg))
+                 emacos--chat-presentation-max-bytes))
+    (with-silent-modifications
+      (save-excursion
+        (remove-text-properties beg end
+                                '(font-lock-face nil wrap-prefix nil
+                                  emacos--chat-verbatim nil))
+        (save-restriction
+          (narrow-to-region beg end)
+          (let ((in-fence nil))
+            (goto-char (point-min))
+            (while (< (point) (point-max))
+              (let ((line-start (point))
+                    (line-end (line-end-position)))
+                (cond
+                 ((looking-at "[ \t]*```")
+                  (emacos--chat-add-face line-start line-end
+                                         'emacos-chat-code-face)
+                  (emacos--chat-add-face (match-beginning 0) (match-end 0)
+                                         'emacos-chat-markup-face)
+                  (put-text-property line-start line-end
+                                     'emacos--chat-verbatim t)
+                  (setq in-fence (not in-fence)))
+                 (in-fence
+                  (emacos--chat-add-face line-start line-end
+                                         'emacos-chat-code-face)
+                  (put-text-property line-start line-end
+                                     'emacos--chat-verbatim t))
+                 ((looking-at "[ \t]*\\(#\\{1,6\\}\\)[ \t]+")
+                  (emacos--chat-add-face (match-beginning 1) (match-end 1)
+                                         'emacos-chat-markup-face)
+                  (emacos--chat-add-face (match-end 0) line-end
+                                         'emacos-chat-heading-face))
+                 ((looking-at
+                   "[ \t]*\\(?:[-+*]\\|[0-9]+[.)]\\)[ \t]+")
+                  (emacos--chat-add-face (match-beginning 0) (match-end 0)
+                                         'font-lock-builtin-face)
+                  (put-text-property line-start line-end 'wrap-prefix
+                                     (make-string
+                                      (save-excursion
+                                        (goto-char (match-end 0))
+                                        (current-column))
+                                      ?\s)))
+                 ((looking-at "[ \t]*>[ \t]*")
+                  (emacos--chat-add-face (match-beginning 0) (match-end 0)
+                                         'emacos-chat-markup-face)
+                  (emacos--chat-add-face (match-end 0) line-end
+                                         'emacos-chat-quote-face)
+                  (put-text-property line-start line-end 'wrap-prefix
+                                     (make-string
+                                      (save-excursion
+                                        (goto-char (match-end 0))
+                                        (current-column))
+                                      ?\s)))))
+              (forward-line 1)))
+
+          ;; Inline code wins: later passes skip ranges marked verbatim.
+          (goto-char (point-min))
+          (while (re-search-forward "`\\([^`\n]+\\)`" nil t)
+            (unless (emacos--chat-match-verbatim-p)
+              (emacos--chat-add-face (match-beginning 0) (match-end 0)
+                                     'emacos-chat-code-face)
+              (emacos--chat-add-face (match-beginning 0) (1+ (match-beginning 0))
+                                     'emacos-chat-markup-face)
+              (emacos--chat-add-face (1- (match-end 0)) (match-end 0)
+                                     'emacos-chat-markup-face)
+              (put-text-property (match-beginning 0) (match-end 0)
+                                 'emacos--chat-verbatim t)))
+
+          (goto-char (point-min))
+          (while (re-search-forward
+                  "\\[\\([^]\n]+\\)\\](\\([^()\n]+\\))" nil t)
+            (unless (emacos--chat-match-verbatim-p)
+              (emacos--chat-add-face (match-beginning 1) (match-end 1)
+                                     'emacos-chat-link-face)
+              (emacos--chat-add-face (match-beginning 0) (match-beginning 1)
+                                     'emacos-chat-markup-face)
+              (emacos--chat-add-face (match-end 1) (match-end 0)
+                                     'emacos-chat-markup-face)
+              (put-text-property (match-beginning 0) (match-end 0)
+                                 'emacos--chat-verbatim t)))
+
+          (dolist (regexp '("\\*\\*\\([^*\n]+\\)\\*\\*"))
+            (goto-char (point-min))
+            (while (re-search-forward regexp nil t)
+              (unless (emacos--chat-match-verbatim-p)
+                (emacos--chat-add-face (match-beginning 1) (match-end 1) 'bold)
+                (emacos--chat-add-face (match-beginning 0) (match-beginning 1)
+                                       'emacos-chat-markup-face)
+                (emacos--chat-add-face (match-end 1) (match-end 0)
+                                       'emacos-chat-markup-face)
+                (put-text-property (match-beginning 0) (match-end 0)
+                                   'emacos--chat-verbatim t))))
+
+          (dolist (regexp '("\\*\\([^*\n]+\\)\\*"))
+            (goto-char (point-min))
+            (while (re-search-forward regexp nil t)
+              (if (emacos--chat-match-verbatim-p)
+                  (goto-char
+                   (or (next-single-property-change
+                        (match-beginning 0) 'emacos--chat-verbatim nil
+                        (point-max))
+                       (point-max)))
+                (emacos--chat-add-face (match-beginning 1) (match-end 1) 'italic)
+                (emacos--chat-add-face (match-beginning 0) (match-beginning 1)
+                                       'emacos-chat-markup-face)
+                (emacos--chat-add-face (match-end 1) (match-end 0)
+                                       'emacos-chat-markup-face))))
+          (remove-text-properties (point-min) (point-max)
+                                  '(emacos--chat-verbatim nil)))))))
+
+(defun emacos--chat-present-message (prefix-start body-start end role)
+  "Present one ROLE message without changing PREFIX-START..END source text.
+
+BODY-START follows the visible role prefix.  Presentation is deliberately
+best-effort and never allowed to interrupt chat lifecycle code."
+  (condition-case error
+      (progn
+        (with-silent-modifications
+          (remove-text-properties prefix-start body-start
+                                  '(font-lock-face nil))
+          (emacos--chat-add-face
+           prefix-start body-start
+           (if (eq role 'user)
+               'emacos-chat-user-role-face
+             'emacos-chat-assistant-role-face)))
+        (emacos--chat-present-markdown-1 body-start end))
+    (error
+     (message "chat: couldn't present Markdown: %s"
+              (error-message-string error))
+     nil)))
+
+(defun emacos--chat-present-transcript (beg end)
+  "Present role-prefixed messages between BEG and END as cosmetic hints."
+  (condition-case error
+      (when (<= (- (position-bytes end) (position-bytes beg))
+                emacos--chat-presentation-max-bytes)
+        (save-excursion
+          (goto-char beg)
+          (let (messages)
+            (while (re-search-forward "^\\(you> \\|bot> \\)" end t)
+              (push (list (match-beginning 1) (match-end 1)
+                          (if (eq (char-after (match-beginning 1)) ?y)
+                              'user 'assistant))
+                    messages))
+            (setq messages (nreverse messages))
+            (while messages
+              (let* ((message (car messages))
+                     (next (cadr messages)))
+                (emacos--chat-present-message
+                 (nth 0 message) (nth 1 message)
+                 (if next (nth 0 next) end) (nth 2 message)))
+              (setq messages (cdr messages))))))
+    (error
+     (message "chat: couldn't present transcript: %s"
+              (error-message-string error))
+     nil)))
+
 ;; The chat stream engine is buffer-agnostic: handlers render into the
 ;; buffer that initiated the current stream, not the literal *chat*.  That
 ;; buffer is the *chat* scratch or a file-backed `emacos-assist-mode' buffer.
@@ -206,6 +434,7 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
     ;; proportional `variable-pitch' face (the keyboard stays monospace
     ;; in its own buffer).  The face family is set in the init snippet.
     (variable-pitch-mode 1)
+    (emacos--chat-enable-presentation)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (emacos--chat-write-prompt))
@@ -244,7 +473,7 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
 ;;; Stream handlers (called from the process filter, per NDJSON event)
 
 (defun emacos--chat-handle-start (_event)
-  "Open a new bot line in the *chat* buffer.  Sets up the three
+  "Open a new bot line in the active conversation buffer.  Set up the three
 markers (insert / status-start / status-end) used by subsequent
 event handlers."
   (let ((buf (emacos--chat-render-buffer)))
@@ -264,7 +493,11 @@ event handlers."
               ;; Insert "\nbot> " at the prompt's position.  The
               ;; existing prompt and input get pushed down.
               (let ((line-start (point)))
-                (insert "\n" emacos--chat-bot-prefix)
+                (insert "\n")
+                (let ((prefix-start (point)))
+                  (insert emacos--chat-bot-prefix)
+                  (emacos--chat-present-message
+                   prefix-start (point) (point) 'assistant))
                 ;; Insert marker sits just after "bot> " — that's where
                 ;; tokens and status both insert.  Marker insertion-type
                 ;; t so it moves forward as content is added.
@@ -341,15 +574,34 @@ working silently)."
   "Heartbeat is purely transport-level — no UI change."
   nil)
 
-(defun emacos--chat-handle-end (_event)
-  "Stream complete.  Clear status, release the in-flight lock,
-release markers, re-render the page so CLEAR returns."
+(defun emacos--chat-handle-end (event)
+  "Finish or recover a stream described by EVENT.
+Clear status and release the in-flight lock and markers.  A genuine end event
+also presents the complete Markdown body; a nil watchdog event leaves it raw."
   (let ((buf (emacos--chat-render-buffer)))
-    (when (and buf (buffer-live-p buf))
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          (emacos--chat-clear-status-bracket))))
-    (emacos--chat-stream-cleanup)))
+    (unwind-protect
+        (when (and buf (buffer-live-p buf))
+          (with-current-buffer buf
+            (let* ((inhibit-read-only t)
+                   (window (get-buffer-window buf))
+                   (window-start-position (and window (window-start window))))
+              (emacos--chat-clear-status-bracket)
+              ;; A nil EVENT is the watchdog's synthetic cleanup after a
+              ;; connection close.  Only a real terminal event proves that a
+              ;; half-received Markdown delimiter is complete.
+              (when (and (equal (plist-get event :type) "end")
+                         (markerp emacos--chat-status-start)
+                         (markerp emacos--chat-stream-insert-marker))
+                (condition-case error
+                    (emacos--chat-present-markdown-1
+                     (marker-position emacos--chat-status-start)
+                     (marker-position emacos--chat-stream-insert-marker))
+                  (error
+                   (message "chat: couldn't present Markdown: %s"
+                            (error-message-string error)))))
+              (when (and window-start-position (window-live-p window))
+                (set-window-start window window-start-position t)))))
+      (emacos--chat-stream-cleanup))))
 
 (defun emacos--chat-handle-error (event)
   "Render `[error: <reason>]' on the bot line and clean up.
@@ -380,7 +632,13 @@ Otherwise (error before any server response), synthesize a fresh
                 (when prompt-start
                   (goto-char prompt-start)
                   (let ((before (point)))
-                    (insert "\n" emacos--chat-bot-prefix "[error: " reason "]")
+                    (insert "\n")
+                    (let ((prefix-start (point)))
+                      (insert emacos--chat-bot-prefix)
+                      (let ((body-start (point)))
+                        (insert "[error: " reason "]")
+                        (emacos--chat-present-message
+                         prefix-start body-start (point) 'assistant)))
                     (add-text-properties
                      before (point)
                      '(read-only t front-sticky t rear-nonsticky t)))))))))))
@@ -405,7 +663,13 @@ stream that started meanwhile."
             (save-excursion
               (goto-char prompt-start)
               (let ((before (point)))
-                (insert "\n" emacos--chat-bot-prefix text)
+                (insert "\n")
+                (let ((prefix-start (point)))
+                  (insert emacos--chat-bot-prefix)
+                  (let ((body-start (point)))
+                    (insert text)
+                    (emacos--chat-present-message
+                     prefix-start body-start (point) 'assistant)))
                 (add-text-properties before (point)
                                      '(read-only t front-sticky t rear-nonsticky t))))))))))
 
@@ -669,7 +933,13 @@ sends its per-file thread id + the file's directory so the server keys a
                 (save-excursion
                   (goto-char prompt-start)
                   (let ((before (point)))
-                    (insert "\nyou> " msg)
+                    (insert "\n")
+                    (let ((prefix-start (point)))
+                      (insert "you> ")
+                      (let ((body-start (point)))
+                        (insert msg)
+                        (emacos--chat-present-message
+                         prefix-start body-start (point) 'user)))
                     (add-text-properties before (point)
                                          '(read-only t front-sticky t rear-nonsticky t))))))))
         ;; First-token watchdog.  Fires once if no event lands

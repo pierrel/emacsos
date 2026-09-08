@@ -1,0 +1,185 @@
+#+title: Native conversation rendering on the phone
+#+date: 2026-09-07
+
+State: implemented and locally reviewed; awaiting sequenced phone deployment
+
+* Objective
+
+Make both EmacsOS conversation surfaces readable on the narrow phone display.
+Local =*chat*= / =.assist= conversations and canonical Assist Web thread
+buffers render the Markdown already carried in message text using native Emacs
+display properties and faces.  The stored, copied, sent, and cached text remains
+byte-for-byte unchanged.
+
+* User experience
+
+- Conversation buffers use visual-line wrapping and proportional prose.
+- =you>= and =bot>= remain visible source text, but distinct faces make each
+  message boundary immediate on a 320-pixel-wide display.
+- Headings, unordered and ordered lists, bold and italic emphasis, links,
+  inline code, fenced code blocks, block quotes, and blank-line paragraph
+  spacing receive native Emacs presentation.  Code stays fixed-pitch, and
+  wrapped list and quote lines retain their indentation.
+- No HTML conversion, WebKit, =shr=, browser widget, or browser-backed renderer
+  participates.  Link labels receive a neutral textual face and destinations
+  retain subdued visible punctuation, not the conventional underlined =link=
+  face.  Links are not activated.  They therefore
+  do not promise a dead tap or add an external action.
+- A local assistant response streams as plain source while incomplete and is
+  formatted once the end event arrives.  This avoids flicker and interpreting a
+  half-received delimiter while retaining the current editable-next-prompt flow.
+- Assist Web refresh and pending-turn commitment retain the draft cursor when
+  composing.  When reading history, point and the viewport remain anchored to
+  the same stable message id and offset.  Loaded older history is retained
+  across canonical recent-page refreshes, so loading or refreshing above the
+  viewport does not jump to a line-count approximation.
+
+* Design
+
+1. =chat.el= owns the shared, bounded presentation pass because it already owns
+   the buffer-agnostic conversation renderer loaded by both local chat modes.
+   =assist-web.el= requires =chat= explicitly.  The formatter is a one-shot,
+   non-signaling applicator over freshly inserted or freshly opened text; it
+   never owns request cleanup.  It accepts explicit message body bounds and
+   leaves =read-only=, markers, undo, modified state, and source characters
+   alone.
+2. The deliberately flat grammar is: triple-backtick fences; headings, list
+   markers, and quote markers at a message's logical line start; and single-line,
+   non-nested backtick code, links, star-delimited bold, and star-delimited
+   italic.  Underscore emphasis is deliberately not inferred because ordinary
+   identifiers are common in assistant output.  Inline code wins over all
+   other inline forms.  Backslash escapes are not interpreted; recursive inline
+   formatting, alternate fence characters, and multiline emphasis are outside
+   the supported grammar.  A logical line begins at
+   the body start even though the visible role prefix precedes it on the same
+   physical line.  Markdown delimiters remain visible but subdued; content gets
+   a semantic face.  Lists and quotes receive inert string =wrap-prefix=
+   indentation.  Existing blank lines provide paragraph spacing without adding
+   height-changing display properties.
+3. Presentation uses only =font-lock-face=, string-valued =wrap-prefix=, and the
+   inert namespaced Assist Web message-id property.  It never installs =display=,
+   =invisible=, =composition=, buttons, keymaps, mouse/follow-link properties,
+   function-valued help, modification hooks, yank handlers, or values derived
+   through evaluation or interning.  Conversation copying uses a source-side
+   plain-text filter, so neither presentation nor identity properties enter the
+   kill ring or a destination buffer.
+4. Known local insertions supply exact boundaries.  User messages format when
+   committed.  The assistant body formats after =emacos--chat-handle-end= clears
+   its transient status and before stream markers are released, but only for a
+   genuine end event.  A watchdog-synthesized end leaves incomplete Markdown
+   plain.  Formatting preserves the one displayed phone window's start as well
+   as point and the editable draft.  Notes and errors keep their existing status
+   presentation.
+5. A reopened =.assist= file has no durable message ids or delimiters beyond the
+   historical =you> = / =bot> = prefixes.  Initialization may use those prefixes
+   only to reconstruct visual spans.  A literal prefix inside assistant content
+   can therefore split apparent formatting spans or acquire role styling.  That
+   styling is an untrusted presentation hint, not provenance; the ambiguity
+   never affects persistence, sending, thread identity, or server state.
+6. Assist Web retains its separate canonical snapshot/run state machine.
+   =assist-web.el= calls only the common presentation helper for each
+   authoritative message body and stores each render-validated, unique message
+   id as a nonpersistent text property across its role prefix, body, and trailing
+   separator.
+7. Before a full Assist Web redraw, logical anchors capture buffer point and the
+   one displayed phone window's point/start as either an input offset, a stable
+   message id plus offset, or a clamped absolute fallback for non-message header
+   text.  After rendering, those
+   anchors are restored.  The renderer is the sole owner of repositioning; the
+   old post-pagination line-count reset is removed.  A new buffer still opens at
+   its editable prompt.  A refresh merges the canonical recent page with older
+   canonical messages already loaded in memory, preferring fresh records for
+   duplicate ids and retaining the oldest pagination cursor.
+
+* Safety and scope
+
+The change adds no network endpoint, privilege, filesystem access, command,
+parser dependency, or active link sink.  Assist Web messages retain their
+existing response bounds; the local stream remains user-abortable and has no
+total timeout by design.  The formatter does not broaden either contract: it
+scans only the explicit, already-rendered message region it is given, has a hard
+256 KiB presentation budget, uses monotonic bounded regex searches, and leaves
+larger text raw.  Full local reopen and Assist Web redraws apply that budget to
+the total transcript body rather than resetting it per apparent message, so
+false role prefixes and multi-message responses cannot multiply synchronous
+work.  Presentation errors are contained and terminal
+stream cleanup is guaranteed.
+Malformed Markdown can look plain or partially styled; it cannot escape the
+buffer into execution.
+
+This change does not alter either wire protocol, message identity, cache shape,
+file format, request lifecycle, or command surface.  A small supported Markdown
+subset is intentional; complete CommonMark compatibility would add a dependency
+and complexity without improving the phone's normal assistant output.
+
+* Implementation
+
+- =chat.el= owns the faces, raw-copy filter, bounded flat Markdown presenter,
+  reopen scan, and completion-time local-stream integration.
+- =emacos-assist.el= enables wrapping and presents the existing transcript when
+  a local file-backed conversation opens.
+- =assist-web.el= validates unique message ids, formats canonical records, keeps
+  loaded history during recent-page refreshes, and restores logical point and
+  viewport anchors across its full redraw.
+- The code adds no package dependency.  It uses built-in faces, text
+  properties, markers, and visual-line mode only.
+
+* Local review record
+
+The seven code-review lenses ran over the complete diff.  Round one found an
+exclusive-end anchor that could land in the following message after text
+shortened, source-side copying that still allowed display properties into the
+kill ring, documentation drift, and presentation budgets that could reset at
+soft local boundaries or each web message.  It also exposed nested emphasis
+overriding inline code and underscore emphasis styling ordinary identifiers.
+Those findings were fixed with inside-record clamping, a plain-text copy filter,
+one total redraw/reopen budget, code-range precedence, star-only emphasis, and
+aligned tests/docs.  Round two re-ran the affected error/edge and documentation
+lenses and returned clean.  Correctness, concurrency/liveness, adversarial
+security, simplicity/LOC, and design-adherence returned clean.  No reviewed
+finding was rejected or deferred.
+
+* Verification
+
+- ERT pins all supported constructs in one representative multi-line message,
+  fenced/inline-code isolation, role faces, the presentation budget, unchanged
+  source text/modified state, raw kill/yank, allowed property keys,
+  continuation indentation, and visual-line mode.
+- Local stream tests pin unformatted partial tokens, formatting at genuine
+  completion, raw watchdog completion, cleanup after presentation failure, and
+  editable prompt text.
+- Assist Web tests pin per-message formatting and unique ids, draft cursor
+  retention during refresh and pending commitment, loaded-history retention,
+  reading-position retention across refresh, and viewport retention when older
+  messages are prepended.
+- Run =make test-elisp= and =make test-server=.  No wire or boot shape changes,
+  so the docker model smoke is not required.  The live-phone smoke exercises a
+  representative Markdown answer, copying its raw source, composing during a
+  stream, refreshing a web thread, and loading older history.
+
+* Deployment sequencing
+
+The phone currently runs the custom keyboard recorded by EmacsOS commit
+=5ba9300= and wvkbd commit =1ac7c86=.  This branch starts from EmacsOS =main=
+because feature lanes must not stack.  Deployment will wait for the active
+phone reservation and coordinate with the keyboard and command-surface lanes.
+Only after proving the deploy command cannot replace the supervised wvkbd
+binary/process will the changed Emacs client files be hot-loaded.  The keyboard
+process and checksum are verified again afterward.  No merge occurs without
+Pierre's approval.
+
+* Lineage
+
+- [[file:2026-05-27-file-backed-chat.org][File-backed chat]] defines the durable local transcript and its deliberate
+  lack of parseable message boundaries.
+- [[file:2026-09-03-assist-web-thread-flow.org][Assist Web thread flow]] defines canonical message ids, full redraws, and
+  history pagination whose display behavior this design improves.
+
+* Historical supersessions
+
+This design narrowly supersedes the no-reparse part of Decision 10, “File
+format & save lifecycle,” in [[file:2026-05-27-file-backed-chat.org][File-backed chat]].  Reopen still never reconstructs
+server turns, persistence structure, or identity.  It now treats visible
+=you> = / =bot> = prefixes as soft, untrusted presentation hints only.  A false
+prefix can change faces and Markdown span boundaries, but never data or control
+flow.

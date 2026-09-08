@@ -214,7 +214,9 @@ existing transcript read-only.  Leaves the buffer's modified flag unchanged
     (let ((istart (emacos--chat-input-start (current-buffer))))
       (when (and istart (> istart (point-min)))
         (add-text-properties (point-min) istart
-                             '(read-only t front-sticky t rear-nonsticky t))))
+                             '(read-only t front-sticky t rear-nonsticky t))
+        (emacos--chat-present-transcript
+         (point-min) (- istart (length emacos--chat-prompt)))))
     (unless was-modified (set-buffer-modified-p nil)))
   (goto-char (point-max)))
 
@@ -224,6 +226,7 @@ The file's transcript is a read-only chat surface with an editable prompt;
 the utility-row Chat/SEND button streams the input into this buffer and the
 agent reads/edits/runs files in this file's directory on the phone."
   (variable-pitch-mode 1)
+  (emacos--chat-enable-presentation)
   (auto-save-mode -1)               ; the chat surface saves on its own events
   (setq-local revert-buffer-function #'emacos-assist--revert)
   (emacos-assist--init-buffer))

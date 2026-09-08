@@ -609,5 +609,137 @@ don't leak ` *http*' buffers."
       (emacos--chat-rollback-callback nil))
     (should-not (buffer-live-p resp))))
 
+(ert-deftest chat-test-native-markdown-presentation-is-inert-and-text-preserving ()
+  (with-temp-buffer
+    (emacos--chat-enable-presentation)
+    (insert "bot> # Heading\n- item\n> quote\n**bold** *italic* [docs](https://example.test) `code`\n```elisp\n**literal**\n```")
+    (let ((source (buffer-string)))
+      (set-buffer-modified-p nil)
+      (emacos--chat-present-message 1 6 (point-max) 'assistant)
+      (should (equal (buffer-string) source))
+      (should-not (buffer-modified-p))
+      (should (memq 'emacos-chat-assistant-role-face
+                    (get-text-property 1 'font-lock-face)))
+      (goto-char (point-min))
+      (search-forward "Heading")
+      (should (memq 'emacos-chat-heading-face
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "item")
+      (should (stringp (get-text-property (match-beginning 0) 'wrap-prefix)))
+      (search-forward "quote")
+      (should (memq 'emacos-chat-quote-face
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "bold")
+      (should (memq 'bold
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "italic")
+      (should (memq 'italic
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "docs")
+      (should (memq 'emacos-chat-link-face
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "code")
+      (should (memq 'emacos-chat-code-face
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "literal")
+      (let ((faces (get-text-property (match-beginning 0) 'font-lock-face)))
+        (should (memq 'emacos-chat-code-face faces))
+        (should-not (memq 'bold faces)))
+      (let ((position (point-min)))
+        (while (< position (point-max))
+          (let ((properties (text-properties-at position)))
+            (while properties
+              (should (memq (pop properties)
+                            '(font-lock-face wrap-prefix)))
+              (pop properties)))
+          (setq position (next-property-change position nil (point-max)))))
+      (let ((kill-ring nil))
+        (kill-ring-save (point-min) (point-max))
+        (should-not (text-properties-at 0 (car kill-ring)))
+        (erase-buffer)
+        (yank)
+        (should (equal (buffer-string) source))
+        (should-not (text-properties-at (point-min)))))))
+
+(ert-deftest chat-test-inline-code-wins-and-identifiers-are-not-emphasis ()
+  (with-temp-buffer
+    (insert "bot> **outer `code` tail** file_name __init__")
+    (emacos--chat-present-message 1 6 (point-max) 'assistant)
+    (goto-char (point-min))
+    (search-forward "code")
+    (let ((faces (get-text-property (match-beginning 0) 'font-lock-face)))
+      (should (memq 'emacos-chat-code-face faces))
+      (should-not (memq 'bold faces)))
+    (search-forward "name")
+    (should-not (memq 'italic
+                      (get-text-property (match-beginning 0) 'font-lock-face)))
+    (search-forward "init")
+    (should-not (memq 'bold
+                      (get-text-property (match-beginning 0) 'font-lock-face)))))
+
+(ert-deftest chat-test-markdown-budget-skips-body-formatting ()
+  (with-temp-buffer
+    (insert "bot> ``` unmatched **bold\n" (make-string 32 ?x))
+    (let ((emacos--chat-presentation-max-bytes 16))
+      (emacos--chat-present-message 1 6 (point-max) 'assistant))
+    (goto-char 6)
+    (should-not (get-text-property (point) 'font-lock-face))))
+
+(ert-deftest chat-test-reopened-transcript-has-one-total-presentation-budget ()
+  (with-temp-buffer
+    (insert "bot> **first**\nbot> **second**")
+    (let ((emacos--chat-presentation-max-bytes 16))
+      (emacos--chat-present-transcript (point-min) (point-max)))
+    (goto-char (point-min))
+    (should-not (get-text-property (point) 'font-lock-face))))
+
+(ert-deftest chat-test-stream-formats-only-a-genuine-end-and-keeps-draft-point ()
+  (chat-test--reset)
+  (setq emacos--chat-in-flight t)
+  (let ((buf (emacos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (with-current-buffer buf
+      (goto-char (point-max))
+      (insert "draft")
+      (backward-char 2))
+    (emacos--chat-handle-start '(:type "start"))
+    (emacos--chat-handle-token '(:type "token" :text "**done**"))
+    (with-current-buffer buf
+      (goto-char (point-min))
+      (search-forward "done")
+      (should-not (get-text-property (match-beginning 0) 'font-lock-face)))
+    (emacos--chat-handle-end '(:type "end"))
+    (with-current-buffer buf
+      (goto-char (point-min))
+      (search-forward "done")
+      (should (memq 'bold
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (should (equal (emacos--chat-current-input buf) "draft")))))
+
+(ert-deftest chat-test-presentation-error-cannot-strand-end-cleanup ()
+  (chat-test--reset)
+  (setq emacos--chat-in-flight t)
+  (let ((buf (emacos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (emacos--chat-handle-start '(:type "start"))
+    (cl-letf (((symbol-function 'emacos--chat-present-markdown-1)
+               (lambda (&rest _) (error "broken presenter"))))
+      (emacos--chat-handle-end '(:type "end")))
+    (should-not emacos--chat-in-flight)
+    (should-not emacos--chat-stream-insert-marker)))
+
+(ert-deftest chat-test-watchdog-end-leaves-incomplete-markdown-plain ()
+  (chat-test--reset)
+  (setq emacos--chat-in-flight t)
+  (let ((buf (emacos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (emacos--chat-handle-start '(:type "start"))
+    (emacos--chat-handle-token '(:type "token" :text "**unfinished**"))
+    (emacos--chat-handle-end nil)
+    (with-current-buffer buf
+      (goto-char (point-min))
+      (search-forward "unfinished")
+      (should-not (get-text-property (match-beginning 0) 'font-lock-face)))))
+
 (provide 'test-chat)
 ;;; test-chat.el ends here
