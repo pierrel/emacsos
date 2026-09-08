@@ -1,7 +1,7 @@
 #+title: Native conversation rendering on the phone
 #+date: 2026-09-07
 
-State: implemented, locally reviewed, and deployed; awaiting pull-request review
+State: implemented, reviewed, deployed, and ready for Pierre's approval
 
 * Objective
 
@@ -216,6 +216,16 @@ commit whenever independent unmerged phone features must coexist.
 None.  Full CommonMark parsing and active links remain explicit non-goals, not
 deferred defects: the bounded native subset covers the Markdown emitted in the
 phone conversations without adding a parser or a dead-looking tap target.
+
+* Pull request and external review
+
+[[https://github.com/pierrel/emacsos/pull/40][GitHub PR #40]] contains only the native-rendering review branch based on
+=main=; the temporary live integration ancestry is excluded.  Its description
+records the current behavior, deterministic coverage, live deployment, and the
+absence of behavioral eval changes.  Copilot reviewed all changed files in its
+first round, recommended approval, and generated no comments.  No meaningful
+Copilot finding required a bridge-ledger entry.  The PR remains unmerged until
+Pierre explicitly approves it.
 
 * Lineage
 
