@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'chat)
 (require 'json)
 (require 'seq)
 (require 'subr-x)
@@ -310,18 +311,23 @@
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
-    (dolist (message messages)
-      (unless (and (emacos-assist-web--object-p message)
-                   (condition-case nil
-                       (progn
-                         (emacos-assist-web--require-record-id
-                          (alist-get 'id message))
-                         t)
-                     (error nil))
-                   (member (alist-get 'role message) '("user" "assistant"))
-                   (stringp (alist-get 'text message))
-                   (member (alist-get 'state message) '("final" "incomplete")))
-        (error "Assist Web returned an invalid thread message")))
+    (let ((seen (make-hash-table :test #'equal)))
+      (dolist (message messages)
+        (unless (and (emacos-assist-web--object-p message)
+                     (condition-case nil
+                         (progn
+                           (emacos-assist-web--require-record-id
+                            (alist-get 'id message))
+                           t)
+                       (error nil))
+                     (member (alist-get 'role message) '("user" "assistant"))
+                     (stringp (alist-get 'text message))
+                     (member (alist-get 'state message) '("final" "incomplete")))
+          (error "Assist Web returned an invalid thread message"))
+        (let ((identity (alist-get 'id message)))
+          (when (gethash identity seen)
+            (error "Assist Web returned duplicate message identities"))
+          (puthash identity t seen))))
     (when-let ((cursor (alist-get 'next_before value)))
       (emacos-assist-web--require-record-id cursor))
     value))
@@ -920,52 +926,199 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
                          '(read-only t front-sticky t rear-nonsticky t))
     (setq emacos-assist-web--input-marker (copy-marker (point) nil))))
 
+(defun emacos-assist-web--anchor-at (position)
+  "Describe POSITION in the current rendered thread using logical content."
+  (let ((input-start (emacos-assist-web--prompt-start))
+        (position (max (point-min) (min position (point-max)))))
+    (cond
+     ((and input-start (>= position input-start))
+      (list :kind 'input :offset (- position input-start)))
+     ((< position (point-max))
+      (let ((identity (get-text-property
+                       position 'emacos-assist-web-message-id)))
+        (if identity
+            (let ((start position))
+              (while (and (> start (point-min))
+                          (equal identity
+                                 (get-text-property
+                                  (1- start)
+                                  'emacos-assist-web-message-id)))
+                (setq start (previous-single-property-change
+                             start 'emacos-assist-web-message-id nil
+                             (point-min))))
+              (list :kind 'message :id identity
+                    :offset (- position start)
+                    :fallback position))
+          (list :kind 'absolute :position position))))
+     (t (list :kind 'absolute :position position)))))
+
+(defun emacos-assist-web--resolve-anchor (anchor)
+  "Resolve logical ANCHOR in the current rendered thread."
+  (pcase (plist-get anchor :kind)
+    ('input
+     (let ((start (or (emacos-assist-web--prompt-start) (point-max))))
+       (min (point-max) (+ start (plist-get anchor :offset)))))
+    ('message
+     (if-let ((start
+               (let ((position (point-min)) found)
+                 ;; Property search primitives compare string values by
+                 ;; identity.  Snapshot redraws produce equal, newly allocated
+                 ;; id strings, so walk the bounded property runs explicitly.
+                 (while (and (< position (point-max)) (not found))
+                   (when (equal (get-text-property
+                                 position 'emacos-assist-web-message-id)
+                                (plist-get anchor :id))
+                     (setq found position))
+                   (unless found
+                     (setq position
+                           (next-single-property-change
+                            position 'emacos-assist-web-message-id nil
+                            (point-max)))))
+                 found)))
+         (let ((end (or (next-single-property-change
+                         start 'emacos-assist-web-message-id nil (point-max))
+                        (point-max))))
+           ;; END is exclusive.  Clamping to END can silently move the anchor
+           ;; onto the following message when a refreshed record gets shorter.
+           (min (max start (1- end))
+                (+ start (plist-get anchor :offset))))
+       (max (point-min)
+            (min (or (plist-get anchor :fallback) (point-min))
+                 (point-max)))))
+    (_
+     (max (point-min)
+          (min (or (plist-get anchor :position) (point-min))
+               (point-max))))))
+
+(defun emacos-assist-web--capture-render-state ()
+  "Capture point and the one displayed phone window before a redraw."
+  (when (and (markerp emacos-assist-web--input-marker)
+             (marker-buffer emacos-assist-web--input-marker))
+    (let ((window (get-buffer-window (current-buffer))))
+      (list :point (emacos-assist-web--anchor-at (point))
+            :window window
+            :window-point (and window
+                               (emacos-assist-web--anchor-at
+                                (window-point window)))
+            :window-start (and window
+                               (emacos-assist-web--anchor-at
+                                (window-start window)))))))
+
+(defun emacos-assist-web--restore-render-state (state)
+  "Restore logical point and phone viewport from STATE after a redraw."
+  (if (not state)
+      (goto-char (point-max))
+    (let ((window (plist-get state :window)))
+      (when (and window (window-live-p window)
+                 (eq (window-buffer window) (current-buffer)))
+        (set-window-point
+         window
+         (emacos-assist-web--resolve-anchor
+          (plist-get state :window-point)))
+        (set-window-start
+         window
+         (emacos-assist-web--resolve-anchor
+          (plist-get state :window-start)) t))
+      (goto-char (emacos-assist-web--resolve-anchor
+                  (plist-get state :point))))))
+
+(defun emacos-assist-web--retain-loaded-history (fresh previous)
+  "Return FRESH with canonical messages already loaded in PREVIOUS retained.
+
+Thread messages are append-only.  A fresh recent page replaces records with
+matching ids; older records no longer present in that bounded page stay ahead
+of it, together with the oldest pagination cursor already reached."
+  (if (not previous)
+      fresh
+    (let ((fresh-by-id (make-hash-table :test #'equal))
+          (older nil)
+          (has-old-only nil)
+          (result (copy-tree fresh)))
+      (dolist (message (alist-get 'messages fresh))
+        (puthash (alist-get 'id message) message fresh-by-id))
+      (dolist (message (alist-get 'messages previous))
+        (unless (gethash (alist-get 'id message) fresh-by-id)
+          (setq has-old-only t)
+          (push message older)))
+      (setf (alist-get 'messages result)
+            (append (nreverse older) (alist-get 'messages fresh)))
+      (when has-old-only
+        (setf (alist-get 'has_older_messages result)
+              (alist-get 'has_older_messages previous)
+              (alist-get 'next_before result)
+              (alist-get 'next_before previous)))
+      result)))
+
 (defun emacos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed."
   (let ((inhibit-read-only t)
         (inhibit-modification-hooks t)
-        (thread (alist-get 'thread snapshot))
-        (draft (emacos-assist-web--input)))
-    (let ((returned-id (emacos-assist-web--require-id (alist-get 'id thread))))
-      (when (and emacos-assist-web--thread-id
-                 (not (equal returned-id emacos-assist-web--thread-id)))
-        (error "Assist Web snapshot identity does not match this buffer"))
-      (setq emacos-assist-web--thread-id returned-id))
-    (setq
-     emacos-assist-web--snapshot snapshot
-     emacos-assist-web--pending-rendered-p nil)
-    (erase-buffer)
-    (let ((transcript-start (point)))
-      (insert (format "%s%s\n"
-                      (emacos-assist-web--thread-label
-                       `((description . ,(alist-get 'description thread))
-                         (repo_label . ,(alist-get 'repo_label (alist-get 'workspace thread)))))
-                      (if stale " [cached]" "")))
-      (setq emacos-assist-web--status-start (copy-marker (point) nil))
-      (insert (format "[%s%s]" (or emacos-assist-web--stream-status
-                                   (alist-get 'status thread))
-                      (if-let ((error (alist-get 'error thread)))
-                          (concat ": " error) "")))
-      (setq emacos-assist-web--status-end (copy-marker (point) nil))
-      (insert "\n\n")
-      (dolist (message (alist-get 'messages snapshot))
-        (insert (if (equal (alist-get 'role message) "user") "you> " "bot> "))
-        (insert (alist-get 'text message))
-        (when (and emacos-assist-web--pending-accepted-p
-                   (equal (alist-get 'role message) "user")
-                   (equal (alist-get 'state message) "incomplete")
-                   (equal (alist-get 'text message)
-                          emacos-assist-web--submitted-text))
-          (setq emacos-assist-web--pending-rendered-p t))
-        (insert "\n\n"))
-      (add-text-properties transcript-start (point)
-                           '(read-only t front-sticky t rear-nonsticky t))
-      (emacos-assist-web--write-prompt)
-      (if draft (insert draft) (emacos-assist-web--restore-draft))
-      (goto-char (point-max))
-      (setq buffer-read-only nil)
-      (set-buffer-modified-p nil)
-      (emacos-assist-web--save-draft))))
+        (draft (emacos-assist-web--input))
+        (render-state (emacos-assist-web--capture-render-state)))
+    (emacos-assist-web--require-snapshot snapshot emacos-assist-web--thread-id)
+    (setq snapshot
+          (emacos-assist-web--retain-loaded-history
+           snapshot emacos-assist-web--snapshot))
+    (let ((thread (alist-get 'thread snapshot))
+          (presentation-bytes
+           (cl-loop for message in (alist-get 'messages snapshot)
+                    sum (string-bytes (alist-get 'text message)))))
+      (let ((returned-id
+             (emacos-assist-web--require-id (alist-get 'id thread))))
+        (when (and emacos-assist-web--thread-id
+                   (not (equal returned-id emacos-assist-web--thread-id)))
+          (error "Assist Web snapshot identity does not match this buffer"))
+        (setq emacos-assist-web--thread-id returned-id))
+      (setq emacos-assist-web--snapshot snapshot
+            emacos-assist-web--pending-rendered-p nil)
+      (erase-buffer)
+      (let ((transcript-start (point)))
+        (insert (format "%s%s\n"
+                        (emacos-assist-web--thread-label
+                         `((description . ,(alist-get 'description thread))
+                           (repo_label . ,(alist-get
+                                           'repo_label
+                                           (alist-get 'workspace thread)))))
+                        (if stale " [cached]" "")))
+        (setq emacos-assist-web--status-start (copy-marker (point) nil))
+        (insert (format "[%s%s]" (or emacos-assist-web--stream-status
+                                     (alist-get 'status thread))
+                        (if-let ((error (alist-get 'error thread)))
+                            (concat ": " error) "")))
+        (setq emacos-assist-web--status-end (copy-marker (point) nil))
+        (insert "\n\n")
+        (let ((emacos--chat-presentation-max-bytes
+               (if (<= presentation-bytes emacos--chat-presentation-max-bytes)
+                   emacos--chat-presentation-max-bytes
+                 0)))
+          (dolist (message (alist-get 'messages snapshot))
+            (let* ((message-start (point))
+                   (role (if (equal (alist-get 'role message) "user")
+                             'user 'assistant)))
+              (insert (if (eq role 'user) "you> " "bot> "))
+              (let ((body-start (point)))
+                (insert (alist-get 'text message))
+                (emacos--chat-present-message
+                 message-start body-start (point) role))
+              (when (and emacos-assist-web--pending-accepted-p
+                         (equal (alist-get 'role message) "user")
+                         (equal (alist-get 'state message) "incomplete")
+                         (equal (alist-get 'text message)
+                                emacos-assist-web--submitted-text))
+                (setq emacos-assist-web--pending-rendered-p t))
+              (insert "\n\n")
+              (add-text-properties
+               message-start (point)
+               `(emacos-assist-web-message-id ,(alist-get 'id message)
+                 rear-nonsticky t)))))
+        (add-text-properties transcript-start (point)
+                             '(read-only t front-sticky t rear-nonsticky t))
+        (emacos-assist-web--write-prompt)
+        (if draft (insert draft) (emacos-assist-web--restore-draft))
+        (emacos-assist-web--restore-render-state render-state)
+        (setq buffer-read-only nil)
+        (set-buffer-modified-p nil)
+        (emacos-assist-web--save-draft)))))
 
 (defun emacos-assist-web--snapshot-cache-name (tid)
   "Return the bounded per-thread snapshot cache filename for TID."
@@ -1277,11 +1430,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                (alist-get 'has_older_messages page)
                                (alist-get 'next_before updated)
                                (alist-get 'next_before page))
-                         (emacos-assist-web--render updated)
-                         (goto-char (point-min))
-                         (forward-line 3)
-                         (when-let ((window (get-buffer-window (current-buffer))))
-                           (set-window-start window (point))))
+                         (emacos-assist-web--render updated))
                      (error
                       (message "Older history rejected: %s"
                                (error-message-string problem))))))))))))))
@@ -1439,20 +1588,36 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 
 (defun emacos-assist-web--append-pending (text)
   "Commit sent TEXT to this transcript while preserving a newly typed draft."
-  (let ((draft (emacos-assist-web--input))
-        (prompt-start (and (markerp emacos-assist-web--prompt-marker)
-                           (marker-position emacos-assist-web--prompt-marker)))
-        (inhibit-read-only t))
+  (let* ((input-start (emacos-assist-web--prompt-start))
+         (draft (emacos-assist-web--input))
+         (input-offset (and input-start (>= (point) input-start)
+                            (- (point) input-start)))
+         (prompt-start (and (markerp emacos-assist-web--prompt-marker)
+                            (marker-position emacos-assist-web--prompt-marker)))
+         (inhibit-read-only t))
     (when prompt-start
       (delete-region prompt-start (point-max))
-      (let ((start (point)))
-        (insert "you> " text "\n\nbot> [waiting for Assist]\n")
-        (add-text-properties start (point)
+      (let ((transcript-start (point))
+            (start (point)) body-start)
+        (insert "you> ")
+        (setq body-start (point))
+        (insert text)
+        (emacos--chat-present-message start body-start (point) 'user)
+        (insert "\n\n")
+        (setq start (point))
+        (insert "bot> ")
+        (setq body-start (point))
+        (insert "[waiting for Assist]\n")
+        (emacos--chat-present-message start body-start (point) 'assistant)
+        (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t)))
       (emacos-assist-web--write-prompt)
       (when (and draft (not (equal draft text))) (insert draft))
       (setq emacos-assist-web--pending-rendered-p t)
-      (goto-char (point-max)))))
+      (if input-offset
+          (goto-char (min (point-max)
+                          (+ (emacos-assist-web--prompt-start) input-offset)))
+        (goto-char (point-max))))))
 
 (defun emacos-assist-web-abort ()
   "Abort an unclaimed run, or honestly detach if Assist has already started it."
@@ -1557,7 +1722,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 (define-derived-mode emacos-assist-web-mode text-mode "Assist Web"
   "Major mode for a canonical Assist Web thread or unsent local draft."
   (variable-pitch-mode 1)
-  (setq-local truncate-lines nil)
+  (emacos--chat-enable-presentation)
   (add-hook 'after-change-functions #'emacos-assist-web--after-change nil t)
   (add-hook 'kill-buffer-hook #'emacos-assist-web--buffer-killed nil t))
 

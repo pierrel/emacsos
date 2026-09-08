@@ -213,6 +213,23 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
       (should (= istart (point-max)))                        ; reused, none appended
       (should (get-text-property prompt-start 'read-only))))) ; prompt itself locked
 
+(ert-deftest test-assist-mode-presents-reopened-markdown-without-changing-file-text ()
+  (with-temp-buffer
+    (insert "#+assist_thread: m3\n\nyou> # Question\nbot> - answer\n> ")
+    (let ((source (buffer-string)))
+      (set-buffer-modified-p nil)
+      (emacos-assist-mode)
+      (should visual-line-mode)
+      (should (equal (buffer-string) source))
+      (should-not (buffer-modified-p))
+      (goto-char (point-min))
+      (search-forward "Question")
+      (should (memq 'emacos-chat-heading-face
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (search-forward "answer")
+      (should (stringp
+               (get-text-property (match-beginning 0) 'wrap-prefix))))))
+
 (ert-deftest test-assist-mode-registered-in-auto-mode-alist ()
   (should (eq (cdr (assoc "\\.assist\\'" auto-mode-alist)) 'emacos-assist-mode)))
 

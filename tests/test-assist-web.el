@@ -1342,5 +1342,172 @@
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacos--assist-active-surface nil))))
 
+(ert-deftest test-assist-web-render-presents-markdown-and-tags-whole-message ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (let ((snapshot
+           '((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-1") (role . "assistant")
+                           (text . "# Heading\n- item") (state . "final")))))))
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t)))
+        (emacos-assist-web--render snapshot))
+      (should visual-line-mode)
+      (goto-char (point-min))
+      (search-forward "Heading")
+      (should (memq 'emacos-chat-heading-face
+                    (get-text-property (match-beginning 0) 'font-lock-face)))
+      (goto-char (point-min))
+      (search-forward "bot> ")
+      (let ((message-start (match-beginning 0)))
+        (search-forward "\n\n")
+        (should (equal (get-text-property
+                        message-start 'emacos-assist-web-message-id)
+                       "m-1"))
+        (should (equal (get-text-property
+                        (1- (point)) 'emacos-assist-web-message-id)
+                       "m-1"))))))
+
+(ert-deftest test-assist-web-render-rejects-duplicate-message-identities ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (should-error
+     (emacos-assist-web--render
+      '((thread . ((id . "thread-1") (description . "Thread")
+                   (status . "ready")
+                   (workspace . ((repo_label . "Assist")))))
+        (messages . (((id . "same") (role . "user") (text . "one")
+                      (state . "final"))
+                     ((id . "same") (role . "assistant") (text . "two")
+                      (state . "final")))))))))
+
+(ert-deftest test-assist-web-render-has-one-total-presentation-budget ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (let ((emacos--chat-presentation-max-bytes 12)
+          (snapshot
+           '((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-1") (role . "assistant")
+                           (text . "**one**") (state . "final"))
+                          ((id . "m-2") (role . "assistant")
+                           (text . "**two**") (state . "final")))))))
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t)))
+        (emacos-assist-web--render snapshot)))
+    (goto-char (point-min))
+    (search-forward "one")
+    (should-not (memq 'bold
+                      (get-text-property (match-beginning 0) 'font-lock-face)))))
+
+(ert-deftest test-assist-web-refresh-retains-draft-cursor-and-loaded-history ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (let* ((old
+            '((thread . ((id . "thread-1") (description . "Thread")
+                         (status . "ready")
+                         (workspace . ((repo_label . "Assist")))))
+              (messages . (((id . "m-old") (role . "assistant")
+                            (text . "older") (state . "final"))
+                           ((id . "m-1") (role . "assistant")
+                            (text . "recent") (state . "final"))))
+              (has_older_messages . t) (next_before . "cursor-old")))
+           (fresh
+            '((thread . ((id . "thread-1") (description . "Thread")
+                         (status . "ready")
+                         (workspace . ((repo_label . "Assist")))))
+              (messages . (((id . "m-1") (role . "assistant")
+                            (text . "recent final") (state . "final"))
+                           ((id . "m-2") (role . "assistant")
+                            (text . "new") (state . "final"))))
+              (has_older_messages . t) (next_before . "cursor-new"))))
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t)))
+        (emacos-assist-web--render old)
+        (insert "draft text")
+        (goto-char (+ (emacos-assist-web--prompt-start) 3))
+        (emacos-assist-web--render fresh))
+      (should (= (point) (+ (emacos-assist-web--prompt-start) 3)))
+      (should (string-match-p "older" (buffer-string)))
+      (should (string-match-p "recent final" (buffer-string)))
+      (should (equal (alist-get 'next_before emacos-assist-web--snapshot)
+                     "cursor-old")))))
+
+(ert-deftest test-assist-web-render-keeps-phone-viewport-on-message-anchor ()
+  (let ((buffer (generate-new-buffer " *assist-anchor-test*"))
+        (window (selected-window))
+        (old-buffer (window-buffer (selected-window))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (emacos-assist-web-mode)
+          (set-window-buffer window buffer)
+          (let* ((long-text
+                  (mapconcat (lambda (number) (format "line %d" number))
+                             (number-sequence 1 60) "\n"))
+                 (initial
+                  `((thread . ((id . "thread-1") (description . "Thread")
+                               (status . "ready")
+                               (workspace . ((repo_label . "Assist")))))
+                    (messages . (((id . "m-1") (role . "assistant")
+                                  (text . ,long-text) (state . "final"))))))
+                 (updated (copy-tree initial)))
+            (setf (alist-get 'messages updated)
+                  `(((id . "m-0") (role . "user")
+                     (text . ,(mapconcat
+                               (lambda (number) (format "older %d" number))
+                               (number-sequence 1 30) "\n"))
+                     (state . "final"))
+                    ((id . "m-1") (role . "assistant")
+                     (text . ,long-text) (state . "final"))))
+            (cl-letf (((symbol-function 'emacos-assist-web--save-draft)
+                       (lambda () t)))
+              (emacos-assist-web--render initial)
+            (goto-char (point-min))
+              (search-forward "line 25")
+            (goto-char (match-beginning 0))
+            (set-window-start window (match-beginning 0) t)
+              (redisplay t)
+              (should (equal
+                       (get-text-property
+                        (window-start window) 'emacos-assist-web-message-id)
+                       "m-1"))
+              (emacos-assist-web--render updated))
+            (should (equal
+                     (get-text-property
+                      (window-start window) 'emacos-assist-web-message-id)
+                     "m-1"))
+            (should (looking-at "line 25"))))
+      (set-window-buffer window old-buffer)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest test-assist-web-message-anchor-clamps-inside-a-shortened-record ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (let* ((long (concat "bot> " (make-string 40 ?x) "\n\n"))
+           (short "bot> x\n\n")
+           (id "message-1"))
+      (insert long "bot> next\n\n")
+      (put-text-property (point-min) (1+ (length long))
+                         'emacos-assist-web-message-id id)
+      (let ((anchor (emacos-assist-web--anchor-at (+ (point-min) 30))))
+        (erase-buffer)
+        (insert short "bot> next\n\n")
+        (put-text-property (point-min) (1+ (length short))
+                           'emacos-assist-web-message-id id)
+        (let ((resolved (emacos-assist-web--resolve-anchor anchor)))
+          (should (equal (get-text-property
+                          resolved 'emacos-assist-web-message-id)
+                         id)))))))
+
+(ert-deftest test-assist-web-pending-commit-preserves-next-draft-cursor ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (emacos-assist-web--write-prompt)
+    (insert "next draft")
+    (goto-char (+ (emacos-assist-web--prompt-start) 4))
+    (emacos-assist-web--append-pending "sent")
+    (should (= (point) (+ (emacos-assist-web--prompt-start) 4)))
+    (should (equal (emacos-assist-web--input) "next draft"))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here
