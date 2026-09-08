@@ -1,0 +1,164 @@
+#+title: wvkbd modifier-swipe interaction
+#+date: 2026-09-07
+
+* Goal
+
+Make Emacs modifier chords available directly from the PinePhone's existing
+wlroots keyboard without adding permanent modifier rows or changing ordinary
+typing.  With an explicit =--mod-swipe= option, touching an ordinary character
+key arms it without emitting input.  Releasing in place emits that character
+once; swiping vertically up and releasing emits =Control+character=; swiping
+vertically down and releasing emits =Alt+character=.  The keyboard shows the
+pending base character, then =C-<character>= or =M-<character>= as soon as a
+gesture qualifies.
+
+The packaged =/usr/bin/wvkbd-mobintl= remains installed and active until the new
+binary has passed automated and controlled live validation.
+
+* Lineage
+
+This design advances [[file:2026-09-07-wvkbd-repository-integration.org][wvkbd repository and build integration]], which created
+the pinned v0.16-based fork and side-by-side artifact path but intentionally did
+not define the gesture.  It also replaces the need, on this PinePhone session,
+for the Emacs-rendered persistent modifier button described in
+[[file:2026-05-27-modifier-keys.org][Modifier Keys]]: the compositor keyboard now emits ordinary Wayland chords that
+work in Emacs, Firefox, and Android rather than routing commands inside Emacs.
+
+* Interaction contract
+
+** Eligibility and compatibility
+
+1. Modifier swipe is off unless =--mod-swipe= is present.  Without it, pointer,
+   touch, drawing, layout, output, compose, and modifier behavior continue on
+   the existing paths.
+2. Only =Code= keys representing printable keyboard characters are deferred:
+   letters, digits, and the ordinary punctuation keycodes from =KEY_1= through
+   =KEY_SLASH=, excluding Backspace, Tab, Enter, and Left Shift.  Space,
+   navigation, Escape, function-like keys, =Copy= keys, modifiers, Compose, and
+   layout controls retain their current immediate behavior.
+3. When Compose is armed, every key retains the existing compose/layout path.
+   Modifier swipe never intercepts that next key.
+4. =--mod-swipe= is incompatible with =-O= intersected-key/swipe-word output.
+   Startup rejects that combination before connecting to Wayland.  Plain =-o=
+   remains valid and follows existing behavior: modified characters are not
+   printed as unmodified text.
+
+** Gesture geometry
+
+The threshold is adaptive so the same rule works with 300-pixel portrait and
+landscape keyboard heights:
+
+#+begin_src text
+threshold = max(12 logical pixels, floor(0.4 * touched key height))
+#+end_src
+
+On the five-row 300-pixel phone layout this is 24 logical pixels.  A gesture
+qualifies only when absolute vertical displacement reaches the threshold and is
+at least twice the absolute horizontal displacement.  Up is Control; down is
+Alt/Meta.  Reaching the threshold with horizontal or diagonal motion that does
+not meet that dominance rule cancels the gesture.  Sub-threshold movement is
+ordinary touch jitter and release still emits the base key once.
+
+The first qualifying state latches.  Returning toward the key or moving farther
+after the visible =C-= or =M-= feedback does not change or cancel the chord.  This
+makes release deterministic after the user has received confirmation.  Leaving
+the key laterally before qualification reaches the same cancellation boundary;
+leaving it vertically is the intended gesture.  Horizontal displacement reaching
+the same threshold without 2:1 vertical dominance cancels even when vertical
+displacement has not reached the threshold.  All gesture arithmetic uses signed
+surface coordinates, including motion above or left of the keyboard.
+
+Cancellation immediately removes the key highlight and popup.  That visible
+clearing tells the user that release will emit nothing.  It is not possible to
+retain compositor-driven hold repeat while also guaranteeing that touch-down
+emits no key before the gesture is known; in opt-in modifier-swipe mode, holding
+an eligible character and releasing therefore emits it exactly once.  Users who
+need hold repeat can run without =--mod-swipe=.
+
+** Input-state ownership
+
+One touch ID owns the keyboard at a time while =--mod-swipe= is enabled.  A
+second down, motion, or up is ignored until the owning ID releases or the
+compositor cancels it.  An ignored finger never becomes the owner midway through
+its contact, so it cannot emit a stray key after the first finger lifts.
+
+For an eligible key, down only draws the ordinary pressed state and records the
+key and origin.  Motion updates the pure gesture classifier and redraws only on
+a state transition.  On release:
+
+- pending emits the key's existing press/release sequence once;
+- Control or Alt temporarily adds that modifier, emits the same balanced
+  press/release sequence, and consumes existing one-shot modifiers through
+  wvkbd's normal release path;
+- cancelled emits nothing.
+
+The touch state is cleared before emitting the release action.  A compositor
+cancel clears the armed drawing and popup without emitting a key.  Surface
+reconfiguration or teardown and loss of the seat's touch capability perform the
+same reset; an already-pressed noneligible key is released before its UI objects
+are destroyed.  A noneligible key uses the existing immediate press and release
+path, but the owning touch ID still prevents competing contacts from releasing
+it.  Pointer input is unchanged.
+
+No modifier is sent on touch-down or motion.  The modifier, key-down, key-up, and
+restored modifier mask are emitted together only on the owning touch's release.
+Consequently cancel, lateral escape, and competing IDs cannot strand Ctrl or Alt.
+The transient modifier is combined with any existing modifier mask.  The normal
+wvkbd release path then consumes one-shot Shift, Ctrl, Alt, Super, and AltGr just
+as an ordinary key does; Caps Lock remains latched.
+
+* Components
+
+1. The wvkbd fork gains a small =mod-swipe.c=/=.h= pure state machine.  It owns
+   threshold calculation, keycode eligibility, capture, direction
+   classification, latching, ID filtering, the forward-declared target key,
+   finish, and cancel.  It is the single source of interaction state, has no
+   Wayland or drawing dependency, and is compiled directly into focused unit
+   tests.  =main.c= only routes touch callbacks through it when the option is
+   enabled.
+2. =keyboard.c= adds a label override to the existing pressed drawing state for
+   =C-= and =M-= feedback and a small balanced activation entry point that reuses
+   the existing key press/release implementation.  No second key-emission
+   implementation is introduced.
+3. =README.md=, =wvkbd.1.scd=, and =--help= describe the option, thresholds, and
+   =-O= incompatibility.
+4. EmacsOS advances its exact wvkbd revision only after the fork commit passes
+   native unit tests and the pinned ARM64 build.
+
+* Verification
+
+1. Compile the pure classifier with strict warnings and test: threshold floor
+   and scaling; tap; upward/downward qualification; exact dominance boundary;
+   diagonal/horizontal cancellation; sub-threshold jitter; action latching;
+   competing IDs; cancel/reset; and the printable-keycode eligibility boundary.
+2. Compile the full native binary with =-Wall -Wextra -Werror= where the v0.16
+   dependency headers permit it.  Verify =--help= and that =--mod-swipe -O= is
+   rejected before a Wayland connection.
+3. Build through EmacsOS's pinned ARM64 container, inspect AArch64/musl
+   architecture, run the existing atomic-install tests, and retain the checksum.
+4. Run all wvkbd checks plus EmacsOS Elisp, server, and PinePhone shell suites.
+5. Review for correctness, touch-ID/event liveness, cancellation and stuck-key
+   paths, adversarial CLI/input sequences, UX, simplicity, design adherence, and
+   documentation/comment alignment.
+6. After review convergence, install only =/usr/local/bin/wvkbd-emacos= on the
+   phone through the live-phone resource.  Do not change the running session or
+   the outbound-SMS EmacsOS deployment during this phase.
+
+* Controlled live-validation gate
+
+The current session supervisor treats death of its packaged keyboard as death
+of the entire UI, so killing or replacing that child ad hoc is not a safe test.
+The next live step is a separately reviewed OpenRC selector on top of the
+then-current outbound-SMS main.  It must teach Emacs's PID validation both exact
+executable names and persistently demote a custom binary that exits during its
+startup health window, so service restart selects =/usr/bin/wvkbd-mobintl=
+instead of entering a custom-keyboard crash loop.  Deploy it through the normal
+transaction only after the outbound-SMS work has landed or been rebased.
+
+The live oracle is not merely successful typing.  Synthetic and physical checks
+must prove: tap inserts once; up/down invoke known Emacs =C-= and =M-= bindings;
+cancel and competing IDs emit nothing; Shift/Caps/Compose/layout/hide/show retain
+their stated behavior; Firefox =Ctrl+L= focuses the address bar, ordinary text can
+then be entered, and =Alt+Left= performs navigation without poisoning the next
+typed character.  Rollback must restore the packaged keyboard before Pierre is
+asked to test.
