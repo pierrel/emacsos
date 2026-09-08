@@ -5,45 +5,18 @@
 (load-file (expand-file-name "../deploy/pinephone/openrc-init.el"
                              (file-name-directory load-file-name)))
 
-(ert-deftest emacsos-openrc-home-is-editable-and-touchable ()
-  (let ((buffer (emacsos-pinephone-openrc-home)))
-    (unwind-protect
-        (with-current-buffer buffer
-          (should-not buffer-read-only)
-          (should (= (point-min) (window-point (selected-window))))
-          (goto-char (point-min))
-          (should (search-forward "Open Firefox" nil t))
-          (let ((button (button-at (1- (point)))))
-            (should button)
-            (should (eq (lookup-key (button-get button 'keymap) [mouse-1])
-                        'push-button)))
-          (should (search-forward "Firefox is closed." nil t))
-          (should (search-forward "Open Android" nil t))
-          (should (search-forward "Stop Android" nil t))
-          (should (search-forward "Android is stopped." nil t)))
-          (should-not (local-variable-p 'mode-line-format))
-      (kill-buffer buffer))))
-
-(ert-deftest emacsos-openrc-firefox-status-is-visible ()
-  (let ((buffer (emacsos-pinephone-openrc-home)))
-    (unwind-protect
-        (progn
-          (emacsos-pinephone-set-status
-           emacsos-pinephone-firefox-status-marker "Starting Firefox...")
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (should (search-forward "Starting Firefox..." nil t))
-            (should-not (search-forward "Firefox is closed." nil t))))
-      (kill-buffer buffer))))
+(ert-deftest emacsos-openrc-lifecycle-actions-are-commands ()
+  (dolist (command '(emacsos-pinephone-open-firefox
+                     emacsos-pinephone-quit-firefox
+                     emacsos-pinephone-open-waydroid
+                     emacsos-pinephone-stop-waydroid))
+    (should (commandp command))))
 
 (ert-deftest emacsos-openrc-fixed-input-marker-is-inserted ()
-  (let ((buffer (emacsos-pinephone-openrc-home)))
-    (unwind-protect
-        (with-current-buffer buffer
-          (emacsos-pinephone-record-synthetic-input)
-          (goto-char (point-min))
-          (should (search-forward "[synthetic-input]" nil t)))
-      (kill-buffer buffer))))
+  (with-temp-buffer
+    (emacsos-pinephone-record-synthetic-input)
+    (goto-char (point-min))
+    (should (search-forward "[synthetic-input]" nil t))))
 
 (ert-deftest emacsos-openrc-wakeup-event-is-silent ()
   (should (eq (lookup-key global-map [WakeUp]) #'ignore)))
@@ -410,94 +383,149 @@
    (emacsos-pinephone-network-command '("general" "permissions"))))
 
 (ert-deftest emacsos-openrc-firefox-nonterminal-sentinel-keeps-tracking ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (emacsos-pinephone-firefox-process 'tracked))
-    (unwind-protect
-        (progn
-          (emacsos-pinephone-set-status
-           emacsos-pinephone-firefox-status-marker "Starting Firefox...")
-          (cl-letf (((symbol-function 'process-status) (lambda (_process) 'run)))
-            (emacsos-pinephone-firefox-finished 'tracked "changed"))
-          (should (eq emacsos-pinephone-firefox-process 'tracked))
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (should (search-forward "Starting Firefox..." nil t))))
-      (kill-buffer buffer))))
+  (let ((emacsos-pinephone-firefox-process 'tracked))
+    (cl-letf (((symbol-function 'process-status) (lambda (_process) 'run)))
+      (emacsos-pinephone-firefox-finished 'tracked "changed"))
+    (should (eq emacsos-pinephone-firefox-process 'tracked))))
 
 (ert-deftest emacsos-openrc-old-firefox-sentinel-keeps-new-process ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (emacsos-pinephone-firefox-process 'new))
-    (unwind-protect
-        (cl-letf (((symbol-function 'process-status) (lambda (_process) 'exit)))
-          (emacsos-pinephone-firefox-finished 'old "finished")
-          (should (eq emacsos-pinephone-firefox-process 'new)))
-      (kill-buffer buffer))))
+  (let ((emacsos-pinephone-firefox-process 'new))
+    (cl-letf (((symbol-function 'process-status) (lambda (_process) 'exit)))
+      (emacsos-pinephone-firefox-finished 'old "finished")
+      (should (eq emacsos-pinephone-firefox-process 'new)))))
 
 (ert-deftest emacsos-openrc-firefox-focus-failure-is-visible ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (emacsos-pinephone-firefox-process 'tracked))
-    (unwind-protect
-        (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
-                  ((symbol-function 'call-process) (lambda (&rest _args) 1)))
-          (emacsos-pinephone-open-firefox)
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (should (search-forward "Firefox window is not ready." nil t))))
-      (kill-buffer buffer))))
+  (let ((emacsos-pinephone-firefox-process 'tracked)
+        (process-environment (copy-sequence process-environment))
+        call-arguments
+        message-text)
+    (setenv "SWAYSOCK" "/run/user/1000/sway.sock")
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'call-process)
+               (lambda (&rest args)
+                 (setq call-arguments args)
+                 "killed by signal 15"))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-open-firefox)
+      (should (equal call-arguments
+                     '("/usr/bin/timeout" nil nil nil
+                       "-s" "TERM" "-k" "1" "3"
+                       "/usr/bin/swaymsg" "-s"
+                       "/run/user/1000/sway.sock"
+                       "[app_id=\"firefox\"] focus")))
+      (should (equal message-text "Firefox window is not ready.")))))
 
-(ert-deftest emacsos-openrc-waydroid-readiness-can-span-output-chunks ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (emacsos-pinephone-waydroid-process 'tracked)
-        (properties nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'process-get)
-                   (lambda (_process property) (alist-get property properties)))
-                  ((symbol-function 'process-put)
-                   (lambda (_process property value)
-                     (setf (alist-get property properties) value))))
-          (emacsos-pinephone-waydroid-output 'tracked "Android with user ")
-          (emacsos-pinephone-waydroid-output 'tracked "0 is ready\n")
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (should (search-forward "Android is open." nil t))))
-      (kill-buffer buffer))))
+(ert-deftest emacsos-openrc-firefox-quit-targets-only-live-tracked-process ()
+  (let ((emacsos-pinephone-firefox-process 'tracked)
+        signaled message-text)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'signal-process)
+               (lambda (process signal) (setq signaled (list process signal))))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-quit-firefox)
+      (should (equal signaled '(tracked SIGTERM)))
+      (should (equal message-text "Closing Firefox...")))))
+
+(ert-deftest emacsos-openrc-firefox-quit-without-process-is-harmless ()
+  (let ((emacsos-pinephone-firefox-process nil)
+        signaled message-text)
+    (cl-letf (((symbol-function 'signal-process)
+               (lambda (process signal) (setq signaled (list process signal))))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-quit-firefox)
+      (should-not signaled)
+      (should (equal message-text "Firefox is not open.")))))
+
+(ert-deftest emacsos-openrc-firefox-quit-tolerates-an-exit-race ()
+  (let ((emacsos-pinephone-firefox-process 'tracked)
+        message-text)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'signal-process)
+               (lambda (_process _signal) (error "already exited")))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-quit-firefox)
+      (should-not emacsos-pinephone-firefox-process)
+      (should (equal message-text "Firefox is not open.")))))
+
+(ert-deftest emacsos-openrc-firefox-launch-failure-is-visible ()
+  (let (message-text)
+    (cl-letf (((symbol-function 'start-process)
+               (lambda (&rest _arguments) (signal 'file-error nil)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-open-firefox)
+      (should-not emacsos-pinephone-firefox-process)
+      (should (equal message-text "Firefox could not start.")))))
 
 (ert-deftest emacsos-openrc-waydroid-nonterminal-sentinel-keeps-tracking ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (emacsos-pinephone-waydroid-process 'tracked))
-    (unwind-protect
-        (progn
-          (cl-letf (((symbol-function 'process-status) (lambda (_process) 'run)))
-            (emacsos-pinephone-waydroid-finished 'tracked "changed"))
-          (should (eq emacsos-pinephone-waydroid-process 'tracked)))
-      (kill-buffer buffer))))
+  (let ((emacsos-pinephone-waydroid-process 'tracked))
+    (cl-letf (((symbol-function 'process-status) (lambda (_process) 'run)))
+      (emacsos-pinephone-waydroid-finished 'tracked "changed"))
+    (should (eq emacsos-pinephone-waydroid-process 'tracked))))
+
+(ert-deftest emacsos-openrc-old-waydroid-sentinel-keeps-new-process ()
+  (let ((emacsos-pinephone-waydroid-process 'new))
+    (cl-letf (((symbol-function 'process-status) (lambda (_process) 'exit)))
+      (emacsos-pinephone-waydroid-finished 'old "finished")
+      (should (eq emacsos-pinephone-waydroid-process 'new)))))
 
 (ert-deftest emacsos-openrc-waydroid-focus-failure-is-visible ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (emacsos-pinephone-waydroid-process 'tracked)
-        (emacsos-pinephone-waydroid-config "/etc/passwd"))
-    (unwind-protect
-        (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
-                  ((symbol-function 'call-process) (lambda (&rest _args) 1)))
-          (emacsos-pinephone-open-waydroid)
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (should (search-forward "Android window is not ready." nil t))))
-      (kill-buffer buffer))))
+  (let ((emacsos-pinephone-waydroid-process 'tracked)
+        (emacsos-pinephone-waydroid-config "/etc/passwd")
+        (process-environment (copy-sequence process-environment))
+        call-arguments
+        message-text)
+    (setenv "SWAYSOCK" "/run/user/1000/sway.sock")
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'call-process)
+               (lambda (&rest args)
+                 (setq call-arguments args)
+                 1))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-open-waydroid)
+      (should (equal call-arguments
+                     '("/usr/bin/timeout" nil nil nil
+                       "-s" "TERM" "-k" "1" "3"
+                       "/usr/bin/swaymsg" "-s"
+                       "/run/user/1000/sway.sock"
+                       "[app_id=\"Waydroid\"] focus")))
+      (should (equal message-text "Android window is not ready.")))))
 
 (ert-deftest emacsos-openrc-waydroid-reports-missing-images-without-starting ()
-  (let ((buffer (emacsos-pinephone-openrc-home))
-        (started nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'file-exists-p) (lambda (_path) nil))
-                  ((symbol-function 'start-process)
-                   (lambda (&rest _arguments) (setq started t))))
-          (emacsos-pinephone-open-waydroid)
-          (should-not started)
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (should (search-forward "Android images are not installed." nil t))))
-      (kill-buffer buffer))))
+  (let (started message-text)
+    (cl-letf (((symbol-function 'file-exists-p) (lambda (_path) nil))
+              ((symbol-function 'start-process)
+               (lambda (&rest _arguments) (setq started t)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-open-waydroid)
+      (should-not started)
+      (should (equal message-text "Android images are not installed.")))))
+
+(ert-deftest emacsos-openrc-waydroid-launch-failure-is-visible ()
+  (let ((emacsos-pinephone-waydroid-config "/etc/passwd")
+        message-text)
+    (cl-letf (((symbol-function 'file-exists-p) (lambda (_path) t))
+              ((symbol-function 'start-process)
+               (lambda (&rest _arguments) (signal 'file-error nil)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq message-text (apply #'format format-string args)))))
+      (emacsos-pinephone-open-waydroid)
+      (should-not emacsos-pinephone-waydroid-process)
+      (should (equal message-text "Android could not start.")))))
 
 (ert-deftest emacsos-openrc-sms-operation-uses-fixed-argv-and-stdin ()
   (let (seen-command seen-input eof)

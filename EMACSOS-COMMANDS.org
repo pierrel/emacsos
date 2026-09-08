@@ -1,0 +1,138 @@
+#+title: EmacsOS commands and keys
+
+Use the on-screen =M-x= button, type a command name, then press =RET=.
+The command list above the keyboard changes with the current buffer.  Its
+buttons call the same Emacs commands listed here.
+
+* Applications
+
+| Action | M-x command |
+|--------+-------------|
+| Start or switch to Firefox | =emacsos-pinephone-open-firefox= |
+| Quit Firefox started by EmacsOS | =emacsos-pinephone-quit-firefox= |
+| Start or switch to Android | =emacsos-pinephone-open-waydroid= |
+| Stop Android | =emacsos-pinephone-stop-waydroid= |
+
+Use =Alt+Tab= to move between full-screen applications.  The on-screen =Chat=
+button returns to the ordinary EmacsOS chat buffer; there it becomes =SEND=.
+
+* Chat and messages
+
+| Action | M-x command |
+|--------+-------------|
+| Return to ordinary chat | =emacos--chat-show-top-buffer= |
+| Start a new ordinary chat | =emacos--chat-new-chat= |
+| Stop the current ordinary-chat response | =emacos--chat-abort= |
+| Open an Assist Web thread | =emacos-assist-web-open-thread= |
+| Start an Assist Web thread | =emacos-assist-web-new-thread= |
+| Send from an Assist Web thread | =emacos-assist-web-send= |
+| Refresh an Assist Web thread | =emacos-assist-web-refresh-thread= |
+| Refresh the Assist Web thread list | =emacos-assist-web-refresh-threads= |
+| Load older Assist Web messages | =emacos-assist-web-load-older= |
+| Stop an Assist Web response | =emacos-assist-web-abort= |
+| Start a file-backed chat | =emacos-assist-new-file= |
+| Forget a file-backed chat checkpoint | =emacos-assist-forget= |
+| Compose an SMS | =emacos-send-message= |
+
+Assist Web also uses the =C-c C-a= prefix:
+
+| Key | Action |
+|-----+--------|
+| =C-c C-a t= | Open thread |
+| =C-c C-a n= | New thread |
+| =C-c C-a r= | Refresh thread list |
+| =C-c C-a g= | Refresh current thread |
+| =C-c C-a s= | Send |
+| =C-c C-a o= | Load older messages |
+| =C-c C-a a= | Abort response |
+
+* Phone and network
+
+| Action | M-x command |
+|--------+-------------|
+| Stage a call for confirmation | =emacos-call= |
+| Answer the ringing call | =emacos-answer= |
+| Hang up | =emacos-hang-up= |
+| Open network controls | =emacos-net-show= |
+| Toggle Wi-Fi | =emacos-net-toggle-wifi= |
+| Toggle cellular data | =emacos-net-toggle-cell= |
+| Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
+
+The modeline network, call, SMS, and keyboard labels are touch controls for
+their current status or action.
+
+* On-screen command list
+
+The command list changes with the buffer.  These labels are shortcuts to the
+listed =M-x= commands.
+
+=Dtach= (=dtach-shell=) is prepended to the ordinary-chat and fallback lists.
+Ordinary chat changes =New chat= to =Confirm clear?= after the first tap and
+shows =ROLLBACK= only when a configuration rollback is available.  The network
+page shows state-dependent =Wifi on/off= and =Cell on/off= controls plus
+=Refresh=.  Assist Web buffers deliberately show no parallel command list;
+their commands use =M-x= or the =C-c C-a= prefix above.
+
+| Buffer | Label | Command |
+|--------+-------+---------|
+| Plain or other buffer | Save | =save-buffer= |
+| Plain or other buffer | Undo | =undo= |
+| Plain or other buffer | Find File | =find-file= |
+| Plain or other buffer | Switch Buffer | =switch-to-buffer= |
+| Plain or other buffer | New message | =emacos-send-message= |
+| Plain or other buffer | Net | =emacos-net-show= |
+| Ordinary chat | New chat | =emacos--chat-new-chat= |
+| Ordinary chat | ABORT | =emacos--chat-abort= |
+| Ordinary chat | New message | =emacos-send-message= |
+| File-backed chat | New file | =emacos-assist-new-file= |
+| File-backed chat | Forget | =emacos-assist-forget= |
+| Org | Heading | =org-insert-heading= |
+| Org | TODO | =org-todo= |
+| Org | Export | =org-export-dispatch= |
+| Emacs Lisp | Eval Buffer | =eval-buffer= |
+| Emacs Lisp | Eval Last Sexp | =eval-last-sexp= |
+| Dired | Open | =dired-find-file= |
+| Dired | Up | =dired-up-directory= |
+| Dired | Rename | =dired-do-rename= |
+| Dired | Copy | =dired-do-copy= |
+| Dired | Delete | =dired-do-delete= |
+| Dired | Refresh | =revert-buffer= |
+| Code | Save | =save-buffer= |
+| Code | Comment | =comment-line= |
+| Code | Goto Line | =goto-line= |
+| Code | Search | =isearch-forward= |
+| Code | Replace | =query-replace= |
+| Code | Next Error | =next-error= |
+| Code | Xref Def | =xref-find-definitions= |
+| Text | Save | =save-buffer= |
+| Text | Search | =isearch-forward= |
+| Text | Replace | =query-replace= |
+| Text | Spell | =ispell-buffer= |
+| Text | Fill | =fill-paragraph= |
+| Text | Goto Line | =goto-line= |
+
+Magit buffers add the usual =magit-stage=, =magit-unstage=,
+=magit-commit-create=, =magit-push=, =magit-pull=, =magit-fetch=,
+=magit-branch=, =magit-log=, =magit-diff=, and =magit-refresh= commands.
+
+* Files and terminals
+
+| Action | Command or key |
+|--------+----------------|
+| Open a file | =M-x find-file= |
+| Switch buffer | =M-x switch-to-buffer= |
+| Save | =M-x save-buffer= |
+| Undo | =M-x undo= |
+| Open or choose a persistent terminal | =M-x dtach-shell= or =C-c d= |
+| Reconnect the current persistent terminal | =M-x dtach-shell-reconnect= or =C-c S-d= |
+
+* Hardware
+
+| Control | Action |
+|---------+--------|
+| Power button | Blank the display; press again to wake |
+| Volume button | Wake the display |
+| =Alt+Tab= | Move to the next full-screen application |
+
+When the custom modifier-swipe keyboard is active, swipe upward from a character
+for =Control+character= and downward for =Meta+character=.

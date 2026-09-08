@@ -982,7 +982,7 @@ button when a modifier is active (firebrick4 vs Chat's dodger blue)."
   "Render the persistent utility row: QUIT, M-x, Chat/SEND (3-up).
 `QUIT' (`emacos--tap-quit') clears popup/minibuffer clutter off the top;
 `M-x' runs `execute-extended-command' (manual command entry); the third
-button (`emacos--chat-button', accent face) opens the *chat* home app
+button (`emacos--chat-button', accent face) opens the ordinary *chat* buffer
 when chat isn't on top and SENDS the input when it is — its label flips
 between \"Chat\" and \"SEND\" accordingly.  CAPS lives on the action row
 (`emacos--render-action-row')."

@@ -8,8 +8,9 @@ export PATH
 
 stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
+reference_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=9eac92d6379d6602790fc073521082b4f810b1e721357265b3bca88bc18395fc
+manifest_hash=74c9cdd56f16dcb0264753c74fe6d57ba7d4604876ea1c9b09a9d1123a78a9bb
 committed=0
 mutating=0
 lab_group_created=0
@@ -147,6 +148,7 @@ cleanup() {
         fi
     fi
     [ -z "$snapshot" ] || rm -rf -- "$snapshot"
+    [ -z "$reference_tmp" ] || rm -f -- "$reference_tmp"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -168,13 +170,16 @@ flock -n -x 9 || fail 'install lock is busy'
 [ -d "$stage" ] && [ ! -L "$stage" ] || fail 'staging directory is absent'
 [ "$(stat -c '%U:%G:%a:%h:%F' "$stage")" = 'user:user:700:2:directory' ] ||
     fail 'unsafe staging directory'
+[ ! -e /home/user/EMACSOS-COMMANDS.org ] &&
+    [ ! -L /home/user/EMACSOS-COMMANDS.org ] ||
+    fail 'command reference already exists'
 
 count=0
 for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -183,7 +188,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ "$(stat -c '%s' "$path")" -le 1048576 ] || fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 29 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 30 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
@@ -193,6 +198,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper \
     os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+    EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
     openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
@@ -254,7 +260,7 @@ render_ipv4_template "$snapshot/openrc-emacs-server.nft" '@DEPLOY_CLIENT_IP@' \
     [ ! -L /usr/local/libexec/emacsos-waydroid-container ] ||
     fail 'local Waydroid manager wrapper already exists'
 [ ! -e /var/lib/emacsos-lab ] && [ ! -L /var/lib/emacsos-lab ] ||
-    fail 'lab home already exists'
+    fail 'emacsos-lab account home already exists'
 [ ! -e /etc/doas.d/95-emacsos-ui.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui.conf ] || fail 'UI privilege rule already exists'
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
@@ -386,6 +392,12 @@ install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /var/lib/emacsos-lab/.config /var/lib/emacsos-lab/.config/emacsos
 install -o emacsos-lab -g emacsos-lab -m 0600 "$snapshot/assist-web-token" \
     /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+reference_tmp=$(mktemp /home/.emacsos-command-reference.XXXXXX)
+install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org" \
+    "$reference_tmp"
+cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"
+[ "$(stat -c '%U:%G:%a:%h:%F' "$reference_tmp")" = \
+    'root:root:600:1:regular file' ]
 install -o root -g root -m 0644 "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 nft_rule_created=1
@@ -474,5 +486,16 @@ timeout -s TERM -k 2 30 rc-service eg25-manager start 9>&-
 rc-update add modemmanager default
 timeout -s TERM -k 2 30 rc-service modemmanager start 9>&-
 rm -f -- /run/emacsos-openrc-proof
+
+# Nothing after publication can fail the transaction.  Mask catchable signals
+# across the no-clobber link and commit flag so cleanup never needs to unlink a
+# path controlled by the recovery user.
+trap '' HUP INT TERM
+chown user:user "$reference_tmp"
+ln -- "$reference_tmp" /home/user/EMACSOS-COMMANDS.org || {
+    trap 'exit 1' HUP INT TERM
+    fail 'command reference appeared during install'
+}
 committed=1
+trap 'exit 1' HUP INT TERM
 printf '%s\n' 'OpenRC UI installed and selected; reboot the phone'
