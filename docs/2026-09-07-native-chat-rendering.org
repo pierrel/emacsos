@@ -222,10 +222,11 @@ phone conversations without adding a parser or a dead-looking tap target.
 [[https://github.com/pierrel/emacsos/pull/40][GitHub PR #40]] contains only the native-rendering review branch based on
 =main=; the temporary live integration ancestry is excluded.  Its description
 records the current behavior, deterministic coverage, live deployment, and the
-absence of behavioral eval changes.  Copilot reviewed all changed files in its
-first round, recommended approval, and generated no comments.  No meaningful
-Copilot finding required a bridge-ledger entry.  The PR remains unmerged until
-Pierre explicitly approves it.
+absence of behavioral eval changes.  Copilot reviewed all ten changed files in
+two rounds, recommended approval both times, and generated no comments.  Round
+two covered the functional and live-report head after the first review result
+was recorded.  No meaningful Copilot finding required a bridge-ledger entry.
+The PR remains unmerged until Pierre explicitly approves it.
 
 * Lineage
 
