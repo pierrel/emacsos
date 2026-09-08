@@ -44,8 +44,10 @@ rm -f -- "$output"
 command -v docker >/dev/null 2>&1 || fail 'docker is required'
 if ! docker run --rm --platform linux/arm64 "$image" /bin/true; then
     printf '%s\n' \
-        'wvkbd-build: arm64 container execution is unavailable; install binfmt once with:' \
-        '  docker run --privileged --rm tonistiigi/binfmt --install arm64' >&2
+        'wvkbd-build: arm64 container preflight failed; verify Docker access and image availability' \
+        'wvkbd-build: on a non-arm64 host, install binfmt once with:' \
+        '  docker run --privileged --rm tonistiigi/binfmt --install arm64' \
+        >&2
     exit 1
 fi
 
