@@ -14,10 +14,10 @@ for script in \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos.sh" \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root"
 do
-    sh -n "$script"
+sh -n "$script"
 done
-grep -Fx '1ac7c8642e0327dde653f109a69e477f53e04dc5' \
-    "$repo_dir/deploy/pinephone/wvkbd-revision" >/dev/null
+revision=$(cat "$repo_dir/deploy/pinephone/wvkbd-revision")
+printf '%s\n' "$revision" | grep -Eq '^[0-9a-f]{40}$'
 make_output=$(make -C "$wvkbd_dir" -n BIN=wvkbd-emacos LAYOUT=mobintl)
 printf '%s\n' "$make_output" | grep -F ' -o wvkbd-emacos ' >/dev/null
 grep -F 'target=/usr/local/bin/wvkbd-emacos' \
@@ -40,8 +40,7 @@ if WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/output \
     printf '%s\n' 'wrong source revision was accepted' >&2
     exit 1
 fi
-git -C "$scratch/wvkbd" checkout -q --detach \
-    1ac7c8642e0327dde653f109a69e477f53e04dc5
+git -C "$scratch/wvkbd" checkout -q --detach "$revision"
 : >"$scratch/wvkbd/untracked"
 if WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/output \
     "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" 2>/dev/null; then

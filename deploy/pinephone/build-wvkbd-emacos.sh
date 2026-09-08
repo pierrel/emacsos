@@ -41,6 +41,7 @@ output_dir=$(CDPATH='' cd -- "$output_dir" && pwd)
 output=$output_dir/wvkbd-emacos
 rm -f -- "$output"
 
+command -v docker >/dev/null 2>&1 || fail 'docker is required'
 if ! docker run --rm --platform linux/arm64 "$image" /bin/true; then
     printf '%s\n' \
         'wvkbd-build: arm64 container execution is unavailable; install binfmt once with:' \
