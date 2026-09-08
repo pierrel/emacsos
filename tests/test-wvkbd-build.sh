@@ -12,7 +12,7 @@ trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
 sh -n "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos.sh" \
     "$repo_dir/deploy/pinephone/install-wvkbd-emacos-root"
-grep -Fx '5a9c42a0e625ab55a6f4d12900925b07f1eb9af4' \
+grep -Fx '6bc2052a6a83254efc838265bde45004d4446a22' \
     "$repo_dir/deploy/pinephone/wvkbd-revision" >/dev/null
 make -C "$wvkbd_dir" -n BIN=wvkbd-emacos LAYOUT=mobintl |
     grep -F ' -o wvkbd-emacos ' >/dev/null
@@ -37,7 +37,7 @@ if WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/output \
     exit 1
 fi
 git -C "$scratch/wvkbd" checkout -q --detach \
-    5a9c42a0e625ab55a6f4d12900925b07f1eb9af4
+    6bc2052a6a83254efc838265bde45004d4446a22
 : >"$scratch/wvkbd/untracked"
 if WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/output \
     "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" 2>/dev/null; then
