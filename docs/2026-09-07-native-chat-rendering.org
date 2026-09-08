@@ -1,7 +1,7 @@
 #+title: Native conversation rendering on the phone
 #+date: 2026-09-07
 
-State: implemented and locally reviewed; awaiting sequenced phone deployment
+State: implemented, locally reviewed, and deployed; awaiting pull-request review
 
 * Objective
 
@@ -174,6 +174,48 @@ init, command reference, keyboard binary/process, and installed conversation
 module hashes are verified afterward.  The temporary integration ancestry
 does not enter this feature's pull request.  No merge occurs without Pierre's
 approval.
+
+* Live deployment
+
+The persistent phone update used integration commit =4b613aa=: exact live
+keyboard-and-command commit =7c6b0fb=, native rendering commit =a27c4a1=, and
+the integration-only manifest update.  The hash-pinned updater completed,
+stopped and restarted the OpenRC UI cleanly, and reported the UI ready.
+
+Post-update verification established:
+
+- =emacsos-ui= is started;
+- the installed =chat.el=, =assist-web.el=, and =emacos-assist.el= hashes are
+  =d65556c…=, =d1cd8fb…=, and =f523f2a…=, matching the reviewed sources;
+- the OpenRC init and user command reference retain their pre-update hashes
+  =b9d49ea…= and =cf91026…=;
+- exactly one custom =wvkbd-emacos= process is supervised, and its binary
+  retains hash =2f7e6fe…=;
+- the ordinary chat buffer is live with visual-line wrapping, proportional
+  presentation, raw-copy filtering, and the native presenter loaded;
+- a live synthetic Markdown sample retained identical source and copied text
+  while exposing heading, continuation-indent, code, and link faces;
+- the initial target is ordinary chat, no =*EmacsOS*= Lab Home buffer exists,
+  and the Firefox/Waydroid start and stop commands remain interactive.
+
+* What was hard and what we learned
+
+The phone was already running two unmerged changes, so deploying this
+main-based review branch would have removed a working keyboard and the newly
+landed command surface.  A temporary integration branch made the safe state
+constructive: it began at the exact verified live commit and added only the
+reviewed renderer.  The persistent OpenRC path also differs from the legacy
+=~/.emacs.d/emacsos= hot-load path.  The combined deployment test caught the
+missing manifest and embedded-manifest digest updates before the phone was
+changed.  The durable lesson is to treat the root-owned OpenRC payload and its
+two digest pins as the deployed interface, and to use a tested integration
+commit whenever independent unmerged phone features must coexist.
+
+* Deferred findings
+
+None.  Full CommonMark parsing and active links remain explicit non-goals, not
+deferred defects: the bounded native subset covers the Markdown emitted in the
+phone conversations without adding a parser or a dead-looking tap target.
 
 * Lineage
 
