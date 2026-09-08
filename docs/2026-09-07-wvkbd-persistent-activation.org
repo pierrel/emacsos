@@ -61,3 +61,15 @@ Live deployment must then prove that:
 
 Physical gesture feel and application-specific shortcuts remain the next user
 validation.  They do not weaken the process and UI-health deployment gate.
+
+* Live result
+
+At 2026-09-07 19:33 PDT the transactional OpenRC updater installed the session
+and reached its ready gate.  The phone then had exactly one keyboard process:
+=/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300=, owned by
+=emacsos-lab=.  No =wvkbd-mobintl= process was running.  The custom executable
+retained SHA-256
+=2f7e6fe22640128f4fcdf1d6939b934d6b0efb19a547caaa151c9841944acaad=
+and root ownership with mode 0755.  =emacsos-ui= remained started, its ready
+marker was valid, and the Emacs server returned successfully.  Pierre also
+confirmed from the touchscreen that the keyboard was working.
