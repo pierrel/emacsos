@@ -56,6 +56,7 @@ docker run --rm --platform linux/arm64 \
     --mount "type=bind,src=$output_dir,dst=/out" \
     -e HOST_UID="$host_uid" -e HOST_GID="$host_gid" \
     "$image" /bin/sh -ec '
+        # Fail closed if Alpine no longer offers this reviewed dependency set.
         apk add --no-cache \
             build-base=0.5-r3 \
             cairo-dev=1.18.4-r0 \
