@@ -53,7 +53,7 @@
         (emacsos-pinephone-keyboard-hidden nil)
         signal)
     (cl-letf (((symbol-function 'process-attributes)
-               (lambda (_) '((comm . "wvkbd-mobintl") (user . "emacsos-lab"))))
+               (lambda (_) '((comm . "wvkbd-emacos") (user . "emacsos-lab"))))
               ((symbol-function 'signal-process)
                (lambda (pid value) (setq signal (list pid value))))
               ((symbol-function 'force-mode-line-update) #'ignore))
@@ -100,15 +100,19 @@
       (should (equal emacsos-pinephone-wvkbd-pid "43")))))
 
 (ert-deftest emacsos-openrc-keyboard-finds-one-supervised-pid ()
-  (let (directory)
+  (let (directory command)
     (let ((default-directory "/ssh:thinky:"))
       (cl-letf (((symbol-function 'call-process)
-                 (lambda (&rest _)
+                 (lambda (program _infile _destination _display &rest args)
                    (setq directory default-directory)
+                   (setq command (cons program args))
                    (insert "43\n")
                    0)))
         (should (equal (emacsos-pinephone-find-wvkbd-pid) "43"))))
-    (should (equal directory "/"))))
+    (should (equal directory "/"))
+    (should (equal command
+                   '("/usr/bin/pgrep" "-u" "emacsos-lab" "-f"
+                     "^/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300$")))))
 
 (ert-deftest emacsos-openrc-keyboard-validates-pid-locally ()
   (let (directory)
@@ -116,9 +120,15 @@
       (cl-letf (((symbol-function 'process-attributes)
                  (lambda (_)
                    (setq directory default-directory)
-                   '((comm . "wvkbd-mobintl") (user . "emacsos-lab")))))
+                   '((comm . "wvkbd-emacos") (user . "emacsos-lab")))))
         (should (emacsos-pinephone-valid-wvkbd-pid-p "43"))))
     (should (equal directory "/"))))
+
+(ert-deftest emacsos-openrc-keyboard-rejects-stock-process ()
+  (cl-letf (((symbol-function 'process-attributes)
+             (lambda (_)
+               '((comm . "wvkbd-mobintl") (user . "emacsos-lab")))))
+    (should-not (emacsos-pinephone-valid-wvkbd-pid-p "43"))))
 
 (ert-deftest emacsos-openrc-keyboard-mode-line-label-tracks-state ()
   (let ((emacsos-pinephone-keyboard-hidden nil))

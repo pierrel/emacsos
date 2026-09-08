@@ -1,0 +1,63 @@
+#+title: wvkbd modifier-swipe persistent activation
+#+date: 2026-09-07
+
+* Lineage
+
+This decision changes the activation boundary in
+=2026-09-07-wvkbd-modifier-swipe.org= and
+=2026-09-07-wvkbd-repository-integration.org=.  Those records installed the
+custom keyboard beside the packaged keyboard but deliberately left it inactive.
+Pierre rejected a supervised selector and automatic fallback.  The normal
+EmacsOS session now starts the reviewed custom keyboard directly.
+
+* Decision
+
+The OpenRC session launches:
+
+#+begin_src sh
+/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300
+#+end_src
+
+The command is fixed in the reviewed session file.  Emacs keyboard visibility
+controls validate and recover only that exact process owned by =emacsos-lab=.
+There is no selector, crash counter, automatic demotion, or alternate launch
+path.  The packaged =/usr/bin/wvkbd-mobintl= remains installed but inactive.  A
+future switch back is an explicit operator change to the session command.
+
+* User flow
+
+Every UI boot presents the same 300-pixel mobile keyboard as before, now with
+modifier swipes enabled.  Ordinary character taps continue to type once.  An
+upward qualifying swipe emits Control plus the character; a downward qualifying
+swipe emits Alt/Meta plus the character.  The existing mode-line keyboard
+button continues to hide and show the one directly supervised keyboard process.
+
+* Failure and trust boundary
+
+The session deliberately treats failure of the custom keyboard as failure of a
+required UI process.  It does not silently start different code.  The OpenRC
+updater already rolls back the whole session update if the new keyboard cannot
+start and reach UI readiness during deployment.  After a committed update, the
+stock binary is only a manual recovery option over SSH.
+
+The executable remains root-owned, mode 0755, installed atomically from the
+reviewed SHA-256-bound artifact.  No input-derived value selects its path or
+arguments.
+
+* Verification
+
+Deterministic checks require the exact custom command in the session, reject the
+old stock command, and exercise PID validation, stale-PID recovery, hide/show,
+and unexpected-process rejection with the custom executable identity.  The full
+PinePhone shell and initialization suites run before deployment.
+
+Live deployment must then prove that:
+
+1. =emacsos-ui= reaches and retains =started=.
+2. Exactly one =emacsos-lab= process runs the fixed custom command.
+3. No stock-keyboard process runs.
+4. Emacs responds through its server and Sway still reports the Emacs window.
+5. The custom binary on disk retains the reviewed artifact digest.
+
+Physical gesture feel and application-specific shortcuts remain the next user
+validation.  They do not weaken the process and UI-health deployment gate.
