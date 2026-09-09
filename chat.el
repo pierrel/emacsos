@@ -195,7 +195,10 @@ rather than pushing it forward.")
 (defun emacos-conversation--safe-url-p (url)
   "Return non-nil for one literal HTTP(S) URL suitable for explicit opening."
   (and (stringp url)
-       (string-match-p "\\`https?://[^[:space:]\0-\x1f]+\\'" url)))
+       (string-match-p "\\`https?://[^[:space:]]+\\'" url)
+       (cl-loop for character across url
+                never (or (< character #x20)
+                          (<= #x7f character #x9f)))))
 
 (defvar emacos-conversation-object-map
   (let ((map (make-sparse-keymap)))

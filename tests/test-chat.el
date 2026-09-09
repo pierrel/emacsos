@@ -436,6 +436,14 @@ bot line if a stream was open (start handler had run)."
         (emacos-conversation-open-object 'fake-mouse))
       (should (equal opened "https://example.test/two")))))
 
+(ert-deftest chat-test-safe-url-rejects-c0-del-and-c1-controls ()
+  (should (emacos-conversation--safe-url-p "https://example.test/ok"))
+  (dolist (code (append (number-sequence 0 #x1f)
+                        (number-sequence #x7f #x9f)))
+    (should-not
+     (emacos-conversation--safe-url-p
+      (concat "https://example.test/" (string code))))))
+
 (ert-deftest chat-test-physical-ret-in-plain-chat-remains-newline-without-an-object ()
   (chat-test--reset)
   (let ((buffer (emacos--chat-buffer)))
