@@ -187,6 +187,19 @@ invalidate the live markers); otherwise revert normally."
     (let ((revert-buffer-function nil))
       (apply #'revert-buffer args))))
 
+(defun emacos-assist-refresh ()
+  "Reload this .assist conversation from disk without a confirmation prompt.
+
+Refuse a modified buffer rather than discard an unsaved prompt.  An active
+stream is rejected before the buffer changes so its rendering markers remain
+valid."
+  (interactive)
+  (unless (derived-mode-p 'emacos-assist-mode)
+    (user-error "This is not a .assist conversation"))
+  (when (buffer-modified-p)
+    (user-error "Save or send this .assist draft before refreshing"))
+  (emacos-assist--revert t t))
+
 ;;; Mode
 
 (defun emacos-assist--init-buffer ()
@@ -233,7 +246,7 @@ agent reads/edits/runs files in this file's directory on the phone."
    '((send . emacos--chat-send)
      (abort . emacos--chat-abort)
      (new . emacos-assist-new-file)
-     (refresh . revert-buffer)
+     (refresh . emacos-assist-refresh)
      (forget . emacos-assist-forget)))
   (emacos-assist--init-buffer))
 

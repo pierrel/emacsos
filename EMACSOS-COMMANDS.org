@@ -32,6 +32,7 @@ chat with =M-x emacos--chat-show-top-buffer=.
 | Load older Assist Web messages | =emacos-assist-web-load-older= |
 | Stop or detach from an Assist Web response | =emacos-assist-web-abort= |
 | Start a file-backed chat | =emacos-assist-new-file= |
+| Reload an unchanged file-backed chat from disk without prompting | =emacos-assist-refresh= |
 | Forget a file-backed chat checkpoint | =emacos-assist-forget= |
 | Compose an SMS | =emacos-send-message= |
 
