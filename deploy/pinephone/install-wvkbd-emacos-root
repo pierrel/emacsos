@@ -1,62 +1,24 @@
 #!/bin/sh
-# Atomically install one verified keyboard staged by the recovery user.
-
+# Fixed entrypoint: serialise an activation through the installed recovery helper.
 set -eu
-PATH=/usr/bin:/usr/sbin:/bin:/sbin
+PATH=/usr/bin:/usr/sbin:/bin:/sbin; export PATH
 umask 077
-export PATH
-
-target=/usr/local/bin/wvkbd-emacos
 lock=/run/wvkbd-emacos-install.lock
-temporary=
+helper=/usr/local/sbin/emacsos-wvkbd-transaction
+initd=/etc/init.d/emacsos-ui
 
-fail() {
-    printf 'wvkbd-install: %s\n' "$1" >&2
-    exit 1
-}
-
-cleanup() {
-    [ -z "$temporary" ] || rm -f -- "$temporary"
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-
+fail() { printf 'wvkbd-install: %s\n' "$1" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
 [ "$#" -eq 0 ] || fail 'arguments are not accepted'
 [ "${SUDO_USER-}" = user ] || fail 'must be authorized by the recovery user'
-touch "$lock"
-chown root:root "$lock"
-chmod 0600 "$lock"
-exec 9>"$lock"
-flock -n -x 9 || fail 'install is already running'
-stage=${WVKBD_STAGE-}
-expected=${WVKBD_SHA256-}
-printf '%s\n' "$stage" |
-    grep -Eq '^/home/user/\.cache/wvkbd-emacos\.[A-Za-z0-9]{6}$' ||
-    fail 'invalid staging path'
-printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$' ||
-    fail 'invalid expected digest'
-[ -f "$stage" ] && [ ! -L "$stage" ] || fail 'unsafe staged artifact'
-[ "$(stat -c '%U:%G:%a:%h:%F' "$stage")" = \
-    'user:user:600:1:regular file' ] || fail 'unsafe staged artifact metadata'
-
-if [ -e "$target" ] || [ -L "$target" ]; then
-    [ -f "$target" ] && [ ! -L "$target" ] &&
-        [ "$(stat -c '%U:%G:%a:%h:%F' "$target")" = \
-            'root:root:755:1:regular file' ] || fail 'unsafe existing target'
-fi
-
-temporary=$(mktemp /usr/local/bin/.wvkbd-emacos.XXXXXX)
-timeout -s TERM -k 1 10 dd if="$stage" of="$temporary" \
-    bs=1048576 count=17 status=none 9>&- || fail 'could not snapshot staged artifact'
-[ "$(stat -c '%s' "$temporary")" -le 16777216 ] || fail 'staged artifact is too large'
-[ "$(sha256sum "$temporary")" = "$expected  $temporary" ] ||
-    fail 'staged artifact digest mismatch'
-chown root:root "$temporary"
-chmod 0755 "$temporary"
-mv -f -- "$temporary" "$target"
-temporary=
-[ "$(stat -c '%U:%G:%a:%h:%F' "$target")" = \
-    'root:root:755:1:regular file' ] || fail 'unsafe installed target'
-[ "$(sha256sum "$target")" = "$expected  $target" ] ||
-    fail 'installed target digest mismatch'
+[ -f "$helper" ] && [ ! -L "$helper" ] &&
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$helper")" = 'root:root:755:1:regular file' ] ||
+    fail 'recovery helper is not installed safely'
+[ -f "$initd" ] && [ ! -L "$initd" ] &&
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$initd")" = 'root:root:755:1:regular file' ] &&
+    grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1' "$initd" >/dev/null &&
+    grep -F '/usr/local/sbin/emacsos-wvkbd-transaction finalize-start' "$initd" >/dev/null ||
+    fail 'OpenRC UI transaction hooks are not installed safely'
+touch "$lock"; chown root:root "$lock"; chmod 0600 "$lock"
+exec 9>"$lock"; flock -n -x 9 || fail 'install is already running'
+exec "$helper" activate

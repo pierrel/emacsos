@@ -1,0 +1,349 @@
+#!/bin/sh
+# Root-owned durable activation and recovery for the supervised wvkbd binary.
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+umask 077
+
+target=/usr/local/bin/wvkbd-emacos
+notice=/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+state_dir=/var/lib/emacsos-wvkbd-transaction
+state=$state_dir/state
+previous=$state_dir/previous
+previous_notice=$state_dir/previous-notice
+service=emacsos-ui
+ready=/run/emacsos-ui/ready
+command='/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300'
+
+fail() { printf 'wvkbd-transaction: %s\n' "$1" >&2; exit 1; }
+sha() { sha256sum "$1" | awk '{print $1}'; }
+checkpoint() { :; }
+
+root_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$1")" = "root:root:$2:1:regular file" ]
+}
+
+root_dir() {
+    [ -d "$1" ] && [ ! -L "$1" ] &&
+        [ "$(stat -c '%U:%G:%a:%F' "$1")" = "root:root:$2:directory" ]
+}
+
+safe_target() { root_file "$target" 755; }
+safe_notice() { root_file "$notice" 644; }
+
+# Copy user-owned staged input through the one descriptor we validated.  The
+# root-only transaction directory makes the snapshot safe to hash and install.
+snapshot_stage() {
+    source=$1 snapshot=$2 maximum=$3
+    /usr/bin/python3 - "$source" "$snapshot" "$maximum" <<'PY'
+import os
+import pwd
+import stat
+import sys
+
+source, snapshot, maximum = sys.argv[1], sys.argv[2], int(sys.argv[3])
+user = pwd.getpwnam("user")
+fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+try:
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != user.pw_uid or
+            info.st_gid != user.pw_gid or stat.S_IMODE(info.st_mode) != 0o600 or
+            info.st_nlink != 1 or info.st_size > maximum):
+        raise SystemExit("unsafe staged input")
+    out = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                  0o600)
+    try:
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit("oversized staged input")
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(out, view):]
+        os.fsync(out)
+    finally:
+        os.close(out)
+finally:
+    os.close(fd)
+PY
+    root_file "$snapshot" 600 && [ "$(stat -c '%s' "$snapshot")" -le "$maximum" ] ||
+        fail 'unsafe staged snapshot'
+}
+
+ensure_state_dir() {
+    if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+        root_dir "$state_dir" 700 || fail 'unsafe transaction directory'
+    else
+        install -d -o root -g root -m 0700 "$state_dir"
+    fi
+}
+
+sync_state() { sync "$state_dir"; }
+
+remove_file() {
+    [ ! -e "$1" ] && [ ! -L "$1" ] || rm -f -- "$1"
+}
+
+clear_state() {
+    checkpoint cleanup-notice
+    remove_file "$previous_notice"
+    checkpoint cleanup-previous
+    remove_file "$previous"
+    checkpoint cleanup-state
+    remove_file "$state"
+    sync_state
+}
+
+write_state() {
+    phase=$1 old_sha=$2 new_sha=$3 prior_notice=$4
+    temporary=$(mktemp "$state_dir/.state.XXXXXX")
+    trap 'rm -f -- "${temporary-}"' EXIT HUP INT TERM
+    printf 'version=1\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice_present=%s\n' \
+        "$phase" "$old_sha" "$new_sha" "$prior_notice" >"$temporary"
+    chown root:root "$temporary"
+    chmod 0600 "$temporary"
+    root_file "$temporary" 600 || fail 'could not create safe state marker'
+    mv -f -- "$temporary" "$state"
+    temporary=
+    trap - EXIT HUP INT TERM
+    sync_state
+}
+
+read_state() {
+    ensure_state_dir
+    root_file "$state" 600 || fail 'unsafe transaction state'
+    [ "$(stat -c '%s' "$state")" -le 512 ] || fail 'oversized transaction state'
+    [ "$(wc -l <"$state")" -eq 5 ] || fail 'malformed transaction state'
+    version=$(sed -n '1s/^version=//p' "$state")
+    phase=$(sed -n '2s/^phase=//p' "$state")
+    old_sha=$(sed -n '3s/^old_sha=//p' "$state")
+    new_sha=$(sed -n '4s/^new_sha=//p' "$state")
+    prior_notice=$(sed -n '5s/^prior_notice_present=//p' "$state")
+    [ "$version" = 1 ] && { [ "$phase" = pending ] || [ "$phase" = committed ]; } &&
+        printf '%s\n%s\n' "$old_sha" "$new_sha" | grep -Eq '^[0-9a-f]{64}$' &&
+        { [ "$prior_notice" = 0 ] || [ "$prior_notice" = 1 ]; } ||
+        fail 'malformed transaction state'
+    # Reject extra keys, reordered fields, and embedded control data.
+    printf 'version=1\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice_present=%s\n' \
+        "$phase" "$old_sha" "$new_sha" "$prior_notice" | cmp -s - "$state" ||
+        fail 'malformed transaction state'
+}
+
+verified_backup() {
+    root_file "$previous" 600 || fail 'unsafe previous keyboard backup'
+    [ "$(sha "$previous")" = "$old_sha" ] || fail 'previous keyboard digest mismatch'
+    if [ "$prior_notice" = 1 ]; then
+        root_file "$previous_notice" 600 || fail 'unsafe previous notice backup'
+    elif [ -e "$previous_notice" ] || [ -L "$previous_notice" ]; then
+        fail 'unexpected previous notice backup'
+    fi
+}
+
+copy_checked() {
+    source=$1 destination=$2 mode=$3 digest=$4
+    temporary=$(mktemp "$(dirname -- "$destination")/.wvkbd.XXXXXX")
+    trap 'rm -f -- "${temporary-}"' EXIT HUP INT TERM
+    install -o root -g root -m "$mode" "$source" "$temporary"
+    checkpoint "temporary-$destination"
+    root_file "$temporary" "$mode" || fail 'unsafe temporary installation'
+    [ "$(sha "$temporary")" = "$digest" ] || fail 'temporary digest mismatch'
+    mv -f -- "$temporary" "$destination"
+    checkpoint "renamed-$destination"
+    temporary=
+    trap - EXIT HUP INT TERM
+    sync "$(dirname -- "$destination")"
+    checkpoint "installed-$destination"
+}
+
+restore_old() {
+    read_state
+    [ "$phase" = pending ] || fail 'restore requested for committed transaction'
+    verified_backup
+    copy_checked "$previous" "$target" 755 "$old_sha"
+    if [ "$prior_notice" = 1 ]; then
+        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+        copy_checked "$previous_notice" "$notice" 644 "$(sha "$previous_notice")"
+    else
+        if [ -e "$notice" ] || [ -L "$notice" ]; then
+            safe_notice || fail 'unsafe current notice during restore'
+            remove_file "$notice"
+            sync /usr/local/share/licenses/wvkbd-emacos
+        fi
+    fi
+    safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'old keyboard restore failed'
+}
+
+candidate_authorized() {
+    [ "${EMACSOS_WVKBD_CANDIDATE_SHA256-}" = "$new_sha" ] &&
+        safe_target && [ "$(sha "$target")" = "$new_sha" ]
+}
+
+keyboard_pid() {
+    for proc in /proc/[0-9]*; do
+        [ "$(stat -c '%U' "$proc" 2>/dev/null || true)" = emacsos-lab ] || continue
+        [ -r "$proc/cmdline" ] || continue
+        actual=$(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null | sed 's/ $//' || true)
+        [ "$actual" = "$command" ] && printf '%s\n' "${proc##*/}"
+    done
+}
+
+gate() {
+    expected=$1
+    rc-service "$service" status >/dev/null 2>&1 || return 1
+    checkpoint gate-status
+    [ -f "$ready" ] && [ ! -L "$ready" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$ready")" = 'emacsos-lab:emacsos-lab:600:1:regular file' ] || return 1
+    checkpoint gate-ready-metadata
+    [ "$(wc -c <"$ready")" -eq 5 ] && [ "$(cat "$ready")" = ready ] || return 1
+    checkpoint gate-ready-content
+    pids=$(keyboard_pid)
+    [ "$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l)" -eq 1 ] || return 1
+    checkpoint gate-process
+    pid=$(printf '%s\n' "$pids" | sed -n '1p')
+    case $pid in ''|*[!0-9]*) return 1;; esac
+    [ -e "/proc/$pid/exe" ] || return 1
+    checkpoint gate-proc-exe
+    [ "$(sha "/proc/$pid/exe")" = "$expected" ]
+}
+
+wait_gate() {
+    expected=$1 attempt=0
+    while [ "$attempt" -lt 100 ]; do
+        gate "$expected" && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
+restart_candidate() {
+    checkpoint before-candidate-restart
+    rm -f -- "$ready"
+    checkpoint during-candidate-restart
+    timeout 30 env EMACSOS_WVKBD_CANDIDATE_SHA256="$1" rc-service "$service" restart >/dev/null 2>&1 &&
+        wait_gate "$1" && checkpoint after-candidate-restart
+}
+
+normal_recovery() {
+    rm -f -- "$ready"
+    timeout 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service "$service" restart >/dev/null 2>&1 &&
+        wait_gate "$old_sha"
+}
+
+prepare_start() {
+    ensure_state_dir
+    if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+        # A crash before pending could leave only safe, unreachable backups.
+        for file in "$previous" "$previous_notice" "$state_dir/candidate" "$state_dir/candidate-notice"; do
+            if [ -e "$file" ] || [ -L "$file" ]; then
+                root_file "$file" 600 || fail 'unsafe orphan transaction backup'
+                rm -f -- "$file"
+            fi
+        done
+        sync_state
+        return 0
+    fi
+    read_state
+    case $phase in
+        pending)
+            verified_backup
+            candidate_authorized && return 0
+            restore_old
+            ;;
+        committed)
+            safe_target && [ "$(sha "$target")" = "$new_sha" ] || fail 'committed keyboard digest mismatch'
+            clear_state
+            ;;
+    esac
+}
+
+finalize_start() {
+    if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+        return 0
+    fi
+    read_state
+    case $phase in
+        pending)
+            if candidate_authorized; then
+                wait_gate "$new_sha" || fail 'candidate keyboard did not pass readiness gate'
+                return 0
+            fi
+            safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'restored keyboard digest mismatch'
+            wait_gate "$old_sha" || fail 'restored keyboard did not pass readiness gate'
+            clear_state
+            ;;
+        committed)
+            safe_target && [ "$(sha "$target")" = "$new_sha" ] || fail 'committed keyboard digest mismatch'
+            clear_state
+            ;;
+    esac
+}
+
+activate() {
+    [ "$(id -u)" -eq 0 ] || fail 'must run as root'
+    [ "${SUDO_USER-}" = user ] || fail 'must be authorized by the recovery user'
+    stage=${WVKBD_STAGE-} expected_new=${WVKBD_SHA256-}
+    notice_stage=${WVKBD_NOTICE_STAGE-} expected_notice=${WVKBD_NOTICE_SHA256-}
+    printf '%s\n%s\n' "$expected_new" "$expected_notice" | grep -Eq '^[0-9a-f]{64}$' || fail 'invalid staged digest'
+    printf '%s\n' "$stage" | grep -Eq '^/home/user/\.cache/wvkbd-emacos\.[A-Za-z0-9]{6}$' || fail 'unsafe keyboard stage path'
+    printf '%s\n' "$notice_stage" | grep -Eq '^/home/user/\.cache/wvkbd-notice\.[A-Za-z0-9]{6}$' || fail 'unsafe notice stage path'
+    ensure_state_dir
+    [ ! -e "$state" ] && [ ! -L "$state" ] || fail 'unfinished transaction requires recovery'
+    candidate_snapshot=$state_dir/candidate
+    notice_snapshot=$state_dir/candidate-notice
+    remove_file "$candidate_snapshot"
+    remove_file "$notice_snapshot"
+    snapshot_stage "$stage" "$candidate_snapshot" 16777216
+    snapshot_stage "$notice_stage" "$notice_snapshot" 1048576
+    [ "$(sha "$candidate_snapshot")" = "$expected_new" ] || fail 'staged keyboard digest mismatch'
+    [ "$(sha "$notice_snapshot")" = "$expected_notice" ] || fail 'staged notice digest mismatch'
+    safe_target || fail 'unsafe current keyboard'
+    old_sha=$(sha "$target")
+    copy_checked "$target" "$previous" 600 "$old_sha"
+    prior_notice=0
+    if [ -e "$notice" ] || [ -L "$notice" ]; then
+        safe_notice || fail 'unsafe current notice'
+        copy_checked "$notice" "$previous_notice" 600 "$(sha "$notice")"
+        prior_notice=1
+    fi
+    sync_state
+    checkpoint before-pending
+    write_state pending "$old_sha" "$expected_new" "$prior_notice"
+    checkpoint after-pending
+    install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+    copy_checked "$notice_snapshot" "$notice" 644 "$expected_notice"
+    checkpoint after-notice-install
+    copy_checked "$candidate_snapshot" "$target" 755 "$expected_new"
+    checkpoint after-candidate-rename
+    if restart_candidate "$expected_new"; then
+        checkpoint after-candidate-gate
+        write_state committed "$old_sha" "$expected_new" "$prior_notice"
+        checkpoint after-committed
+        clear_state
+        remove_file "$candidate_snapshot"
+        remove_file "$notice_snapshot"
+        return 0
+    fi
+    restore_old || fail 'candidate failed and old keyboard could not be restored'
+    if normal_recovery; then
+        finalize_start
+        remove_file "$candidate_snapshot"
+        remove_file "$notice_snapshot"
+        printf '%s\n' 'candidate failed; old keyboard restored' >&2
+        return 1
+    fi
+    fail 'candidate failed; old keyboard backup retained because rollback did not become ready'
+}
+
+[ "$#" -eq 1 ] || fail 'expected exactly one action'
+case $1 in
+    activate) activate ;;
+    prepare-start) prepare_start ;;
+    finalize-start) finalize_start ;;
+    *) fail 'unknown action' ;;
+esac

@@ -1,0 +1,16 @@
+#+title: PinePhone glide keyboard implementation amendment
+#+date: 2026-09-09
+
+* Lineage
+
+This amendment implements =2026-09-08-glide-modifier-keyboard.org= against
+wvkbd commit =4d6d695cbd98a2922a041f857af5e8718a6258bb=.
+
+* Current boundary
+
+The pin, archive-only AArch64 build, benchmark artifact, transaction helper,
+and deterministic integration tests are local implementation work.  The
+=wvkbd-phone-bench= path transfers only the benchmark and never replaces or
+restarts the live keyboard.  No deployment, restart, phone keyboard
+replacement, interactive acceptance, push, pull request, or EmacsOS commit has
+occurred in this amendment.

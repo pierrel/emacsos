@@ -14,7 +14,7 @@ doas_tmp=
 reference_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=19e690f53cdf376c92b7f745548f23ff42e2b330dd3245e5053708c6371b49a9
+manifest_hash=03a1d4e788629d4a7770ba81341d735b0a2c5a1e8f26d15c8080b8458d148716
 mutating=0
 committed=0
 restart_only=0
@@ -176,6 +176,9 @@ cleanup() {
             restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
             restore_file openrc-suspend-root \
                 /usr/local/sbin/emacsos-openrc-suspend 0755
+            restore_file wvkbd-transaction-root \
+                /usr/local/sbin/emacsos-wvkbd-transaction 0755
+            restore_file emacsos-ui.initd /etc/init.d/emacsos-ui 0755
             restore_file openrc-boot-mode \
                 /usr/local/sbin/emacsos-openrc-boot-mode 0755
             restore_file openrc-call-root /usr/local/sbin/emacsos-openrc-call 0755
@@ -261,7 +264,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -271,13 +274,14 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 30 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 31 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
     emacos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
@@ -326,6 +330,9 @@ for target in /usr/local/share/emacsos-openrc/init.el \
     /usr/local/sbin/emacsos-openrc-boot-mode; do
     [ -f "$target" ] && [ ! -L "$target" ] || fail "unsafe installed file: $target"
 done
+[ -f /etc/init.d/emacsos-ui ] && [ ! -L /etc/init.d/emacsos-ui ] &&
+    [ "$(stat -c '%U:%G:%a:%h:%F' /etc/init.d/emacsos-ui)" = \
+        'root:root:755:1:regular file' ] || fail 'unsafe installed OpenRC UI service'
 for target in /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/chat.el \
     /usr/local/share/emacsos-openrc/assist-web.el \
@@ -405,6 +412,8 @@ for pair in \
     'phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el' \
     'phone-sms.el:/usr/local/share/emacsos-openrc/phone-sms.el' \
     'openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend' \
+    'wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction' \
+    'emacsos-ui.initd:/etc/init.d/emacsos-ui' \
     'openrc-boot-mode:/usr/local/sbin/emacsos-openrc-boot-mode' \
     'openrc-call-root:/usr/local/sbin/emacsos-openrc-call' \
     'openrc-sms-root:/usr/local/sbin/emacsos-openrc-sms' \
@@ -469,6 +478,9 @@ chmod 0600 "$doas_tmp"
 /usr/bin/doas -C "$doas_tmp" >/dev/null
 install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
     /usr/local/sbin/emacsos-openrc-suspend
+install -o root -g root -m 0755 "$snapshot/wvkbd-transaction-root" \
+    /usr/local/sbin/emacsos-wvkbd-transaction
+install -o root -g root -m 0755 "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
 mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf
 doas_tmp=
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
@@ -534,6 +546,12 @@ cmp -s "$snapshot/openrc-session" /usr/local/share/emacsos-openrc/session
 cmp -s "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
+cmp -s "$snapshot/wvkbd-transaction-root" /usr/local/sbin/emacsos-wvkbd-transaction
+cmp -s "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
+[ "$(stat -c '%U:%G:%a:%h:%F' /usr/local/sbin/emacsos-wvkbd-transaction)" = \
+    'root:root:755:1:regular file' ]
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/init.d/emacsos-ui)" = \
+    'root:root:755:1:regular file' ]
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-sms-root" /usr/local/sbin/emacsos-openrc-sms
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network

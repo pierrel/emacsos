@@ -25,6 +25,7 @@ depend() {
 
 start_pre() {
     local cgroup uid group groups runtime
+    /usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1
     cgroup=/sys/fs/cgroup/openrc.emacsos-ui
     [ -d "$cgroup" ] && [ ! -L "$cgroup" ] || return 1
     [ -f "$cgroup/cgroup.procs" ] && [ ! -L "$cgroup/cgroup.procs" ] || return 1
@@ -47,6 +48,10 @@ start_pre() {
         rm -rf -- "$runtime"
     fi
     install -d -o "$uid" -g "$group" -m 0700 "$runtime"
+}
+
+start_post() {
+    /usr/local/sbin/emacsos-wvkbd-transaction finalize-start
 }
 
 stop_post() {

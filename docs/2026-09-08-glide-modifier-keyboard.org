@@ -1,0 +1,381 @@
+#+title: PinePhone modifier-preserving glide keyboard state and integration design
+#+date: 2026-09-08
+
+* State
+
+Phase 1 design only.  The wvkbd repository owns gesture recognition and
+ordinary Wayland output.  EmacsOS owns the reviewed revision pin, reproducible
+AArch64 build, side-by-side installation, session command, recovery, and live
+phone acceptance.  No production code, test, build, deployment, or phone state
+changed in this phase.
+
+* Lineage
+
+- =docs/2026-09-07-wvkbd-modifier-swipe.org= specified the original phone
+  gesture and live acceptance matrix.  The new wvkbd design preserves short
+  vertical Ctrl/Alt and gives continuing horizontal/diagonal Latin traces a
+  glide result instead of cancellation.
+- =docs/2026-09-07-wvkbd-repository-integration.org= established the pinned
+  external checkout, AArch64 container build, atomic side-by-side install, and
+  manual packaged recovery.  This integration retains those boundaries.
+- =docs/2026-09-07-wvkbd-persistent-activation.org= made the custom binary the
+  directly supervised OpenRC keyboard.  Its exact launch command and PID
+  identity remain unchanged.
+
+* Phone experience
+
+The 320x240 keyboard keeps one interaction surface and no candidate row.
+Tapping types normally.  A short upward letter gesture still shows =C-= and
+emits Ctrl+letter; a short downward gesture still shows =M-= and emits
+Alt+letter.  If that same finger continues far enough across letter keys, the
+popup clears, intersected keys use the existing swipe color, and release types
+one top-ranked local word.  Space and punctuation remain explicit taps.
+The starting Latin key is trace element zero at touch-down and is included in
+the highlighted trace when glide qualifies; recognition never loses the letter
+under the initial finger contact.
+
+For a horizontal/diagonal movement that has crossed the first threshold but
+has not yet met all glide takeover thresholds, the ordinary pressed-key popup
+clears and feedback is blank.  It stays blank while =GlideCandidate= is live.
+Only full =Glide= paints the seeded trace; release/cancel from the candidate
+redraws the normal keyboard and inserts nothing.
+
+Before the change, a horizontal or diagonal trace under =--mod-swipe= clears
+the key and emits nothing, while the first vertical threshold permanently
+latches Ctrl/Alt.  After it, a trace through =h-e-l-o= can insert =hello=, even
+if its first segment briefly qualified =C-h=.  Releasing that brief first
+segment still emits exactly =C-h=.  Continuing from =C-= or =M-= enters glide
+directly and clears that popup before the seeded trace paints.  An unknown trace clears its highlights and
+inserts nothing, so the user can tap-type without a modal or dead candidate UI.
+
+The recognizer, its 20,000-word MIT-licensed frequency snapshot, and all trace
+data are compiled into wvkbd.  The phone performs no network lookup, runtime
+dictionary load, history, learning, or telemetry.
+
+* Integration contracts already present
+
+- =deploy/pinephone/openrc-session:189= launches
+  =/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300= before Emacs.  Glide
+  extends =--mod-swipe=, so this command does not change.
+- =deploy/pinephone/openrc-init.el:460-481= validates the supervised keyboard
+  and matches that exact command.  It also does not change.
+- =deploy/pinephone/build-wvkbd-emacos.sh:9-35= requires an exact clean pinned
+  wvkbd revision based on v0.16; lines 44-86 build and validate AArch64 musl in
+  the pinned Alpine container.  Its =apk add= at lines 61-68 still fetches the
+  pinned build dependencies when they are not cached.
+- =deploy/pinephone/install-wvkbd-emacos.sh:7-60= bounds and hashes the staged
+  artifact.  =deploy/pinephone/install-wvkbd-emacos-root:9-62= locks, rechecks,
+  and atomically replaces only =/usr/local/bin/wvkbd-emacos=.
+- =tests/test-wvkbd-build.sh:18-61= pins script syntax, revision/source
+  invariants, and AArch64 output; lines 63-94 pin digest checking and preservation
+  of =/usr/bin/wvkbd-mobintl=.
+- =tests/test-pinephone-openrc-deploy.sh:123-149= pins the exact launch command,
+  rejects packaged fallback in the supervised session, and requires keyboard
+  startup before Emacs.  =tests/test-pinephone-openrc-init.el:75-88= pins the
+  exact PID lookup.
+
+* Cross-repository interface
+
+The only runtime interface is the existing command above and ordinary Wayland
+virtual-keyboard events.  EmacsOS does not receive traces, candidates, or
+dictionary state and has no app-specific glide code.  The wvkbd CLI contract is:
+
+- =--mod-swipe= enables taps, short Ctrl/Alt swipes, and bounded Latin glide;
+- =-o= may still echo the final emitted key stream;
+- =-O= remains the external raw-intersection mode and remains incompatible
+  with =--mod-swipe= before Wayland setup; and
+- SIGUSR1/SIGUSR2/SIGRTMIN, process identity, height flags, and layouts are
+  unchanged.
+
+wvkbd uses one explicit 26-entry ASCII-letter/evdev table in both directions.
+Its reverse lookup alone defines admission and trace membership; its forward
+lookup defines emission.  No numeric =KEY_A=/=KEY_Z= range or evdev arithmetic
+is part of the EmacsOS contract.
+
+The source/build interface remains a single 40-hex revision in
+=deploy/pinephone/wvkbd-revision=.  The builder must not bind/copy the writable
+checkout.  It creates a =git archive= of that exact commit, mounts only the
+archive read-only, extracts it into a new empty container directory, and builds
+there.  The tracked generated dictionary header comes from the archive;
+=config.h= is freshly derived there from the archived =config.def.h=.  These
+are the only permitted generated/config inputs and both have explicit archived
+origins; no host pathname is injected.  No host
+=config.h=, object, binary, ignored, untracked, or modified working-tree file can
+enter.  Any future out-of-archive generated input would need an explicit fixed
+name, size, and digest, but this design has none.
+
+That archived build performs no dictionary/source download, and the phone
+runtime performs no network request.  This is not a claim that the AArch64
+container build is offline: Docker may obtain the pinned image and its =apk add=
+obtains pinned compiler/development packages when absent from cache.  The
+dictionary's source commit, exact compressed size/SHA-256, same-buffer
+decompression contract, generated bounds, and MIT notice are tracked in
+wvkbd's dated design and =THIRD_PARTY_LICENSES.md=.
+
+For license delivery, the EmacsOS build copies that reviewed notice beside the
+binary artifact, and the installer stages it with the executable for
+=/usr/local/share/licenses/wvkbd-emacos/wordninja.txt= under root ownership and
+mode 0644.  Binary activation never depends on reading the notice.
+
+The deployment transaction is stronger than in-process file replacement.
+=deploy/pinephone/wvkbd-transaction-root= is installed as the fixed root-owned
+=/usr/local/sbin/emacsos-wvkbd-transaction= by the existing OpenRC payload
+transaction before any glide binary is attempted.  =emacsos-ui.initd:26-50=
+invokes its =prepare-start= action before the session command and its
+=finalize-start= action after startup.  The keyboard installer refuses to
+activate unless that exact helper and both service hooks are installed.
+
+While holding the existing install lock, require the current custom executable
+to be a safe root-owned regular file, compute its digest, and copy it plus any
+current notice to fixed root-only files under
+=/var/lib/emacsos-wvkbd-transaction=.  Verify and globally sync the executable
+backup against the captured old digest.  Write versioned =pending= state with
+old/new digests and prior-notice presence through temporary-plus-rename and
+sync it before activation.  Install the notice first, sync a verified new
+executable temporary, atomically rename it over the target, and sync again.
+Thus power, SSH, or helper death at any later boundary leaves a durable marker
+and verified prior binary.
+
+The state directory is root:root mode 0700 with fixed non-symlink file names
+=state=, =previous=, and optional =previous-notice=.  =state= is root:root mode
+0600, at most 512 bytes, and has exactly version, phase, old SHA-256, new
+SHA-256, and prior-notice-present fields; it contains no caller-supplied path.
+The phase is only =pending= or =committed=.  Recovery rejects any other shape,
+owner, mode, link count, digest, or file type before touching the target.
+
+An ordinary boot or service start that sees =pending= restores the verified old
+binary and notice atomically in =prepare-start= before launching the session.
+If marker metadata, backup metadata, or the old digest cannot be verified,
+=prepare-start= fails closed and OpenRC launches no keyboard/UI command.
+The installer may perform one candidate restart by passing the new digest as
+the root-only =EMACSOS_WVKBD_CANDIDATE_SHA256= transient authorization to
+OpenRC; only a matching =pending= marker
+and target digest permit that candidate start.  The authorization is not stored
+durably and therefore cannot authorize a later boot.  Candidate =finalize-start=
+does not commit; the still-running installer owns the gate below.  A normal
+recovery start retains the state until =finalize-start= gates the restored old
+process, then cleans it.  A leftover durable =committed= state retains the new
+target and is cleanup-only because its gate completed before that state was
+synced.
+
+Before candidate restart, remove the old =/run/emacsos-ui/ready= proof.  Restart
+=emacsos-ui= through a bounded OpenRC command and wait for a fresh readiness
+proof.  Success requires all of:
+
+- =rc-service emacsos-ui status= succeeds;
+- =/run/emacsos-ui/ready= is a non-symlink, =emacsos-lab=-owned mode-0600
+  regular file containing exactly =ready=;
+- exactly one =emacsos-lab= process has the unchanged command
+  =/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300=; and
+- that PID remains live and SHA-256 of =/proc/PID/exe= equals the expected
+  new or restored-old digest.
+
+Only after that gate does the installer atomically replace =pending= with
+=committed= and sync it.  It then deletes and syncs the backups/state and reports
+success.  Interruption after the gate but before =committed= therefore rolls
+back safely; interruption after durable =committed= retains the proven new
+binary and cleans state on the next start.
+
+If new restart or readiness fails in-process, stop/quiesce the UI, atomically
+restore the verified old binary and prior notice while leaving =pending=
+durable, and start normally without candidate authorization.  Service
+=prepare-start= makes that restore idempotent; =finalize-start= applies the same
+readiness/PID/executable-digest gate using the old digest and only then clears
+state.  A successful rollback returns deployment failure so the new revision is
+never reported live.  If rollback itself cannot restore readiness, preserve the
+root-only state/backup and report both digests for deliberate recovery.  Never
+start the packaged keyboard or bypass the gate.
+
+The interruption test matrix kills the installer after each durable boundary:
+verified backup sync before marker; =pending= marker sync; notice install;
+candidate temporary sync; candidate rename/sync; immediately before, during,
+and after candidate restart; after each readiness/PID/digest predicate; after
+the full gate but before =committed=; after =committed= sync; and between each
+backup/state deletion.  On the next ordinary service start, every =pending=
+case must restore and verify the old digest before the session command executes,
+then clear state only after restored readiness.  Every =committed= case must
+retain the new digest and safely finish cleanup.  Death before =pending= may
+leave only a fixed orphan backup; =prepare-start= removes it because activation
+was impossible.  Repeating recovery/start is idempotent and never dispatches
+two keyboards.
+
+* Resource and safety acceptance
+
+- The generated runtime dictionary payload is at most 256 KiB, per-touch state
+  below 2 KiB, trace length 64, motion callbacks 2,048, candidate bucket 512,
+  and word length 24.  One release performs at most 786,432 bounded edit cells.
+- The installed ELF remains under the existing 16 MiB transfer/install cap.
+  =size= must show dictionary read-only data no larger than 256 KiB.  Keyboard
+  RSS after first glide may grow by no more than 1 MiB versus the same binary
+  immediately after launch.  Idle CPU and wakeups must be indistinguishable
+  from the accepted modifier build because glide adds no timer, thread, or I/O.
+- wvkbd's fixed worst-retained-bucket harness performs ten warmups and 1,000
+  individually timed recognitions using =CLOCK_MONOTONIC_RAW=.  On the installed
+  AArch64 binary/test build every post-warmup call must complete in at most
+  50,000 microseconds; report the maximum, not only an average.
+- All recognizer input is touchscreen coordinates and compiled data.  Signed
+  extremes and long traces are covered before phone use.  The maintainer-only
+  generator opens the source once, requires exactly 538,593 compressed bytes,
+  hashes and decompresses that same byte buffer, and checks both compressed and
+  deterministic 20,000-word output hashes rather than carrying a separate
+  hostile-input hardening suite.  Recognition emits only balanced ASCII letter
+  events, at most 24 per gesture.
+- Trace and selected word never leave the process.  No logs, telemetry,
+  personalization files, network connections, clipboard, shell, or privileged
+  helper are added.
+
+* Numbered implementation and verification plan
+
+1. Implement and locally review the wvkbd design in
+   =../wvkbd/2026-09-08-glide-modifier-keyboard.org=.  Require its pure state,
+   touch-down trace seed, blank nonterminal =GlideCandidate= feedback,
+   all-active-input transition cancellation, direct balanced batch word emitter,
+   recognizer, simplified pinned-hash dictionary generation, CLI, worst-bucket
+   timing harness, explicit noncontiguous 26-letter evdev map, all-26
+   admission/trace/emission and intervening-nonletter tests, active-layout
+   eligibility tests, same-buffer generator validation, ASan+UBSan, bounded
+   fuzz, formatting, and dependency-backed build checks before advancing the
+   pin.
+2. Advance only =deploy/pinephone/wvkbd-revision:1= to the reviewed wvkbd
+   commit.  Do not change =deploy/pinephone/openrc-session:189= or
+   =deploy/pinephone/openrc-init.el:481= because the integrated behavior is an
+   extension of the existing =--mod-swipe= contract.
+3. Replace =deploy/pinephone/build-wvkbd-emacos.sh:18-76='s writable checkout
+   copy with a =git archive= of the exact pinned commit, extracted into an empty
+   build directory.  Build =wvkbd-emacos= and =tests/bench-glide= there; take the
+   tracked dictionary header from the archive and generate =config.h= only from
+   archived =config.def.h=.  Copy and validate the ELF, AArch64 benchmark, and
+   exact checked-in notice without any dictionary/source download or runtime
+   generation.  Retain the existing pinned =apk= dependency installation.
+   Extend
+   =deploy/pinephone/install-wvkbd-emacos.sh:7-60= and
+   =deploy/pinephone/install-wvkbd-emacos-root:9-62= with fixed safe staging,
+   ownership, size, digest, and destination checks for the notice, plus the
+   complete durable old-binary backup/marker, new install, bounded authorized
+   restart/readiness/PID/digest gate, atomic restore, rollback restart/gate, and
+   success cleanup transaction above.  Add
+   =deploy/pinephone/wvkbd-transaction-root= and call its installed form from
+   =deploy/pinephone/emacsos-ui.initd:26-50= before/after start.  Include it in
+   the fixed OpenRC install/update manifests.  Deploy and verify this recovery
+   hook before a glide candidate install.  Install the notice first, preserve
+   the locked atomic binary rename as the file activation step, and never target
+   =/usr/bin/wvkbd-mobintl=.
+4. Extend =tests/test-wvkbd-build.sh:18-94= to assert the new revision, tracked
+   archive source, no dictionary/source download, ARM64 musl keyboard and
+   benchmark ELFs, 16 MiB ELF cap, 256 KiB dictionary section bound, exact notice
+   contents/digest, safe staging, and unchanged stock binary.  Seed the writable
+   checkout with ignored hostile =config.h=, stale =.o=, binaries, and untracked
+   source and prove none appears in or affects the fresh archive build.  With
+   controlled OpenRC/readiness/PID fixtures, prove: unsafe
+   current binary is rejected before change; backup digest mismatch aborts;
+   new success restarts and deletes backups; stale/malformed readiness, missing
+   or duplicate PID, wrong command, exited PID, wrong =/proc/PID/exe= digest, and
+   restart failure each atomically restore the old digest and restart it; a
+   successful rollback still returns failure; and failed rollback preserves the
+   root-only backup.  Run the full interruption matrix above, including ordinary
+   boot/service-start recovery before command execution and =committed= cleanup.
+   Prove the previous notice state is restored and the stock packaged binary is
+   byte-identical in every case.
+5. Keep =tests/test-pinephone-openrc-deploy.sh:136-149= and
+   =tests/test-pinephone-openrc-init.el:75-88= as regression guards for the
+   unchanged command, startup ordering, process lookup, and absence of runtime
+   packaged fallback.  Run =make test-wvkbd-build= and =make
+   test-pinephone-scripts= after the wvkbd checks.
+   The wvkbd suite must also prove that a held pointer key is released exactly
+   once before pointer-axis, output-enter, output-geometry, output-scale,
+   surface/layout/resize/hide transitions, pointer ownership is cleared, and a
+   later pointer-up cannot act in the new surface.
+6. First deploy the persistent transaction helper and =emacsos-ui= pre/post
+   start hooks through the existing OpenRC update transaction, then verify an
+   ordinary service restart.  Reserve the shared live-phone resource and confirm
+   Pierre is ready before any controlled test.  Build and install through =make wvkbd-phone-install=
+   (=Makefile:15-23=).  That one command must retain and verify the previous
+   custom executable, install the new artifacts, restart the supervised UI, and
+   pass the fresh readiness/exact PID/new digest gate or automatically restore,
+   restart, and gate the previous digest.  After reported success, independently
+   verify no backup remains, exact PID/cmdline, executable digest, notice, stock
+   fallback digest, RSS, idle CPU/wakeups, and show/hide signals before touch
+   testing.
+7. In Emacs, use an ordinary editable buffer and validate: taps; =C-g= and
+   another visible Ctrl command; =M-f= and another visible Meta command; exact
+   boundary swipes; visible popup-to-blank =GlideCandidate=; candidate release
+   with no insertion; direct modifier-candidate popup-clear then seeded-trace
+   glide takeover; common words;
+   repeated-letter words; manual Space/punctuation; Shift-first-letter;
+   CapsLock; unknown/overlong trace no-output; Backspace correction; Compose
+   and a non-Latin layout remaining tap-only; keyboard hide/show; and no stuck
+   key/modifier after touch cancel.  Every action must update the current buffer
+   immediately; no candidate surface may cover it.
+8. In Firefox, validate a text field plus =Ctrl+L=, =Alt+Left=, common glides,
+   manual URL punctuation, correction, focus changes, and hide/show.  In a
+   Waydroid text field, validate the same ordinary letter stream, manual
+   separators, cancellation, and absence of duplicate/stuck events.  These are
+   the real cross-client oracle because wvkbd emits normal Wayland events, not
+   Emacs-specific text.
+9. Add =deploy/pinephone/bench-wvkbd-emacos.sh= and a
+   =wvkbd-phone-bench= Make target.  They require the benchmark produced beside
+   the keyboard by the same pinned-archive AArch64 build, validate its digest
+   and ARM64 musl ELF, transfer it to a random mode-0700 user-cache path, run it
+   unprivileged through SSH as =timeout 60 BENCH --max-us 50000=, and remove it
+   on every handled exit.  Before manual traces, run that exact path.  Require
+   all 1,000 post-warmup calls to pass and retain its reported maximum with the
+   live record.  Then repeat a fixed
+   common-word/near-neighbor/unknown trace set ten times in each
+   client.  Accept only if modifier results never become words on short vertical
+   release, common-word results are stable, release-to-visible-text has no
+   perceptible pause, RSS stays within the 1 MiB delta, and the phone
+   remains thermally/power stable.  Record failures by trace and adjust only
+   the two takeover constants or ranking cutoff before another full review.
+10. If interaction acceptance fails after a technically successful deployment
+    has already deleted its transactional backup, repin/build the previously
+    reviewed wvkbd revision and run the same transactional installer; verify its
+    digest, restart/readiness/PID gate, and exact session command.  The packaged
+    =/usr/bin/wvkbd-mobintl= remains available for deliberate SSH recovery, but
+    no automatic runtime fallback is added.
+
+* Tradeoffs and risks
+
+- Top-one insertion preserves the buffer and keyboard height but makes a wrong
+  match cost Backspace plus retyping.  A candidate bar is deferred until repeat
+  live evidence, not one anecdote, shows top-one unusable.
+- Explicit Space is one extra tap, but avoids application-dependent automatic
+  separator and retraction behavior.
+- A fixed English vocabulary cannot type names or slang by glide.  Tap typing
+  remains the honest path and no private vocabulary is persisted.
+- Installing the license notice adds bounded deployment plumbing.  It does not
+  affect runtime availability and keeps the external data's license visible.
+- Restarting the full directly supervised UI briefly interrupts the current
+  Emacs surface, but it is the smallest existing path that proves the new mapped
+  executable is actually running.  File-only success would leave the old mapped
+  process live and make validation lie.
+- Rollback cannot make a hardware/service failure disappear.  It does make the
+  old executable and its digest recoverable by construction; if even the old
+  UI cannot pass readiness, the helper preserves that verified backup and fails
+  loudly instead of claiming the package fallback is active.
+- Emacs, Firefox, and Waydroid may interpret modifier chords differently, but
+  the keyboard's contract is only balanced ordinary Wayland events.  Live tests
+  distinguish an output defect from application keymap behavior.
+- Blank =GlideCandidate= feedback is intentionally quieter than the pressed
+  popup: it avoids falsely promising a word before takeover.  The next visible
+  outcome is either the painted seeded trace or the normal keyboard restored on
+  release/cancel, with no modal or persistent dead surface.
+
+* Explicit non-goals
+
+- Any Emacs Lisp, Firefox, Waydroid, Assist, web, server, or input-method
+  integration for glide.
+- Candidate UI, language switching, user dictionary, personalization,
+  autocorrect, prediction, automatic separators, telemetry, or cloud service.
+- Changing the OpenRC launch command, process discovery, boot supervision,
+  touchscreen calibration, keyboard height, or signal control.
+- Overwriting/removing the packaged keyboard or adding automatic runtime
+  fallback/key complexity.
+- Deployment, reboot, live touch testing, commit, push, or pull request in this
+  design phase.
+
+* Decision
+
+Proceed with integrated =--mod-swipe= behavior, the pinned 20,000-word
+wordninja snapshot, explicit separators, one top result, and the exact bounds
+above.  There is no Phase 1 blocker.  Candidate UI and automatic spacing remain
+evidence-gated follow-ups, not unresolved implementation choices.

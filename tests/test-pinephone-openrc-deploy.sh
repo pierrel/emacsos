@@ -30,6 +30,7 @@ sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-install-root" \
     "$deploy_dir/openrc-update-root" \
     "$deploy_dir/openrc-bootstrap-root" \
+    "$deploy_dir/wvkbd-transaction-root" \
     "$deploy_dir/install-openrc-session.sh" \
     "$deploy_dir/update-openrc-session.sh" \
     "$deploy_dir/emacsos-ui.initd" \
@@ -38,7 +39,7 @@ sh -n "$deploy_dir/openrc-session" \
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
-    openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session-power openrc-process-group openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -81,7 +82,8 @@ phone-call.el
 phone-sms.el
 waydroid-container-wrapper
 waydroid-container.conf
-waydroid-container.service'
+waydroid-container.service
+wvkbd-transaction-root'
 actual=$(cut -d' ' -f3 "$deploy_dir/openrc-manifest.sha256" | sort)
 [ "$actual" = "$expected" ]
 
@@ -91,6 +93,10 @@ grep -F 'XDG_RUNTIME_DIR=/run/emacsos-ui' "$deploy_dir/emacsos-ui.initd" >/dev/n
 grep -F 'WLR_BACKENDS=drm,libinput' "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'NO_AT_BRIDGE=1' "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'need localmount seatd cgroups' "$deploy_dir/emacsos-ui.initd" >/dev/null
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start' \
+    "$deploy_dir/emacsos-ui.initd" >/dev/null
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction finalize-start' \
+    "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'cgroup=/sys/fs/cgroup/openrc.emacsos-ui' \
     "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'grep -Fx "$$" "$cgroup/cgroup.procs"' \

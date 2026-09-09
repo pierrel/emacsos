@@ -16,6 +16,7 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -427,6 +428,8 @@ grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config
 printf '%s\n' old-power-after >/usr/local/share/emacsos-openrc/session-power
+printf '%s\n' old-initd >/etc/init.d/emacsos-ui
+chmod 0755 /etc/init.d/emacsos-ui
 printf '%s\n' old-reference >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
@@ -441,10 +444,21 @@ fi
 [ "$(cat /usr/local/share/emacsos-openrc/session)" = old-session ]
 [ "$(cat /usr/local/share/emacsos-openrc/sway.config)" = old-sway-after ]
 [ "$(cat /usr/local/share/emacsos-openrc/session-power)" = old-power-after ]
+[ "$(cat /etc/init.d/emacsos-ui)" = old-initd ]
 [ "$(cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = old-reference ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = \
     'emacsos-lab:emacsos-lab:600:1:regular file' ]
 [ -f /run/emacsos-ui/ready ]
+
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /source/openrc-update-root
+cmp -s /source/emacsos-ui.initd /etc/init.d/emacsos-ui
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/init.d/emacsos-ui)" = \
+    'root:root:755:1:regular file' ]
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1' \
+    /etc/init.d/emacsos-ui >/dev/null
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction finalize-start' \
+    /etc/init.d/emacsos-ui >/dev/null
 
 printf '%s\n' old-reference-directory-race >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
