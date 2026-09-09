@@ -54,6 +54,26 @@ Sets up the buffer so handlers operate against a realistic state."
                      emacos--chat-prompt))
       (should (= (point) (point-max))))))
 
+(ert-deftest chat-test-global-assist-thread-navigation-needs-no-conversation ()
+  (let (opened started required)
+    (with-temp-buffer
+      (org-mode)
+      (setq-local emacos-conversation-actions nil)
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &rest _)
+                   (setq required feature)))
+                ((symbol-function 'emacos-assist-web-open-thread)
+                 (lambda () (interactive) (setq opened t)))
+                ((symbol-function 'emacos-assist-web-new-thread)
+                 (lambda () (interactive) (setq started t))))
+        (call-interactively
+         (key-binding (kbd "C-c C-a t")))
+        (call-interactively
+         (key-binding (kbd "C-c C-a n")))))
+    (should (eq required 'assist-web))
+    (should opened)
+    (should started)))
+
 (ert-deftest chat-test-current-input-after-prompt ()
   (chat-test--reset)
   (let ((buf (emacos--chat-buffer)))

@@ -36,9 +36,10 @@ chat with =M-x emacos--chat-show-top-buffer=.
 | Forget a file-backed chat checkpoint | =emacos-assist-forget= |
 | Compose an SMS | =emacos-send-message= |
 
-Both file-backed and Assist Web conversations use the =C-c C-a= prefix.  The
-=M-x emacos-conversation-command= chooser lists only actions supported by the
-current buffer.
+On the =C-c C-a= prefix, opening or starting a canonical Assist thread is
+global navigation: =t= and =n= work in every buffer.  The other prefix commands
+act on the current conversation.  The =M-x emacos-conversation-command= chooser
+lists only actions supported by the current buffer.
 
 | Key | Action |
 |-----+--------|

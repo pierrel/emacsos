@@ -1897,10 +1897,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (emacos-conversation-install-actions
    '((send . emacos-assist-web-send)
      (abort . emacos-assist-web-abort)
-     (new . emacos-assist-web-new-thread)
      (refresh . emacos-assist-web-refresh-thread)
      (older . emacos-assist-web-load-older)
-     (threads . emacos-assist-web-open-thread)
      (catalog . emacos-assist-web-refresh-threads)))
   (add-hook 'after-change-functions #'emacos-assist-web--after-change nil t)
   (add-hook 'kill-buffer-hook #'emacos-assist-web--buffer-killed nil t))

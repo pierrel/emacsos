@@ -21,6 +21,8 @@
 
 ;; Defined in os.el (which `require's this file); resolved at call time.
 (declare-function emacos--target "os")
+(declare-function emacos-assist-web-new-thread "assist-web")
+(declare-function emacos-assist-web-open-thread "assist-web")
 
 ;;; Customization
 
@@ -236,15 +238,25 @@ remain owned by the backend; this small kernel owns only discovery and binding."
 
 (dolist (entry '((send . emacos-conversation-send)
                  (abort . emacos-conversation-abort)
-                 (new . emacos-conversation-new)
                  (refresh . emacos-conversation-refresh)
                  (older . emacos-conversation-load-older)
                  (forget . emacos-conversation-forget)
-                 (threads . emacos-conversation-open-thread)
                  (catalog . emacos-conversation-refresh-catalog)))
   (defalias (cdr entry)
     `(lambda () ,(format "Run the %s action for this conversation." (car entry))
        (interactive) (emacos-conversation--run ',(car entry)))))
+
+(defun emacos-conversation-new ()
+  "Start a canonical Assist thread from any buffer."
+  (interactive)
+  (require 'assist-web)
+  (call-interactively #'emacos-assist-web-new-thread))
+
+(defun emacos-conversation-open-thread ()
+  "Open the canonical Assist thread chooser from any buffer."
+  (interactive)
+  (require 'assist-web)
+  (call-interactively #'emacos-assist-web-open-thread))
 
 (defun emacos-conversation-command ()
   "Run one action supported by the current conversation backend."
@@ -268,7 +280,19 @@ remain owned by the backend; this small kernel owns only discovery and binding."
     (define-key map (kbd "t") #'emacos-conversation-open-thread)
     (define-key map (kbd "r") #'emacos-conversation-refresh-catalog)
     map)
-  "Shared conventional C-c C-a bindings for conversation buffers.")
+  "EmacsOS Assist commands under the conventional C-c C-a prefix.")
+
+(defvar emacos-conversation-global-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-a n") #'emacos-conversation-new)
+    (define-key map (kbd "C-c C-a t") #'emacos-conversation-open-thread)
+    map)
+  "Global bindings for canonical Assist thread navigation.")
+
+(define-minor-mode emacos-conversation-global-mode
+  "Keep canonical Assist thread navigation available in every buffer."
+  :global t
+  :keymap emacos-conversation-global-mode-map)
 
 (defun emacos--chat-add-face (beg end face)
   "Append FACE to text from BEG to END through the inert font-lock channel."
@@ -1400,6 +1424,7 @@ not `current-buffer' (safety-control renders can run with *keyboard* current)."
         "ABORT" "SEND")))
 
 (global-set-key (kbd "C-c C-a") emacos-conversation-command-map)
+(emacos-conversation-global-mode 1)
 
 (provide 'chat)
 ;;; chat.el ends here
