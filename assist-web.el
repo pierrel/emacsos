@@ -354,13 +354,16 @@
   page)
 
 (defun emacos-assist-web--response-json (buffer &optional allow-status)
-  "Return BUFFER's JSON object or signal a useful local error.
-When ALLOW-STATUS is non-nil, retain its HTTP status as `http_status' so the
-DELETE adapter can distinguish its bounded structured 409 outcomes."
+  "Return BUFFER's JSON value or signal a useful local error.
+When ALLOW-STATUS is non-nil, require an integer HTTP status and a top-level
+object, retaining that status as `http_status' so the DELETE adapter can
+distinguish its bounded structured 409 outcomes."
   (with-current-buffer buffer
     (let ((status url-http-response-status)
           (start (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)))
-      (unless (or allow-status (and status (<= 200 status 299)))
+      (unless (and (integerp status)
+                   (or (<= 200 status 299)
+                       (and allow-status (= status 409))))
         (error "Assist Web request failed (%s)" (or status "no response")))
       (unless (and (stringp url-http-content-type)
                    (string-match-p "\\`application/json\\(?:[ ;]\\|\\'\\)"
@@ -368,8 +371,14 @@ DELETE adapter can distinguish its bounded structured 409 outcomes."
         (error "Assist Web returned an unexpected response type"))
       (unless start (error "Assist Web returned no response body"))
       (goto-char start)
+      (skip-chars-forward " \t\r\n")
+      (when (and allow-status (not (eq (char-after) ?{)))
+        (error "Assist Web returned an unexpected response body"))
       (let ((value (json-parse-buffer :object-type 'alist :array-type 'list
                                       :null-object nil :false-object nil)))
+        (skip-chars-forward " \t\r\n")
+        (unless (eobp)
+          (error "Assist Web returned an unexpected response body"))
         (if allow-status (cons (cons 'http_status status) value) value)))))
 
 (defun emacos-assist-web--guarded-filter (url-filter fail &optional streaming)

@@ -154,6 +154,25 @@
                 url-http-end-of-headers (copy-marker (point-min)))
     (should (equal (emacos-assist-web--response-json (current-buffer)) nil))))
 
+(ert-deftest test-assist-web-status-bearing-response-requires-status-and-object ()
+  "A status-bearing response requires a status and exactly one JSON object."
+  (dolist (case '((nil "{}") (0 "{}") (500 "{}") (999 "{}")
+                  (409 "\"running\"") (409 "[]")
+                  (200 "{\"outcome\":\"cancelled\"} trailing")))
+    (with-temp-buffer
+      (insert (cadr case))
+      (setq-local url-http-response-status (car case)
+                  url-http-content-type "application/json"
+                  url-http-end-of-headers (copy-marker (point-min)))
+      (should-error (emacos-assist-web--response-json (current-buffer) t))))
+  (with-temp-buffer
+    (insert "{}")
+    (setq-local url-http-response-status 409
+                url-http-content-type "application/json"
+                url-http-end-of-headers (copy-marker (point-min)))
+    (should (equal (emacos-assist-web--response-json (current-buffer) t)
+                   '((http_status . 409))))))
+
 (ert-deftest test-assist-web-completion-marks-cached-source-and-state ()
   (let* ((emacos-assist-web--catalog-stale t)
          (emacos-assist-web--catalog
