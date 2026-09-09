@@ -78,8 +78,10 @@ After:
    retained current attempt.  =assistant-delta= carries
    ={attempt,index,text}=; indexes begin at 1 and increase within an attempt.
    Reset clears the client's seen position, not the user message or draft.
-   Duplicate/old indexes are ignored and a gap interrupts observation as
-   unverified rather than inserting out-of-order text.  SSE =id= is ignored.
+   Valid deltas from an older attempt are ignored; malformed deltas interrupt
+   first.  A duplicate or other non-next index in the current attempt interrupts
+   observation as unverified rather than risking duplicated or out-of-order
+   text.  SSE =id= is ignored.
 6. =assistant-truncated= is nonterminal.  The buffer keeps its partial body,
    displays =[live text truncated; waiting for final]=, continues status and
    terminal observation, and leaves =ABORT= active while the Run is busy.  A
@@ -208,8 +210,9 @@ After:
    =assistant-truncated=.  Reject a raw process-filter callback over 64 KiB
    before the stock URL filter, retain the 64 KiB event cap, and validate a
    decoded delta at no more than 16 KiB before insertion.  Reset attempt/index
-   state on every observation replay; ignore old indexes and interrupt on a
-   gap; target the captured buffer/generation only.  A false or absent flag
+   state on every observation replay; validate deltas before ignoring older
+   attempts, and interrupt on a duplicate or other non-next current-attempt
+   index; target the captured buffer/generation only.  A false or absent flag
    retains status-only observation and terminal reconciliation.  Keep ordinary
    requests' success-only parsing, but let the DELETE adapter validate the
    bounded structured 409 JSON body needed to distinguish =running= from

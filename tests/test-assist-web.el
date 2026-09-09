@@ -639,7 +639,7 @@
                    "Assist stream is missing its reset; refresh to reconcile"))))
 
 (ert-deftest test-assist-web-indexed-replay-rejects-duplicate-and-gap-but-keeps-partial ()
-  "A reset is the only replay boundary; invalid later indexes keep evidence visible."
+  "Duplicate or other non-next indexes keep existing stream evidence visible."
   (with-temp-buffer
     (emacos-assist-web-mode)
     (emacos-assist-web--write-prompt)
