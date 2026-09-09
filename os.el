@@ -438,14 +438,17 @@ just-typed space into \". \" — the familiar mobile period shortcut (see
       (emacos--refocus))))
 
 (defun emacos--tap-return ()
-  "Insert a newline, or exit the minibuffer when it is active."
+  "Accept the minibuffer, or activate a safe object before newline fallback."
   (emacos--commit)
   (emacos--commit-armed-tap)         ; A3: utility tap commits armed.
   (let ((w (emacos--target)))
     (when w
       (if (active-minibuffer-window)
           (with-selected-window w (exit-minibuffer))
-        (with-selected-window w (newline))
+        (with-selected-window w
+          (if (fboundp 'emacos-conversation-activate-or-newline)
+              (emacos-conversation-activate-or-newline)
+            (newline)))
         (emacos--refocus)))))
 
 (defun emacos--tap-backspace ()
@@ -833,12 +836,12 @@ button when a modifier is active (firebrick4 vs Chat's dodger blue)."
     (insert "\n")))
 
 (defun emacos--render-utility-row ()
-  "Render the persistent utility row: QUIT, M-x, Chat/SEND (3-up).
+  "Render the persistent utility row: QUIT, M-x, Chat/SEND/ABORT (3-up).
 `QUIT' (`emacos--tap-quit') clears popup/minibuffer clutter off the top;
 `M-x' runs `execute-extended-command' (manual command entry); the third
-button (`emacos--chat-button', accent face) opens the ordinary *chat* buffer
-when chat isn't on top and SENDS the input when it is — its label flips
-between \"Chat\" and \"SEND\" accordingly.  CAPS lives on the action row
+button (`emacos--chat-button', accent face) opens ordinary chat off a
+conversation surface and runs the displayed surface's primary action.  Its
+label is Chat, SEND, or ABORT.  CAPS lives on the action row
 (`emacos--render-action-row')."
   (let* ((win   (get-buffer-window (current-buffer)))
          (win-w (if win (window-body-width win) 20))

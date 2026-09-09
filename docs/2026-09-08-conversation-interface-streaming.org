@@ -1,0 +1,351 @@
+#+TITLE: One native conversation interface with two backend lifecycles
+#+DATE: <2026-09-08>
+#+STATUS: Phase 3 implementation, local review converged
+
+* Objective
+
+Make local =.assist= buffers and canonical Assist thread buffers feel like one
+native Emacs conversation on the 320x240 touchscreen.  Both append live
+assistant text to the exact client buffer from which Send was accepted.  They
+share presentation, prompt, streaming-region, command, and object interaction
+behavior, while retaining genuinely different persistence and lifecycle rules.
+
+No HTML, browser conversation view, or web rendering belongs in this client.
+The canonical backend still uses an authenticated HTTP API as transport.
+
+* Concrete phone flows
+
+** Local file-backed conversation, before and after
+
+Before: opening a =.assist= file uses the native formatter and streams locally,
+but its Send/Abort/New/Forget surface is special-cased in =chat.el= and the
+keyboard utility row.  The interaction does not match a canonical thread.
+
+After:
+1. Open =notes.assist=.  One buffer shows formatted, copyable transcript and a
+   =you>= prompt.  =M-x emacos-conversation-command= lists the same concise
+   actions as =C-c C-a=; the utility button reads =SEND=.
+2. Type with T9 and tap =SEND= or press =C-c C-a s=.  Before opening the
+   transport, the local adapter synchronously calls shared =commit-user= and
+   =begin-assistant("queued")=.  The user turn and =bot> [queued]= therefore
+   appear in the same buffer even if the server withholds its first callback,
+   and the utility button becomes =ABORT=.  The next editable prompt remains
+   below them with point and draft intact.
+3. The local NDJSON =start= event updates that exact provisional assistant
+   region; it never creates a second =bot>= line.  Later status changes replace
+   the bracket in place.  The first delta removes it;
+   subsequent text grows above the draft.  The partial body stays plain source.
+4. A genuine end formats only that completed body, saves the human-readable
+   file mirror, and returns the button to =SEND=.  The local checkpoint remains
+   the conversational truth, as today.
+5. Abort marks the partial body incomplete and closes the local HTTP stream.
+   It does not claim to cancel a model call that the local server may already
+   be running.  A later Send is a new local turn with no idempotent replay.
+
+** Canonical Assist thread, before and after
+
+Before: Send appends a local waiting placeholder; the SSE at
+=assist-web.el:595-780= observes only status, then a full refresh reveals the
+answer.  This is not assistant-text streaming.
+
+After:
+1. Choose or create a thread using the existing native minibuffer flow.  The
+   opened thread buffer has the same transcript, prompt, command prefix, and
+   utility button as a local conversation.
+2. Send first synchronously calls shared =commit-user= and
+   =begin-assistant("queued")=, then starts POST, so the user message and
+   =bot> [queued]= are already visible in that same buffer if the POST callback
+   is withheld.  The callback attaches the returned thread/work/Run identity
+   and =live_text= capability to those exact markers; it must not append another
+   user or assistant record.  The submission key and later returned logical Run
+   handle remain buffer-local.  Switching buffers does not redirect callbacks.  =ABORT= is
+   live even before POST returns: it immediately invalidates the captured send
+   and stream generations, releases the active surface, replaces =[queued]= in
+   the existing provisional region with =[stopped watching; acceptance unknown;
+   Send re-observes]=, preserves the committed user turn, draft, and exact
+   key/text tuple, and ignores a late callback.  The
+   next unchanged Send repeats that exact idempotent POST and therefore learns
+   and observes an already accepted Run instead of duplicating it.
+3. The submit response feature-detects live text.  =live_text=true= enables
+   reset/delta handling.  =false=, or an absent field from an older Assist,
+   shows =bot> [working; live text unavailable]= and retains the existing
+   status-plus-terminal observation path.  The accepted Run still executes.
+4. With live text available, authenticated SSE resets and appends provisional
+   top-level assistant text in the originating buffer.  Queue, tool, pause, and
+   reconnect status remains visible inline, so a long turn never looks dead.
+5. A rollback or replay reset clears only the provisional assistant body for
+   that logical Run.  Replay first resets, then reconstructs only the journal's
+   retained current attempt.  =assistant-delta= carries
+   ={attempt,index,text}=; indexes begin at 1 and increase within an attempt.
+   Reset clears the client's seen position, not the user message or draft.
+   Duplicate/old indexes are ignored and a gap interrupts observation as
+   unverified rather than inserting out-of-order text.  SSE =id= is ignored.
+6. =assistant-truncated= is nonterminal.  The buffer keeps its partial body,
+   displays =[live text truncated; waiting for final]=, continues status and
+   terminal observation, and leaves =ABORT= active while the Run is busy.  A
+   reconnect may replay that notice once after resetting/replaying the current
+   attempt; polling never repeats it within one observation.
+7. On logical terminal, the buffer shows =[reconciling]= while one canonical
+   snapshot refresh runs.  Success replaces the whole provisional region with
+   stable server messages.  The reader's point/window anchor and the draft's
+   text/point survive the redraw.  Failure leaves the partial text visibly
+   =[unverified; refresh]= and preserves the exact idempotent retry state.
+8. =C-c C-a a= or tapping =ABORT= detaches observation and asks Assist to cancel
+   the current logical work only if its current physical Run is still pending.
+   It branches on the structured DELETE result: HTTP 200 =cancelled= displays
+   =[cancelled; reconciling]= and refreshes; HTTP 409 =running= displays
+   =[stopped watching; Assist is running]=; HTTP 409 =transitioning= displays
+   =[stopped watching; Assist is transitioning]=.  Other terminal outcomes
+   reconcile.  A malformed/network response remains =[cancellation
+   unconfirmed]=.  Running and transitioning keep Refresh/re-observe available;
+   no non-cancel response is described as cancelled.  Re-send with unchanged
+   text/key re-observes; it does not commit or submit a duplicate turn.
+
+* Shared native buffer contract
+
+1. =chat.el= owns one concrete marker-scoped presentation and interaction
+   kernel used by the two existing modes.  It owns backend action functions and
+   the shared primitives; each adapter owns its prompt, marker storage,
+   generations, transport, and lifecycle.  It is not a general chat framework.
+2. The kernel operations are =commit-user=, =begin-assistant=,
+   =replace-marked=, =set-status=, =reset-assistant=, =append-delta=,
+   =finish-assistant=, and =fail-assistant=.  The public replacement primitive
+   is the shared exact-text boundary used when an adapter owns status wording.
+   The adapters validate their captured buffer/generation before calling these
+   marker operations.  A killed or superseded buffer is abandoned; no callback
+   falls back to whichever buffer happens to be selected.  Both send adapters
+   synchronously insert =[queued]=, invoke =commit-user=, then delimit it with
+   =begin-assistant= before starting their
+   transports.  That pair is idempotent for the buffer-local submitted tuple:
+   an acceptance-unknown retry reuses its existing committed/provisional region.
+   Local =start= and canonical POST success only attach backend state and update
+   that region.  For the existing rare new-thread/canonical-buffer collision,
+   ownership moves the pending record once before attachment; there are never
+   two live provisional regions for one tuple.
+3. The existing bounded Markdown presenter in =chat.el:173-360= remains the one
+   renderer.  Incomplete content is raw source.  Final content is native faces
+   and text properties; copying yields the original Markdown source.  Full
+   redraw uses stable message anchors for canonical history and prompt-relative
+   anchors for drafts.
+4. Canonical final messages retain server =message.id= identity.  Canonical
+   provisional text is marker-delimited, adapter-local, and destroyed on
+   reconciliation.  It is never cached, pinned,
+   paged, or treated as a stable message.  Local transcript records continue to
+   have no invented persistent message ids.
+5. Explicit Markdown links become native clickable object references without
+   changing copied source.  =RET=, touchscreen tap, or
+   =M-x emacos-conversation-open-object= opens only an =http= or =https= target
+   through =browse-url=.  Other schemes, inferred bare text, Lisp forms, and
+   filesystem paths remain inert.  Activation is an explicit user action; text
+   arrival never opens a target.  =chat.el= owns the shared interactive
+   =emacos-conversation-activate-or-newline=: activate the validated native
+   object at point, otherwise call ordinary =newline=.  The conversation keymap
+   remaps physical =RET= to that command.  The touchscreen =os.el=
+   =emacos--tap-return= preserves active-minibuffer =exit-minibuffer= first, then
+   calls the same command in the target conversation buffer.  Touchscreen link
+   buttons use the same literal-target validator.
+6. =chat.el= owns =emacos-conversation-command= and one action table.  The
+   minibuffer dispatcher filters entries by the current buffer's installed
+   backend capabilities; it includes canonical-only chooser, catalog refresh,
+   thread refresh, and paging, plus local-only Forget where available.  Every
+   action is also an ordinary interactive command.  =C-c C-a= binds =s= send,
+   =a= abort/detach, =n= new conversation, =g= refresh, =o= open object, =l=
+   load older canonical history, and =f= local Forget.  The existing canonical
+   =t= thread chooser and =r= catalog refresh remain.  Unsupported actions are
+   omitted from completion and report one clear sentence if invoked directly;
+   they do not open a modal page.
+7. Only one phone conversation stream may own
+   =emacos--assist-active-surface= at a time.  Ownership is released on every
+   terminal, error, invalid response, detach, and buffer-kill path.  Backend
+   transport processes, parsers, timers, caches, and persistence stay in their
+   current modules.
+8. Assist owns a 16 KiB decoded delta bound and a 48 KiB encoded SSE-record
+   bound.  =assist-web.el= retains its 64 KiB event cap
+   (=assist-web.el:64-67=), adds a 64 KiB raw process-filter callback cap before
+   invoking the stock URL filter, and accepts at most 16 KiB of decoded UTF-8
+   text from one delta before synchronous insertion.  These three checks bound
+   stock-filter parsing, JSON validation, and buffer insertion separately.  A
+   transport callback that aggregates beyond the raw cap ends observation as
+   unverified; replay reset makes re-observation safe.
+
+* Backend ownership kept separate
+
+| Concern | Local =.assist= | Canonical Assist thread |
+|---------+-----------------+-------------------------|
+| Truth | server checkpoint; file is a readable mirror | Assist snapshot and durable Runs |
+| Send | local =/chat= NDJSON, no idempotency | phone POST with idempotency key |
+| Live transport | =chat.el= local NDJSON process | =assist-web.el= authenticated SSE |
+| End | format and save file | fetch snapshot and replace provisional text |
+| Abort | close local stream; worker may continue | detach immediately; before acceptance preserve unknown retry, afterward render cancelled/running/transitioning from structured DELETE |
+| Retry | new turn | exact key/text re-observes accepted work |
+| History | reopen file text | stable ids, bounded paging and cache |
+| Forget | two-tap local destructive action | not part of shared canonical lifecycle |
+
+* Numbered implementation plan
+
+1. In =chat.el:128-360,421-470,1189-1226=, keep the existing native Markdown
+   and prompt code but give it marker-scoped presentation primitives and the
+   seven concrete operations above.  Own the capability-filtered
+   =emacos-conversation-command= action table, shared =C-c C-a= map, primary
+   action, and =emacos-conversation-activate-or-newline= here.  Install the
+   shared conversation keymap in both conversation modes and the local scratch,
+   remapping physical =RET= to that command.  Extend link presentation
+   with inert-by-default native buttons restricted to literal =http(s)=
+   Markdown targets and preserve the raw-copy filter.
+2. In =chat.el:475-720,901-1015,1086-1110=, route the local NDJSON handlers
+   through that kernel.  After validation, synchronously =commit-user= and
+   =begin-assistant("queued")= before =url-retrieve=; make NDJSON =start=
+   update those markers rather than insert another assistant line.  Preserve
+   local global transport ownership, endpoint,
+   checkpoint/file context, save points, watchdog, abort limitation, and
+   final-only Markdown formatting.
+3. In =emacos-assist.el:28-81,89-180,192-235=, initialize the shared command
+   adapters for file-backed buffers.  Keep per-file thread id/workdir, save,
+   revert guard, new-file, and two-tap forget semantics here.
+4. In =assist-web.el:54-82,353-490,595-780=, feature-detect the submit
+   response's =live_text= flag and extend the bounded SSE parser for
+   =assistant-reset=, indexed =assistant-delta=, and nonterminal
+   =assistant-truncated=.  Reject a raw process-filter callback over 64 KiB
+   before the stock URL filter, retain the 64 KiB event cap, and validate a
+   decoded delta at no more than 16 KiB before insertion.  Reset attempt/index
+   state on every observation replay; ignore old indexes and interrupt on a
+   gap; target the captured buffer/generation only.  A false or absent flag
+   retains status-only observation and terminal reconciliation.  Keep ordinary
+   requests' success-only parsing, but let the DELETE adapter validate the
+   bounded structured 409 JSON body needed to distinguish =running= from
+   =transitioning= without trusting arbitrary error text.
+5. In =assist-web.el:909-1123,1333-1436=, replace the waiting placeholder with
+   shared provisional markers.  On terminal perform one snapshot refresh;
+   reconcile by full canonical redraw using stable ids and the existing logical
+   draft/point/window anchors.  Retain loaded history and the existing opaque
+   =next_before= paging cursor.  Keep provisional text marked unverified if
+   refresh fails; streaming must not replace or reset the loaded-history set.
+6. In =assist-web.el:1438-1655,1722-1749=, keep canonical submission,
+   idempotency, pending cache, and logical abort/retry ownership, while exposing
+   them through shared interactive commands.  Synchronously =commit-user= and
+   =begin-assistant("queued")= before POST; POST success attaches accepted ids,
+   feature availability, and observation to those markers rather than calling
+   the current append-after-response path.  Represent POST ownership as
+   =posting=/=acceptance-unknown=/=accepted=.  Pre-accept Abort increments the
+   captured send/stream generations, releases the active surface, retains the
+   committed user/draft and exact key/text tuple, changes the existing
+   provisional status to =[stopped watching; acceptance unknown; Send
+   re-observes]=, and sends no DELETE without a Run id; a late POST callback is
+   ignored.  The next unchanged Send reuses the tuple and existing
+   region.  After accepted Abort, render =cancelled=, =running=, and
+   =transitioning= according to the exact HTTP 200/409 contract above; refresh
+   only the cancelled/terminal result, and never treat any arbitrary 2xx or
+   request failure as proof of cancellation.  Move Load
+   older from =C-c C-a o= to =C-c C-a l= and reserve =o= for shared object
+   activation.  A repeat observation clears then replays provisional text
+   rather than appending duplicates.
+7. In =os.el:440-449,835-858=, preserve minibuffer Return, then call the shared
+   =emacos-conversation-activate-or-newline= in a conversation buffer; its safe
+   object-at-point check precedes ordinary newline fallback.
+   Make the persistent third utility button call the shared
+   primary action for either conversation mode.  Its label is =CHAT= off a
+   conversation, =SEND= when idle, and =ABORT= while that open buffer owns the
+   stream.  The state change redraws the keyboard immediately.
+8. In =tests/test-chat.el:106-133,220-350,612-731=, add shared-kernel tests for
+   target/generation isolation, status/delta/reset/final/error, literal-scheme
+   validation, copyable link buttons, capability-filtered dispatch, =o=/=l=
+   bindings, the actual conversation-keymap physical =RET= activation and
+   newline fallback, draft stability, killed buffers, and command adapters.
+   Hold the local transport callback/event and assert committed user plus the
+   single queued assistant region already exist; deliver =start= and assert it
+   updates, rather than duplicates, that region.  In
+   =tests/test-assist-web.el:459-700,1026-1282,1345-1513=, add current-attempt
+   indexed replay and rollback reset, duplicate/gap handling, one nonterminal
+   truncation notice, 64 KiB callback/event and 16 KiB decoded-delta bounds,
+   explicit and absent live-text fallback, a withheld POST callback with the
+   immediate committed/queued region, pre-accept abort plus an exact assertion
+   that the same region now displays =[stopped watching; acceptance unknown;
+   Send re-observes]= while user/draft/key/text survive, ignored late callback,
+   and exact-tuple retry without a second committed region,
+   =cancelled=/=running=/=transitioning= DELETE branches (including structured
+   409 validation and no any-2xx-equals-cancelled shortcut), late/disconnected observer,
+   provisional-to-canonical identity replacement, older-history preservation,
+   refresh-failure, point/window, and utility-label coverage.  In
+   =tests/test-os.el:598-650=, exercise the real physical Return path for safe
+   object activation, newline fallback, and unchanged minibuffer exit; also
+   exercise touchscreen Return and link activation through the same validator.
+9. In =server/emacsos_server/stream.py:43-167=, delegate the existing chunk
+   projections to Assist's shared helpers after the Assist dependency lands.
+   Preserve local NDJSON event names and =app.py:362-537= execution/liveness
+   behavior.  Run =make test-elisp= and =make test-server=, then exercise both
+   backends on the real 320x240 phone: type the next draft while tokens arrive,
+   change buffers, abort, reconnect canonical observation, force refresh
+   failure, load older history, copy Markdown, and tap an HTTPS link.
+10. Align user-facing and load-bearing prose in =README.org:104-180,210,269-274=
+    and =EMACSOS-COMMANDS.org:17-47=, plus the touched docstrings/comments in
+    =chat.el=, =assist-web.el=, and =os.el=.  The command reference must show
+    object activation on =C-c C-a o=, older history on =C-c C-a l=, the
+    capability-filtered =M-x= dispatcher, and truthful pre-accept Abort wording.
+
+* Tradeoffs and risks
+
+- Sharing buffer behavior while leaving transports separate duplicates a small
+  amount of parser/lifecycle glue.  A transport abstraction would erase real
+  persistence differences and add more code than it removes.
+- Canonical deltas are intentionally provisional.  A visible reconciliation
+  step costs one GET but prevents streamed retries, rollbacks, or truncated
+  journals from masquerading as durable history.  Journal saturation or an old
+  Assist version degrades visibly to status-only observation without affecting
+  durable acceptance or execution.
+- Rejecting a greater-than-64-KiB raw process callback can interrupt an
+  otherwise valid stream if the transport coalesces records unusually.  It is
+  the smallest hard bound around synchronous stock-filter work; current-attempt
+  replay recovers without duplicate text.
+- Formatting only at genuine completion avoids reparsing partial Markdown and
+  point jumps.  Users see source punctuation during the stream.
+- Clickable model-supplied URLs add an external-navigation sink.  Literal
+  =http(s)= validation plus explicit activation excludes execution schemes and
+  automatic effects.  Canonical =file_refs= remain visible/copyable, not
+  clickable, until a separately designed safe local workspace mirror exists.
+- The highest regression risks are rendering into the selected instead of
+  originating buffer, losing draft/window anchors during final refresh,
+  losing older-history pages, duplicating or skipping indexed replay, treating
+  pre-accept detach as proof of rejection, releasing the single active slot too
+  early, and presenting unverified text as final.  Tests above target the
+  symptoms.
+
+* Resolved scope boundary
+
+Canonical =file_refs= cannot truthfully open until the client has a safe local
+workspace mirror.  Pulling archive extraction into this consolidation would
+materially widen its security and lifecycle scope.  Ship clickable explicit
+HTTP(S) Markdown references for both buffers now.  Keep typed canonical file
+references visible and copyable until the separately investigated pull-only
+workspace-snapshot feature supplies the bounded local mirror.
+
+* Explicit non-goals
+
+- No web conversation UI, HTML renderer, WebSocket, CommonMark replacement, or
+  live reformatting on every token.
+- No merger of checkpoint, file, Run, cache, history, forget, cancel, or retry
+  semantics between backends.
+- No server pin API, stable ids for local file records, provisional-message
+  persistence, or simultaneous phone streams.
+- No clickable shell/Lisp/file targets and no canonical workspace mirroring.
+- No redesign of thread chooser, older-history pagination, agent prompts,
+  tools, model behavior, or local server cancellation.
+
+* Deployment implication
+
+Deploy and verify the Assist SSE contract first.  Then deploy EmacsOS client and
+local-stream helper reuse.  The client feature-detects =live_text=: false or
+absent keeps status-only SSE and terminal snapshot reconciliation.  It must not
+synthesize text from status, and =assistant-truncated= must not detach before
+terminal.
+
+* Lineage
+
+- [[file:2026-09-07-native-chat-rendering.org][2026-09-07-native-chat-rendering.org]] completed the bounded native,
+  copy-preserving presenter and deliberately left links inert.  This record
+  reuses it for one interaction model and narrowly activates HTTP(S) objects.
+- [[file:2026-09-03-assist-web-thread-flow.org][2026-09-03-assist-web-thread-flow.org]] established canonical phone thread
+  identity, idempotent sends, pending recovery, paging, and status-only SSE.
+  This record retains those owners and adds provisional text reconciliation.
+- [[file:2026-05-27-file-backed-chat.org][2026-05-27-file-backed-chat.org]] established file-backed identity, buffer-targeted
+  local streaming, readable mirrors, and full-trust execution.  This record
+  factors only the presentation and interaction those buffers now share.

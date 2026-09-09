@@ -133,14 +133,8 @@ def extract_content_text(messages_chunk: Any) -> str:
     are surfaced separately (`extract_tool_results` → the `applied`
     event), so skip any tool message here and keep only the model's prose.
     The `type == "tool"` discriminator mirrors `extract_tool_results`."""
-    try:
-        msg, _meta = messages_chunk
-    except (TypeError, ValueError):
-        return ""
-    if getattr(msg, "type", None) == "tool":
-        return ""
-    content = getattr(msg, "content", "")
-    return content if isinstance(content, str) else ""
+    from assist.stream_chunks import extract_content_text as extract
+    return extract(messages_chunk)
 
 
 def render_update_to_status(update_chunk: Any) -> str | None:

@@ -23,6 +23,13 @@
     (insert "no header here\n")
     (should (null (emacos-assist--read-header)))))
 
+(ert-deftest test-assist-physical-ret-in-file-chat-remains-newline-without-an-object ()
+  (with-temp-buffer
+    (emacos-assist-mode)
+    (goto-char (point-max))
+    (call-interactively (lookup-key (current-local-map) (kbd "RET")))
+    (should (string-suffix-p "\n" (buffer-string)))))
+
 (ert-deftest test-assist-read-header-rejects-malformed-value ()
   ;; The whole value must be a valid slug to end-of-line; a header with an
   ;; embedded invalid char yields nil (mint fresh), not a truncated prefix

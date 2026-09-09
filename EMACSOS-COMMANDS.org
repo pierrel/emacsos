@@ -28,23 +28,31 @@ chat with =M-x emacos--chat-show-top-buffer=.
 | Send from an Assist Web thread | =emacos-assist-web-send= |
 | Refresh an Assist Web thread | =emacos-assist-web-refresh-thread= |
 | Refresh the Assist Web thread list | =emacos-assist-web-refresh-threads= |
+| Conversation actions available in this buffer | =emacos-conversation-command= |
 | Load older Assist Web messages | =emacos-assist-web-load-older= |
-| Stop an Assist Web response | =emacos-assist-web-abort= |
+| Stop or detach from an Assist Web response | =emacos-assist-web-abort= |
 | Start a file-backed chat | =emacos-assist-new-file= |
 | Forget a file-backed chat checkpoint | =emacos-assist-forget= |
 | Compose an SMS | =emacos-send-message= |
 
-Assist Web also uses the =C-c C-a= prefix:
+Both file-backed and Assist Web conversations use the =C-c C-a= prefix.  The
+=M-x emacos-conversation-command= chooser lists only actions supported by the
+current buffer.
 
 | Key | Action |
 |-----+--------|
 | =C-c C-a t= | Open thread |
-| =C-c C-a n= | New thread |
+| =C-c C-a n= | New conversation (Assist Web only) |
 | =C-c C-a r= | Refresh thread list |
-| =C-c C-a g= | Refresh current thread |
+| =C-c C-a g= | Refresh current conversation |
 | =C-c C-a s= | Send |
-| =C-c C-a o= | Load older messages |
-| =C-c C-a a= | Abort response |
+| =C-c C-a a= | Abort or detach |
+| =C-c C-a o= | Open the HTTP(S) object at point |
+| =C-c C-a l= | Load older canonical history |
+| =C-c C-a f= | Forget a file-backed conversation |
+
+Physical =RET= and touchscreen RET open only a literal HTTP(S) object at point;
+otherwise they insert a newline.  RET accepts an active minibuffer first.
 
 * Phone and network
 

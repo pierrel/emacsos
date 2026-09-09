@@ -403,6 +403,66 @@ bot line if a stream was open (start handler had run)."
   (cl-letf (((symbol-function 'emacos--chat-on-top-p) (lambda () nil)))
     (should (equal (emacos--chat-button-label) "Chat"))))
 
+(ert-deftest chat-test-button-label-and-action-follow-the-displayed-owner ()
+  "A keyboard-buffer current-buffer must not make another surface show SEND."
+  (let ((owner (generate-new-buffer " *assist-web-owner*")) fired)
+    (unwind-protect
+        (progn
+          (with-current-buffer owner
+            (emacos-conversation-install-actions
+             '((send . ignore) (abort . emacos-assist-web-abort)))
+            (setq-local emacos-assist-web--in-flight t))
+          (let ((emacos--assist-active-surface owner))
+            (with-temp-buffer
+              (cl-letf (((symbol-function 'emacos--chat-surface-on-top) (lambda () owner))
+                        ((symbol-function 'emacos--chat-on-top-p) (lambda () t))
+                        ((symbol-function 'emacos-assist-web-abort)
+                         (lambda () (interactive) (setq fired (current-buffer)))))
+                (should (equal (emacos--chat-button-label) "ABORT"))
+                (emacos--chat-button)
+                (should (eq fired owner))))))
+      (when (buffer-live-p owner) (kill-buffer owner)))))
+
+(ert-deftest chat-test-object-mouse-activation-uses-the-event-position ()
+  "Mouse activation resolves the clicked object's URL, not stale point."
+  (with-temp-buffer
+    (insert "one two")
+    (put-text-property 5 8 'emacos-conversation-url "https://example.test/two")
+    (let (opened)
+      (goto-char 1)
+      (cl-letf (((symbol-function 'mouse-event-p) (lambda (_event) t))
+                ((symbol-function 'mouse-set-point) (lambda (_event) (goto-char 5)))
+                ((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (emacos-conversation-open-object 'fake-mouse))
+      (should (equal opened "https://example.test/two")))))
+
+(ert-deftest chat-test-physical-ret-in-plain-chat-remains-newline-without-an-object ()
+  (chat-test--reset)
+  (let ((buffer (emacos--chat-buffer)))
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      (call-interactively (lookup-key (current-local-map) (kbd "RET")))
+      (should (string-suffix-p "\n" (buffer-string))))))
+
+(ert-deftest chat-test-shared-marker-kernel-keeps-provisional-body-read-only ()
+  "Both transport adapters rely on these marker operations for transcript text."
+  (with-temp-buffer
+    (insert "you> hello\nbot> ")
+    (let* ((body-start (point))
+           (markers (emacos-conversation-begin-assistant body-start body-start))
+           (start (car markers))
+           (end (cdr markers)))
+      (emacos-conversation-commit-user (point-min) (+ (point-min) 5) body-start)
+      (set-marker end
+                  (emacos-conversation-replace-marked start end "[queued]\n"))
+      (set-marker end (emacos-conversation-set-status start end "queued"))
+      (set-marker end (emacos-conversation-reset-assistant start end))
+      (set-marker end (emacos-conversation-append-delta end "answer"))
+      (emacos-conversation-finish-assistant start end)
+      (set-marker end (emacos-conversation-fail-assistant start end "unverified"))
+      (should (equal (buffer-substring-no-properties start end) "[unverified]"))
+      (should (get-text-property start 'read-only)))))
+
 (ert-deftest chat-test-switch-shows-top-buffer ()
   (chat-test--reset)
   (let ((scratch (get-buffer-create "*scratch*")))
@@ -609,7 +669,7 @@ don't leak ` *http*' buffers."
       (emacos--chat-rollback-callback nil))
     (should-not (buffer-live-p resp))))
 
-(ert-deftest chat-test-native-markdown-presentation-is-inert-and-text-preserving ()
+(ert-deftest chat-test-native-markdown-presentation-keeps-source-and-safe-objects ()
   (with-temp-buffer
     (emacos--chat-enable-presentation)
     (insert "bot> # Heading\n- item\n> quote\n**bold** *italic* [docs](https://example.test) `code`\n```elisp\n**literal**\n```")
@@ -650,7 +710,8 @@ don't leak ` *http*' buffers."
           (let ((properties (text-properties-at position)))
             (while properties
               (should (memq (pop properties)
-                            '(font-lock-face wrap-prefix)))
+                            '(font-lock-face wrap-prefix emacos-conversation-url
+                              keymap mouse-face)))
               (pop properties)))
           (setq position (next-property-change position nil (point-max)))))
       (let ((kill-ring nil))

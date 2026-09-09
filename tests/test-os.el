@@ -411,6 +411,30 @@ collapse popup windows (harmless no-op when there are none)."
       (emacos--tap-tab)
       (should (eq called 'complete)))))
 
+(ert-deftest test-os-tap-return-uses-conversation-activation-or-newline-and-minibuffer-ret ()
+  "Touch RET shares physical conversation activation but never steals minibuffer RET."
+  (let (activated accepted)
+    (with-temp-buffer
+      (let ((target-buffer (window-buffer (selected-window))))
+        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'active-minibuffer-window) (lambda () nil))
+                  ((symbol-function 'emacos-conversation-activate-or-newline)
+                   (lambda () (setq activated (current-buffer)))))
+          (emacos--tap-return)
+          (should (eq activated target-buffer)))))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+                ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                ((symbol-function 'emacos--refocus) (lambda () nil))
+                ((symbol-function 'active-minibuffer-window) (lambda () 'minibuffer))
+                ((symbol-function 'exit-minibuffer) (lambda () (setq accepted t)))
+                ((symbol-function 'emacos-conversation-activate-or-newline)
+                 (lambda () (ert-fail "minibuffer RET must not activate chat"))))
+        (emacos--tap-return)
+        (should accepted)))))
+
 ;;; Modifier keys (Ctrl / Meta / Ctrl-Meta) — see
 ;;; docs/2026-05-27-modifier-keys.org.  Pure helpers tested directly;
 ;;; tap dispatch + commit/abandon tested with real keymaps in

@@ -223,13 +223,22 @@ existing transcript read-only.  Leaves the buffer's modified flag unchanged
 (define-derived-mode emacos-assist-mode text-mode "Assist"
   "Major mode for `.assist' file-backed chat conversations.
 The file's transcript is a read-only chat surface with an editable prompt;
-the utility-row Chat/SEND button streams the input into this buffer and the
+the utility-row Chat/SEND/ABORT button streams or stops the input in this buffer and the
 agent reads/edits/runs files in this file's directory on the phone."
   (variable-pitch-mode 1)
   (emacos--chat-enable-presentation)
   (auto-save-mode -1)               ; the chat surface saves on its own events
   (setq-local revert-buffer-function #'emacos-assist--revert)
+  (emacos-conversation-install-actions
+   '((send . emacos--chat-send)
+     (abort . emacos--chat-abort)
+     (new . emacos-assist-new-file)
+     (refresh . revert-buffer)
+     (forget . emacos-assist-forget)))
   (emacos-assist--init-buffer))
+
+(define-key emacos-assist-mode-map (kbd "RET")
+            #'emacos-conversation-activate-or-newline)
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.assist\\'" . emacos-assist-mode))

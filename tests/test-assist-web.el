@@ -350,6 +350,33 @@
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-event-parser-tiny-fragments-scan-only-new-suffix ()
+  "A fragmented record is dispatched once without quadratic retained-buffer copies."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (payload (concat "event: status\ndata: {\"status\":\"working\"}\n\n"))
+        (copied 0) seen)
+    (unwind-protect
+        (with-current-buffer source
+          (setq-local url-http-end-of-headers (copy-marker (point-min)))
+          (let ((original (symbol-function 'buffer-substring-no-properties)))
+            (cl-letf (((symbol-function 'buffer-substring-no-properties)
+                       (lambda (start end)
+                         (cl-incf copied (- end start))
+                         (funcall original start end)))
+                      ((symbol-function 'emacos-assist-web--dispatch-event)
+                       (lambda (_target event _data) (push event seen))))
+              (dolist (byte (string-to-list payload))
+                (goto-char (point-max))
+                (insert-char byte)
+                (emacos-assist-web--drain-events target 0 1))))
+          ;; The old parser copied the whole unfinished record per callback.
+          ;; This implementation copies it once, after the delimiter arrives.
+          (should (< copied (* 3 (length payload))))
+          (should (equal seen '("status"))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
 (ert-deftest test-assist-web-raw-filter-rejects-encoded-response-before-url-filter ()
   (let (forwarded rejected)
     (funcall
@@ -481,6 +508,13 @@
     (should (equal (emacos-assist-web--input)
                    "  first line\nsecond line  \n"))))
 
+(ert-deftest test-assist-web-physical-ret-remains-newline-without-an-object ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (insert "draft")
+    (call-interactively (lookup-key (current-local-map) (kbd "RET")))
+    (should (string-suffix-p "draft\n" (buffer-string)))))
+
 (ert-deftest test-assist-web-pending-transcript-removes-the-old-prompt ()
   (with-temp-buffer
     (emacos-assist-web-mode)
@@ -579,6 +613,83 @@
     (should (equal emacos-assist-web--submitted-text "message"))
     (should-not emacos-assist-web--in-flight)
     (should (equal emacos-assist-web--stream-status "observation disconnected"))))
+
+(ert-deftest test-assist-web-truncation-and-interruption-keep-streamed-partial ()
+  "A nonterminal notice or failed observer must not erase visible evidence."
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (emacos-assist-web--write-prompt)
+    (emacos-assist-web--append-pending "hello")
+    (emacos-assist-web--reset-assistant 1)
+    (emacos-assist-web--append-delta 1 1 "partial answer")
+    (emacos-assist-web--dispatch-event (current-buffer) "assistant-truncated" "{}")
+    (should (string-match-p "partial answer" (buffer-string)))
+    (emacos-assist-web--stream-interrupted (current-buffer) "observation disconnected")
+    (should (string-match-p "partial answer" (buffer-string)))))
+
+(ert-deftest test-assist-web-requires-reset-before-first-delta ()
+  "A stale replay cannot append into a queued region without its reset boundary."
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (emacos-assist-web--write-prompt)
+    (emacos-assist-web--append-pending "hello")
+    (emacos-assist-web--append-delta 1 1 "stale")
+    (should-not (string-match-p "stale" (buffer-string)))
+    (should (equal emacos-assist-web--stream-status
+                   "Assist stream is missing its reset; refresh to reconcile"))))
+
+(ert-deftest test-assist-web-indexed-replay-rejects-duplicate-and-gap-but-keeps-partial ()
+  "A reset is the only replay boundary; invalid later indexes keep evidence visible."
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (emacos-assist-web--write-prompt)
+    (emacos-assist-web--append-pending "hello")
+    (emacos-assist-web--reset-assistant 1)
+    (emacos-assist-web--append-delta 1 1 "first")
+    ;; Same-attempt duplicate is not another next delta, so reconcile rather
+    ;; than risking duplicated model text.
+    (emacos-assist-web--append-delta 1 1 "duplicate")
+    (should (string-match-p "first" (buffer-string)))
+    (should-not (string-match-p "duplicate" (buffer-string)))
+    (should (string-match-p "gap" emacos-assist-web--stream-status))
+    ;; A later replay reset deliberately replaces the provisional attempt.
+    (emacos-assist-web--reset-assistant 2)
+    (emacos-assist-web--append-delta 2 1 "retry")
+    (should (string-match-p "retry" (buffer-string)))
+    (should-not (string-match-p "first" (buffer-string)))
+    (emacos-assist-web--append-delta 2 3 "gap")
+    (should (string-match-p "retry" (buffer-string)))
+    (should-not (string-match-p "gap\\n" (buffer-string)))))
+
+(ert-deftest test-assist-web-interruptions-keep-partial-and-mark-it-unverified ()
+  "Every parser/transport interruption retains partial text instead of blanking it."
+  (dolist (reason '("observation disconnected" "invalid Assist delta"
+                    "Assist event is too large" "Assist observation was rejected"
+                    "Assist observation timed out"))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (emacos-assist-web--write-prompt)
+      (emacos-assist-web--append-pending "hello")
+      (emacos-assist-web--reset-assistant 1)
+      (emacos-assist-web--append-delta 1 1 "partial")
+      (emacos-assist-web--stream-interrupted (current-buffer) reason)
+      (should (string-match-p "partial" (buffer-string)))
+      (should (equal emacos-assist-web--stream-status reason)))))
+
+(ert-deftest test-assist-web-malformed-and-oversized-deltas-keep-the-real-partial ()
+  "The event adapter, not only its shared failure helper, retains prior text."
+  (dolist (data (list "{not json}"
+                      (json-encode `((attempt . 1) (index . 2)
+                                     (text . ,(make-string (1+ (* 16 1024)) ?x))))))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (emacos-assist-web--write-prompt)
+      (emacos-assist-web--append-pending "hello")
+      (emacos-assist-web--reset-assistant 1)
+      (emacos-assist-web--append-delta 1 1 "partial")
+      (emacos-assist-web--dispatch-event (current-buffer) "assistant-delta" data)
+      (should (string-match-p "partial" (buffer-string)))
+      (should (equal emacos-assist-web--stream-status "invalid Assist delta")))))
 
 (ert-deftest test-assist-web-history-merges-chronologically-and-keeps-page-cursor ()
   (let ((emacos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
@@ -1010,17 +1121,18 @@
     (should (equal (alist-get 'id (car emacos-assist-web--catalog))
                    "existing"))))
 
-(ert-deftest test-assist-web-has-one-step-two-command-prefix ()
+(ert-deftest test-assist-web-has-shared-conversation-command-prefix ()
   (should (keymapp (lookup-key (current-global-map) (kbd "C-c C-a"))))
-  (dolist (binding '(("C-c C-a t" . emacos-assist-web-open-thread)
-                     ("C-c C-a n" . emacos-assist-web-new-thread)
-                     ("C-c C-a r" . emacos-assist-web-refresh-threads)
-                     ("C-c C-a g" . emacos-assist-web-refresh-thread)
-                     ("C-c C-a s" . emacos-assist-web-send)
-                     ("C-c C-a o" . emacos-assist-web-load-older)
-                     ("C-c C-a a" . emacos-assist-web-abort)))
+  (dolist (binding '(("C-c C-a t" . emacos-conversation-open-thread)
+                     ("C-c C-a n" . emacos-conversation-new)
+                     ("C-c C-a r" . emacos-conversation-refresh-catalog)
+                     ("C-c C-a g" . emacos-conversation-refresh)
+                     ("C-c C-a s" . emacos-conversation-send)
+                     ("C-c C-a o" . emacos-conversation-open-object)
+                     ("C-c C-a l" . emacos-conversation-load-older)
+                     ("C-c C-a a" . emacos-conversation-abort)))
     (should (eq (key-binding (kbd (car binding))) (cdr binding))))
-  (dolist (key '("C-c C-a d" "C-c C-a f" "C-c C-a p" "C-c C-a i"))
+  (dolist (key '("C-c C-a d" "C-c C-a p" "C-c C-a i"))
     (should-not (key-binding (kbd key)))))
 
 (ert-deftest test-assist-web-abort-cleans-up-and-refreshes ()
@@ -1033,7 +1145,8 @@
       (cl-letf (((symbol-function 'emacos-assist-web--request)
                  (lambda (method path _payload callback &rest _)
                    (setq request (list method path))
-                   (funcall callback nil nil)))
+                   (funcall callback '((http_status . 200)
+                                       (outcome . "cancelled")) nil)))
                 ((symbol-function 'emacos-assist-web-refresh-thread)
                  (lambda (&optional buffer) (setq refreshed buffer))))
         (emacos-assist-web-abort))
@@ -1079,7 +1192,64 @@
         (emacos-assist-web-abort))
       (should (equal requests '(("POST" "threads/thread-1/messages"))))
       (should-not emacos-assist-web--run-id)
-      (should emacos-assist-web--in-flight))))
+      (should-not emacos-assist-web--in-flight))))
+
+(ert-deftest test-assist-web-preaccept-abort-keeps-exact-retry-and_ignores_late_acceptance ()
+  "Abort before POST acceptance is visibly unknown and makes its old callback inert."
+  (let ((emacos--assist-active-surface nil) request)
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1")
+      (emacos-assist-web--write-prompt)
+      (insert "hello")
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web--request)
+                 (lambda (method path payload callback &optional headers &rest _)
+                   (setq request (list method path payload callback headers))))
+                ((symbol-function 'emacos-assist-web--observe-run)
+                 (lambda (&rest _) (ert-fail "late acceptance must not observe"))))
+        (emacos-assist-web-send)
+        (let ((key emacos-assist-web--pending-key))
+          (should (string-match-p "you> hello" (buffer-string)))
+          (should (string-match-p "\\[queued\\]" (buffer-string)))
+          (should (equal (butlast request 2)
+                         '("POST" "threads/thread-1/messages" ((message . "hello")))))
+          (should (equal (cdr (assoc "Idempotency-Key" (nth 4 request))) key))
+          (emacos-assist-web-abort)
+          (should (equal emacos-assist-web--pending-key key))
+          (should (equal emacos-assist-web--submitted-text "hello"))
+          (should-not emacos-assist-web--in-flight)
+          (should (string-match-p "acceptance unknown" (buffer-string)))
+          (funcall (nth 3 request) '((thread_id . "thread-1") (run_id . "run-late")) nil)
+          (should-not emacos-assist-web--run-id)
+          (should (string-match-p "acceptance unknown" emacos-assist-web--stream-status)))))))
+
+(ert-deftest test-assist-web-abort-honors-structured-status-outcome-pairs ()
+  "Only the documented DELETE response pairs claim a confirmed cancellation."
+  (dolist (case '((200 "cancelled" "cancelled; reconciling" t)
+                  (409 "running" "stopped watching; Assist is running" nil)
+                  (409 "transitioning" "stopped watching; Assist is transitioning" nil)
+                  (200 "running" "stopped watching; cancellation unconfirmed" nil)
+                  ;; A terminal logical outcome can race DELETE after a pause;
+                  ;; 409 still means canonical refresh rather than uncertainty.
+                  (409 "cancelled" "cancelled; reconciling" t)))
+    (pcase-let ((`(,status ,outcome ,expected ,refresh) case))
+      (let ((emacos--assist-active-surface nil) refreshed)
+        (with-temp-buffer
+          (emacos-assist-web-mode)
+          (setq emacos-assist-web--thread-id "thread-1"
+                emacos-assist-web--run-id "run-1"
+                emacos-assist-web--in-flight t
+                emacos--assist-active-surface (current-buffer))
+          (cl-letf (((symbol-function 'emacos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback `((http_status . ,status) (outcome . ,outcome)) nil)))
+                    ((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                    ((symbol-function 'emacos-assist-web-refresh-thread)
+                     (lambda (&rest _) (setq refreshed t))))
+            (emacos-assist-web-abort))
+          (should (equal emacos-assist-web--stream-status expected))
+          (should (eq (and refreshed t) refresh)))))))
 
 (ert-deftest test-assist-web-cache-failure-prevents-an-unrecoverable-send ()
   (let ((emacos--assist-active-surface nil) requested)
