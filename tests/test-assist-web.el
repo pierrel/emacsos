@@ -1213,7 +1213,7 @@
       (should-not emacos-assist-web--run-id)
       (should-not emacos-assist-web--in-flight))))
 
-(ert-deftest test-assist-web-preaccept-abort-keeps-exact-retry-and_ignores_late_acceptance ()
+(ert-deftest test-assist-web-preaccept-abort-keeps-exact-retry-and-ignores-late-acceptance ()
   "Abort before POST acceptance is visibly unknown and makes its old callback inert."
   (let ((emacos--assist-active-surface nil) request)
     (with-temp-buffer
