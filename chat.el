@@ -226,7 +226,8 @@ rather than pushing it forward.")
 
 Each entry is (CAPABILITY . COMMAND).  Transport, persistence, and lifecycle
 remain owned by the backend; this small kernel owns only discovery and binding."
-  (setq-local emacos-conversation-actions actions))
+  (setq-local emacos-conversation-actions actions)
+  (local-set-key (kbd "C-c C-a") emacos-conversation-command-map))
 
 (defun emacos-conversation--run (capability)
   "Invoke CAPABILITY in this buffer, or give one compact unavailable message."
@@ -259,14 +260,17 @@ remain owned by the backend; this small kernel owns only discovery and binding."
   (call-interactively #'emacos-assist-web-open-thread))
 
 (defun emacos-conversation-command ()
-  "Run one action supported by the current conversation backend."
+  "Run a current-buffer action or global canonical Assist navigation."
   (interactive)
-  (let* ((choices (mapcar (lambda (entry) (symbol-name (car entry)))
-                           emacos-conversation-actions))
+  (let* ((choices (append (mapcar (lambda (entry) (symbol-name (car entry)))
+                                  emacos-conversation-actions)
+                         '("new Assist thread" "open Assist thread")))
          (choice (and choices (completing-read "Conversation: " choices nil t))))
-    (if choice
-        (emacos-conversation--run (intern choice))
-      (message "No conversation actions are available here"))))
+    (pcase choice
+      ("new Assist thread" (emacos-conversation-new))
+      ("open Assist thread" (emacos-conversation-open-thread))
+      ((and (pred stringp) action) (emacos-conversation--run (intern action)))
+      (_ (message "No conversation actions are available here")))))
 
 (defvar emacos-conversation-command-map
   (let ((map (make-sparse-keymap)))
@@ -516,14 +520,7 @@ When TRAILING-SPACE is non-nil, retain the local stream's token separator."
 
 (defun emacos-conversation-append-delta (end text)
   "Append read-only TEXT at provisional assistant marker END and return its end."
-  (let ((inhibit-read-only t) (inhibit-modification-hooks t))
-    (save-excursion
-      (goto-char end)
-      (let ((before (point)))
-        (insert text)
-        (add-text-properties before (point)
-                             '(read-only t front-sticky t rear-nonsticky t))
-        (point)))))
+  (emacos-conversation-replace-marked end end text))
 
 (defun emacos-conversation-finish-assistant (body-start body-end)
   "Present the completed assistant body delimited by BODY-START and BODY-END."
@@ -1423,7 +1420,6 @@ not `current-buffer' (safety-control renders can run with *keyboard* current)."
               (emacos--chat-surface-on-top)))
         "ABORT" "SEND")))
 
-(global-set-key (kbd "C-c C-a") emacos-conversation-command-map)
 (emacos-conversation-global-mode 1)
 
 (provide 'chat)

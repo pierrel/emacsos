@@ -154,6 +154,22 @@
                 url-http-end-of-headers (copy-marker (point-min)))
     (should (equal (emacos-assist-web--response-json (current-buffer)) nil))))
 
+(ert-deftest test-assist-web-recognizes-only-the-sanitized-run-store-response ()
+  (with-temp-buffer
+    (insert "{\"detail\":\"run-store-unavailable\"}")
+    (setq-local url-http-response-status 503
+                url-http-content-type "application/json"
+                url-http-end-of-headers (copy-marker (point-min)))
+    (should (emacos-assist-web--run-store-unavailable-response-p (current-buffer)))
+    (should-error (emacos-assist-web--response-json (current-buffer))
+                  :type 'error))
+  (with-temp-buffer
+    (insert "{\"detail\":\"other\"}")
+    (setq-local url-http-response-status 503
+                url-http-content-type "application/json"
+                url-http-end-of-headers (copy-marker (point-min)))
+    (should-not (emacos-assist-web--run-store-unavailable-response-p (current-buffer)))))
+
 (ert-deftest test-assist-web-status-bearing-response-requires-status-and-object ()
   "A status-bearing response requires a status and exactly one JSON object."
   (dolist (case '((nil "{}") (0 "{}") (500 "{}") (999 "{}")
@@ -502,6 +518,67 @@
     (should forwarded)
     (should-not rejected)))
 
+(ert-deftest test-assist-web-raw-filter-bounds-a-stalled-json-503-response ()
+  "A non-SSE error response cannot grow url-http's retained stream forever."
+  (let ((emacos-assist-web-max-response-bytes 128) (forwarded 0) rejected)
+    (let ((filter
+           (emacos-assist-web--guarded-filter
+            (lambda (&rest _) (cl-incf forwarded))
+            (lambda (_process problem) (setq rejected problem))
+            t)))
+      (funcall filter nil (concat "HTTP/1.1 503 Service Unavailable\r\n"
+                                  "Content-Type: application/json\r\n\r\n"))
+      (funcall filter nil (make-string 32 ?x))
+      (funcall filter nil (make-string 32 ?x)))
+    (should (= forwarded 2))
+    (should (equal rejected "Assist Web response is too large"))))
+
+(ert-deftest test-assist-web-raw-filter-does-not-trust-a-lookalike-content-type ()
+  "Only the exact Content-Type header may make a response stream unbounded."
+  (let ((emacos-assist-web-max-response-bytes 128) (forwarded 0) rejected)
+    (let ((filter
+           (emacos-assist-web--guarded-filter
+            (lambda (&rest _) (cl-incf forwarded))
+            (lambda (_process problem) (setq rejected problem))
+            t)))
+      (funcall filter nil (concat "HTTP/1.1 200 OK\r\n"
+                                  "X-Content-Type: text/event-stream\r\n\r\n"))
+      (funcall filter nil (make-string 128 ?x)))
+    (should (= forwarded 1))
+    (should (equal rejected "Assist Web response is too large"))))
+
+(ert-deftest test-assist-web-raw-filter-allows-batched-bounded-sse-events ()
+  "TCP batching does not turn several valid events into one oversized event."
+  (let* ((emacos-assist-web-max-event-bytes 64)
+         (event "event: status\ndata: {\"s\":\"xxxxxxxxxxxxxxxx\"}\n\n")
+         (body (apply #'concat (make-list 1600 event)))
+         forwarded rejected)
+    (should (< (string-bytes event) emacos-assist-web-max-event-bytes))
+    (should (> (string-bytes body) (* 64 1024)))
+    (funcall
+     (emacos-assist-web--guarded-filter
+      (lambda (_process bytes) (setq forwarded bytes))
+      (lambda (_process problem) (setq rejected problem))
+      t)
+     nil
+     (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" body))
+    (should forwarded)
+    (should-not rejected)))
+
+(ert-deftest test-assist-web-raw-filter-rejects-one-oversized-sse-record-before-forwarding ()
+  "A bad incomplete record never reaches url-http's retained response buffer."
+  (let ((emacos-assist-web-max-event-bytes 32) forwarded rejected)
+    (funcall
+     (emacos-assist-web--guarded-filter
+      (lambda (&rest _) (setq forwarded t))
+      (lambda (_process problem) (setq rejected problem))
+      t)
+     nil
+     (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+             (make-string 33 ?x)))
+    (should-not forwarded)
+    (should (equal rejected "Assist event is too large"))))
+
 (ert-deftest test-assist-web-render-preserves-draft-and-updates-status-in-place ()
   (let ((emacos-assist-web-cache-directory (make-temp-file "assist-web-render-" t)))
     (unwind-protect
@@ -514,6 +591,31 @@
           (should (string-match-p "\\[running\\]" (buffer-string)))
           (should (string-match-p "\\[cached\\]" (buffer-string))))
       (delete-directory emacos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-reopened-incomplete-message-recreates-assistant-markers ()
+  "A resumed accepted Run renders live deltas after its canonical user turn."
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (setq emacos-assist-web--thread-id "thread-1"
+          emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+          emacos-assist-web--submitted-text "hello"
+          emacos-assist-web--pending-accepted-p t
+          emacos-assist-web--run-id "run-1")
+    (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t)))
+      (emacos-assist-web--render
+       '((thread . ((id . "thread-1") (description . "Thread")
+                    (status . "processing")
+                    (workspace . ((repo_label . "Assist")))))
+         (messages . (((id . "m-1") (role . "user") (text . "hello")
+                       (state . "incomplete")))))))
+    (should emacos-assist-web--pending-rendered-p)
+    (should (markerp emacos-assist-web--assistant-start))
+    (should (markerp emacos-assist-web--assistant-end))
+    (emacos-assist-web--dispatch-event (current-buffer) "assistant-reset"
+                                       "{\"attempt\":1}")
+    (emacos-assist-web--dispatch-event (current-buffer) "assistant-delta"
+                                       "{\"attempt\":1,\"index\":1,\"text\":\"live\"}")
+    (should (string-match-p "bot> live" (buffer-string)))))
 
 (ert-deftest test-assist-web-input-preserves-exact-multiline-text ()
   (with-temp-buffer
@@ -598,6 +700,9 @@
     (insert "[processing]")
     (setq emacos-assist-web--status-end (copy-marker (point) nil))
     (emacos-assist-web--write-prompt)
+    ;; `--render` owns this marker after it has actually drawn the incomplete
+    ;; submission; text equality in an unrendered snapshot is not enough.
+    (setq emacos-assist-web--pending-rendered-p t)
     (cl-letf (((symbol-function 'emacos-assist-web--read-cache)
                (lambda (&rest _)
                  '((text . "")
@@ -617,6 +722,33 @@
     (emacos-assist-web--after-change)
     (should-not emacos-assist-web--pending-key)
     (should-not emacos-assist-web--submitted-text)))
+
+(ert-deftest test-assist-web-edited-failed-retry-renders-a-fresh-pending-turn ()
+  "A distinct retry cannot stream into the failed turn's old markers."
+  (let ((emacos--assist-active-surface nil))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--pending-key
+            "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "old")
+      (emacos-assist-web--write-prompt)
+      (emacos-assist-web--append-pending "old")
+      (should emacos-assist-web--pending-rendered-p)
+      (insert "new")
+      (emacos-assist-web--after-change)
+      (should-not emacos-assist-web--pending-rendered-p)
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback '((thread_id . "thread-1") (run_id . "run-2")
+                                       (live_text . t)) nil)))
+                ((symbol-function 'emacos-assist-web--observe-run) #'ignore))
+        (emacos-assist-web-send))
+      (should (= (how-many "you> old" (point-min) (point-max)) 1))
+      (should (= (how-many "you> new" (point-min) (point-max)) 1))
+      (goto-char (marker-position emacos-assist-web--assistant-start))
+      (should (> (point) (string-match "you> new" (buffer-string)))))))
 
 (ert-deftest test-assist-web-interrupted-observation-retains-the-exact-retry ()
   (with-temp-buffer
@@ -810,6 +942,33 @@
         (emacos-assist-web-refresh-thread (current-buffer) "run-1"))
       (should-not emacos-assist-web--run-id)
       (should-not emacos-assist-web--pending-key))))
+
+(ert-deftest test-assist-web-busy-refresh-keeps-live-provisional-markers ()
+  "A nonterminal snapshot cannot redraw underneath its active SSE observer."
+  (let ((busy-snapshot
+         '((thread . ((id . "thread-1") (description . "Thread")
+                      (status . "processing")
+                      (workspace . ((repo_label . "Assist")))))
+           (messages . nil)))
+        rendered)
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key "retry-key"
+            emacos-assist-web--submitted-text "hello"
+            emacos-assist-web--pending-accepted-p t
+            emacos-assist-web--in-flight t)
+      (cl-letf (((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback busy-snapshot nil)))
+                ((symbol-function 'emacos-assist-web--try-write-cache) #'ignore)
+                ((symbol-function 'emacos-assist-web--render)
+                 (lambda (&rest _) (setq rendered t))))
+        (emacos-assist-web-refresh-thread))
+      (should-not rendered)
+      (should emacos-assist-web--in-flight)
+      (should (equal emacos-assist-web--run-id "run-1")))))
 
 (ert-deftest test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key ()
   (with-temp-buffer
@@ -1013,7 +1172,9 @@
             (emacos-assist-web-mode)
             (setq emacos-assist-web--draft-id "new-thread"
                   emacos-assist-web--draft-repository "repo-key"
-                  emacos-assist-web--draft-harness "deepagents")
+                  emacos-assist-web--draft-harness "deepagents"
+                  emacos-assist-web--pending-key
+                  "emacsos-0123456789abcdef0123456789abcdef")
             (emacos-assist-web--write-prompt)
             (insert "saved locally")
             (should (emacos-assist-web--save-draft)))
@@ -1141,18 +1302,39 @@
                    "existing"))))
 
 (ert-deftest test-assist-web-has-shared-conversation-command-prefix ()
-  (should (keymapp (lookup-key (current-global-map) (kbd "C-c C-a"))))
-  (dolist (binding '(("C-c C-a t" . emacos-conversation-open-thread)
-                     ("C-c C-a n" . emacos-conversation-new)
-                     ("C-c C-a r" . emacos-conversation-refresh-catalog)
-                     ("C-c C-a g" . emacos-conversation-refresh)
-                     ("C-c C-a s" . emacos-conversation-send)
-                     ("C-c C-a o" . emacos-conversation-open-object)
-                     ("C-c C-a l" . emacos-conversation-load-older)
-                     ("C-c C-a a" . emacos-conversation-abort)))
-    (should (eq (key-binding (kbd (car binding))) (cdr binding))))
-  (dolist (key '("C-c C-a d" "C-c C-a p" "C-c C-a i"))
-    (should-not (key-binding (kbd key)))))
+  (with-temp-buffer
+    (org-mode)
+    (should (eq (key-binding (kbd "C-c C-a t"))
+                #'emacos-conversation-open-thread))
+    (should (eq (key-binding (kbd "C-c C-a n"))
+                #'emacos-conversation-new))
+    (dolist (key '("C-c C-a r" "C-c C-a g" "C-c C-a s" "C-c C-a o"
+                   "C-c C-a l" "C-c C-a a"))
+      (should-not (memq (key-binding (kbd key))
+                         '(emacos-conversation-refresh-catalog
+                           emacos-conversation-refresh
+                           emacos-conversation-send
+                           emacos-conversation-open-object
+                           emacos-conversation-load-older
+                           emacos-conversation-abort)))))
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (dolist (binding '(("C-c C-a r" . emacos-conversation-refresh-catalog)
+                       ("C-c C-a g" . emacos-conversation-refresh)
+                       ("C-c C-a s" . emacos-conversation-send)
+                       ("C-c C-a o" . emacos-conversation-open-object)
+                       ("C-c C-a l" . emacos-conversation-load-older)
+                       ("C-c C-a a" . emacos-conversation-abort)))
+      (should (eq (key-binding (kbd (car binding))) (cdr binding))))))
+
+(ert-deftest test-assist-web-stream-cleanup-forgets-an-interrupted-record-budget ()
+  (with-temp-buffer
+    (emacos-assist-web-mode)
+    (setq emacos-assist-web--stream-scan-marker (copy-marker (point-min))
+          emacos-assist-web--stream-unconsumed-bytes 99)
+    (emacos-assist-web--stream-cleanup nil t)
+    (should-not emacos-assist-web--stream-scan-marker)
+    (should-not emacos-assist-web--stream-unconsumed-bytes)))
 
 (ert-deftest test-assist-web-abort-cleans-up-and-refreshes ()
   (with-temp-buffer
@@ -1167,10 +1349,11 @@
                    (funcall callback '((http_status . 200)
                                        (outcome . "cancelled")) nil)))
                 ((symbol-function 'emacos-assist-web-refresh-thread)
-                 (lambda (&optional buffer) (setq refreshed buffer))))
+                 (lambda (&optional buffer completed-run-id)
+                   (setq refreshed (list buffer completed-run-id)))))
         (emacos-assist-web-abort))
       (should (equal request '("DELETE" "threads/thread-1/runs/run-1")))
-      (should (eq refreshed (current-buffer)))
+      (should (equal refreshed (list (current-buffer) "run-1")))
       (should-not emacos-assist-web--in-flight))))
 
 (ert-deftest test-assist-web-unconfirmed-abort-retains-accepted-retry-state ()
@@ -1194,6 +1377,33 @@
       (should (equal emacos-assist-web--submitted-text "hello"))
       (should emacos-assist-web--pending-accepted-p)
       (should-not emacos-assist-web--in-flight))))
+
+(ert-deftest test-assist-web-abort-retries-a-pending-cancellation-receipt ()
+  "A detached accepted Run remains eligible for the required DELETE replay."
+  (let ((emacos--assist-active-surface nil) (requests 0))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key "retry-key"
+            emacos-assist-web--submitted-text "hello"
+            emacos-assist-web--pending-accepted-p t
+            emacos-assist-web--in-flight t
+            emacos--assist-active-surface (current-buffer))
+      (cl-letf (((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (cl-incf requests)
+                   (funcall callback
+                            (and (= requests 2)
+                                 '((http_status . 200) (outcome . "cancelled")))
+                            (and (= requests 1) "offline"))))
+                ((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web-refresh-thread) #'ignore))
+        (emacos-assist-web-abort)
+        (should-not emacos-assist-web--in-flight)
+        (emacos-assist-web-abort))
+      (should (= requests 2))
+      (should (equal emacos-assist-web--stream-status "cancelled; reconciling")))))
 
 (ert-deftest test-assist-web-abort-during-post-cannot-target-an-old-run ()
   (with-temp-buffer
@@ -1366,12 +1576,10 @@
           emacos-assist-web--submitted-text "hello")
     (emacos-assist-web--write-prompt)
     (emacos-assist-web--append-pending "hello")
-    (let (callback refreshed observed)
+    (let (callback observed)
       (cl-letf (((symbol-function 'emacos-assist-web--request)
                  (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                 ((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
-                ((symbol-function 'emacos-assist-web-refresh-thread)
-                 (lambda (&rest _) (setq refreshed t)))
                 ((symbol-function 'emacos-assist-web--observe-run)
                  (lambda (&rest _) (setq observed t))))
         (emacos-assist-web-send)
@@ -1379,7 +1587,8 @@
                  '((thread_id . "thread-1") (run_id . "run-1") (replayed . t)) nil))
       (goto-char (point-min))
       (should (= (how-many "you> hello" (point-min) (point-max)) 1))
-      (should refreshed)
+      ;; The replayed journal, not a concurrent snapshot, owns this
+      ;; provisional region until its terminal event reconciles it.
       (should observed))))
 
 (ert-deftest test-assist-web-replay-consumes-an-unrendered-submitted-prompt ()
@@ -1405,7 +1614,103 @@
       (should (= (how-many "you> hello" (point-min) (point-max)) 1))
       (should (equal (emacos-assist-web--input) "")))))
 
-(ert-deftest test-assist-web-replay-consumes-a-submission-already-in-the-snapshot ()
+(ert-deftest test-assist-web-existing-acceptance-saves-its-exact-run-before-observing ()
+  "A crash after POST acceptance can reopen the exact canonical Run."
+  (let ((emacos--assist-active-surface nil) callback saved observed)
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1")
+      (emacos-assist-web--write-prompt)
+      (insert "hello")
+      (cl-letf (((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                ((symbol-function 'emacos-assist-web--save-draft)
+                 (lambda () (push emacos-assist-web--run-id saved) t))
+                ((symbol-function 'emacos-assist-web--observe-run)
+                 (lambda (_buffer) (setq observed (member "run-1" saved)))))
+        (emacos-assist-web-send)
+        (funcall callback '((thread_id . "thread-1") (run_id . "run-1")
+                            (live_text . t)) nil))
+      (should (member "run-1" saved))
+      (should observed))))
+
+(ert-deftest test-assist-web-accepted-run-never-observes-before-its-draft-saves ()
+  "A failed accepted-run save detaches with the replay tuple instead of streaming."
+  (let ((emacos--assist-active-surface nil) callback observed (saves 0))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1")
+      (emacos-assist-web--write-prompt)
+      (insert "hello")
+      (cl-letf (((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                ((symbol-function 'emacos-assist-web--save-draft)
+                 (lambda () (setq saves (1+ saves)) (= saves 1)))
+                ((symbol-function 'emacos-assist-web--observe-run)
+                 (lambda (_buffer) (setq observed t))))
+        (emacos-assist-web-send)
+        (funcall callback '((thread_id . "thread-1") (run_id . "run-1")
+                            (live_text . t)) nil))
+      (should-not observed)
+      (should (equal emacos-assist-web--run-id "run-1"))
+      (should emacos-assist-web--pending-accepted-p)
+      (should-not emacos-assist-web--in-flight)
+      (should-not emacos--assist-active-surface))))
+
+(ert-deftest test-assist-web-awaiting-approval-recovery-keeps-the-exact-run ()
+  "A nonterminal approval wait survives until its canonical refresh succeeds."
+  (let ((emacos--assist-active-surface nil) callback refreshed)
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key
+            "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "hello"
+            emacos-assist-web--pending-accepted-p t)
+      (emacos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                ((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web-refresh-thread)
+                 (lambda (buffer completed-run-id)
+                   (setq refreshed (list buffer completed-run-id)))))
+        (emacos-assist-web--resume-accepted-run)
+        (funcall callback '((status . "awaiting_approval")) nil))
+      (should (equal emacos-assist-web--run-id "run-1"))
+      (should emacos-assist-web--pending-accepted-p)
+      (should (equal refreshed (list (current-buffer) "run-1"))))))
+
+(ert-deftest test-assist-web-unknown-run-status-keeps-the-exact-retry-tuple ()
+  "An unrecognized projection cannot discard accepted durable work."
+  (let ((emacos--assist-active-surface nil) callback observed)
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key
+            "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "hello"
+            emacos-assist-web--pending-accepted-p t)
+      (emacos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                ((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web--observe-run)
+                 (lambda (&rest _) (setq observed t))))
+        (emacos-assist-web--resume-accepted-run)
+        (funcall callback '((status . "unknown-future-status")) nil))
+      (should-not observed)
+      (should (equal emacos-assist-web--run-id "run-1"))
+      (should emacos-assist-web--pending-accepted-p)
+      (should (equal emacos-assist-web--pending-key
+                     "emacsos-0123456789abcdef0123456789abcdef"))
+      (should-not emacos-assist-web--in-flight)
+      (should-not emacos--assist-active-surface)
+      (should (string-match-p "invalid Assist run status"
+                              emacos-assist-web--stream-status)))))
+
+(ert-deftest test-assist-web-replay-renders-a-new-submission-with-the-same-text ()
   (let ((emacos--assist-active-surface nil)
         (snapshot
          '((thread . ((id . "thread-1") (description . "Thread")
@@ -1431,11 +1736,12 @@
           (funcall callback
                    '((thread_id . "thread-1") (run_id . "run-1")
                      (replayed . t)) nil)))
-      (should (= (how-many "you> hello" (point-min) (point-max)) 1))
+      (should (= (how-many "you> hello" (point-min) (point-max)) 2))
       (should (equal (emacos-assist-web--input) "")))))
 
 (ert-deftest test-assist-web-restored-final-submission-is-not-a-false-pending-turn ()
-  (let ((snapshot
+  (let ((emacos--assist-active-surface nil)
+        (snapshot
          '((thread . ((id . "thread-1") (description . "Thread")
                       (status . "ready")
                       (workspace . ((repo_label . "Assist")))))
@@ -1443,17 +1749,87 @@
                          (state . "final")))))))
     (with-temp-buffer
       (emacos-assist-web-mode)
-      (setq emacos-assist-web--thread-id "thread-1"
-            emacos-assist-web--snapshot snapshot)
-      (emacos-assist-web--write-prompt)
+      (setq emacos-assist-web--thread-id "thread-1")
+      (let (refreshed request)
       (cl-letf (((symbol-function 'emacos-assist-web--read-cache)
                  (lambda (&rest _)
                    '((text . "hello")
                      (pending_key . "emacsos-0123456789abcdef0123456789abcdef")
-                     (submitted_text . "hello") (pending_accepted . t)))))
-        (emacos-assist-web--restore-draft))
-      (should-not (string-match-p "waiting for Assist" (buffer-string)))
-      (should (equal (emacos-assist-web--input) "")))))
+                     (submitted_text . "hello") (pending_accepted . t)
+                     (run_id . "run-1"))))
+                ((symbol-function 'emacos-assist-web--try-write-cache) #'ignore)
+                ((symbol-function 'emacos-assist-web--request)
+                 (lambda (method path _payload callback &rest _)
+                   (setq request (list method path))
+                   (funcall callback '((status . "success")) nil)))
+                ((symbol-function 'emacos-assist-web-refresh-thread)
+                 (lambda (&rest _) (setq refreshed t))))
+          (emacos-assist-web--render snapshot))
+        (should (equal request '("GET" "threads/thread-1/runs/run-1")))
+        (should refreshed)
+        (should (= (how-many "you> hello" (point-min) (point-max)) 1))
+        (should-not (string-match-p "observation interrupted" (buffer-string)))
+        (should-not emacos-assist-web--pending-key)
+        (should (equal (emacos-assist-web--input) ""))))))
+
+(ert-deftest test-assist-web-restores-an-active-repeated-submission-by-run-id ()
+  "A prior identical final turn cannot suppress the restored active submission."
+  (let ((emacos--assist-active-surface nil)
+        (snapshot
+         '((thread . ((id . "thread-1") (description . "Thread")
+                      (status . "processing")
+                      (workspace . ((repo_label . "Assist")))))
+           (messages . (((id . "m-1") (role . "user") (text . "hello")
+                         (state . "final")))))))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1")
+      (let (observed)
+        (cl-letf (((symbol-function 'emacos-assist-web--read-cache)
+                   (lambda (&rest _)
+                     '((text . "")
+                       (pending_key . "emacsos-0123456789abcdef0123456789abcdef")
+                       (submitted_text . "hello") (pending_accepted . t)
+                       (run_id . "run-2"))))
+                  ((symbol-function 'emacos-assist-web--try-write-cache) #'ignore)
+                  ((symbol-function 'emacos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (funcall callback '((status . "pending")) nil)))
+                  ((symbol-function 'emacos-assist-web--observe-run)
+                   (lambda (&rest _) (setq observed t))))
+          (emacos-assist-web--render snapshot))
+        (should (= (how-many "you> hello" (point-min) (point-max)) 2))
+        (should emacos-assist-web--in-flight)
+        (should observed)))))
+
+(ert-deftest test-assist-web-restored-run-never-steals-another-active-surface ()
+  "A recovered accepted run waits without losing its exact retry identity."
+  (let ((owner (generate-new-buffer " *local-chat-owner*"))
+        requested)
+    (unwind-protect
+        (let ((emacos--assist-active-surface owner))
+          (with-temp-buffer
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--thread-id "thread-1"
+                  emacos-assist-web--pending-key
+                  "emacsos-0123456789abcdef0123456789abcdef"
+                  emacos-assist-web--submitted-text "hello"
+                  emacos-assist-web--pending-accepted-p t
+                  emacos-assist-web--run-id "run-1")
+            (cl-letf (((symbol-function 'emacos-assist-web--request)
+                       (lambda (&rest _) (setq requested t))))
+              (emacos-assist-web--resume-accepted-run))
+            (should-not requested)
+            (should (eq emacos--assist-active-surface owner))
+            (should-not emacos-assist-web--in-flight)
+            (should (equal emacos-assist-web--pending-key
+                           "emacsos-0123456789abcdef0123456789abcdef"))
+            (should (equal emacos-assist-web--submitted-text "hello"))
+            (should emacos-assist-web--pending-accepted-p)
+            (should (equal emacos-assist-web--run-id "run-1"))
+            (should (string-match-p "another conversation is active"
+                                    emacos-assist-web--stream-status))))
+      (when (buffer-live-p owner) (kill-buffer owner)))))
 
 (ert-deftest test-assist-web-does-not-overlap-the-local-chat-stream ()
   (let ((emacos--assist-active-surface 'chat) requested)
@@ -1494,7 +1870,8 @@
   (let ((emacos--assist-active-surface nil)
         (canonical (generate-new-buffer " *assist-canonical*"))
         (draft (generate-new-buffer " *assist-new-draft*"))
-        callback observed)
+        callback observations cleaned
+        (original-cleanup (symbol-function 'emacos-assist-web--stream-cleanup)))
     (unwind-protect
         (progn
           (with-current-buffer canonical
@@ -1508,25 +1885,132 @@
                   emacos-assist-web--draft-harness "deepagents")
             (emacos-assist-web--write-prompt)
             (insert "hello")
-            (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
-                      ((symbol-function 'emacos-assist-web--delete-cache) #'ignore)
+            (cl-letf (((symbol-function 'emacos-assist-web--stream-cleanup)
+                       (lambda (&optional keep-pending no-render)
+                         (when (eq (current-buffer) canonical)
+                           (setq cleaned (list keep-pending no-render)))
+                         (funcall original-cleanup keep-pending no-render)))
+                      ((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacos-assist-web--delete-cache)
+                       (lambda (&rest _) t))
                       ((symbol-function 'emacos-assist-web--request)
                        (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                       ((symbol-function 'emacos-assist-web--observe-run)
-                       (lambda (buffer) (setq observed buffer))))
+                       (lambda (buffer) (push buffer observations))))
               (emacos-assist-web-send)
               (switch-to-buffer draft)
+              ;; The source remains editable while POST acceptance is in flight.
+              (insert "next draft")
               (funcall callback
                        '((thread_id . "thread-new") (run_id . "run-new")) nil)))
           (should-not (buffer-live-p draft))
-          (should (eq observed canonical))
+          (should (equal observations (list canonical)))
+          (should (equal cleaned '(t t)))
           (should (eq emacos--assist-active-surface canonical))
           (with-current-buffer canonical
             (should (equal emacos-assist-web--run-id "run-new"))
             (should (= emacos-assist-web--refresh-generation 1))
             (should (= emacos-assist-web--send-generation 1))
             (should (= emacos-assist-web--stream-generation 1))
-            (should (= (how-many "you> hello" (point-min) (point-max)) 1))))
+            (should (= (how-many "you> hello" (point-min) (point-max)) 1))
+            (should (equal (emacos-assist-web--input) "next draft"))
+            (should (string-match-p "working; live text unavailable"
+                                    (buffer-string)))))
+      (when (buffer-live-p draft) (kill-buffer draft))
+      (when (buffer-live-p canonical) (kill-buffer canonical))
+      (setq emacos--assist-active-surface nil))))
+
+(ert-deftest test-assist-web-transfer-waits-for-the-final-owner-save ()
+  "A failed canonical save leaves the source draft and ownership untouched."
+  (let ((emacos--assist-active-surface nil)
+        (canonical (generate-new-buffer " *assist-canonical*"))
+        (draft (generate-new-buffer " *assist-new-draft*"))
+        callback observed deleted)
+    (unwind-protect
+        (progn
+          (with-current-buffer canonical
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--thread-id "thread-new")
+            (emacos-assist-web--write-prompt))
+          (with-current-buffer draft
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--draft-id "new-thread"
+                  emacos-assist-web--draft-repository "repo-key"
+                  emacos-assist-web--draft-harness "deepagents"
+                  emacos-assist-web--pending-key
+                  "emacsos-0123456789abcdef0123456789abcdef")
+            (emacos-assist-web--write-prompt)
+            (insert "hello")
+            (cl-letf (((symbol-function 'emacos-assist-web--save-draft)
+                       (lambda () (not (eq (current-buffer) canonical))))
+                      ((symbol-function 'emacos-assist-web--delete-cache)
+                       (lambda (&rest _) (setq deleted t)))
+                      ((symbol-function 'emacos-assist-web--request)
+                       (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                      ((symbol-function 'emacos-assist-web--observe-run)
+                       (lambda (_buffer) (setq observed t))))
+              (emacos-assist-web-send)
+              (funcall callback
+                       '((thread_id . "thread-new") (run_id . "run-new")
+                         (live_text . t)) nil)))
+          (should-not observed)
+          (should-not deleted)
+          (should (buffer-live-p draft))
+          (should-not emacos--assist-active-surface)
+          (with-current-buffer canonical
+            (should-not emacos-assist-web--run-id)
+            (should-not emacos-assist-web--pending-accepted-p)
+            (should-not emacos-assist-web--in-flight)))
+          (with-current-buffer draft
+            (should-not emacos-assist-web--thread-id)
+            (should (equal emacos-assist-web--draft-id "new-thread"))
+            (should (equal emacos-assist-web--pending-key
+                           "emacsos-0123456789abcdef0123456789abcdef"))
+            (should-not emacos-assist-web--pending-accepted-p)
+            (should-not emacos-assist-web--run-id)
+            (should-not emacos-assist-web--in-flight))
+      (when (buffer-live-p draft) (kill-buffer draft))
+      (when (buffer-live-p canonical) (kill-buffer canonical))
+      (setq emacos--assist-active-surface nil))))
+
+(ert-deftest test-assist-web-transfer-keeps-source-until-its-old-cache-is-retired ()
+  "A stale new-thread cache cannot outlive accepted canonical ownership."
+  (let ((emacos--assist-active-surface nil)
+        (canonical (generate-new-buffer " *assist-canonical*"))
+        (draft (generate-new-buffer " *assist-new-draft*"))
+        callback observed)
+    (unwind-protect
+        (progn
+          (with-current-buffer canonical
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--thread-id "thread-new")
+            (emacos-assist-web--write-prompt))
+          (with-current-buffer draft
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--draft-id "new-thread"
+                  emacos-assist-web--draft-repository "repo-key"
+                  emacos-assist-web--draft-harness "deepagents"
+                  emacos-assist-web--pending-key
+                  "emacsos-0123456789abcdef0123456789abcdef")
+            (emacos-assist-web--write-prompt)
+            (insert "hello")
+            (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacos-assist-web--delete-cache) (lambda (&rest _) nil))
+                      ((symbol-function 'emacos-assist-web--request)
+                       (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                      ((symbol-function 'emacos-assist-web--observe-run)
+                       (lambda (_buffer) (setq observed t))))
+              (emacos-assist-web-send)
+              (funcall callback
+                       '((thread_id . "thread-new") (run_id . "run-new")
+                         (live_text . t)) nil)))
+          (should-not observed)
+          (should (buffer-live-p draft))
+          (should-not emacos--assist-active-surface)
+          (with-current-buffer draft
+            (should (equal emacos-assist-web--draft-id "new-thread"))
+            (should (equal emacos-assist-web--pending-key
+                           "emacsos-0123456789abcdef0123456789abcdef"))))
       (when (buffer-live-p draft) (kill-buffer draft))
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacos--assist-active-surface nil))))
@@ -1697,6 +2181,216 @@
     (emacos-assist-web--append-pending "sent")
     (should (= (point) (+ (emacos-assist-web--prompt-start) 4)))
     (should (equal (emacos-assist-web--input) "next draft"))))
+
+(ert-deftest test-assist-web-deleted-thread-closes-without-losing-visible-partial-or-next-draft ()
+  (let ((emacos--assist-active-surface nil))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "sent"
+            emacos-assist-web--pending-accepted-p t
+            emacos-assist-web--in-flight t
+            emacos--assist-active-surface (current-buffer))
+      (emacos-assist-web--write-prompt)
+      (insert "next draft")
+      (emacos-assist-web--append-pending "sent")
+      (emacos-assist-web--reset-assistant 1)
+      (emacos-assist-web--append-delta 1 1 "partial")
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t)))
+        (emacos-assist-web--dispatch-event
+         (current-buffer) "closed-set" "{\"reason\":\"thread-gone\"}"))
+      (should-not emacos-assist-web--thread-id)
+      (should-not emacos-assist-web--run-id)
+      (should-not emacos-assist-web--pending-key)
+      (should-not emacos-assist-web--pending-accepted-p)
+      (should-not emacos-assist-web--in-flight)
+      (should-not emacos--assist-active-surface)
+      (should (equal emacos-assist-web--stream-status
+                     "thread deleted; start a new thread"))
+      (should (string-match-p "partial" (buffer-string)))
+      (should (equal (emacos-assist-web--input) "next draft"))
+      (should-not emacos-assist-web--pending-rendered-p)
+      (should-not emacos-assist-web--assistant-start)
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback '((thread_id . "thread-2") (run_id . "run-2")
+                                       (live_text . t)) nil)))
+                ((symbol-function 'emacos-assist-web--observe-run) #'ignore))
+        (emacos-assist-web-send))
+      (should (string-match-p "you> next draft" (buffer-string)))
+      (should (markerp emacos-assist-web--assistant-start)))))
+
+(ert-deftest test-assist-web-deleted-thread-persists-the-next-draft-as-local ()
+  (let ((emacos-assist-web-cache-directory (make-temp-file "assist-web-deleted-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (emacos-assist-web-mode)
+          (setq emacos-assist-web--thread-id "thread-1"
+                emacos-assist-web--run-id "run-1"
+                emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+                emacos-assist-web--submitted-text "sent"
+                emacos-assist-web--pending-accepted-p t)
+          (emacos-assist-web--write-prompt)
+          (insert "next draft")
+          (emacos-assist-web--dispatch-event
+           (current-buffer) "closed-set" "{\"reason\":\"thread-gone\"}")
+          (should (equal (alist-get 'text
+                                    (emacos-assist-web--read-cache "drafts/new-thread.json"))
+                         "next draft")))
+      (delete-directory emacos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-run-store-error-keeps-accepted-identity-for-operator-repair ()
+  (let ((emacos--assist-active-surface nil))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "sent"
+            emacos-assist-web--pending-accepted-p t
+            emacos-assist-web--in-flight t
+            emacos--assist-active-surface (current-buffer))
+      (emacos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t)))
+        (emacos-assist-web--dispatch-event
+         (current-buffer) "error" "{\"detail\":\"run-store-unavailable\"}"))
+      (should (equal emacos-assist-web--thread-id "thread-1"))
+      (should (equal emacos-assist-web--run-id "run-1"))
+      (should (equal emacos-assist-web--pending-key
+                     "emacsos-0123456789abcdef0123456789abcdef"))
+      (should emacos-assist-web--pending-accepted-p)
+      (should-not emacos-assist-web--in-flight)
+      (should-not emacos--assist-active-surface)
+      (should (equal emacos-assist-web--stream-status
+                     "observation unavailable; operator repair required"))
+      (should-not (string-match-p "Send retries" (buffer-string))))))
+
+(ert-deftest test-assist-web-pre-sse-run-store-error-keeps-accepted-identity ()
+  (let ((emacos--assist-active-surface nil)
+        (source (generate-new-buffer " *assist-web-unavailable*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "{\"detail\":\"run-store-unavailable\"}")
+            (setq-local url-http-response-status 503
+                        url-http-content-type "application/json"
+                        url-http-end-of-headers (copy-marker (point-min))))
+          (with-temp-buffer
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--thread-id "thread-1"
+                  emacos-assist-web--run-id "run-1"
+                  emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+                  emacos-assist-web--submitted-text "sent"
+                  emacos-assist-web--pending-accepted-p t
+                  emacos-assist-web--in-flight t
+                  emacos--assist-active-surface (current-buffer))
+            (emacos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_delay _repeat function &rest args)
+                         (apply function args))))
+              (emacos-assist-web--finish-observation-response
+               (current-buffer) emacos-assist-web--stream-generation source))
+            (should (equal emacos-assist-web--thread-id "thread-1"))
+            (should (equal emacos-assist-web--run-id "run-1"))
+            (should (equal emacos-assist-web--stream-status
+                           "observation unavailable; operator repair required"))))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-pre-sse-store-error-survives-url-sentinel-ordering ()
+  "The URL sentinel must not clear identity before its deferred 503 verdict."
+  (let ((emacos--assist-active-surface nil)
+        (source (generate-new-buffer " *assist-web-unavailable*"))
+        timer)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "{\"detail\":\"run-store-unavailable\"}")
+            (setq-local url-http-response-status 503
+                        url-http-content-type "application/json"
+                        url-http-end-of-headers (copy-marker (point-min))))
+          (with-temp-buffer
+            (emacos-assist-web-mode)
+            (setq emacos-assist-web--thread-id "thread-1"
+                  emacos-assist-web--run-id "run-1"
+                  emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+                  emacos-assist-web--submitted-text "sent"
+                  emacos-assist-web--pending-accepted-p t
+                  emacos-assist-web--in-flight t
+                  emacos-assist-web--stream-generation 3
+                  emacos-assist-web--stream-process 'ended
+                  emacos--assist-active-surface (current-buffer))
+            (emacos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_delay _repeat function &rest args)
+                         (setq timer (cons function args)) 'timer)))
+              (funcall
+               (emacos-assist-web--stream-sentinel
+                (lambda (_ended _event)
+                  (emacos-assist-web--finish-observation-response
+                   (current-buffer) 3 source))
+                (current-buffer) 3)
+               'ended "finished")
+              ;; The sentinel only schedules the completion verdict.  A generic
+              ;; disconnect here would invalidate this tuple before the 503 is read.
+              (should (equal emacos-assist-web--run-id "run-1"))
+              (apply (car timer) (cdr timer)))
+            (should (equal emacos-assist-web--thread-id "thread-1"))
+            (should (equal emacos-assist-web--run-id "run-1"))
+            (should (equal emacos-assist-web--stream-status
+                           "observation unavailable; operator repair required"))))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-recovered-run-store-error-keeps-accepted-identity ()
+  (let ((emacos--assist-active-surface nil))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "sent"
+            emacos-assist-web--pending-accepted-p t)
+      (emacos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback nil "Assist Web run store is unavailable"))))
+        (emacos-assist-web--resume-accepted-run))
+      (should (equal emacos-assist-web--thread-id "thread-1"))
+      (should (equal emacos-assist-web--run-id "run-1"))
+      (should (equal emacos-assist-web--stream-status
+                     "observation unavailable; operator repair required")))))
+
+(ert-deftest test-assist-web-abort-run-store-error-keeps-accepted-identity ()
+  "A failed DELETE read is observation loss, not an unconfirmed cancellation."
+  (let ((emacos--assist-active-surface nil))
+    (with-temp-buffer
+      (emacos-assist-web-mode)
+      (setq emacos-assist-web--thread-id "thread-1"
+            emacos-assist-web--run-id "run-1"
+            emacos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
+            emacos-assist-web--submitted-text "sent"
+            emacos-assist-web--pending-accepted-p t
+            emacos-assist-web--in-flight t
+            emacos--assist-active-surface (current-buffer))
+      (emacos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback nil "Assist Web run store is unavailable"))))
+        (emacos-assist-web-abort))
+      (should (equal emacos-assist-web--thread-id "thread-1"))
+      (should (equal emacos-assist-web--run-id "run-1"))
+      (should (equal emacos-assist-web--pending-key
+                     "emacsos-0123456789abcdef0123456789abcdef"))
+      (should emacos-assist-web--pending-accepted-p)
+      (should-not emacos-assist-web--in-flight)
+      (should (equal emacos-assist-web--stream-status
+                     "observation unavailable; operator repair required")))))
 
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

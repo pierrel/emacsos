@@ -1,0 +1,25 @@
+#+TITLE: Conversation deleted-thread recovery amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The deleted-thread closure now clears every provisional insertion marker as
+well as the accepted retry tuple.  The visible partial assistant text remains
+evidence in the open buffer, but the next Send creates a fresh pending region
+and a new canonical thread.  Before the old canonical identity is discarded,
+the client adopts =new-thread= as the local draft identity and attempts to
+persist the next editable tail.  A successful local cache write preserves that
+draft across restart; a write failure leaves the visible buffer usable and is
+reported by the cache layer.
+
+Assist also registers status-only observations while they are open.  Thus a
+thread deleted during journal saturation or after a process restart still
+arrives as the same =closed-set/thread-gone= outcome rather than an ambiguous
+disconnected observer.
+
+* Lineage
+
+This amends [[file:2026-09-09-conversation-observation-closure-amendment.org][the
+conversation observation closure amendment]].  That record remains historical.
+This correction completes the user-visible deletion recovery path without
+changing durable Run authority.

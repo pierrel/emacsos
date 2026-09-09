@@ -39,12 +39,14 @@ chat with =M-x emacos--chat-show-top-buffer=.
 On the =C-c C-a= prefix, opening or starting a canonical Assist thread is
 global navigation: =t= and =n= work in every buffer.  The other prefix commands
 act on the current conversation.  The =M-x emacos-conversation-command= chooser
-lists only actions supported by the current buffer.
+lists actions supported by the current buffer plus distinctly named =new Assist
+thread= and =open Assist thread= navigation, so local =new= is never confused
+with starting a canonical thread.
 
 | Key | Action |
 |-----+--------|
 | =C-c C-a t= | Open thread |
-| =C-c C-a n= | New conversation (Assist Web only) |
+| =C-c C-a n= | New canonical Assist thread |
 | =C-c C-a r= | Refresh thread list |
 | =C-c C-a g= | Refresh current conversation |
 | =C-c C-a s= | Send |

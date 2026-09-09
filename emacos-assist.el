@@ -200,6 +200,11 @@ valid."
     (user-error "Save or send this .assist draft before refreshing"))
   (emacos-assist--revert t t))
 
+(defun emacos-assist-send ()
+  "Send the current file-backed conversation through its own chat surface."
+  (interactive)
+  (emacos--chat-send (current-buffer)))
+
 ;;; Mode
 
 (defun emacos-assist--init-buffer ()
@@ -243,7 +248,7 @@ agent reads/edits/runs files in this file's directory on the phone."
   (auto-save-mode -1)               ; the chat surface saves on its own events
   (setq-local revert-buffer-function #'emacos-assist--revert)
   (emacos-conversation-install-actions
-   '((send . emacos--chat-send)
+   '((send . emacos-assist-send)
      (abort . emacos--chat-abort)
      (new . emacos-assist-new-file)
      (refresh . emacos-assist-refresh)

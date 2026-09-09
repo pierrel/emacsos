@@ -1,0 +1,23 @@
+#+TITLE: Conversation observation closure amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+Canonical Assist observation now distinguishes two server-owned closures.  A
+=closed-set= event with =thread-gone= releases the active surface, clears the
+accepted retry tuple and dead canonical thread identity, preserves the visible
+partial response and next draft, and tells the user to start a new thread.  It
+never offers a retry for work whose canonical thread is gone.
+
+An =error= event with =run-store-unavailable= is different: it releases the
+live observer but retains the exact accepted Run and idempotency tuple.  The UI
+shows that observation is unavailable and operator repair is required.  It does
+not automatically resend or attempt repair, because durable Run state remains
+the authority.
+
+* Lineage
+
+This amends [[file:2026-09-09-conversation-streaming-boundary-amendment.org][the
+conversation streaming boundary amendment]].  That earlier record remains
+historical.  This correction adds explicit user-visible closure outcomes while
+preserving the same bounded, provisional SSE transport contract.

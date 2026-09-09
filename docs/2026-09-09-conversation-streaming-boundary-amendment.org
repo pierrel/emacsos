@@ -1,0 +1,17 @@
+#+TITLE: Conversation streaming size-bound amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The September 8 design incorrectly assigned a 16 KiB decoded-delta bound to
+Assist. Assist emits at most 7 KiB UTF-8 model-text chunks. =assist-web.el=
+independently accepts at most 16 KiB of decoded UTF-8 text for one delta, and
+continues to cap one whole SSE event and one raw process-filter callback at
+64 KiB. Assist separately caps encoded SSE records at 48 KiB.
+
+* Lineage
+
+This amends [[file:2026-09-08-conversation-interface-streaming.org][one native
+conversation interface]]. The earlier record remains historical. This
+correction assigns each bound to the server emission, client delta validation,
+or client transport layer that actually owns it.

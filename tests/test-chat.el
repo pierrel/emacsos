@@ -74,6 +74,28 @@ Sets up the buffer so handlers operate against a realistic state."
     (should opened)
     (should started)))
 
+(ert-deftest chat-test-conversation-command-offers-canonical-navigation-in-ordinary-buffers ()
+  "The shared M-x chooser exposes named canonical navigation without a chat."
+  (let ((responses '("new Assist thread" "open Assist thread"))
+        opened started choices)
+    (with-temp-buffer
+      (org-mode)
+      (setq-local emacos-conversation-actions nil)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq choices collection)
+                   (pop responses)))
+                ((symbol-function 'emacos-conversation-new)
+                 (lambda () (setq started t)))
+                ((symbol-function 'emacos-conversation-open-thread)
+                 (lambda () (setq opened t))))
+        (emacos-conversation-command)
+        (emacos-conversation-command)))
+    (should (member "new Assist thread" choices))
+    (should (member "open Assist thread" choices))
+    (should started)
+    (should opened)))
+
 (ert-deftest chat-test-current-input-after-prompt ()
   (chat-test--reset)
   (let ((buf (emacos--chat-buffer)))
