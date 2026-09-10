@@ -16,7 +16,7 @@ bootstrap_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_lock=/run/wvkbd-emacos-install.lock
-manifest_hash=83c44a5bf1222ddba4a389356d88c829ac60e6e8145af5aa5123ba5676c257dc
+manifest_hash=acb19091dc8676e331ffdb43339019e382e4235bbb76ccf542a6dd530e11c0d5
 mutating=0
 committed=0
 restart_only=0
@@ -243,7 +243,7 @@ reconcile_untracked_ui() {
 
 stop_ui() {
     timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
-        rc-service emacsos-ui stop 8>&- 9>&- || true
+        rc-service emacsos-ui stop 7>&- 8>&- 9>&- || true
     ui_quiescent && return 0
     reconcile_untracked_ui && ui_quiescent
 }
@@ -255,7 +255,7 @@ default_ui_entry() {
 
 start_ui() {
     timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
-        rc-service emacsos-ui start 8>&- 9>&- || return 1
+        rc-service emacsos-ui start 7>&- 8>&- 9>&- || return 1
     ready=0
     attempt=0
     while [ "$attempt" -lt 150 ]; do

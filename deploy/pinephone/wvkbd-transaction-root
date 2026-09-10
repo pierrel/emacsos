@@ -351,13 +351,13 @@ restart_candidate() {
     checkpoint before-candidate-restart
     rm -f -- "$ready"
     checkpoint during-candidate-restart
-    timeout 30 rc-service "$service" restart >/dev/null 2>&1 &&
+    timeout 30 rc-service "$service" restart 7>&- 8>&- 9>&- >/dev/null 2>&1 &&
         wait_service_gate "$1" && checkpoint after-candidate-restart
 }
 
 normal_recovery() {
     rm -f -- "$ready"
-    timeout 30 rc-service "$service" restart >/dev/null 2>&1 &&
+    timeout 30 rc-service "$service" restart 7>&- 8>&- 9>&- >/dev/null 2>&1 &&
         wait_service_gate "$old_sha"
 }
 

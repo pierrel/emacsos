@@ -68,6 +68,7 @@ printf '%s\n' '#!/bin/sh' \
     'elif [ "$1 $2" = "emacsos-ui status" ]; then' \
     '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
+    '  for fd in 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
     '  if [ -e /tmp/race-command-reference ]; then' \
     '    rm -f /tmp/race-command-reference' \

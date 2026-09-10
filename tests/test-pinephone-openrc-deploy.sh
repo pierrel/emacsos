@@ -449,7 +449,7 @@ fi
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'rc-service emacsos-ui start 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rc-service emacsos-ui start 7>&- 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
