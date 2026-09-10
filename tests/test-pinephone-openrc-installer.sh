@@ -567,6 +567,11 @@ rm -f /usr/local/share/emacsos-openrc/os.el
 ln -s /repo/os.el /usr/local/share/emacsos-openrc/os.el
 assert_preflight_rejection backup-source
 install -o root -g root -m 0644 /repo/os.el /usr/local/share/emacsos-openrc/os.el
+for unsafe_mode in 0664 0646; do
+    chmod "$unsafe_mode" /usr/local/share/emacsos-openrc/os.el
+    assert_preflight_rejection "backup-source-mode-$unsafe_mode"
+done
+chmod 0644 /usr/local/share/emacsos-openrc/os.el
 
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config

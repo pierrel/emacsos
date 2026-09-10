@@ -124,10 +124,16 @@ preflight_backup_sources() {
         case $name in
             assist-web-token) continue ;;
         esac
+        metadata=$(stat -c '%U:%G:%h:%F:%a' "$target") ||
+            fail "unsafe installed backup source: $target"
         [ -f "$target" ] && [ ! -L "$target" ] &&
-            [ "$(stat -c '%U:%G:%h:%F' "$target")" = \
+            [ "${metadata%:*}" = \
                 'root:root:1:regular file' ] ||
             fail "unsafe installed backup source: $target"
+        mode=${metadata##*:}
+        case $mode in
+            *[2367]?|*[2367]) fail "unsafe installed backup source: $target" ;;
+        esac
     done
 }
 
