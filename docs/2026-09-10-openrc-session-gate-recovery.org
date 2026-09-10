@@ -6,10 +6,9 @@
 This amends [[file:2026-09-07-wvkbd-persistent-activation.org][the persistent keyboard activation design]],
 [[file:2026-09-08-glide-modifier-keyboard.org][the glide-modifier keyboard design]], and
 [[file:2026-09-09-glide-modifier-keyboard-implementation.org][the glide-modifier implementation record]].
-The second record's old =finalize-start=, environment-authorized, version-1
-lifecycle is amended here.  This records a deployment failure found while
-combining the tested chat and keyboard revisions; it does not revise those
-historical records.
+This records a deployment failure found while combining the tested chat and
+keyboard revisions; it does not revise those historical records or the separate
+version-1 migration work.
 
 * Observed boundary
 
@@ -30,9 +29,11 @@ The transaction now has two deliberately separate proofs:
   gate.  It is used only after =rc-service restart= returns to the activation
   caller.
 
-=start_post= performs only the session proof. It cannot commit or clear a
-candidate. The activation caller commits only after the full service gate
-passes.
+For the version-2/current-init =verify-start= hook, =start_post= performs only
+the session proof. It cannot commit or clear a candidate. The activation caller
+commits only after the full service gate passes. The legacy version-1
+=finalize-start= compatibility path may clear its marker only after the restored
+or retained target passes that session proof.
 
 The root-only state marker is version 2 and has exactly these fields: version,
 phase, old_sha, new_sha, prior_notice, boot_id, owner_pid, and owner_start.

@@ -56,6 +56,21 @@ manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'wvkbd_lock=/run/wvkbd-emacos-install.lock' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'flock -n -x 7 || fail '\''keyboard install lock is busy'\''' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'validate-upgrade' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+[ "$simulate_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
+    [ "$bootstrap_line" -lt "$stop_line" ] && [ "$bootstrap_line" -lt "$mutating_line" ] &&
+    [ "$mutating_line" -lt "$install_line" ]
 expected='EMACSOS-COMMANDS.org
 assist-web.el
 chat.el
@@ -431,10 +446,11 @@ fi
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'rc-service emacsos-ui start 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui stop 8>&- 9>&-' \
+grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui start 8>&- 9>&-' \
+grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "grep -Fx 'populated 0'" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'pgrep -u "$lab_uid"' "$deploy_dir/openrc-update-root" >/dev/null

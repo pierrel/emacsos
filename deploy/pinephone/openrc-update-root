@@ -12,9 +12,11 @@ backup=
 boot_tmp=
 doas_tmp=
 reference_tmp=
+bootstrap_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=17ab550faf53339f76ae8e0f5d87c5fdae0cb5b1b9dfecdd6de20d54ca169c07
+wvkbd_lock=/run/wvkbd-emacos-install.lock
+manifest_hash=b7c098f2fabe865bdf17638458bf590bcaeabe12ba2965626f07a7e82000dcb8
 mutating=0
 committed=0
 restart_only=0
@@ -23,10 +25,109 @@ config_dir_created=0
 token_parent_dir_created=0
 token_config_dir_created=0
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
+backup_pairs='
+openrc-init.el:/usr/local/share/emacsos-openrc/init.el
+dtach-shell.el:/usr/local/share/emacsos-openrc/dtach-shell.el
+dtach-shell-init.el:/usr/local/share/emacsos-openrc/dtach-shell-init.el
+openrc-sway.config:/usr/local/share/emacsos-openrc/sway.config
+openrc-session:/usr/local/share/emacsos-openrc/session
+openrc-session-power:/usr/local/share/emacsos-openrc/session-power
+os.el:/usr/local/share/emacsos-openrc/os.el
+chat.el:/usr/local/share/emacsos-openrc/chat.el
+assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el
+emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el
+network.el:/usr/local/share/emacsos-openrc/network.el
+phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el
+phone-sms.el:/usr/local/share/emacsos-openrc/phone-sms.el
+openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend
+wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction
+emacsos-ui.initd:/etc/init.d/emacsos-ui
+openrc-boot-mode:/usr/local/sbin/emacsos-openrc-boot-mode
+openrc-call-root:/usr/local/sbin/emacsos-openrc-call
+openrc-sms-root:/usr/local/sbin/emacsos-openrc-sms
+openrc-network-root:/usr/local/sbin/emacsos-openrc-network
+openrc-chat-url:/etc/emacsos-openrc/chat-url
+openrc-assist-web-url:/etc/emacsos-openrc/assist-web-url
+assist-web-ca.pem:/etc/emacsos-openrc/assist-web-ca.pem
+assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token
+openrc-emacs-server.nft:/etc/nftables.d/49-emacsos-callback.nft
+95-emacsos-callback.nft:/etc/nftables.d/95-emacsos-callback.nft
+95-emacsos-ui.conf:/etc/doas.d/95-emacsos-ui.conf'
 
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
     exit 1
+}
+
+rc_service() {
+    env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service "$@"
+}
+
+sync_file_and_parent() {
+    /usr/bin/python3 - "$1" "$2" <<'PY'
+import os
+import sys
+for path in sys.argv[1:]:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY if path == sys.argv[2] else 0)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+PY
+}
+
+bootstrap_compat_helper() {
+    destination=/usr/local/sbin/emacsos-wvkbd-transaction
+    bootstrap_tmp=$(mktemp /usr/local/sbin/.emacsos-wvkbd-transaction.XXXXXX) || return 1
+    if ! install -o root -g root -m 0755 "$snapshot/wvkbd-transaction-root" "$bootstrap_tmp" ||
+       ! cmp -s "$snapshot/wvkbd-transaction-root" "$bootstrap_tmp" ||
+       [ "$(stat -c '%U:%G:%a:%h:%F' "$bootstrap_tmp")" != 'root:root:755:1:regular file' ] ||
+       ! sync_file_and_parent "$bootstrap_tmp" /usr/local/sbin ||
+       ! mv -f -- "$bootstrap_tmp" "$destination"; then
+        rm -f -- "$bootstrap_tmp" || return 1
+        bootstrap_tmp=
+        return 1
+    fi
+    bootstrap_tmp=
+    sync_file_and_parent "$destination" /usr/local/sbin || return 1
+}
+
+preflight_backup_sources() {
+    for directory in /var/lib/emacsos-lab /var/lib/emacsos-lab/.config \
+        /var/lib/emacsos-lab/.config/emacsos; do
+        if [ -e "$directory" ] || [ -L "$directory" ]; then
+            [ -d "$directory" ] && [ ! -L "$directory" ] &&
+                [ "$(stat -c '%U:%G:%F' "$directory")" = \
+                    'emacsos-lab:emacsos-lab:directory' ] ||
+                fail "unsafe Assist Web configuration directory: $directory"
+        fi
+    done
+    token_target=/var/lib/emacsos-lab/.config/emacsos/assist-web-token
+    if [ -e "$token_target" ] || [ -L "$token_target" ]; then
+        [ -f "$token_target" ] && [ ! -L "$token_target" ] &&
+            [ "$(stat -c '%U:%G:%a:%h:%F' "$token_target")" = \
+                'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
+            fail 'unsafe installed Assist Web token'
+    fi
+    reference_target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+    if [ -e "$reference_target" ] || [ -L "$reference_target" ]; then
+        [ -f "$reference_target" ] && [ ! -L "$reference_target" ] &&
+            [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_target")" = \
+                'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
+            fail 'unsafe installed command reference'
+    fi
+    for pair in $backup_pairs; do
+        name=${pair%%:*}
+        target=${pair#*:}
+        [ -e "$target" ] || [ -L "$target" ] || continue
+        case $name in
+            assist-web-token) continue ;;
+        esac
+        [ -f "$target" ] && [ ! -L "$target" ] &&
+            [ "$(stat -c '%U:%G:%h:%F' "$target")" = \
+                'root:root:1:regular file' ] ||
+            fail "unsafe installed backup source: $target"
+    done
 }
 
 valid_ipv4() (
@@ -118,7 +219,7 @@ remove_runtime() {
 }
 
 ui_quiescent() {
-    ! rc-service emacsos-ui status >/dev/null 2>&1 || return 1
+    ! rc_service emacsos-ui status >/dev/null 2>&1 || return 1
     if [ -e "$service_cgroup" ] || [ -L "$service_cgroup" ]; then
         cgroup_empty || return 1
     fi
@@ -126,7 +227,7 @@ ui_quiescent() {
 }
 
 reconcile_untracked_ui() {
-    ! rc-service emacsos-ui status >/dev/null 2>&1 || return 1
+    ! rc_service emacsos-ui status >/dev/null 2>&1 || return 1
     safe_service_cgroup || return 1
     cgroup_empty && return 1
     lab_processes_outside_cgroup && return 1
@@ -141,7 +242,8 @@ reconcile_untracked_ui() {
 }
 
 stop_ui() {
-    timeout -s TERM -k 5 30 rc-service emacsos-ui stop 8>&- 9>&- || true
+    timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
+        rc-service emacsos-ui stop 8>&- 9>&- || true
     ui_quiescent && return 0
     reconcile_untracked_ui && ui_quiescent
 }
@@ -152,11 +254,12 @@ default_ui_entry() {
 }
 
 start_ui() {
-    timeout -s TERM -k 5 30 rc-service emacsos-ui start 8>&- 9>&- || return 1
+    timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
+        rc-service emacsos-ui start 8>&- 9>&- || return 1
     ready=0
     attempt=0
     while [ "$attempt" -lt 150 ]; do
-        if rc-service emacsos-ui status >/dev/null 2>&1 &&
+        if rc_service emacsos-ui status >/dev/null 2>&1 &&
            /usr/local/sbin/emacsos-wvkbd-transaction verify-current >/dev/null 2>&1; then
             ready=1
             break
@@ -292,6 +395,7 @@ cleanup() {
     [ -z "$boot_tmp" ] || rm -f -- "$boot_tmp"
     [ -z "$doas_tmp" ] || rm -f -- "$doas_tmp"
     [ -z "$reference_tmp" ] || rm -f -- "$reference_tmp"
+    [ -z "$bootstrap_tmp" ] || rm -f -- "$bootstrap_tmp"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -314,6 +418,11 @@ chown root:root "$boot_lock"
 chmod 0600 "$boot_lock"
 exec 8>"$boot_lock"
 flock -n -x 8 || fail 'boot mode transition is busy'
+touch "$wvkbd_lock"
+chown root:root "$wvkbd_lock"
+chmod 0600 "$wvkbd_lock"
+exec 7>"$wvkbd_lock"
+flock -n -x 7 || fail 'keyboard install lock is busy'
 
 [ -d "$stage" ] && [ ! -L "$stage" ] || fail 'staging directory is absent'
 [ "$(stat -c '%U:%G:%a:%h:%F' "$stage")" = 'user:user:700:2:directory' ] ||
@@ -362,6 +471,8 @@ done
 [ "$(sha256sum "$snapshot/openrc-manifest.sha256")" = \
     "$manifest_hash  $snapshot/openrc-manifest.sha256" ] || fail 'manifest hash mismatch'
 (cd "$snapshot" && sha256sum -c openrc-manifest.sha256) || fail 'payload hash mismatch'
+/bin/sh "$snapshot/wvkbd-transaction-root" validate-upgrade ||
+    fail 'keyboard transaction cannot be safely upgraded'
 LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
     "$snapshot/assist-web-token" || fail 'invalid Assist Web token'
 LC_ALL=C awk 'NR == 1 { ok = ($0 == "-----BEGIN CERTIFICATE-----"); next } $0 != "-----END CERTIFICATE-----" && $0 !~ /^[A-Za-z0-9+\/=]+$/ { ok = 0 } { last = $0 } END { exit !(ok && NR >= 3 && last == "-----END CERTIFICATE-----") }' \
@@ -393,26 +504,7 @@ done
 [ -f /etc/init.d/emacsos-ui ] && [ ! -L /etc/init.d/emacsos-ui ] &&
     [ "$(stat -c '%U:%G:%a:%h:%F' /etc/init.d/emacsos-ui)" = \
         'root:root:755:1:regular file' ] || fail 'unsafe installed OpenRC UI service'
-for target in /usr/local/share/emacsos-openrc/os.el \
-    /usr/local/share/emacsos-openrc/chat.el \
-    /usr/local/share/emacsos-openrc/assist-web.el \
-    /usr/local/share/emacsos-openrc/emacos-assist.el \
-    /usr/local/share/emacsos-openrc/network.el \
-    /usr/local/share/emacsos-openrc/phone-call.el \
-    /usr/local/share/emacsos-openrc/phone-sms.el \
-    /usr/local/share/emacsos-openrc/dtach-shell.el \
-    /usr/local/share/emacsos-openrc/dtach-shell-init.el \
-    /usr/local/sbin/emacsos-openrc-call \
-    /usr/local/sbin/emacsos-openrc-sms \
-    /usr/local/sbin/emacsos-openrc-network \
-    /etc/emacsos-openrc/chat-url \
-    /etc/emacsos-openrc/assist-web-url \
-    /etc/emacsos-openrc/assist-web-ca.pem \
-    /etc/nftables.d/49-emacsos-callback.nft \
-    /etc/nftables.d/95-emacsos-callback.nft \
-    /usr/local/sbin/emacsos-openrc-suspend \
-    /etc/doas.d/95-emacsos-ui.conf \
-    /etc/doas.d/95-emacsos-ui-suspend.conf; do
+for target in /etc/doas.d/95-emacsos-ui-suspend.conf; do
     if [ -e "$target" ] || [ -L "$target" ]; then
         [ -f "$target" ] && [ ! -L "$target" ] ||
             fail "unsafe installed file: $target"
@@ -424,67 +516,18 @@ done
     [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
 apk add --simulate py3-dbus >/dev/null
-apk add py3-dbus >/dev/null
-[ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
-    /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
+preflight_backup_sources
 
+bootstrap_compat_helper || fail 'could not durably bootstrap keyboard compatibility helper'
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
 chown root:root "$backup"
 chmod 0700 "$backup"
 restart_only=1
 stop_ui || fail 'UI did not become quiescent'
-for directory in /var/lib/emacsos-lab /var/lib/emacsos-lab/.config \
-    /var/lib/emacsos-lab/.config/emacsos; do
-    if [ -e "$directory" ] || [ -L "$directory" ]; then
-        [ -d "$directory" ] && [ ! -L "$directory" ] &&
-            [ "$(stat -c '%U:%G:%F' "$directory")" = \
-                'emacsos-lab:emacsos-lab:directory' ] ||
-            fail "unsafe Assist Web configuration directory: $directory"
-    fi
-done
-token_target=/var/lib/emacsos-lab/.config/emacsos/assist-web-token
-if [ -e "$token_target" ] || [ -L "$token_target" ]; then
-    [ -f "$token_target" ] && [ ! -L "$token_target" ] &&
-        [ "$(stat -c '%U:%G:%a:%h:%F' "$token_target")" = \
-            'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
-        fail 'unsafe installed Assist Web token'
-fi
-reference_target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
-if [ -e "$reference_target" ] || [ -L "$reference_target" ]; then
-    [ -f "$reference_target" ] && [ ! -L "$reference_target" ] &&
-        [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_target")" = \
-            'emacsos-lab:emacsos-lab:600:1:regular file' ] ||
-        fail 'unsafe installed command reference'
-fi
-for pair in \
-    'openrc-init.el:/usr/local/share/emacsos-openrc/init.el' \
-    'dtach-shell.el:/usr/local/share/emacsos-openrc/dtach-shell.el' \
-    'dtach-shell-init.el:/usr/local/share/emacsos-openrc/dtach-shell-init.el' \
-    'openrc-sway.config:/usr/local/share/emacsos-openrc/sway.config' \
-    'openrc-session:/usr/local/share/emacsos-openrc/session' \
-    'openrc-session-power:/usr/local/share/emacsos-openrc/session-power' \
-    'os.el:/usr/local/share/emacsos-openrc/os.el' \
-    'chat.el:/usr/local/share/emacsos-openrc/chat.el' \
-    'assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el' \
-    'emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
-    'network.el:/usr/local/share/emacsos-openrc/network.el' \
-    'phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el' \
-    'phone-sms.el:/usr/local/share/emacsos-openrc/phone-sms.el' \
-    'openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend' \
-    'wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction' \
-    'emacsos-ui.initd:/etc/init.d/emacsos-ui' \
-    'openrc-boot-mode:/usr/local/sbin/emacsos-openrc-boot-mode' \
-    'openrc-call-root:/usr/local/sbin/emacsos-openrc-call' \
-    'openrc-sms-root:/usr/local/sbin/emacsos-openrc-sms' \
-    'openrc-network-root:/usr/local/sbin/emacsos-openrc-network' \
-    'openrc-chat-url:/etc/emacsos-openrc/chat-url' \
-    'openrc-assist-web-url:/etc/emacsos-openrc/assist-web-url' \
-    'assist-web-ca.pem:/etc/emacsos-openrc/assist-web-ca.pem' \
-    'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token' \
-    'openrc-emacs-server.nft:/etc/nftables.d/49-emacsos-callback.nft' \
-    '95-emacsos-callback.nft:/etc/nftables.d/95-emacsos-callback.nft' \
-    '95-emacsos-ui.conf:/etc/doas.d/95-emacsos-ui.conf'; do
+/usr/local/sbin/emacsos-wvkbd-transaction normalize-upgrade ||
+    fail 'keyboard transaction could not be normalized'
+for pair in $backup_pairs; do
     name=${pair%%:*}
     target=${pair#*:}
     [ ! -e "$target" ] || install -o root -g root -m 0600 "$target" "$backup/$name"
@@ -524,6 +567,12 @@ fi
 
 mutating=1
 restart_only=0
+# Package installation is intentionally retained: it is the verified system
+# dependency for both the old and new UI.  A failure below rolls back the UI
+# payload and restarts it through the ordinary transaction cleanup.
+apk add py3-dbus >/dev/null
+[ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
+    /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
 boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
 doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
 install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"

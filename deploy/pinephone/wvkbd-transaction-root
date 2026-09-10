@@ -91,12 +91,22 @@ remove_file() {
 }
 
 clear_state() {
+    # The durable decision goes first. A later crash leaves only inert,
+    # metadata-checked backups that no-state recovery may discard.
+    checkpoint cleanup-state
+    remove_file "$state"
+    sync_state
+    for file in "$previous_notice" "$previous" "$state_dir/candidate" "$state_dir/candidate-notice"; do
+        if [ -e "$file" ] || [ -L "$file" ]; then
+            root_file "$file" 600 || fail 'unsafe transaction cleanup metadata'
+        fi
+    done
     checkpoint cleanup-notice
     remove_file "$previous_notice"
     checkpoint cleanup-previous
     remove_file "$previous"
-    checkpoint cleanup-state
-    remove_file "$state"
+    remove_file "$state_dir/candidate"
+    remove_file "$state_dir/candidate-notice"
     sync_state
 }
 
@@ -118,6 +128,15 @@ read_state() {
     ensure_state_dir
     root_file "$state" 600 || fail 'unsafe transaction state'
     [ "$(stat -c '%s' "$state")" -le 512 ] || fail 'oversized transaction state'
+    state_version=$(sed -n '1s/^version=//p' "$state")
+    case $state_version in
+        2) read_v2_state ;;
+        1) read_v1_state ;;
+        *) fail 'malformed transaction state' ;;
+    esac
+}
+
+read_v2_state() {
     [ "$(wc -l <"$state")" -eq 8 ] || fail 'malformed transaction state'
     version=$(sed -n '1s/^version=//p' "$state")
     phase=$(sed -n '2s/^phase=//p' "$state")
@@ -140,6 +159,68 @@ read_state() {
     # Reject extra keys, reordered fields, and embedded control data.
     printf 'version=2\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice=%s\nboot_id=%s\nowner_pid=%s\nowner_start=%s\n' "$phase" "$old_sha" "$new_sha" "$prior_notice" "$boot_id" "$owner_pid" "$owner_start" | cmp -s - "$state" ||
         fail 'malformed transaction state'
+}
+
+legacy_cleanup_metadata() {
+    for file in "$previous" "$previous_notice" "$state_dir/candidate" "$state_dir/candidate-notice"; do
+        if [ -e "$file" ] || [ -L "$file" ]; then
+            root_file "$file" 600 || fail 'unsafe legacy transaction cleanup metadata'
+        fi
+    done
+}
+
+read_v1_state() {
+    [ "$(wc -l <"$state")" -eq 5 ] || fail 'malformed legacy transaction state'
+    phase=$(sed -n '2s/^phase=//p' "$state")
+    old_sha=$(sed -n '3s/^old_sha=//p' "$state")
+    new_sha=$(sed -n '4s/^new_sha=//p' "$state")
+    prior_notice=$(sed -n '5s/^prior_notice_present=//p' "$state")
+    [ "$state_version" = 1 ] && case $phase in pending|committed) true;; *) false;; esac &&
+        printf '%s\n%s\n' "$old_sha" "$new_sha" | grep -Eq '^[0-9a-f]{64}$' &&
+        { [ "$prior_notice" = 0 ] || [ "$prior_notice" = 1 ]; } &&
+        printf 'version=1\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice_present=%s\n' \
+            "$phase" "$old_sha" "$new_sha" "$prior_notice" | cmp -s - "$state" ||
+        fail 'malformed legacy transaction state'
+    safe_target || fail 'unsafe legacy keyboard target'
+    current_sha=$(sha "$target")
+    case $phase in
+        pending)
+            { [ "$current_sha" = "$old_sha" ] || [ "$current_sha" = "$new_sha" ]; } ||
+                fail 'legacy pending keyboard digest mismatch'
+            verified_backup
+            ;;
+        committed)
+            [ "$current_sha" = "$new_sha" ] || fail 'legacy committed keyboard digest mismatch'
+            ;;
+    esac
+    legacy_cleanup_metadata
+}
+
+validate_upgrade() {
+    if [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
+        return 0
+    fi
+    root_dir "$state_dir" 700 || fail 'unsafe transaction directory'
+    if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+        legacy_cleanup_metadata
+        return 0
+    fi
+    read_state
+    [ "$state_version" = 1 ] || fail 'version-2 transaction requires its original helper'
+}
+
+normalize_upgrade() {
+    ensure_state_dir
+    if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+        remove_safe_orphans
+        return 0
+    fi
+    read_state
+    [ "$state_version" = 1 ] || fail 'version-2 transaction requires its original helper'
+    case $phase in
+        pending) restore_legacy_old; clear_state ;;
+        committed) clear_state ;;
+    esac
 }
 
 current_boot_id() {
@@ -280,20 +361,45 @@ normal_recovery() {
         wait_service_gate "$old_sha"
 }
 
+remove_safe_orphans() {
+    for file in "$previous" "$previous_notice" "$state_dir/candidate" "$state_dir/candidate-notice"; do
+        if [ -e "$file" ] || [ -L "$file" ]; then
+            root_file "$file" 600 || fail 'unsafe orphan transaction backup'
+            rm -f -- "$file"
+        fi
+    done
+    sync_state
+}
+
+restore_legacy_old() {
+    verified_backup
+    copy_checked "$previous" "$target" 755 "$old_sha"
+    if [ "$prior_notice" = 1 ]; then
+        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+        copy_checked "$previous_notice" "$notice" 644 "$(sha "$previous_notice")"
+    elif [ -e "$notice" ] || [ -L "$notice" ]; then
+        safe_notice || fail 'unsafe current notice during legacy restore'
+        remove_file "$notice"
+        sync /usr/local/share/licenses/wvkbd-emacos
+    fi
+    safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'legacy old keyboard restore failed'
+}
+
 prepare_start() {
     ensure_state_dir
     if [ ! -e "$state" ] && [ ! -L "$state" ]; then
         # A crash before pending could leave only safe, unreachable backups.
-        for file in "$previous" "$previous_notice" "$state_dir/candidate" "$state_dir/candidate-notice"; do
-            if [ -e "$file" ] || [ -L "$file" ]; then
-                root_file "$file" 600 || fail 'unsafe orphan transaction backup'
-                rm -f -- "$file"
-            fi
-        done
-        sync_state
+        remove_safe_orphans
         return 0
     fi
     read_state
+    if [ "$state_version" = 1 ]; then
+        case $phase in
+            pending) restore_legacy_old ;;
+            committed) clear_state ;;
+        esac
+        return 0
+    fi
     case $phase in
         armed)
             verified_backup
@@ -329,6 +435,23 @@ verify_start() {
         return 0
     fi
     read_state
+    if [ "$state_version" = 1 ]; then
+        case $phase in
+            pending)
+                safe_target && [ "$(sha "$target")" = "$old_sha" ] ||
+                    fail 'legacy restored keyboard digest mismatch'
+                wait_session "$old_sha" || fail 'legacy restored keyboard session did not become ready'
+                clear_state
+                ;;
+            committed)
+                safe_target && [ "$(sha "$target")" = "$new_sha" ] ||
+                    fail 'legacy committed keyboard digest mismatch'
+                wait_session "$new_sha" || fail 'legacy committed keyboard session did not become ready'
+                clear_state
+                ;;
+        esac
+        return 0
+    fi
     case $phase in
         testing)
             verified_backup
@@ -365,8 +488,7 @@ activate() {
     [ ! -e "$state" ] && [ ! -L "$state" ] || fail 'unfinished transaction requires recovery'
     candidate_snapshot=$state_dir/candidate
     notice_snapshot=$state_dir/candidate-notice
-    remove_file "$candidate_snapshot"
-    remove_file "$notice_snapshot"
+    remove_safe_orphans
     snapshot_stage "$stage" "$candidate_snapshot" 16777216
     snapshot_stage "$notice_stage" "$notice_snapshot" 1048576
     [ "$(sha "$candidate_snapshot")" = "$expected_new" ] || fail 'staged keyboard digest mismatch'
@@ -402,16 +524,14 @@ activate() {
         write_state committed "$old_sha" "$expected_new" "$prior_notice" - 0 0
         checkpoint after-committed
         clear_state
-        remove_file "$candidate_snapshot"
-        remove_file "$notice_snapshot"
+        remove_safe_orphans
         return 0
     fi
     read_state
     write_state rollback "$old_sha" "$new_sha" "$prior_notice" - 0 0
     restore_old || fail 'candidate failed and old keyboard could not be restored'
     if normal_recovery; then
-        remove_file "$candidate_snapshot"
-        remove_file "$notice_snapshot"
+        remove_safe_orphans
         printf '%s\n' 'candidate failed; old keyboard restored' >&2
         return 1
     fi
@@ -421,8 +541,11 @@ activate() {
 [ "$#" -eq 1 ] || fail 'expected exactly one action'
 case $1 in
     activate) activate ;;
+    validate-upgrade) validate_upgrade ;;
+    normalize-upgrade) normalize_upgrade ;;
     prepare-start) prepare_start ;;
     verify-start) verify_start ;;
     verify-current) verify_current ;;
+    finalize-start) verify_start ;;
     *) fail 'unknown action' ;;
 esac
