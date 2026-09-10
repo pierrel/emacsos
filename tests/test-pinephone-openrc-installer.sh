@@ -169,6 +169,11 @@ sed \
     -e 's|printf '\''%s\\n'\'' 1 >"$service_cgroup/cgroup.kill"|: >"$service_cgroup/cgroup.procs"; printf '\''populated 0\\n'\'' >"$service_cgroup/cgroup.events"|' \
     /source/openrc-update-root >/tmp/openrc-update-root
 chmod 0755 /tmp/openrc-update-root
+awk '
+    { print }
+    /^    bootstrap_tmp=\$\(mktemp / { print "    sleep 30" }
+' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-signal
+chmod 0755 /tmp/openrc-update-bootstrap-signal
 
 for group in seat video audio; do
     getent group "$group" >/dev/null || addgroup -S "$group"
@@ -452,6 +457,79 @@ grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
 [ ! -e /etc/nftables.d/95-emacsos-callback.nft ]
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
+
+# A signal after same-directory mktemp but before installation must use the
+# updater's outer cleanup without stopping the UI or leaving a root temp.
+if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
+    -print -quit | grep -q .; then
+    printf '%s\n' 'unexpected preexisting compatibility-helper temporary' >&2
+    exit 1
+fi
+: >/tmp/rc-service-log
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-bootstrap-signal >/tmp/update-bootstrap-signal.out 2>&1 &
+bootstrap_pid=$!
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
+        -print -quit | grep -q .; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+if [ "$attempt" -eq 50 ]; then
+    kill -TERM "$bootstrap_pid" 2>/dev/null || true
+    wait "$bootstrap_pid" 2>/dev/null || true
+    printf '%s\n' 'bootstrap signal fixture did not reach its temporary file' >&2
+    exit 1
+fi
+kill -TERM "$bootstrap_pid"
+if wait "$bootstrap_pid"; then
+    printf '%s\n' 'interrupted bootstrap unexpectedly succeeded' >&2
+    exit 1
+fi
+if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
+    -print -quit | grep -q .; then
+    printf '%s\n' 'interrupted bootstrap left a compatibility-helper temporary' >&2
+    exit 1
+fi
+if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
+    printf '%s\n' 'interrupted bootstrap stopped the UI' >&2
+    exit 1
+fi
+
+# Every existing file that the update might later snapshot is checked before
+# the forward-only compatibility-helper replacement or any UI stop.  Exercise
+# the per-user token and reference as well as an ordinary root backup source.
+assert_preflight_rejection() {
+    label=$1
+    helper_before=$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)
+    : >/tmp/rc-service-log
+    if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+        /bin/sh /tmp/openrc-update-root >/tmp/update-preflight.out 2>&1; then
+        printf '%s\n' "updater accepted unsafe $label" >&2
+        exit 1
+    fi
+    [ "$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)" = "$helper_before" ]
+    if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
+        printf '%s\n' "unsafe $label stopped the UI before rejection" >&2
+        exit 1
+    fi
+}
+
+chmod 0644 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+assert_preflight_rejection token
+chmod 0600 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+
+chmod 0644 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+assert_preflight_rejection command-reference
+chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+
+rm -f /usr/local/share/emacsos-openrc/os.el
+ln -s /repo/os.el /usr/local/share/emacsos-openrc/os.el
+assert_preflight_rejection backup-source
+install -o root -g root -m 0644 /repo/os.el /usr/local/share/emacsos-openrc/os.el
 
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config
