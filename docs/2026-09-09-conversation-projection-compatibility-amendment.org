@@ -1,0 +1,25 @@
+#+TITLE: Conversation projection compatibility amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The September 8 record said =server/emacsos_server/stream.py= would delegate
+the existing chunk projections to Assist shared helpers.  The deployed
+EmacsOS server instead shares =assist.stream_chunks.unwrap_messages= for
+LangGraph's updates-mode message wrapper, while retaining its small local
+projections for messages-mode text, tool calls, and update-status text.
+
+That boundary is intentional for this independently deployable client.  The
+current public Assist main exports =unwrap_messages= but does not yet export a
+paired public text-projection helper.  Importing a branch-only helper would
+make a normal EmacsOS installation against Assist main fail at runtime.  The
+local text helper keeps the same narrow contract: only string model content,
+never =type == "tool"= content.  It will be replaced by a public paired Assist
+release only when the EmacsOS dependency contract can require that release.
+
+* Lineage
+
+This amends [[file:2026-09-08-conversation-interface-streaming.org][one native
+conversation interface]].  That implementation record remains historical.
+This amendment documents the compatible current dependency boundary rather
+than changing the original plan in place.

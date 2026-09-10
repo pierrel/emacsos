@@ -187,6 +187,24 @@ invalidate the live markers); otherwise revert normally."
     (let ((revert-buffer-function nil))
       (apply #'revert-buffer args))))
 
+(defun emacos-assist-refresh ()
+  "Reload this .assist conversation from disk without a confirmation prompt.
+
+Refuse a modified buffer rather than discard an unsaved prompt.  An active
+stream is rejected before the buffer changes so its rendering markers remain
+valid."
+  (interactive)
+  (unless (derived-mode-p 'emacos-assist-mode)
+    (user-error "This is not a .assist conversation"))
+  (when (buffer-modified-p)
+    (user-error "Save or send this .assist draft before refreshing"))
+  (emacos-assist--revert t t))
+
+(defun emacos-assist-send ()
+  "Send the current file-backed conversation through its own chat surface."
+  (interactive)
+  (emacos--chat-send (current-buffer)))
+
 ;;; Mode
 
 (defun emacos-assist--init-buffer ()
@@ -223,13 +241,22 @@ existing transcript read-only.  Leaves the buffer's modified flag unchanged
 (define-derived-mode emacos-assist-mode text-mode "Assist"
   "Major mode for `.assist' file-backed chat conversations.
 The file's transcript is a read-only chat surface with an editable prompt;
-the utility-row Chat/SEND button streams the input into this buffer and the
+the utility-row Chat/SEND/ABORT button streams or stops the input in this buffer and the
 agent reads/edits/runs files in this file's directory on the phone."
   (variable-pitch-mode 1)
   (emacos--chat-enable-presentation)
   (auto-save-mode -1)               ; the chat surface saves on its own events
   (setq-local revert-buffer-function #'emacos-assist--revert)
+  (emacos-conversation-install-actions
+   '((send . emacos-assist-send)
+     (abort . emacos--chat-abort)
+     (new . emacos-assist-new-file)
+     (refresh . emacos-assist-refresh)
+     (forget . emacos-assist-forget)))
   (emacos-assist--init-buffer))
+
+(define-key emacos-assist-mode-map (kbd "RET")
+            #'emacos-conversation-activate-or-newline)
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.assist\\'" . emacos-assist-mode))

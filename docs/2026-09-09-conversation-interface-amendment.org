@@ -1,0 +1,55 @@
+#+TITLE: Conversation interface corrections amendment
+#+DATE: <2026-09-09>
+
+* Purpose
+
+This amendment records three corrections discovered after the conversation
+streaming design was written. It does not rewrite the historical records.
+
+* Nonmodal file-chat refresh
+
+=emacos-assist-refresh= is the file-backed conversation's Refresh action. It
+never opens a confirmation prompt: an unchanged =.assist= buffer reloads from
+disk immediately. It refuses a modified buffer rather than discarding the
+draft, and delegates active-stream protection to the existing revert guard
+before a buffer change can invalidate stream markers. It also rejects calls
+outside =emacos-assist-mode=. The command reference names this exact user
+behavior.
+
+* Global canonical navigation
+
+Opening or starting a canonical Assist thread is global navigation, not an
+operation owned by the current conversation. =C-c C-a t= and =C-c C-a n= are
+therefore supplied by the small global minor-mode map, while the current
+buffer's action table contains only its owned operations. This clarifies the
+lineage of the global-navigation correction: it supersedes only the
+capability-dispatch treatment of those two keys, not the shared conversation
+actions or their precedence.
+
+* Kernel-operation count
+
+The phrase "seven concrete operations" in the September 8 implementation plan
+was a count typo. The enumerated kernel has eight operations:
+=commit-user=, =begin-assistant=, =replace-marked=, =set-status=,
+=reset-assistant=, =append-delta=, =finish-assistant=, and =fail-assistant=.
+No runtime behavior changed.
+
+* Lineage
+
+This amends [[file:2026-09-08-conversation-interface-streaming.org][one native
+conversation interface]] and [[file:2026-09-09-global-assist-thread-navigation.org][the
+global Assist thread navigation amendment]]. The earlier documents remain
+immutable historical records. The September 8 record established the shared
+kernel and adapter boundary; the global-navigation amendment moved only the
+two navigation keys out of buffer-local capability dispatch. This amendment
+adds the precise nonmodal refresh behavior, makes that navigation lineage
+explicit, and corrects the historical operation count without changing either
+record.
+
+* Validation
+
+=tests/test-emacos-assist.el= proves Refresh does not call either confirmation
+function, reloads only through the ordinary revert path, and rejects modified,
+active-stream, and non-=.assist= buffers. =tests/test-chat.el= proves the two
+global navigation bindings remain effective from an Org buffer with no
+conversation actions.

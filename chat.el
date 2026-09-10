@@ -15,11 +15,14 @@
 (require 'cl-lib)
 (require 'font-lock)
 (require 'json)
+(require 'mouse)
 (require 'url)
 (require 'url-http)
 
 ;; Defined in os.el (which `require's this file); resolved at call time.
 (declare-function emacos--target "os")
+(declare-function emacos-assist-web-new-thread "assist-web")
+(declare-function emacos-assist-web-open-thread "assist-web")
 
 ;;; Customization
 
@@ -183,6 +186,118 @@ rather than pushing it forward.")
               word-wrap t
               filter-buffer-substring-function #'emacos--chat-copy-raw))
 
+(defun emacos-conversation-activate-or-newline ()
+  "Open a literal HTTP(S) object at point, otherwise insert an ordinary newline."
+  (interactive)
+  (let ((url (get-text-property (point) 'emacos-conversation-url)))
+    (if (emacos-conversation--safe-url-p url)
+        (browse-url url)
+      (newline))))
+
+(defun emacos-conversation--safe-url-p (url)
+  "Return non-nil for one literal HTTP(S) URL suitable for explicit opening."
+  (and (stringp url)
+       (string-match-p "\\`https?://[^[:space:]]+\\'" url)
+       (cl-loop for character across url
+                never (or (< character #x20)
+                          (<= #x7f character #x9f)))))
+
+(defvar emacos-conversation-object-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'emacos-conversation-open-object)
+    (define-key map (kbd "RET") #'emacos-conversation-open-object)
+    map)
+  "Keymap on validated, inert-until-activated native conversation objects.")
+
+(defun emacos-conversation-open-object (&optional event)
+  "Open the validated native object at point, or explain that none is present."
+  (interactive (list last-input-event))
+  (when (mouse-event-p event) (mouse-set-point event))
+  (let ((url (get-text-property (point) 'emacos-conversation-url)))
+    (if (emacos-conversation--safe-url-p url)
+        (browse-url url)
+      (message "No HTTP(S) object at point"))))
+
+(defvar-local emacos-conversation-actions nil
+  "Alist of capabilities installed by this conversation backend.")
+
+(defun emacos-conversation-install-actions (actions)
+  "Install backend-owned ACTIONS in the current conversation buffer.
+
+Each entry is (CAPABILITY . COMMAND).  Transport, persistence, and lifecycle
+remain owned by the backend; this small kernel owns only discovery and binding."
+  (setq-local emacos-conversation-actions actions)
+  (local-set-key (kbd "C-c C-a") emacos-conversation-command-map))
+
+(defun emacos-conversation--run (capability)
+  "Invoke CAPABILITY in this buffer, or give one compact unavailable message."
+  (let ((command (alist-get capability emacos-conversation-actions)))
+    (if (commandp command)
+        (call-interactively command)
+      (message "%s is unavailable in this conversation"
+               (capitalize (replace-regexp-in-string "-" " " (symbol-name capability)))))))
+
+(dolist (entry '((send . emacos-conversation-send)
+                 (abort . emacos-conversation-abort)
+                 (refresh . emacos-conversation-refresh)
+                 (older . emacos-conversation-load-older)
+                 (forget . emacos-conversation-forget)
+                 (catalog . emacos-conversation-refresh-catalog)))
+  (defalias (cdr entry)
+    `(lambda () ,(format "Run the %s action for this conversation." (car entry))
+       (interactive) (emacos-conversation--run ',(car entry)))))
+
+(defun emacos-conversation-new ()
+  "Start a canonical Assist thread from any buffer."
+  (interactive)
+  (require 'assist-web)
+  (call-interactively #'emacos-assist-web-new-thread))
+
+(defun emacos-conversation-open-thread ()
+  "Open the canonical Assist thread chooser from any buffer."
+  (interactive)
+  (require 'assist-web)
+  (call-interactively #'emacos-assist-web-open-thread))
+
+(defun emacos-conversation-command ()
+  "Run a current-buffer action or global canonical Assist navigation."
+  (interactive)
+  (let* ((choices (append (mapcar (lambda (entry) (symbol-name (car entry)))
+                                  emacos-conversation-actions)
+                         '("new Assist thread" "open Assist thread")))
+         (choice (and choices (completing-read "Conversation: " choices nil t))))
+    (pcase choice
+      ("new Assist thread" (emacos-conversation-new))
+      ("open Assist thread" (emacos-conversation-open-thread))
+      ((and (pred stringp) action) (emacos-conversation--run (intern action)))
+      (_ (message "No conversation actions are available here")))))
+
+(defvar emacos-conversation-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "s") #'emacos-conversation-send)
+    (define-key map (kbd "a") #'emacos-conversation-abort)
+    (define-key map (kbd "n") #'emacos-conversation-new)
+    (define-key map (kbd "g") #'emacos-conversation-refresh)
+    (define-key map (kbd "o") #'emacos-conversation-open-object)
+    (define-key map (kbd "l") #'emacos-conversation-load-older)
+    (define-key map (kbd "f") #'emacos-conversation-forget)
+    (define-key map (kbd "t") #'emacos-conversation-open-thread)
+    (define-key map (kbd "r") #'emacos-conversation-refresh-catalog)
+    map)
+  "EmacsOS Assist commands under the conventional C-c C-a prefix.")
+
+(defvar emacos-conversation-global-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-a n") #'emacos-conversation-new)
+    (define-key map (kbd "C-c C-a t") #'emacos-conversation-open-thread)
+    map)
+  "Global bindings for canonical Assist thread navigation.")
+
+(define-minor-mode emacos-conversation-global-mode
+  "Keep canonical Assist thread navigation available in every buffer."
+  :global t
+  :keymap emacos-conversation-global-mode-map)
+
 (defun emacos--chat-add-face (beg end face)
   "Append FACE to text from BEG to END through the inert font-lock channel."
   (when (< beg end)
@@ -207,7 +322,9 @@ never replaced or hidden."
       (save-excursion
         (remove-text-properties beg end
                                 '(font-lock-face nil wrap-prefix nil
-                                  emacos--chat-verbatim nil))
+                                  emacos--chat-verbatim nil
+                                  emacos-conversation-url nil keymap nil
+                                  mouse-face nil))
         (save-restriction
           (narrow-to-region beg end)
           (let ((in-fence nil))
@@ -280,6 +397,13 @@ never replaced or hidden."
                                      'emacos-chat-markup-face)
               (emacos--chat-add-face (match-end 1) (match-end 0)
                                      'emacos-chat-markup-face)
+              (let ((target (match-string-no-properties 2)))
+                (when (emacos-conversation--safe-url-p target)
+                  (add-text-properties
+                   (match-beginning 1) (match-end 1)
+                   `(emacos-conversation-url ,target
+                     keymap ,emacos-conversation-object-map
+                     mouse-face highlight))))
               (put-text-property (match-beginning 0) (match-end 0)
                                  'emacos--chat-verbatim t)))
 
@@ -359,11 +483,58 @@ best-effort and never allowed to interrupt chat lifecycle code."
               (error-message-string error))
      nil)))
 
+;;; Marker-scoped conversation kernel
+
+(defun emacos-conversation-commit-user (prefix-start body-start end)
+  "Present the just-committed user region PREFIX-START through END."
+  (emacos--chat-present-message prefix-start body-start end 'user))
+
+(defun emacos-conversation-begin-assistant (body-start body-end)
+  "Return non-inserting markers delimiting one provisional assistant body."
+  (cons (copy-marker body-start nil) (copy-marker body-end nil)))
+
+(defun emacos-conversation-replace-marked (start end text)
+  "Replace START through END with TEXT and return the new exclusive end.
+This is the shared exact-text primitive for conversation adapters.  The caller
+owns marker storage; it only changes the marked, read-only transcript region
+and preserves point in the editable draft."
+  (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+    (save-excursion
+      (goto-char start)
+      (delete-region start end)
+      (let ((before (point)))
+        (insert text)
+        (add-text-properties before (point)
+                             '(read-only t front-sticky t rear-nonsticky t))
+        (point)))))
+
+(defun emacos-conversation-set-status (start end status &optional trailing-space)
+  "Replace the status marker region START..END with visible STATUS.
+When TRAILING-SPACE is non-nil, retain the local stream's token separator."
+  (emacos-conversation-replace-marked
+   start end (format "[%s]%s" status (if trailing-space " " ""))))
+
+(defun emacos-conversation-reset-assistant (start end)
+  "Clear only the provisional assistant marker region START..END."
+  (emacos-conversation-replace-marked start end ""))
+
+(defun emacos-conversation-append-delta (end text)
+  "Append read-only TEXT at provisional assistant marker END and return its end."
+  (emacos-conversation-replace-marked end end text))
+
+(defun emacos-conversation-finish-assistant (body-start body-end)
+  "Present the completed assistant body delimited by BODY-START and BODY-END."
+  (emacos--chat-present-markdown-1 body-start body-end))
+
+(defun emacos-conversation-fail-assistant (start end reason)
+  "Replace provisional START..END with one read-only failure REASON."
+  (emacos-conversation-replace-marked start end (format "[%s]" reason)))
+
 ;; The chat stream engine is buffer-agnostic: handlers render into the
 ;; buffer that initiated the current stream, not the literal *chat*.  That
 ;; buffer is the *chat* scratch or a file-backed `emacos-assist-mode' buffer.
-;; The single server-wide stream lock means only one stream is ever in
-;; flight, so this global safely names its target for the duration.
+;; The phone-wide active-surface slot means only one conversation stream is
+;; ever in flight, so this global safely names the local transport target.
 (defvar emacos--chat-stream-buffer nil
   "Buffer the in-flight stream renders into; set at SEND.  See above.")
 
@@ -435,6 +606,11 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
     ;; in its own buffer).  The face family is set in the init snippet.
     (variable-pitch-mode 1)
     (emacos--chat-enable-presentation)
+    (emacos-conversation-install-actions
+     '((send . emacos--chat-send)
+       (abort . emacos--chat-abort)
+       (new . emacos--chat-new-chat)))
+    (local-set-key (kbd "RET") #'emacos-conversation-activate-or-newline)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (emacos--chat-write-prompt))
@@ -476,7 +652,11 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
   "Open a new bot line in the active conversation buffer.  Set up the three
 markers (insert / status-start / status-end) used by subsequent
 event handlers."
-  (let ((buf (emacos--chat-render-buffer)))
+  (if (markerp emacos--chat-stream-insert-marker)
+      ;; Send already reserved the single provisional region before opening
+      ;; the transport; a delayed start only updates that existing status.
+      (emacos--chat-handle-status '(:text "working"))
+    (let ((buf (emacos--chat-render-buffer)))
     (with-current-buffer buf
       ;; Clear any stale per-stream first-token timer.
       (when (timerp emacos--chat-first-token-timer)
@@ -512,15 +692,15 @@ event handlers."
                 ;; clear-bracket can't accidentally delete streamed
                 ;; tokens.  handle-status `set-marker's status-end
                 ;; explicitly after inserting its bracket text.
-                (setq emacos--chat-status-start
-                      (copy-marker (point) nil))
-                (setq emacos--chat-status-end
-                      (copy-marker (point) nil))
+                (pcase-let ((`(,status-start . ,status-end)
+                             (emacos-conversation-begin-assistant (point) (point))))
+                  (setq emacos--chat-status-start status-start
+                        emacos--chat-status-end status-end))
                 ;; The "\nbot> " text we just inserted needs read-only
                 ;; props applied (the per-token insertion path applies
                 ;; props to each token).
                 (add-text-properties line-start (point)
-                                     '(read-only t front-sticky t rear-nonsticky t))))))))))
+                                     '(read-only t front-sticky t rear-nonsticky t)))))))))))
 
 (defun emacos--chat-clear-status-bracket ()
   "Delete the status bracket between `status-start' and `status-end'.
@@ -542,12 +722,9 @@ Caller must `inhibit-read-only`."
         (let ((inhibit-read-only t))
           (save-excursion
             (emacos--chat-clear-status-bracket)
-            (goto-char emacos--chat-status-end)
-            (let ((before (point)))
-              (insert "[" text "] ")
-              (add-text-properties before (point)
-                                   '(read-only t front-sticky t rear-nonsticky t))
-              (set-marker emacos--chat-status-end (point)))))))))
+            (set-marker emacos--chat-status-end
+                        (emacos-conversation-set-status
+                         emacos--chat-status-start emacos--chat-status-end text t))))))))
 
 (defun emacos--chat-handle-token (event)
   "Append the token text after `status-end'.  First token also
@@ -563,12 +740,9 @@ working silently)."
           (save-excursion
             (when (= emacos--chat-tokens-seen 1)
               (emacos--chat-clear-status-bracket))
-            (goto-char emacos--chat-stream-insert-marker)
-            (let ((before (point)))
-              (insert text)
-              (add-text-properties before (point)
-                                   '(read-only t front-sticky t rear-nonsticky t))
-              (set-marker emacos--chat-stream-insert-marker (point)))))))))
+            (set-marker emacos--chat-stream-insert-marker
+                        (emacos-conversation-append-delta
+                         emacos--chat-stream-insert-marker text))))))))
 
 (defun emacos--chat-handle-heartbeat (_event)
   "Heartbeat is purely transport-level — no UI change."
@@ -593,7 +767,7 @@ also presents the complete Markdown body; a nil watchdog event leaves it raw."
                          (markerp emacos--chat-status-start)
                          (markerp emacos--chat-stream-insert-marker))
                 (condition-case error
-                    (emacos--chat-present-markdown-1
+                    (emacos-conversation-finish-assistant
                      (marker-position emacos--chat-status-start)
                      (marker-position emacos--chat-stream-insert-marker))
                   (error
@@ -618,11 +792,11 @@ Otherwise (error before any server response), synthesize a fresh
              ;; Stream had a start: append to existing bot line.
              ((markerp emacos--chat-stream-insert-marker)
               (emacos--chat-clear-status-bracket)
-              (goto-char emacos--chat-stream-insert-marker)
-              (let ((before (point)))
-                (insert "[error: " reason "]")
-                (add-text-properties before (point)
-                                     '(read-only t front-sticky t rear-nonsticky t))))
+              (set-marker emacos--chat-stream-insert-marker
+                          (emacos-conversation-fail-assistant
+                           emacos--chat-stream-insert-marker
+                           emacos--chat-stream-insert-marker
+                           (format "error: %s" reason))))
              ;; Error before any server response: render a fresh
              ;; bot line above the prompt directly.
              (t
@@ -921,8 +1095,8 @@ sends its per-file thread id + the file's directory so the server keys a
               emacos--assist-active-surface 'chat
               emacos--chat-tokens-seen 0
               emacos--chat-stream-buffer buf)
-        ;; Render the you> line + clear input region right away;
-        ;; the bot line is created by the start handler.
+        ;; Commit the user turn and reserve its one provisional assistant body
+        ;; before url-retrieve can call any callback.
         (let ((inhibit-read-only t))
           (with-current-buffer buf
             (emacos--chat-clear-input buf)
@@ -938,10 +1112,12 @@ sends its per-file thread id + the file's directory so the server keys a
                       (insert "you> ")
                       (let ((body-start (point)))
                         (insert msg)
-                        (emacos--chat-present-message
-                         prefix-start body-start (point) 'user)))
+                        (emacos-conversation-commit-user
+                         prefix-start body-start (point))))
                     (add-text-properties before (point)
                                          '(read-only t front-sticky t rear-nonsticky t))))))))
+        (emacos--chat-handle-start nil)
+        (emacos--chat-handle-status '(:text "queued"))
         ;; First-token watchdog.  Fires once if no event lands
         ;; within the configured timeout AND we're still in flight.
         ;; Uses `emacos--chat-terminate-stream' so the URL process is
@@ -1207,23 +1383,44 @@ not `current-buffer' (safety-control renders can run with *keyboard* current)."
   "Non-nil when a local, file-backed, or web Assist surface is on top."
   (and (emacos--chat-surface-on-top) t))
 
+(defun emacos-conversation-primary-action ()
+  "Send when idle, or abort/detach when this conversation owns the stream."
+  (interactive)
+  (if (emacos-conversation-owns-active-stream-p (current-buffer))
+      (emacos-conversation-abort)
+    (if emacos-conversation-actions
+        (emacos-conversation-send)
+      ;; The legacy scratch test surface may predate installation; its
+      ;; transport remains the same local adapter.
+      (emacos--chat-send (current-buffer)))))
+
+(defun emacos-conversation-owns-active-stream-p (buffer)
+  "Return non-nil only when BUFFER owns the phone-wide stream control."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (or (and emacos--chat-in-flight
+                  (eq emacos--chat-stream-buffer buffer))
+             (and (boundp 'emacos-assist-web--in-flight)
+                  emacos-assist-web--in-flight
+                  (eq emacos--assist-active-surface buffer))))))
+
 (defun emacos--chat-button ()
-  "Utility-row Chat/SEND button for the active Assist surface.
-Open local chat when no Assist surface is on top.  Otherwise send through the
-surface-specific command.  While a stream is active, its send command refuses
-a second request."
+  "Utility-row Chat/SEND/ABORT button for the active Assist surface."
   (interactive)
   (let ((surface (emacos--chat-surface-on-top)))
     (if surface
-        (with-current-buffer surface
-          (if (derived-mode-p 'emacos-assist-web-mode)
-              (emacos-assist-web-send)
-            (emacos--chat-send surface)))
+        (with-current-buffer surface (emacos-conversation-primary-action))
       (emacos--chat-show-top-buffer))))
 
 (defun emacos--chat-button-label ()
-  "Return \"SEND\" on an Assist surface and \"Chat\" elsewhere."
-  (if (emacos--chat-on-top-p) "SEND" "Chat"))
+  "Return the active conversation's truthful Chat/SEND/ABORT label."
+  (if (not (emacos--chat-on-top-p)) "Chat"
+    (if (and (fboundp 'emacos--target)
+             (emacos-conversation-owns-active-stream-p
+              (emacos--chat-surface-on-top)))
+        "ABORT" "SEND")))
+
+(emacos-conversation-global-mode 1)
 
 (provide 'chat)
 ;;; chat.el ends here

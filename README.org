@@ -86,7 +86,7 @@ The =emacos--tap-key= function handles multi-tap and inserts into the correct bu
 emacsclient -f ./server-file -e '(emacos--tap-key "qw")'    # types "q"
 emacsclient -f ./server-file -e '(emacos--tap-key "qw")'    # cycles to "w"
 emacsclient -f ./server-file -e '(emacos--tap-space)'        # space
-emacsclient -f ./server-file -e '(emacos--tap-return)'       # newline
+emacsclient -f ./server-file -e '(emacos--tap-return)'       # exit minibuffer; otherwise open safe object, or newline
 emacsclient -f ./server-file -e '(emacos--tap-backspace)'    # delete backward
 #+end_src
 
@@ -203,6 +203,33 @@ shell:
 #+begin_src sh
 ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 #+end_src
+
+* Canonical Assist Web threads
+
+Assist Web thread buffers use the authenticated HTTPS phone API and SSE only as
+a provisional observation: the final canonical Assist snapshot remains truth.
+Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
+deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
+send at five seconds, and an observation at 30 minutes plus one five-second
+final-send grace period.  A reserved ordinary
+busy follower or initializing run returns =live_text=true=, but its SSE is a
+delta-empty status observation until the eventual worker starts.  Pi and
+journal saturation return =live_text=false=; an older Assist server visibly
+falls back to status-only observation.  ABORT before POST acceptance leaves an
+acceptance-unknown committed turn; Send reuses its exact idempotency key to
+re-observe it.  Afterwards, only HTTP 200 =cancelled= confirms cancellation;
+structured HTTP 409 =running= or =transitioning= truthfully detaches, and other
+terminal outcomes reconcile the canonical snapshot.  =awaiting_approval= is a
+nonterminal Run state, but it ends this finite live-text observation and also
+reconciles the canonical snapshot so the approval state becomes visible.
+If Assist confirms that the thread was deleted while an observer is open, the
+client retains visible partial text and the next draft, clears the accepted
+retry identity, and starts the next submission as a new thread.  If the durable
+Run store becomes unavailable, it instead preserves that identity and reports
+that an operator must repair observation; it never retries automatically.  The
+current closure corrections are [[file:docs/2026-09-09-conversation-observation-closure-amendment.org][the observation closure amendment]],
+[[file:docs/2026-09-09-conversation-deletion-closure-amendment.org][the deleted-thread closure amendment]],
+and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the stream-batching amendment]].
 
 * Project Structure
 

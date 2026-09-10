@@ -1,0 +1,25 @@
+#+TITLE: Conversation stream batching-bound amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The earlier September 9 size-bound amendment incorrectly described a 64 KiB
+limit on one raw URL process-filter callback.  TCP may legally coalesce many
+bounded SSE records into one callback, so rejecting that callback could cut off
+a healthy replay.  The client instead bounds HTTP headers, each complete SSE
+record, and the only retained incomplete record at 64 KiB.  It dispatches and
+discards complete records from a batched callback without treating their total
+as one event.
+
+This preserves the live-streaming contract: Assist still emits 7 KiB text
+chunks and caps one encoded SSE record at 48 KiB; the client still accepts a
+16 KiB decoded delta.  A process filter necessarily receives an already
+allocated byte string, so a callback-size check cannot prevent that allocation
+and must not reject a valid batch.
+
+* Lineage
+
+This amends [[file:2026-09-09-conversation-streaming-boundary-amendment.org][the
+conversation streaming size-bound amendment]].  That earlier amendment remains
+historical.  This correction assigns the 64 KiB limit only to units the client
+can validate without breaking legal transport batching.

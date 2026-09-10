@@ -23,6 +23,42 @@
     (insert "no header here\n")
     (should (null (emacos-assist--read-header)))))
 
+(ert-deftest test-assist-physical-ret-in-file-chat-remains-newline-without-an-object ()
+  (with-temp-buffer
+    (emacos-assist-mode)
+    (goto-char (point-max))
+    (call-interactively (lookup-key (current-local-map) (kbd "RET")))
+    (should (string-suffix-p "\n" (buffer-string)))))
+
+(ert-deftest test-assist-send-targets-the-current-file-chat-surface ()
+  "The shared action map must not fall back to the unrelated *chat* buffer."
+  (with-temp-buffer
+    (emacos-assist-mode)
+    (let (surface)
+      (cl-letf (((symbol-function 'emacos--chat-send)
+                 (lambda (&optional value) (setq surface value))))
+        (emacos-conversation--run 'send))
+      (should (eq surface (current-buffer))))))
+
+(ert-deftest test-assist-command-chooser-names-canonical-new-separately ()
+  "A .assist local new-file action cannot mask canonical thread navigation."
+  (with-temp-buffer
+    (emacos-assist-mode)
+    (let (choices started local-new)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq choices collection)
+                   "new Assist thread"))
+                ((symbol-function 'emacos-conversation-new)
+                 (lambda () (setq started t)))
+                ((symbol-function 'emacos-assist-new-file)
+                 (lambda () (setq local-new t))))
+        (emacos-conversation-command))
+      (should (member "new" choices))
+      (should (member "new Assist thread" choices))
+      (should started)
+      (should-not local-new))))
+
 (ert-deftest test-assist-read-header-rejects-malformed-value ()
   ;; The whole value must be a valid slug to end-of-line; a header with an
   ;; embedded invalid char yields nil (mint fresh), not a truncated prefix
@@ -212,6 +248,36 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
            (prompt-start (- istart (length emacos--chat-prompt))))
       (should (= istart (point-max)))                        ; reused, none appended
       (should (get-text-property prompt-start 'read-only))))) ; prompt itself locked
+
+(ert-deftest test-assist-refresh-is-nonconfirming-and-refuses-an-active-stream ()
+  (with-temp-buffer
+    (emacos-assist-mode)
+    (let (revert-args)
+      (cl-letf (((symbol-function 'revert-buffer)
+                 (lambda (&rest args) (setq revert-args args)))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (error "refresh must not prompt")))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) (error "refresh must not prompt"))))
+        (emacos-assist-refresh)
+        (should (equal revert-args '(t t)))
+        (setq revert-args nil)
+        (set-buffer-modified-p t)
+        (should-error (emacos-assist-refresh) :type 'user-error)
+        (should-not revert-args)
+        (set-buffer-modified-p nil)
+        (let ((emacos--chat-in-flight t)
+              (emacos--chat-stream-buffer (current-buffer)))
+          (should-error (emacos-assist-refresh) :type 'user-error)
+          (should-not revert-args))))))
+
+(ert-deftest test-assist-refresh-refuses-other-buffer-types ()
+  (with-temp-buffer
+    (let (reverted)
+      (cl-letf (((symbol-function 'revert-buffer)
+                 (lambda (&rest _) (setq reverted t))))
+        (should-error (emacos-assist-refresh) :type 'user-error)
+        (should-not reverted)))))
 
 (ert-deftest test-assist-mode-presents-reopened-markdown-without-changing-file-text ()
   (with-temp-buffer

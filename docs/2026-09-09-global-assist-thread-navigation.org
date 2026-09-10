@@ -1,0 +1,21 @@
+#+title: Global Assist thread navigation amendment
+#+date: 2026-09-09
+
+* Correction
+
+Opening or starting a canonical Assist thread is navigation, like opening a
+file.  It does not depend on the current conversation buffer's registered
+capabilities.  This supersedes only the capability-dispatch treatment of the
+=t= thread chooser and =n= new-thread command in
+=2026-09-08-conversation-interface-streaming.org=.
+
+=C-c C-a t= and =C-c C-a n= use a global minor-mode map containing only those
+two navigation keys, so major-mode bindings such as Org's =C-c C-a= cannot hide
+them and unrelated conversation keys retain their existing precedence.  Their
+interactive wrappers load =assist-web= when needed, then invoke the canonical
+chooser or new-thread command.  The current buffer's action table retains only
+operations owned by that conversation.
+
+The regression test starts in an Org buffer with an empty conversation action
+table and proves that both effective key bindings load and invoke the canonical
+commands.
