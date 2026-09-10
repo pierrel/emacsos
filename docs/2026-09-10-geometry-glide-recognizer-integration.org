@@ -24,5 +24,6 @@ isolation and the transactional phone installer are unchanged.
 
 The native wvkbd tests, sanitizers, dictionary regeneration, fuzzing, exact
 AArch64 cross-build, largest-bucket benchmark, EmacsOS Elisp and server suites,
-and PinePhone script suite pass.  Deployment and live word-entry acceptance
-remain pending.
+and PinePhone script suite pass.  The exact AArch64 build was deployed through
+the transactional installer, the installed artifact and running service were
+verified, and live word entry plus modifier swipes passed on the PinePhone.
