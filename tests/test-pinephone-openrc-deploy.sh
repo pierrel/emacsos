@@ -363,17 +363,19 @@ grep -F 'su user -s /bin/sh -c' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'emacsos-lab:emacsos-lab:600:1:regular file' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
-quiesce_line=$(grep -nF 'restart_only=1' "$deploy_dir/openrc-update-root")
-quiesce_line=${quiesce_line%%:*}
 token_check_line=$(grep -nF 'token_target=/var/lib/emacsos-lab' \
     "$deploy_dir/openrc-update-root")
 token_check_line=${token_check_line%%:*}
 token_backup_line=$(grep -nF \
-    "'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token'" \
+    'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token' \
     "$deploy_dir/openrc-update-root")
 token_backup_line=${token_backup_line%%:*}
-[ "$quiesce_line" -lt "$token_check_line" ]
-[ "$token_check_line" -lt "$token_backup_line" ]
+backup_copy_line=$(grep -nF 'for pair in $backup_pairs; do' \
+    "$deploy_dir/openrc-update-root" | tail -1)
+backup_copy_line=${backup_copy_line%%:*}
+[ "$token_backup_line" -lt "$token_check_line" ]
+[ "$token_check_line" -lt "$preflight_line" ]
+[ "$stop_line" -lt "$backup_copy_line" ]
 if grep -F 'assist-web-token' "$deploy_dir/openrc-manifest.sha256" >/dev/null; then
     printf '%s\n' 'secret token must not be pinned in the public manifest' >&2
     exit 1
