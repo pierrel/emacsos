@@ -48,6 +48,20 @@ grep -F 'timeout 60' "$repo_dir/deploy/pinephone/bench-wvkbd-emacos.sh" >/dev/nu
 grep -F 'wvkbd-bench.XXXXXX' "$repo_dir/deploy/pinephone/bench-wvkbd-emacos.sh" >/dev/null
 grep -F "&& file" "$repo_dir/deploy/pinephone/bench-wvkbd-emacos.sh" >/dev/null
 transaction=$repo_dir/deploy/pinephone/wvkbd-transaction-root
+dictionary_symbols=$repo_dir/deploy/pinephone/check-wvkbd-dictionary-symbols.awk
+printf '%s\n' \
+    '1: 0 163647 OBJECT LOCAL DEFAULT 1 glide_word_bytes' \
+    '2: 0 5408 OBJECT LOCAL DEFAULT 1 glide_buckets' |
+    awk -f "$dictionary_symbols"
+if printf '%s\n' \
+    '1: 0 300000 OBJECT LOCAL DEFAULT 1 glide_word_bytes' \
+    '2: 0 5408 OBJECT LOCAL DEFAULT 1 glide_buckets' |
+    awk -f "$dictionary_symbols"; then
+    printf '%s\n' 'oversized dictionary symbols were accepted' >&2
+    exit 1
+fi
+grep -F 'readelf --sym-base=10 -sW "$output"' \
+    "$repo_dir/deploy/pinephone/build-wvkbd-emacos.sh" >/dev/null
 grep -F 'version=2' "$transaction" >/dev/null
 grep -F 'phase=%s' "$transaction" >/dev/null
 grep -F 'prior_notice=%s' "$transaction" >/dev/null

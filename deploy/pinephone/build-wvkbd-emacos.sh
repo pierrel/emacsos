@@ -123,12 +123,9 @@ readelf -l "$benchmark" |
     grep -F 'Requesting program interpreter: /lib/ld-musl-aarch64.so.1' \
         >/dev/null || fail 'benchmark does not use the AArch64 musl interpreter'
 verify_dynamic_contract "$benchmark" benchmark libc.musl-aarch64.so.1
-readelf -sW "$output" | awk '
-    $8 == "glide_word_bytes" || $8 == "glide_word_ranks" || $8 == "glide_buckets" {
-        sum += $3; found++
-    }
-    END { exit !(found == 3 && sum <= 262144) }
-' || fail 'dictionary symbols exceed the 256 KiB bound'
+readelf --sym-base=10 -sW "$output" |
+    awk -f "$repo_dir/deploy/pinephone/check-wvkbd-dictionary-symbols.awk" ||
+    fail 'dictionary symbols exceed the 256 KiB bound'
 [ -f "$notice" ] && [ ! -L "$notice" ] || fail 'build did not produce the notice'
 
 sha256sum "$output"
