@@ -218,6 +218,11 @@ EOF
         if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
         printf "ready\n" >/run/emacsos-ui/ready
         /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        su -s /bin/sh emacsos-lab -c "sleep 300 & echo \$!" >/tmp/non-keyboard-pid
+        cat /run/emacsos-ui/pid /tmp/non-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        kill "$(cat /tmp/non-keyboard-pid)"
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
         # A crash just after commit can meet a stopped service: pre-start must
         # retain only the verified target, clear the marker, then start once.
         /usr/sbin/rc-service emacsos-ui stop

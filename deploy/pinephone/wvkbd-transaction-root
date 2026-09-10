@@ -302,6 +302,7 @@ keyboard_pid() {
         actual=$(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null | sed 's/ $//' || true)
         [ "$actual" = "$command" ] && printf '%s\n' "$pid"
     done <"$service_cgroup/cgroup.procs"
+    return 0
 }
 
 session_gate() {

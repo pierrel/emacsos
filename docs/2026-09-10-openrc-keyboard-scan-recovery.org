@@ -1,0 +1,33 @@
+#+title: OpenRC keyboard process-scan recovery
+#+date: 2026-09-10
+
+* Lineage
+
+This follows [[file:2026-09-10-openrc-session-gate-recovery.org][the session-gate recovery amendment]].  It records an ordering defect
+found by that amendment's =verify-current= check on the live phone.
+
+* Observed boundary
+
+The gate found the one process with the correct keyboard command, but rejected
+the scan before reaching the executable-digest check.  Its process-scan
+function implicitly returned the result of the final loop-body predicate.  The
+live OpenRC cgroup ended with an unrelated =sleep 30= heartbeat process, so the
+function's success depended on cgroup process order.
+
+* Contract
+
+Within its existing 256-entry bound, the scan emits every exact keyboard match
+and explicitly succeeds after reaching end of file.  Its caller remains
+responsible for requiring exactly one emitted PID and verifying that PID's
+executable digest.  Unrelated processes before or after the keyboard do not
+affect a scan within that bound.
+
+The keyboard fixture places an unrelated =emacsos-lab= process after the sole
+keyboard in the synthetic cgroup and requires =verify-current= to pass.  The
+existing zero-keyboard and two-keyboard cases continue to fail.
+
+* Historical supersessions
+
+No earlier statement is superseded.  This makes the ordering-independent
+“exactly one keyboard” contract in the
+[[file:2026-09-10-openrc-session-gate-recovery.org::*Contract][session-gate amendment]] explicit in the implementation.
