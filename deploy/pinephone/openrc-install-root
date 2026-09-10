@@ -10,7 +10,7 @@ stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 reference_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=19e690f53cdf376c92b7f745548f23ff42e2b330dd3245e5053708c6371b49a9
+manifest_hash=7bcbaf65ba1f8628b8822e1d06abddffdc63ac688b3cdafff65b30c17e6338b6
 committed=0
 mutating=0
 lab_group_created=0
@@ -179,7 +179,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -188,13 +188,14 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ "$(stat -c '%s' "$path")" -le 1048576 ] || fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 30 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 31 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper \
     os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
@@ -375,6 +376,8 @@ install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
     /usr/local/share/emacsos-openrc/process-group
 install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
     /usr/local/sbin/emacsos-openrc-suspend
+install -o root -g root -m 0755 "$snapshot/wvkbd-transaction-root" \
+    /usr/local/sbin/emacsos-wvkbd-transaction
 install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
 install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \

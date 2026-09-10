@@ -23,8 +23,20 @@ depend() {
     after modules
 }
 
+runtime_safe_to_remove() {
+    local mount_target mount_targets
+    mount_targets=$(findmnt -rn -o TARGET) || return 1
+    [ -n "$mount_targets" ] || return 1
+    for mount_target in $mount_targets; do
+        case $mount_target in
+            "$1"|"$1"/*) return 1 ;;
+        esac
+    done
+}
+
 start_pre() {
     local cgroup uid group groups runtime
+    /usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1
     cgroup=/sys/fs/cgroup/openrc.emacsos-ui
     [ -d "$cgroup" ] && [ ! -L "$cgroup" ] || return 1
     [ -f "$cgroup/cgroup.procs" ] && [ ! -L "$cgroup/cgroup.procs" ] || return 1
@@ -43,10 +55,14 @@ start_pre() {
     if [ -e "$runtime" ] || [ -L "$runtime" ]; then
         [ -d "$runtime" ] && [ ! -L "$runtime" ] || return 1
         [ "$(stat -c '%u:%g' "$runtime")" = "$uid:$group" ] || return 1
-        findmnt -rn -o TARGET "$runtime" | grep -Fx "$runtime" >/dev/null && return 1
+        runtime_safe_to_remove "$runtime" || return 1
         rm -rf -- "$runtime"
     fi
     install -d -o "$uid" -g "$group" -m 0700 "$runtime"
+}
+
+start_post() {
+    /usr/local/sbin/emacsos-wvkbd-transaction verify-start
 }
 
 stop_post() {
@@ -75,6 +91,6 @@ stop_post() {
     uid=$(id -u emacsos-lab) || return 1
     group=$(id -g emacsos-lab) || return 1
     [ "$(stat -c '%u:%g' "$runtime")" = "$uid:$group" ] || return 1
-    findmnt -rn -o TARGET "$runtime" | grep -Fx "$runtime" >/dev/null && return 1
+    runtime_safe_to_remove "$runtime" || return 1
     rm -rf -- "$runtime"
 }

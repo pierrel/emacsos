@@ -1,0 +1,41 @@
+#+title: OpenRC transaction-lock inheritance recovery
+#+date: 2026-09-10
+
+* Lineage
+
+This follows [[file:2026-09-10-openrc-session-gate-recovery.org][the session-gate recovery amendment]] and
+[[file:2026-09-10-openrc-v1-transaction-recovery.org][the version-1 transaction recovery]].  It records a second live deployment
+failure found while installing their corrected payload.
+
+* Observed boundary
+
+The UI was healthy after rollback, but the next update failed with “keyboard
+install lock is busy.”  The OpenRC supervisor and its logger children held the
+lock.  They had inherited a coordination-lock descriptor from the updater that
+started them, extending the lock from one bounded transaction to the lifetime
+of the UI.
+
+Two launch paths had the same defect: the OpenRC updater retained its keyboard
+lock on descriptor 7, and the standalone keyboard activator retained its
+install lock on descriptor 9.
+
+* Contract
+
+Before invoking OpenRC to start, stop, or restart the persistent UI, both
+transaction helpers close descriptors 7, 8, and 9 in the child command.  These
+are the fixed descriptors for the keyboard, boot-mode, and session-install
+locks.  Redirection applies only to the child, so the transaction caller keeps
+its own locks until it finishes while the supervisor and its descendants
+cannot inherit them.
+
+The keyboard fixture rejects any fake OpenRC launch that can still see one of
+those three locks.  The full keyboard activation and interruption matrix then
+passes.  The OpenRC installer fixture applies the same assertion to session
+updates and passes its install, rollback, reconciliation, and update cases.
+
+* Historical supersessions
+
+No earlier statement is superseded.  This adds an omitted child-descriptor
+lifetime constraint to the [[file:2026-09-08-glide-modifier-keyboard.org::*Cross-repository interface][glide-modifier cross-repository interface]] and the
+[[file:2026-09-10-openrc-session-gate-recovery.org::*Contract][session-gate contract]]: holding a transaction lock in the caller is required,
+while letting a persistent OpenRC child inherit that descriptor is forbidden.

@@ -59,6 +59,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/openrc-suspend-root" \
+    "$deploy_dir/wvkbd-transaction-root" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-sms-root" \
     "$deploy_dir/openrc-network-root" \

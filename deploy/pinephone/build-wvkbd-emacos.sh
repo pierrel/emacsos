@@ -15,6 +15,20 @@ fail() {
     exit 1
 }
 
+verify_dynamic_contract() {
+    path=$1
+    label=$2
+    shift 2
+    dynamic=$(readelf -d "$path") || fail "$label dynamic section is unreadable"
+    if printf '%s\n' "$dynamic" | grep -Eq '\((RPATH|RUNPATH)\)'; then
+        fail "$label contains a runtime library search path"
+    fi
+    needed=$(printf '%s\n' "$dynamic" |
+        sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' | LC_ALL=C sort)
+    expected=$(printf '%s\n' "$@" | LC_ALL=C sort)
+    [ "$needed" = "$expected" ] || fail "$label has unexpected dynamic dependencies"
+}
+
 [ "$#" -eq 0 ] || fail 'arguments are not accepted'
 [ -d "$source_dir" ] && [ ! -L "$source_dir" ] ||
     fail 'WVKBD_REPO_DIR must be a directory, not a symlink'
@@ -39,7 +53,12 @@ mkdir -p -- "$output_dir"
     fail 'WVKBD_BUILD_DIR must be a directory, not a symlink'
 output_dir=$(CDPATH='' cd -- "$output_dir" && pwd)
 output=$output_dir/wvkbd-emacos
-rm -f -- "$output"
+benchmark=$output_dir/bench-glide
+notice=$output_dir/wordninja.txt
+archive=$(mktemp "$output_dir/.wvkbd-archive.XXXXXX")
+cleanup() { rm -f -- "$archive"; }
+trap cleanup EXIT HUP INT TERM
+git -C "$source_dir" archive --format=tar "$expected" >"$archive"
 
 command -v docker >/dev/null 2>&1 || fail 'docker is required'
 if ! docker run --rm --platform linux/arm64 "$image" /bin/true; then
@@ -54,7 +73,7 @@ fi
 host_uid=$(id -u)
 host_gid=$(id -g)
 docker run --rm --platform linux/arm64 \
-    --mount "type=bind,src=$source_dir,dst=/src,readonly" \
+    --mount "type=bind,src=$archive,dst=/source.tar,readonly" \
     --mount "type=bind,src=$output_dir,dst=/out" \
     -e HOST_UID="$host_uid" -e HOST_GID="$host_gid" \
     "$image" /bin/sh -ec '
@@ -67,22 +86,46 @@ docker run --rm --platform linux/arm64 \
             libxkbcommon-dev=1.8.1-r2 \
             scdoc=1.11.3-r0 >/dev/null
         mkdir /build
-        cp -a /src/. /build/
+        tar -xf /source.tar -C /build
         make -C /build BIN=wvkbd-emacos LAYOUT=mobintl
+        make -C /build tests/bench-glide
         temporary=$(mktemp /out/.wvkbd-emacos.XXXXXX)
         trap '\''rm -f -- "$temporary"'\'' EXIT HUP INT TERM
         install -o "$HOST_UID" -g "$HOST_GID" -m 0755 \
             /build/wvkbd-emacos "$temporary"
         mv -f -- "$temporary" /out/wvkbd-emacos
+        install -o "$HOST_UID" -g "$HOST_GID" -m 0755 \
+            /build/tests/bench-glide /out/bench-glide
+        install -o "$HOST_UID" -g "$HOST_GID" -m 0644 \
+            /build/THIRD_PARTY_LICENSES.md /out/wordninja.txt
         temporary=
     '
 
 [ -f "$output" ] && [ ! -L "$output" ] && [ -x "$output" ] ||
     fail 'build did not produce the expected executable'
+[ "$(stat -c '%s' "$output")" -le 16777216 ] ||
+    fail 'artifact exceeds the 16 MiB install bound'
 file "$output" | grep -Eq 'ELF 64-bit LSB (pie )?executable, ARM aarch64' ||
     fail 'artifact is not an AArch64 ELF executable'
 readelf -l "$output" |
     grep -F 'Requesting program interpreter: /lib/ld-musl-aarch64.so.1' \
         >/dev/null || fail 'artifact does not use the AArch64 musl interpreter'
+verify_dynamic_contract "$output" artifact \
+    libc.musl-aarch64.so.1 libcairo.so.2 libpango-1.0.so.0 \
+    libpangocairo-1.0.so.0 libwayland-client.so.0
+[ -f "$benchmark" ] && [ ! -L "$benchmark" ] && [ -x "$benchmark" ] ||
+    fail 'build did not produce the benchmark'
+[ "$(stat -c '%s' "$benchmark")" -le 16777216 ] ||
+    fail 'benchmark exceeds the 16 MiB transfer bound'
+file "$benchmark" | grep -Eq 'ELF 64-bit LSB (pie )?executable, ARM aarch64' ||
+    fail 'benchmark is not an AArch64 ELF executable'
+readelf -l "$benchmark" |
+    grep -F 'Requesting program interpreter: /lib/ld-musl-aarch64.so.1' \
+        >/dev/null || fail 'benchmark does not use the AArch64 musl interpreter'
+verify_dynamic_contract "$benchmark" benchmark libc.musl-aarch64.so.1
+readelf --sym-base=10 -sW "$output" |
+    awk -f "$repo_dir/deploy/pinephone/check-wvkbd-dictionary-symbols.awk" ||
+    fail 'dictionary symbols exceed the 256 KiB bound'
+[ -f "$notice" ] && [ ! -L "$notice" ] || fail 'build did not produce the notice'
 
 sha256sum "$output"

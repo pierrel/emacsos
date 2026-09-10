@@ -1,0 +1,26 @@
+#+title: OpenRC version-1 keyboard transaction recovery
+#+date: 2026-09-10
+
+* Lineage
+
+This follows [[file:2026-09-10-openrc-session-gate-recovery.org][the session-gate recovery amendment]].
+That amendment defines the version-2 owner-generation transaction. This record
+adds a bounded migration rule for the already-installed version-1 marker; it
+does not revise either historical transaction record.
+
+* Migration boundary
+
+The manifest-verified staged transaction helper validates the installed marker
+before the updater stops the UI or changes ordinary installed payload. It
+accepts no marker or only the canonical five-line version-1 marker; version-2
+markers remain with their original helper. The updater then durably and
+atomically bootstraps this forward-compatible helper before taking rollback
+backups, so any later rollback still has a helper that understands the old
+=finalize-start= lifecycle. Offline normalization restores a version-1 pending
+marker to the verified old binary and notice, or retains a committed new binary,
+then clears state before the ordinary update starts the UI.
+
+Candidate files from the old implementation are metadata-checked but never
+used as recovery inputs. The transaction marker is deleted and synced before
+any safe inert backup or candidate cleanup, so a crash cannot reauthorize an
+already-decided legacy transition.

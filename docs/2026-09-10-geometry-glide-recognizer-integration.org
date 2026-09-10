@@ -1,0 +1,29 @@
+#+title: PinePhone geometry glide recognizer integration amendment
+#+date: 2026-09-10
+
+* Lineage
+
+This amendment follows =2026-09-09-glide-modifier-keyboard-implementation.org=.
+The earlier document remains the record of the original literal crossed-letter
+recognizer and integration boundary.
+
+* Observed correction
+
+Live testing of wvkbd =4d6d695= proved that gesture admission and modifier
+swipes worked, but ordinary continuous paths crossed intervening keys and
+produced no word.  The follow-up wvkbd amendment replaces literal
+crossed-letter matching with bounded active-layout geometry matching.
+
+EmacsOS now pins reviewed wvkbd commit
+=4714930c7bbcfc534887a2549601430bb1e02f75=.  Its AArch64 builder reads the two
+retained dictionary symbol sizes in forced decimal and rejects their combined
+payload above 256 KiB after the unused rank table was removed.  Archive
+isolation and the transactional phone installer are unchanged.
+
+* Verification state
+
+The native wvkbd tests, sanitizers, dictionary regeneration, fuzzing, exact
+AArch64 cross-build, largest-bucket benchmark, EmacsOS Elisp and server suites,
+and PinePhone script suite pass.  The exact AArch64 build was deployed through
+the transactional installer, the installed artifact and running service were
+verified, and live word entry plus modifier swipes passed on the PinePhone.

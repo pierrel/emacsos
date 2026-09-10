@@ -16,6 +16,7 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -67,6 +68,7 @@ printf '%s\n' '#!/bin/sh' \
     'elif [ "$1 $2" = "emacsos-ui status" ]; then' \
     '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
+    '  for fd in 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
     '  if [ -e /tmp/race-command-reference ]; then' \
     '    rm -f /tmp/race-command-reference' \
@@ -107,6 +109,7 @@ printf '%s\n' '#!/bin/sh' \
     '  printf "%s\\n" ready >/run/emacsos-ui/ready' \
     '  touch /tmp/emacsos-ui-running' \
     'elif [ "$1 $2" = "emacsos-ui stop" ]; then' \
+    '  [ ! -e /tmp/status3-cgroup ] || { rm -f /tmp/emacsos-ui-running /tmp/status3-cgroup; exit 1; }' \
     '  [ ! -e /tmp/fail-ui-stuck ] || exit 1' \
     '  [ ! -e /tmp/fail-ui-stop ] || exit 1' \
     '  rm -rf /run/emacsos-ui' \
@@ -155,6 +158,24 @@ printf '%s\n' \
     'exec "$@"' >/usr/bin/timeout
 chmod 0755 /usr/bin/timeout
 
+# The real state-free keyboard proof is exercised against a real ELF in
+# test-wvkbd-build.sh. This updater fixture proves that every ordinary start
+# calls that proof and rejects its missing, wrong, and out-of-cgroup failures.
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction verify-current >/dev/null 2>&1' \
+    /source/openrc-update-root >/dev/null
+sed \
+    -e 's|service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui|service_cgroup=/tmp/openrc.emacsos-ui|' \
+    -e 's|/usr/local/sbin/emacsos-wvkbd-transaction verify-current|/usr/local/sbin/test-wvkbd-proof|' \
+    -e 's/\[ "$attempt" -lt 150 \]/[ "$attempt" -lt 1 ]/' \
+    -e 's|printf '\''%s\\n'\'' 1 >"$service_cgroup/cgroup.kill"|: >"$service_cgroup/cgroup.procs"; printf '\''populated 0\\n'\'' >"$service_cgroup/cgroup.events"|' \
+    /source/openrc-update-root >/tmp/openrc-update-root
+chmod 0755 /tmp/openrc-update-root
+awk '
+    { print }
+    /^    bootstrap_tmp=\$\(mktemp / { print "    sleep 30" }
+' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-signal
+chmod 0755 /tmp/openrc-update-bootstrap-signal
+
 for group in seat video audio; do
     getent group "$group" >/dev/null || addgroup -S "$group"
 done
@@ -170,6 +191,18 @@ printf '%s\n' '#!/bin/sh' \
 chmod 0755 /usr/bin/python3
 install -d -o root -g root -m 0750 /etc/doas.d
 install -d -o root -g root -m 0755 /etc/init.d /usr/local/sbin
+printf '%s\n' '#!/bin/sh' \
+    'if [ -s /tmp/wvkbd-proof-case ]; then' \
+    '  case $(cat /tmp/wvkbd-proof-case) in' \
+    '    missing|wrong|out-of-cgroup)' \
+    '      cat /tmp/wvkbd-proof-case >>/tmp/wvkbd-proof-log' \
+    '      rm -f /tmp/wvkbd-proof-case' \
+    '      exit 1' \
+    '      ;;' \
+    '  esac' \
+    'fi' \
+    'exit 0' >/usr/local/sbin/test-wvkbd-proof
+chmod 0755 /usr/local/sbin/test-wvkbd-proof
 install -d -o root -g root -m 0755 /etc/nftables.d
 printf '%s\n' 'table inet filter { chain input { type filter hook input priority 0; policy drop; } }' \
     >/etc/nftables.nft
@@ -178,6 +211,8 @@ chmod 0755 /usr/sbin/nft
 for executable in swayidle doas setsid; do
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
+chmod 0755 /usr/bin/findmnt
 printf '%s\n' '#!/bin/sh' 'exit 0' >/usr/bin/doas
 chmod 0755 /usr/bin/doas
 printf '%s\n' \
@@ -398,7 +433,7 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/sbin/emacsos-openrc-network
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
-    /bin/sh /source/openrc-update-root >/dev/null 2>&1; then
+    /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
     printf '%s\n' 'injected legacy migration failure was accepted' >&2
     exit 1
 fi
@@ -408,8 +443,44 @@ fi
 [ -f /run/emacsos-ui/ready ]
 
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
-    /bin/sh /source/openrc-update-root
+    /bin/sh /tmp/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
+
+# Runtime cleanup must fail closed when mount metadata cannot be read.  Exercise
+# the actual updater function without mutating the live fixture directory.
+sed -n '/^safe_runtime() {$/,/^}$/p' /tmp/openrc-update-root >/tmp/safe-runtime
+printf '%s\n' '#!/bin/sh' 'exit 1' >/usr/bin/findmnt
+if ( . /tmp/safe-runtime; safe_runtime ); then
+    printf '%s\n' 'runtime safety accepted a failed findmnt query' >&2
+    exit 1
+fi
+for unsafe_mount in /run/emacsos-ui /run/emacsos-ui/nested; do
+    printf '%s\n' '#!/bin/sh' "printf '%s\\n' / '$unsafe_mount'" >/usr/bin/findmnt
+    if ( . /tmp/safe-runtime; safe_runtime ); then
+        printf '%s\n' 'runtime safety accepted a session-tree mount' >&2
+        exit 1
+    fi
+done
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
+( . /tmp/safe-runtime; safe_runtime )
+
+sed -n '/^runtime_safe_to_remove() {$/,/^}$/p' \
+    /source/emacsos-ui.initd >/tmp/runtime-safe-to-remove
+printf '%s\n' '#!/bin/sh' 'exit 1' >/usr/bin/findmnt
+if ( . /tmp/runtime-safe-to-remove; runtime_safe_to_remove /run/emacsos-ui ); then
+    printf '%s\n' 'service runtime safety accepted a failed findmnt query' >&2
+    exit 1
+fi
+for unsafe_mount in /run/emacsos-ui /run/emacsos-ui/nested; do
+    printf '%s\n' '#!/bin/sh' "printf '%s\\n' / '$unsafe_mount'" >/usr/bin/findmnt
+    if ( . /tmp/runtime-safe-to-remove; runtime_safe_to_remove /run/emacsos-ui ); then
+        printf '%s\n' 'service runtime safety accepted a session-tree mount' >&2
+        exit 1
+    fi
+done
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
+( . /tmp/runtime-safe-to-remove; runtime_safe_to_remove /run/emacsos-ui )
+
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/emacsos-openrc/assist-web-url ]
 cmp -s /repo/assist-web.el /usr/local/share/emacsos-openrc/assist-web.el
@@ -424,9 +495,89 @@ grep -F 'ip saddr 198.51.100.10 tcp dport 8766' \
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 
+# A signal after same-directory mktemp but before installation must use the
+# updater's outer cleanup without stopping the UI or leaving a root temp.
+if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
+    -print -quit | grep -q .; then
+    printf '%s\n' 'unexpected preexisting compatibility-helper temporary' >&2
+    exit 1
+fi
+: >/tmp/rc-service-log
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-bootstrap-signal >/tmp/update-bootstrap-signal.out 2>&1 &
+bootstrap_pid=$!
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
+        -print -quit | grep -q .; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+if [ "$attempt" -eq 50 ]; then
+    kill -TERM "$bootstrap_pid" 2>/dev/null || true
+    wait "$bootstrap_pid" 2>/dev/null || true
+    printf '%s\n' 'bootstrap signal fixture did not reach its temporary file' >&2
+    exit 1
+fi
+kill -TERM "$bootstrap_pid"
+if wait "$bootstrap_pid"; then
+    printf '%s\n' 'interrupted bootstrap unexpectedly succeeded' >&2
+    exit 1
+fi
+if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
+    -print -quit | grep -q .; then
+    printf '%s\n' 'interrupted bootstrap left a compatibility-helper temporary' >&2
+    exit 1
+fi
+if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
+    printf '%s\n' 'interrupted bootstrap stopped the UI' >&2
+    exit 1
+fi
+
+# Every existing file that the update might later snapshot is checked before
+# the forward-only compatibility-helper replacement or any UI stop.  Exercise
+# the per-user token and reference as well as an ordinary root backup source.
+assert_preflight_rejection() {
+    label=$1
+    helper_before=$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)
+    : >/tmp/rc-service-log
+    if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+        /bin/sh /tmp/openrc-update-root >/tmp/update-preflight.out 2>&1; then
+        printf '%s\n' "updater accepted unsafe $label" >&2
+        exit 1
+    fi
+    [ "$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)" = "$helper_before" ]
+    if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
+        printf '%s\n' "unsafe $label stopped the UI before rejection" >&2
+        exit 1
+    fi
+}
+
+chmod 0644 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+assert_preflight_rejection token
+chmod 0600 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
+
+chmod 0644 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+assert_preflight_rejection command-reference
+chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+
+rm -f /usr/local/share/emacsos-openrc/os.el
+ln -s /repo/os.el /usr/local/share/emacsos-openrc/os.el
+assert_preflight_rejection backup-source
+install -o root -g root -m 0644 /repo/os.el /usr/local/share/emacsos-openrc/os.el
+for unsafe_mode in 0664 0646; do
+    chmod "$unsafe_mode" /usr/local/share/emacsos-openrc/os.el
+    assert_preflight_rejection "backup-source-mode-$unsafe_mode"
+done
+chmod 0644 /usr/local/share/emacsos-openrc/os.el
+
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config
 printf '%s\n' old-power-after >/usr/local/share/emacsos-openrc/session-power
+printf '%s\n' old-initd >/etc/init.d/emacsos-ui
+chmod 0755 /etc/init.d/emacsos-ui
 printf '%s\n' old-reference >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
@@ -434,24 +585,72 @@ chmod 0755 /usr/local/share/emacsos-openrc/session
 chmod 0755 /usr/local/share/emacsos-openrc/session-power
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
-    /bin/sh /source/openrc-update-root >/dev/null 2>&1; then
+    /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
     printf '%s\n' 'injected update failure was accepted' >&2
     exit 1
 fi
 [ "$(cat /usr/local/share/emacsos-openrc/session)" = old-session ]
 [ "$(cat /usr/local/share/emacsos-openrc/sway.config)" = old-sway-after ]
 [ "$(cat /usr/local/share/emacsos-openrc/session-power)" = old-power-after ]
+[ "$(cat /etc/init.d/emacsos-ui)" = old-initd ]
 [ "$(cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = old-reference ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = \
     'emacsos-lab:emacsos-lab:600:1:regular file' ]
 [ -f /run/emacsos-ui/ready ]
+
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-root
+cmp -s /source/emacsos-ui.initd /etc/init.d/emacsos-ui
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/init.d/emacsos-ui)" = \
+    'root:root:755:1:regular file' ]
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1' \
+    /etc/init.d/emacsos-ui >/dev/null
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction verify-start' \
+    /etc/init.d/emacsos-ui >/dev/null
+
+# Reproduce the live failure boundary: OpenRC reports status 3 while the exact
+# UI cgroup is populated.  The updater must stop normally, reconcile that one
+# validated cgroup, remove only the validated runtime directory, and perform
+# one ordinary start that ends with one default-runlevel entry.
+mkdir -p /tmp/openrc.emacsos-ui
+: >/tmp/openrc.emacsos-ui/cgroup.procs
+printf '%s\n' 'populated 1' >/tmp/openrc.emacsos-ui/cgroup.events
+: >/tmp/openrc.emacsos-ui/cgroup.kill
+install -d -o emacsos-lab -g emacsos-lab -m 0700 /run/emacsos-ui
+install -o emacsos-lab -g emacsos-lab -m 0600 /dev/null /run/emacsos-ui/ready
+printf '%s\n' ready >/run/emacsos-ui/ready
+touch /tmp/emacsos-ui-running /tmp/status3-cgroup
+starts_before=$(grep -Fc 'rc-service emacsos-ui start' /tmp/rc-service-log || true)
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-root
+[ "$(grep -Fc 'rc-service emacsos-ui start' /tmp/rc-service-log)" = \
+    "$((starts_before + 1))" ]
+grep -Fx 'populated 0' /tmp/openrc.emacsos-ui/cgroup.events >/dev/null
+[ ! -s /tmp/openrc.emacsos-ui/cgroup.procs ]
+[ -f /run/emacsos-ui/ready ]
+[ "$(rc-update show default | awk '$1 == "emacsos-ui" && $2 == "|" && $3 == "default" { count++ } END { print count + 0 }')" = 1 ]
+
+# The updater's ordinary post-start verification must reject each state-free
+# keyboard-proof failure. The test proof fails once so rollback can start the
+# restored UI and the next case remains independent.
+for proof in missing wrong out-of-cgroup; do
+    printf '%s\n' "$proof" >/tmp/wvkbd-proof-case
+    if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+        /bin/sh /tmp/openrc-update-root >/tmp/update-proof.out 2>&1; then
+        printf '%s\n' "updater accepted $proof keyboard proof" >&2
+        exit 1
+    fi
+    grep -Fx "$proof" /tmp/wvkbd-proof-log >/dev/null
+    grep -F 'updated UI did not become ready' /tmp/update-proof.out >/dev/null
+    [ -f /run/emacsos-ui/ready ]
+done
 
 printf '%s\n' old-reference-directory-race >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 touch /tmp/race-command-reference-directory
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
-    /bin/sh /source/openrc-update-root >/tmp/update-reference-race.out 2>&1; then
+    /bin/sh /tmp/openrc-update-root >/tmp/update-reference-race.out 2>&1; then
     printf '%s\n' 'raced reference rollback was accepted' >&2
     exit 1
 fi
@@ -467,7 +666,7 @@ install -o emacsos-lab -g emacsos-lab -m 0600 /repo/EMACSOS-COMMANDS.org \
 printf '%s\n' old-session-stop >/usr/local/share/emacsos-openrc/session
 touch /tmp/fail-ui-once-and-leak
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
-    /bin/sh /source/openrc-update-root >/tmp/update-stop.out 2>&1; then
+    /bin/sh /tmp/openrc-update-root >/tmp/update-stop.out 2>&1; then
     printf '%s\n' 'unquiesced update rollback was accepted' >&2
     exit 1
 fi
@@ -482,7 +681,7 @@ rm -rf -- /var/tmp/emacsos-openrc-backup.*
 printf '%s\n' old-session-start >/usr/local/share/emacsos-openrc/session
 printf '%s\n' 2 >/tmp/fail-ui-count
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
-    /bin/sh /source/openrc-update-root >/tmp/update-start.out 2>&1; then
+    /bin/sh /tmp/openrc-update-root >/tmp/update-start.out 2>&1; then
     printf '%s\n' 'failed rollback restart was accepted' >&2
     exit 1
 fi

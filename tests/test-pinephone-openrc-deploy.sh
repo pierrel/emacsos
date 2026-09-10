@@ -30,6 +30,7 @@ sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-install-root" \
     "$deploy_dir/openrc-update-root" \
     "$deploy_dir/openrc-bootstrap-root" \
+    "$deploy_dir/wvkbd-transaction-root" \
     "$deploy_dir/install-openrc-session.sh" \
     "$deploy_dir/update-openrc-session.sh" \
     "$deploy_dir/emacsos-ui.initd" \
@@ -38,7 +39,7 @@ sh -n "$deploy_dir/openrc-session" \
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
-    openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session-power openrc-process-group openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -55,6 +56,21 @@ manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'wvkbd_lock=/run/wvkbd-emacos-install.lock' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'flock -n -x 7 || fail '\''keyboard install lock is busy'\''' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'validate-upgrade' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+[ "$simulate_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
+    [ "$bootstrap_line" -lt "$stop_line" ] && [ "$bootstrap_line" -lt "$mutating_line" ] &&
+    [ "$mutating_line" -lt "$install_line" ]
 expected='EMACSOS-COMMANDS.org
 assist-web.el
 chat.el
@@ -81,7 +97,8 @@ phone-call.el
 phone-sms.el
 waydroid-container-wrapper
 waydroid-container.conf
-waydroid-container.service'
+waydroid-container.service
+wvkbd-transaction-root'
 actual=$(cut -d' ' -f3 "$deploy_dir/openrc-manifest.sha256" | sort)
 [ "$actual" = "$expected" ]
 
@@ -91,6 +108,10 @@ grep -F 'XDG_RUNTIME_DIR=/run/emacsos-ui' "$deploy_dir/emacsos-ui.initd" >/dev/n
 grep -F 'WLR_BACKENDS=drm,libinput' "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'NO_AT_BRIDGE=1' "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'need localmount seatd cgroups' "$deploy_dir/emacsos-ui.initd" >/dev/null
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start' \
+    "$deploy_dir/emacsos-ui.initd" >/dev/null
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction verify-start' \
+    "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'cgroup=/sys/fs/cgroup/openrc.emacsos-ui' \
     "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'grep -Fx "$$" "$cgroup/cgroup.procs"' \
@@ -342,17 +363,19 @@ grep -F 'su user -s /bin/sh -c' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'emacsos-lab:emacsos-lab:600:1:regular file' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
-quiesce_line=$(grep -nF 'restart_only=1' "$deploy_dir/openrc-update-root")
-quiesce_line=${quiesce_line%%:*}
 token_check_line=$(grep -nF 'token_target=/var/lib/emacsos-lab' \
     "$deploy_dir/openrc-update-root")
 token_check_line=${token_check_line%%:*}
 token_backup_line=$(grep -nF \
-    "'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token'" \
+    'assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token' \
     "$deploy_dir/openrc-update-root")
 token_backup_line=${token_backup_line%%:*}
-[ "$quiesce_line" -lt "$token_check_line" ]
-[ "$token_check_line" -lt "$token_backup_line" ]
+backup_copy_line=$(grep -nF 'for pair in $backup_pairs; do' \
+    "$deploy_dir/openrc-update-root" | tail -1)
+backup_copy_line=${backup_copy_line%%:*}
+[ "$token_backup_line" -lt "$token_check_line" ]
+[ "$token_check_line" -lt "$preflight_line" ]
+[ "$stop_line" -lt "$backup_copy_line" ]
 if grep -F 'assist-web-token' "$deploy_dir/openrc-manifest.sha256" >/dev/null; then
     printf '%s\n' 'secret token must not be pinned in the public manifest' >&2
     exit 1
@@ -425,10 +448,11 @@ fi
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'rc-service emacsos-ui start 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui stop 8>&- 9>&-' \
+grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rc-service emacsos-ui start 7>&- 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'timeout -s TERM -k 5 30 rc-service emacsos-ui start 8>&- 9>&-' \
+grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "grep -Fx 'populated 0'" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'pgrep -u "$lab_uid"' "$deploy_dir/openrc-update-root" >/dev/null
