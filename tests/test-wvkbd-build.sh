@@ -209,6 +209,16 @@ EOF
         [ -e /tmp/startpost-session-verified ]
         new=$(sha256sum /home/user/.cache/wvkbd-emacos.ABC123 | awk "{print \$1}")
         notice=$(sha256sum /home/user/.cache/wvkbd-notice.ABC123 | awk "{print \$1}")
+        for invalid_digest in keyboard notice; do
+            candidate_new=$new candidate_notice=$notice
+            case $invalid_digest in
+                keyboard) candidate_new=bad ;;
+                notice) candidate_notice=bad ;;
+            esac
+            if SUDO_USER=user WVKBD_STAGE=/home/user/.cache/wvkbd-emacos.ABC123 WVKBD_SHA256=$candidate_new WVKBD_NOTICE_STAGE=/home/user/.cache/wvkbd-notice.ABC123 WVKBD_NOTICE_SHA256=$candidate_notice /usr/local/sbin/emacsos-wvkbd-transaction activate 2>/tmp/wvkbd-digest-error; then exit 1; fi
+            grep -F "invalid staged digest" /tmp/wvkbd-digest-error >/dev/null
+            [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
+        done
         SUDO_USER=user WVKBD_STAGE=/home/user/.cache/wvkbd-emacos.ABC123 WVKBD_SHA256=$new WVKBD_NOTICE_STAGE=/home/user/.cache/wvkbd-notice.ABC123 WVKBD_NOTICE_SHA256=$notice /usr/local/sbin/emacsos-wvkbd-transaction activate
         [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
         [ "$(sha256sum /usr/local/bin/wvkbd-emacos | awk "{print \$1}")" = "$new" ]
@@ -477,7 +487,9 @@ EOF
                 [ "$(for proc in /proc/[0-9]*; do [ "$(stat -c %U "$proc" 2>/dev/null || true)" = emacsos-lab ] || continue; actual=$(tr "\000" " " <"$proc/cmdline" | sed "s/ $//"); [ "$actual" = "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300" ] && printf x; done | wc -c)" -eq 1 ]
             done
         done
-        for corrupt in state-dir state-mode state-link state-type state-size state-fields previous-digest previous-link notice-metadata; do
+        for corrupt in state-dir state-mode state-link state-type state-size state-fields \
+            state-old-sha state-new-sha state-owner-pid state-owner-start \
+            legacy-old-sha legacy-new-sha previous-digest previous-link notice-metadata; do
             /usr/sbin/rc-service emacsos-ui stop
             rm -rf /var/lib/emacsos-wvkbd-transaction
             cc -s -o /usr/local/bin/wvkbd-emacos /tmp/keyboard.c
@@ -495,12 +507,23 @@ EOF
                 state-type) rm -f /var/lib/emacsos-wvkbd-transaction/state; mkdir /var/lib/emacsos-wvkbd-transaction/state ;;
                 state-size) dd if=/dev/zero bs=513 count=1 of=/var/lib/emacsos-wvkbd-transaction/state status=none ;;
                 state-fields) printf "version=2\nphase=broken\nold_sha=%s\nnew_sha=%s\nprior_notice=0\nboot_id=-\nowner_pid=0\nowner_start=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state ;;
+                state-old-sha) sed -i 's/^old_sha=.*/old_sha=bad/' /var/lib/emacsos-wvkbd-transaction/state ;;
+                state-new-sha) sed -i 's/^new_sha=.*/new_sha=bad/' /var/lib/emacsos-wvkbd-transaction/state ;;
+                state-owner-pid) printf "version=2\nphase=armed\nold_sha=%s\nnew_sha=%s\nprior_notice=0\nboot_id=%s\nowner_pid=bad\nowner_start=1\n" "$old" "$new" "$(cat /proc/sys/kernel/random/boot_id)" >/var/lib/emacsos-wvkbd-transaction/state ;;
+                state-owner-start) printf "version=2\nphase=armed\nold_sha=%s\nnew_sha=%s\nprior_notice=0\nboot_id=%s\nowner_pid=1\nowner_start=bad\n" "$old" "$new" "$(cat /proc/sys/kernel/random/boot_id)" >/var/lib/emacsos-wvkbd-transaction/state ;;
+                legacy-old-sha) printf "version=1\nphase=pending\nold_sha=bad\nnew_sha=%s\nprior_notice_present=0\n" "$new" >/var/lib/emacsos-wvkbd-transaction/state ;;
+                legacy-new-sha) printf "version=1\nphase=pending\nold_sha=%s\nnew_sha=bad\nprior_notice_present=0\n" "$old" >/var/lib/emacsos-wvkbd-transaction/state ;;
                 legacy-v1) printf "version=1\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice_present=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state ;;
                 previous-digest) printf bad >/var/lib/emacsos-wvkbd-transaction/previous ;;
                 previous-link) rm -f /var/lib/emacsos-wvkbd-transaction/previous; ln -s /tmp/nope /var/lib/emacsos-wvkbd-transaction/previous ;;
                 notice-metadata) printf "version=2\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice=1\nboot_id=-\nowner_pid=0\nowner_start=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state; printf old-notice >/var/lib/emacsos-wvkbd-transaction/previous-notice; chmod 0644 /var/lib/emacsos-wvkbd-transaction/previous-notice ;;
             esac
-            if /usr/local/sbin/emacsos-wvkbd-transaction prepare-start 2>/dev/null; then exit 1; fi
+            if /usr/local/sbin/emacsos-wvkbd-transaction prepare-start 2>/tmp/wvkbd-corrupt-error; then exit 1; fi
+            case $corrupt in
+                state-old-sha|state-new-sha|state-owner-pid|state-owner-start|legacy-old-sha|legacy-new-sha)
+                    grep -F 'malformed' /tmp/wvkbd-corrupt-error >/dev/null
+                    ;;
+            esac
             [ ! -e /tmp/emacsos-ui-running ]
         done
         kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true

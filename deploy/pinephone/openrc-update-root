@@ -16,7 +16,7 @@ bootstrap_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_lock=/run/wvkbd-emacos-install.lock
-manifest_hash=66d7e8607cbc2ceec54dd3e5c18fa19422df6e94abc21c46d72aec4136e244a7
+manifest_hash=7bcbaf65ba1f8628b8822e1d06abddffdc63ac688b3cdafff65b30c17e6338b6
 mutating=0
 committed=0
 restart_only=0
@@ -207,9 +207,17 @@ no_lab_processes() {
 }
 
 safe_runtime() {
+    local mount_target
     [ -d /run/emacsos-ui ] && [ ! -L /run/emacsos-ui ] &&
-        [ "$(stat -c '%U:%G:%F' /run/emacsos-ui)" = 'emacsos-lab:emacsos-lab:directory' ] &&
-        ! findmnt -rn -o TARGET /run/emacsos-ui | grep -Fx /run/emacsos-ui >/dev/null
+        [ "$(stat -c '%U:%G:%F' /run/emacsos-ui)" = 'emacsos-lab:emacsos-lab:directory' ] ||
+        return 1
+    runtime_mounts=$(findmnt -rn -o TARGET) || return 1
+    [ -n "$runtime_mounts" ] || return 1
+    for mount_target in $runtime_mounts; do
+        case $mount_target in
+            /run/emacsos-ui|/run/emacsos-ui/*) return 1 ;;
+        esac
+    done
 }
 
 remove_runtime() {

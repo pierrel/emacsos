@@ -20,6 +20,14 @@ fail() { printf 'wvkbd-transaction: %s\n' "$1" >&2; exit 1; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 checkpoint() { :; }
 
+valid_sha256() {
+    [ "${#1}" -eq 64 ] && case $1 in *[!0-9a-f]*) false ;; *) true ;; esac
+}
+
+valid_positive_decimal() {
+    case $1 in ''|0*|*[!0-9]*) false ;; *) true ;; esac
+}
+
 root_file() {
     [ -f "$1" ] && [ ! -L "$1" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$1")" = "root:root:$2:1:regular file" ]
@@ -146,12 +154,13 @@ read_v2_state() {
     boot_id=$(sed -n '6s/^boot_id=//p' "$state")
     owner_pid=$(sed -n '7s/^owner_pid=//p' "$state"); owner_start=$(sed -n '8s/^owner_start=//p' "$state")
     [ "$version" = 2 ] && case $phase in pending|armed|testing|rollback|committed) true;; *) false;; esac &&
-        printf '%s\n%s\n' "$old_sha" "$new_sha" | grep -Eq '^[0-9a-f]{64}$' &&
+        valid_sha256 "$old_sha" && valid_sha256 "$new_sha" &&
         { [ "$prior_notice" = 0 ] || [ "$prior_notice" = 1 ]; } &&
         case $phase in
             armed|testing)
                 printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' &&
-                    printf '%s\n%s\n' "$owner_pid" "$owner_start" | grep -Eq '^[1-9][0-9]*$'
+                    valid_positive_decimal "$owner_pid" &&
+                    valid_positive_decimal "$owner_start"
                 ;;
             *) [ "$boot_id" = - ] && [ "$owner_pid" = 0 ] && [ "$owner_start" = 0 ] ;;
         esac ||
@@ -176,7 +185,7 @@ read_v1_state() {
     new_sha=$(sed -n '4s/^new_sha=//p' "$state")
     prior_notice=$(sed -n '5s/^prior_notice_present=//p' "$state")
     [ "$state_version" = 1 ] && case $phase in pending|committed) true;; *) false;; esac &&
-        printf '%s\n%s\n' "$old_sha" "$new_sha" | grep -Eq '^[0-9a-f]{64}$' &&
+        valid_sha256 "$old_sha" && valid_sha256 "$new_sha" &&
         { [ "$prior_notice" = 0 ] || [ "$prior_notice" = 1 ]; } &&
         printf 'version=1\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice_present=%s\n' \
             "$phase" "$old_sha" "$new_sha" "$prior_notice" | cmp -s - "$state" ||
@@ -482,7 +491,7 @@ activate() {
     [ "${SUDO_USER-}" = user ] || fail 'must be authorized by the recovery user'
     stage=${WVKBD_STAGE-} expected_new=${WVKBD_SHA256-}
     notice_stage=${WVKBD_NOTICE_STAGE-} expected_notice=${WVKBD_NOTICE_SHA256-}
-    printf '%s\n%s\n' "$expected_new" "$expected_notice" | grep -Eq '^[0-9a-f]{64}$' || fail 'invalid staged digest'
+    valid_sha256 "$expected_new" && valid_sha256 "$expected_notice" || fail 'invalid staged digest'
     printf '%s\n' "$stage" | grep -Eq '^/home/user/\.cache/wvkbd-emacos\.[A-Za-z0-9]{6}$' || fail 'unsafe keyboard stage path'
     printf '%s\n' "$notice_stage" | grep -Eq '^/home/user/\.cache/wvkbd-notice\.[A-Za-z0-9]{6}$' || fail 'unsafe notice stage path'
     ensure_state_dir

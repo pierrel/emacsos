@@ -211,7 +211,7 @@ chmod 0755 /usr/sbin/nft
 for executable in swayidle doas setsid; do
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
-printf '%s\n' '#!/bin/sh' 'exit 0' >/usr/bin/findmnt
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
 chmod 0755 /usr/bin/findmnt
 printf '%s\n' '#!/bin/sh' 'exit 0' >/usr/bin/doas
 chmod 0755 /usr/bin/doas
@@ -445,6 +445,42 @@ fi
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
+
+# Runtime cleanup must fail closed when mount metadata cannot be read.  Exercise
+# the actual updater function without mutating the live fixture directory.
+sed -n '/^safe_runtime() {$/,/^}$/p' /tmp/openrc-update-root >/tmp/safe-runtime
+printf '%s\n' '#!/bin/sh' 'exit 1' >/usr/bin/findmnt
+if ( . /tmp/safe-runtime; safe_runtime ); then
+    printf '%s\n' 'runtime safety accepted a failed findmnt query' >&2
+    exit 1
+fi
+for unsafe_mount in /run/emacsos-ui /run/emacsos-ui/nested; do
+    printf '%s\n' '#!/bin/sh' "printf '%s\\n' / '$unsafe_mount'" >/usr/bin/findmnt
+    if ( . /tmp/safe-runtime; safe_runtime ); then
+        printf '%s\n' 'runtime safety accepted a session-tree mount' >&2
+        exit 1
+    fi
+done
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
+( . /tmp/safe-runtime; safe_runtime )
+
+sed -n '/^runtime_safe_to_remove() {$/,/^}$/p' \
+    /source/emacsos-ui.initd >/tmp/runtime-safe-to-remove
+printf '%s\n' '#!/bin/sh' 'exit 1' >/usr/bin/findmnt
+if ( . /tmp/runtime-safe-to-remove; runtime_safe_to_remove /run/emacsos-ui ); then
+    printf '%s\n' 'service runtime safety accepted a failed findmnt query' >&2
+    exit 1
+fi
+for unsafe_mount in /run/emacsos-ui /run/emacsos-ui/nested; do
+    printf '%s\n' '#!/bin/sh' "printf '%s\\n' / '$unsafe_mount'" >/usr/bin/findmnt
+    if ( . /tmp/runtime-safe-to-remove; runtime_safe_to_remove /run/emacsos-ui ); then
+        printf '%s\n' 'service runtime safety accepted a session-tree mount' >&2
+        exit 1
+    fi
+done
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
+( . /tmp/runtime-safe-to-remove; runtime_safe_to_remove /run/emacsos-ui )
+
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/emacsos-openrc/assist-web-url ]
 cmp -s /repo/assist-web.el /usr/local/share/emacsos-openrc/assist-web.el
