@@ -48,12 +48,19 @@ grep -F 'timeout 60' "$repo_dir/deploy/pinephone/bench-wvkbd-emacos.sh" >/dev/nu
 grep -F 'wvkbd-bench.XXXXXX' "$repo_dir/deploy/pinephone/bench-wvkbd-emacos.sh" >/dev/null
 grep -F "&& file" "$repo_dir/deploy/pinephone/bench-wvkbd-emacos.sh" >/dev/null
 transaction=$repo_dir/deploy/pinephone/wvkbd-transaction-root
-grep -F 'version=1' "$transaction" >/dev/null
+grep -F 'version=2' "$transaction" >/dev/null
 grep -F 'phase=%s' "$transaction" >/dev/null
-grep -F 'prior_notice_present=%s' "$transaction" >/dev/null
+grep -F 'prior_notice=%s' "$transaction" >/dev/null
+grep -F 'boot_id=%s' "$transaction" >/dev/null
+grep -F 'owner_pid=%s' "$transaction" >/dev/null
+grep -F 'owner_start=%s' "$transaction" >/dev/null
 grep -F 'prepare-start' "$transaction" >/dev/null
-grep -F 'finalize-start' "$transaction" >/dev/null
-grep -F 'EMACSOS_WVKBD_CANDIDATE_SHA256' "$transaction" >/dev/null
+grep -F 'verify-start' "$transaction" >/dev/null
+grep -F 'verify-current' "$transaction" >/dev/null
+if grep -F 'EMACSOS_WVKBD_CANDIDATE_SHA256' "$transaction" >/dev/null; then
+    printf '%s\n' 'candidate activation is still environment-authorized' >&2
+    exit 1
+fi
 grep -F '/usr/local/share/licenses/wvkbd-emacos/wordninja.txt' "$transaction" >/dev/null
 grep -F 'wvkbd-transaction-root' "$repo_dir/deploy/pinephone/openrc-manifest.sha256" >/dev/null
 grep -F 'WVKBD_NOTICE_STAGE' "$repo_dir/deploy/pinephone/install-wvkbd-emacos.sh" >/dev/null
@@ -158,7 +165,8 @@ EOF
         cc -s -o /home/user/.cache/wvkbd-emacos.ABC123 /tmp/new.c
         printf notice >/home/user/.cache/wvkbd-notice.ABC123
         chown user:user /home/user/.cache/wvkbd-*; chmod 0600 /home/user/.cache/wvkbd-*
-        install -m 0755 /transaction /usr/local/sbin/emacsos-wvkbd-transaction
+        sed "s|service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui|service_cgroup=/tmp/openrc.emacsos-ui|" /transaction >/transaction-base
+        install -m 0755 /transaction-base /usr/local/sbin/emacsos-wvkbd-transaction
         install -m 0755 /install-root /usr/local/sbin/install-wvkbd-emacos
         for invalid in missing unsafe one-hook; do
             rm -f /etc/init.d/emacsos-ui
@@ -171,37 +179,141 @@ EOF
         done
         printf "%s\n%s\n" \
             "/usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1" \
-            "/usr/local/sbin/emacsos-wvkbd-transaction finalize-start" >/etc/init.d/emacsos-ui
+            "/usr/local/sbin/emacsos-wvkbd-transaction verify-start" >/etc/init.d/emacsos-ui
         chmod 0755 /etc/init.d/emacsos-ui
         cat >/usr/sbin/rc-service <<"EOF"
 #!/bin/sh
+cgroup=/tmp/openrc.emacsos-ui
 case $2 in
  status) [ -f /run/emacsos-ui/service ] ;;
- start|restart) mkdir -p /run/emacsos-ui; rm -f /run/emacsos-ui/ready; [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300 >/dev/null 2>&1 & echo \$!" >/run/emacsos-ui/pid; chown emacsos-lab:emacsos-lab /run/emacsos-ui/pid; printf ready >/run/emacsos-ui/ready; chown emacsos-lab:emacsos-lab /run/emacsos-ui/ready; chmod 0600 /run/emacsos-ui/ready; : >/run/emacsos-ui/service ;;
- stop) [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; rm -f /run/emacsos-ui/service /run/emacsos-ui/ready ;;
+ start|restart) /usr/local/sbin/emacsos-wvkbd-transaction prepare-start || exit 1; mkdir -p /run/emacsos-ui "$cgroup"; rm -f /run/emacsos-ui/ready /run/emacsos-ui/service /tmp/startpost-session-verified; [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300 >/dev/null 2>&1 & echo \$!" >/run/emacsos-ui/pid; chown emacsos-lab:emacsos-lab /run/emacsos-ui/pid; cat /run/emacsos-ui/pid >"$cgroup/cgroup.procs"; printf "populated 1\\n" >"$cgroup/cgroup.events"; : >"$cgroup/cgroup.kill"; printf ready >/run/emacsos-ui/ready; chown emacsos-lab:emacsos-lab /run/emacsos-ui/ready; chmod 0600 /run/emacsos-ui/ready; [ ! -e /run/emacsos-ui/service ]; /usr/local/sbin/emacsos-wvkbd-transaction verify-start || exit 1; : >/tmp/startpost-session-verified; [ ! -e /tmp/suppress-service-marker ] || { rm -f /tmp/suppress-service-marker; exit 0; }; : >/run/emacsos-ui/service ;;
+ stop) [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; printf "populated 0\\n" >"$cgroup/cgroup.events"; : >"$cgroup/cgroup.procs"; rm -f /run/emacsos-ui/service /run/emacsos-ui/ready ;;
 esac
 EOF
         chmod 0755 /usr/sbin/rc-service
-        /usr/sbin/rc-service start
+        /usr/sbin/rc-service emacsos-ui start
+        [ -e /tmp/startpost-session-verified ]
         new=$(sha256sum /home/user/.cache/wvkbd-emacos.ABC123 | awk "{print \$1}")
         notice=$(sha256sum /home/user/.cache/wvkbd-notice.ABC123 | awk "{print \$1}")
         SUDO_USER=user WVKBD_STAGE=/home/user/.cache/wvkbd-emacos.ABC123 WVKBD_SHA256=$new WVKBD_NOTICE_STAGE=/home/user/.cache/wvkbd-notice.ABC123 WVKBD_NOTICE_SHA256=$notice /usr/local/sbin/emacsos-wvkbd-transaction activate
         [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
         [ "$(sha256sum /usr/local/bin/wvkbd-emacos | awk "{print \$1}")" = "$new" ]
+        # The updater proof has no state behavior and accepts only the exact
+        # keyboard PID declared by the OpenRC cgroup.
+        mkdir -p /tmp/openrc.emacsos-ui
+        : >/tmp/openrc.emacsos-ui/cgroup.events
+        : >/tmp/openrc.emacsos-ui/cgroup.kill
+        : >/tmp/openrc.emacsos-ui/cgroup.procs
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        rm -f /usr/local/bin/wvkbd-emacos
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        install -o root -g root -m 0755 /home/user/.cache/wvkbd-emacos.ABC123 /usr/local/bin/wvkbd-emacos
+        install -o root -g root -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        install -o root -g root -m 0755 /home/user/.cache/wvkbd-emacos.ABC123 /usr/local/bin/wvkbd-emacos
+        : >/tmp/openrc.emacsos-ui/cgroup.procs
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        # A crash just after commit can meet a stopped service: pre-start must
+        # retain only the verified target, clear the marker, then start once.
+        /usr/sbin/rc-service emacsos-ui stop
+        printf "version=2\\nphase=committed\\nold_sha=%s\\nnew_sha=%s\\nprior_notice=0\\nboot_id=-\\nowner_pid=0\\nowner_start=0\\n" "$new" "$new" >/var/lib/emacsos-wvkbd-transaction/state
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+        /usr/local/sbin/emacsos-wvkbd-transaction prepare-start
+        [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
+        /usr/sbin/rc-service emacsos-ui start
+        # The transaction post-start proof still rejects a missing cgroup PID
+        # and two matching PIDs inside it.
+        printf "version=2\\nphase=committed\\nold_sha=%s\\nnew_sha=%s\\nprior_notice=0\\nboot_id=-\\nowner_pid=0\\nowner_start=0\\n" "$new" "$new" >/var/lib/emacsos-wvkbd-transaction/state
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+        : >/tmp/openrc.emacsos-ui/cgroup.procs
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-start 2>/dev/null; then exit 1; fi
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-start
+        su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300 >/dev/null 2>&1 & echo \$!" >/tmp/extra-keyboard-pid
+        cat /run/emacsos-ui/pid /tmp/extra-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        printf "version=2\\nphase=committed\\nold_sha=%s\\nnew_sha=%s\\nprior_notice=0\\nboot_id=-\\nowner_pid=0\\nowner_start=0\\n" "$new" "$new" >/var/lib/emacsos-wvkbd-transaction/state
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-start 2>/dev/null; then exit 1; fi
+        kill "$(cat /tmp/extra-keyboard-pid)"
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-start
+        # A candidate whose start hook succeeds while OpenRC never marks the
+        # service started must roll back through the full old service gate.
+        cc -s -o /home/user/.cache/wvkbd-emacos.DEF456 /tmp/keyboard.c
+        printf notice-two >/home/user/.cache/wvkbd-notice.DEF456
+        chown user:user /home/user/.cache/wvkbd-emacos.DEF456 /home/user/.cache/wvkbd-notice.DEF456
+        chmod 0600 /home/user/.cache/wvkbd-emacos.DEF456 /home/user/.cache/wvkbd-notice.DEF456
+        third=$(sha256sum /home/user/.cache/wvkbd-emacos.DEF456 | awk "{print \$1}")
+        third_notice=$(sha256sum /home/user/.cache/wvkbd-notice.DEF456 | awk "{print \$1}")
+        touch /tmp/suppress-service-marker
+        if SUDO_USER=user WVKBD_STAGE=/home/user/.cache/wvkbd-emacos.DEF456 WVKBD_SHA256=$third WVKBD_NOTICE_STAGE=/home/user/.cache/wvkbd-notice.DEF456 WVKBD_NOTICE_SHA256=$third_notice /usr/local/sbin/emacsos-wvkbd-transaction activate; then exit 1; fi
+        [ "$(sha256sum /usr/local/bin/wvkbd-emacos | awk "{print \$1}")" = "$new" ]
+        [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
+        /usr/sbin/rc-service emacsos-ui status
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-start
+        # A reboot with a durable pending candidate restores the old target;
+        # the start hook then clears only that restored-old state after the
+        # in-cgroup session proof, without candidate authorization.
+        cp /home/user/.cache/wvkbd-emacos.DEF456 /usr/local/bin/wvkbd-emacos
+        cp /usr/local/bin/wvkbd-emacos /tmp/pending-candidate
+        cp /home/user/.cache/wvkbd-emacos.ABC123 /var/lib/emacsos-wvkbd-transaction/previous
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/previous
+        chown root:root /var/lib/emacsos-wvkbd-transaction/previous
+        printf "version=2\\nphase=pending\\nold_sha=%s\\nnew_sha=%s\\nprior_notice=1\\nboot_id=-\\nowner_pid=0\\nowner_start=0\\n" "$new" "$third" >/var/lib/emacsos-wvkbd-transaction/state
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+        chown root:root /var/lib/emacsos-wvkbd-transaction/state
+        cp /usr/local/share/licenses/wvkbd-emacos/wordninja.txt /var/lib/emacsos-wvkbd-transaction/previous-notice
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/previous-notice
+        chown root:root /var/lib/emacsos-wvkbd-transaction/previous-notice
+        /usr/local/sbin/emacsos-wvkbd-transaction prepare-start
+        [ "$(sha256sum /usr/local/bin/wvkbd-emacos | awk "{print \$1}")" = "$new" ]
+        /usr/sbin/rc-service emacsos-ui restart
+        [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
+        /usr/sbin/rc-service emacsos-ui status
+        # Only this activation shell and this boot may carry a candidate from
+        # armed to testing. A stale generation or another boot rolls back
+        # before the old target is restored.
+        install -d -m 0700 /var/lib/emacsos-wvkbd-transaction
+        cp /usr/local/bin/wvkbd-emacos /var/lib/emacsos-wvkbd-transaction/previous
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/previous
+        owner=$$
+        owner_start=$(cut -d" " -f22 /proc/$$/stat)
+        boot=$(cat /proc/sys/kernel/random/boot_id)
+        printf "version=2\\nphase=armed\\nold_sha=%s\\nnew_sha=%s\\nprior_notice=0\\nboot_id=%s\\nowner_pid=%s\\nowner_start=%s\\n" "$new" "$new" "$boot" "$owner" "$owner_start" >/var/lib/emacsos-wvkbd-transaction/state
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+        /usr/local/sbin/emacsos-wvkbd-transaction prepare-start
+        grep -Fx "phase=testing" /var/lib/emacsos-wvkbd-transaction/state
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-start
+        grep -Fx "phase=testing" /var/lib/emacsos-wvkbd-transaction/state
+        sed -i "s/^owner_start=.*/owner_start=999999999/" /var/lib/emacsos-wvkbd-transaction/state
+        /usr/local/sbin/emacsos-wvkbd-transaction prepare-start
+        grep -Fx "phase=rollback" /var/lib/emacsos-wvkbd-transaction/state
+        /usr/sbin/rc-service emacsos-ui restart
+        [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
+        cp /usr/local/bin/wvkbd-emacos /var/lib/emacsos-wvkbd-transaction/previous
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/previous
+        printf "version=2\\nphase=armed\\nold_sha=%s\\nnew_sha=%s\\nprior_notice=0\\nboot_id=00000000-0000-0000-0000-000000000000\\nowner_pid=%s\\nowner_start=%s\\n" "$new" "$new" "$owner" "$owner_start" >/var/lib/emacsos-wvkbd-transaction/state
+        chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+        /usr/local/sbin/emacsos-wvkbd-transaction prepare-start
+        grep -Fx "phase=rollback" /var/lib/emacsos-wvkbd-transaction/state
+        /usr/sbin/rc-service emacsos-ui restart
+        [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
         mkdir -p /var/lib/emacsos-wvkbd-transaction
-        printf "version=1\nphase=pending\nold_sha=%064d\nnew_sha=%s\nprior_notice_present=0\n" 0 "$new" >/var/lib/emacsos-wvkbd-transaction/state
+        printf "version=2\nphase=pending\nold_sha=%064d\nnew_sha=%s\nprior_notice=0\nboot_id=-\nowner_pid=0\nowner_start=0\n" 0 "$new" >/var/lib/emacsos-wvkbd-transaction/state
         cp /usr/local/bin/wvkbd-emacos /var/lib/emacsos-wvkbd-transaction/previous
         chmod 0600 /var/lib/emacsos-wvkbd-transaction/state /var/lib/emacsos-wvkbd-transaction/previous
         chown root:root /var/lib/emacsos-wvkbd-transaction/state /var/lib/emacsos-wvkbd-transaction/previous
         if /usr/local/sbin/emacsos-wvkbd-transaction prepare-start 2>/dev/null; then exit 1; fi
         rm -f /var/lib/emacsos-wvkbd-transaction/state /var/lib/emacsos-wvkbd-transaction/previous
-        sed "s|checkpoint() { :; }|checkpoint() { if [ \"\${WVKBD_TEST_KILL_AT-}\" = \"\$1\" ]; then kill -KILL \"\$\$\"; fi; return 0; }|" /transaction >/transaction-test
+        sed "s|checkpoint() { :; }|checkpoint() { if [ \"\${WVKBD_TEST_KILL_AT-}\" = \"\$1\" ]; then kill -KILL \"\$\$\"; fi; return 0; }|" /transaction-base >/transaction-test
         chmod 0755 /transaction-test
         for point in before-pending after-pending after-notice-install \
             temporary-/usr/local/bin/wvkbd-emacos renamed-/usr/local/bin/wvkbd-emacos \
             installed-/usr/local/bin/wvkbd-emacos after-candidate-rename \
             before-candidate-restart during-candidate-restart after-candidate-restart \
-            gate-status gate-ready-metadata gate-ready-content gate-process gate-proc-exe \
+            session-cgroup session-ready-metadata session-ready-content session-keyboard session-proc-exe \
             after-candidate-gate after-committed cleanup-notice cleanup-previous cleanup-state; do
             for prior in present absent; do
                 /usr/sbin/rc-service emacsos-ui stop
@@ -220,13 +332,13 @@ EOF
                 /transaction-test prepare-start
                 [ "$(sha256sum /usr/local/bin/wvkbd-emacos | awk "{print \$1}")" = "$expected" ]
                 /usr/sbin/rc-service emacsos-ui start
-                /transaction-test finalize-start
+                /transaction-test verify-start
                 [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
                 [ "$(sha256sum /usr/local/bin/wvkbd-emacos | awk "{print \$1}")" = "$expected" ]
                 [ "$(for proc in /proc/[0-9]*; do [ "$(stat -c %U "$proc" 2>/dev/null || true)" = emacsos-lab ] || continue; actual=$(tr "\000" " " <"$proc/cmdline" | sed "s/ $//"); [ "$actual" = "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300" ] && printf x; done | wc -c)" -eq 1 ]
             done
         done
-        for corrupt in state-dir state-mode state-link state-type state-size state-fields previous-digest previous-link notice-metadata; do
+        for corrupt in state-dir state-mode state-link state-type state-size state-fields legacy-v1 previous-digest previous-link notice-metadata; do
             /usr/sbin/rc-service emacsos-ui stop
             rm -rf /var/lib/emacsos-wvkbd-transaction
             cc -s -o /usr/local/bin/wvkbd-emacos /tmp/keyboard.c
@@ -235,7 +347,7 @@ EOF
             install -d -m 0700 /var/lib/emacsos-wvkbd-transaction
             cp /usr/local/bin/wvkbd-emacos /var/lib/emacsos-wvkbd-transaction/previous
             chmod 0600 /var/lib/emacsos-wvkbd-transaction/previous
-            printf "version=1\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice_present=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state
+            printf "version=2\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice=0\nboot_id=-\nowner_pid=0\nowner_start=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state
             chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
             case $corrupt in
                 state-dir) chmod 0755 /var/lib/emacsos-wvkbd-transaction ;;
@@ -243,10 +355,11 @@ EOF
                 state-link) rm -f /var/lib/emacsos-wvkbd-transaction/state; ln -s /tmp/nope /var/lib/emacsos-wvkbd-transaction/state ;;
                 state-type) rm -f /var/lib/emacsos-wvkbd-transaction/state; mkdir /var/lib/emacsos-wvkbd-transaction/state ;;
                 state-size) dd if=/dev/zero bs=513 count=1 of=/var/lib/emacsos-wvkbd-transaction/state status=none ;;
-                state-fields) printf "version=1\nphase=broken\nold_sha=%s\nnew_sha=%s\nprior_notice_present=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state ;;
+                state-fields) printf "version=2\nphase=broken\nold_sha=%s\nnew_sha=%s\nprior_notice=0\nboot_id=-\nowner_pid=0\nowner_start=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state ;;
+                legacy-v1) printf "version=1\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice_present=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state ;;
                 previous-digest) printf bad >/var/lib/emacsos-wvkbd-transaction/previous ;;
                 previous-link) rm -f /var/lib/emacsos-wvkbd-transaction/previous; ln -s /tmp/nope /var/lib/emacsos-wvkbd-transaction/previous ;;
-                notice-metadata) printf "version=1\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice_present=1\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state; printf old-notice >/var/lib/emacsos-wvkbd-transaction/previous-notice; chmod 0644 /var/lib/emacsos-wvkbd-transaction/previous-notice ;;
+                notice-metadata) printf "version=2\nphase=pending\nold_sha=%s\nnew_sha=%s\nprior_notice=1\nboot_id=-\nowner_pid=0\nowner_start=0\n" "$old" "$new" >/var/lib/emacsos-wvkbd-transaction/state; printf old-notice >/var/lib/emacsos-wvkbd-transaction/previous-notice; chmod 0644 /var/lib/emacsos-wvkbd-transaction/previous-notice ;;
             esac
             if /usr/local/sbin/emacsos-wvkbd-transaction prepare-start 2>/dev/null; then exit 1; fi
             [ ! -e /tmp/emacsos-ui-running ]

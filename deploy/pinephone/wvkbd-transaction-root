@@ -14,6 +14,7 @@ previous_notice=$state_dir/previous-notice
 service=emacsos-ui
 ready=/run/emacsos-ui/ready
 command='/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300'
+service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 
 fail() { printf 'wvkbd-transaction: %s\n' "$1" >&2; exit 1; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
@@ -100,11 +101,10 @@ clear_state() {
 }
 
 write_state() {
-    phase=$1 old_sha=$2 new_sha=$3 prior_notice=$4
+    phase=$1 old_sha=$2 new_sha=$3 prior_notice=$4 boot_id=$5 owner_pid=$6 owner_start=$7
     temporary=$(mktemp "$state_dir/.state.XXXXXX")
     trap 'rm -f -- "${temporary-}"' EXIT HUP INT TERM
-    printf 'version=1\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice_present=%s\n' \
-        "$phase" "$old_sha" "$new_sha" "$prior_notice" >"$temporary"
+    printf 'version=2\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice=%s\nboot_id=%s\nowner_pid=%s\nowner_start=%s\n' "$phase" "$old_sha" "$new_sha" "$prior_notice" "$boot_id" "$owner_pid" "$owner_start" >"$temporary"
     chown root:root "$temporary"
     chmod 0600 "$temporary"
     root_file "$temporary" 600 || fail 'could not create safe state marker'
@@ -118,21 +118,36 @@ read_state() {
     ensure_state_dir
     root_file "$state" 600 || fail 'unsafe transaction state'
     [ "$(stat -c '%s' "$state")" -le 512 ] || fail 'oversized transaction state'
-    [ "$(wc -l <"$state")" -eq 5 ] || fail 'malformed transaction state'
+    [ "$(wc -l <"$state")" -eq 8 ] || fail 'malformed transaction state'
     version=$(sed -n '1s/^version=//p' "$state")
     phase=$(sed -n '2s/^phase=//p' "$state")
     old_sha=$(sed -n '3s/^old_sha=//p' "$state")
     new_sha=$(sed -n '4s/^new_sha=//p' "$state")
-    prior_notice=$(sed -n '5s/^prior_notice_present=//p' "$state")
-    [ "$version" = 1 ] && { [ "$phase" = pending ] || [ "$phase" = committed ]; } &&
+    prior_notice=$(sed -n '5s/^prior_notice=//p' "$state")
+    boot_id=$(sed -n '6s/^boot_id=//p' "$state")
+    owner_pid=$(sed -n '7s/^owner_pid=//p' "$state"); owner_start=$(sed -n '8s/^owner_start=//p' "$state")
+    [ "$version" = 2 ] && case $phase in pending|armed|testing|rollback|committed) true;; *) false;; esac &&
         printf '%s\n%s\n' "$old_sha" "$new_sha" | grep -Eq '^[0-9a-f]{64}$' &&
-        { [ "$prior_notice" = 0 ] || [ "$prior_notice" = 1 ]; } ||
+        { [ "$prior_notice" = 0 ] || [ "$prior_notice" = 1 ]; } &&
+        case $phase in
+            armed|testing)
+                printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' &&
+                    printf '%s\n%s\n' "$owner_pid" "$owner_start" | grep -Eq '^[1-9][0-9]*$'
+                ;;
+            *) [ "$boot_id" = - ] && [ "$owner_pid" = 0 ] && [ "$owner_start" = 0 ] ;;
+        esac ||
         fail 'malformed transaction state'
     # Reject extra keys, reordered fields, and embedded control data.
-    printf 'version=1\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice_present=%s\n' \
-        "$phase" "$old_sha" "$new_sha" "$prior_notice" | cmp -s - "$state" ||
+    printf 'version=2\nphase=%s\nold_sha=%s\nnew_sha=%s\nprior_notice=%s\nboot_id=%s\nowner_pid=%s\nowner_start=%s\n' "$phase" "$old_sha" "$new_sha" "$prior_notice" "$boot_id" "$owner_pid" "$owner_start" | cmp -s - "$state" ||
         fail 'malformed transaction state'
 }
+
+current_boot_id() {
+    value=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    printf '%s\n' "$value" | grep -Ex '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}'
+}
+owner_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+owner_live() { [ "$owner_pid" = "${1-}" ] && [ "$owner_start" = "$(owner_starttime "$owner_pid")" ]; }
 
 verified_backup() {
     root_file "$previous" 600 || fail 'unsafe previous keyboard backup'
@@ -162,7 +177,7 @@ copy_checked() {
 
 restore_old() {
     read_state
-    [ "$phase" = pending ] || fail 'restore requested for committed transaction'
+    [ "$phase" = rollback ] || fail 'restore requested outside rollback'
     verified_backup
     copy_checked "$previous" "$target" 755 "$old_sha"
     if [ "$prior_notice" = 1 ]; then
@@ -178,43 +193,73 @@ restore_old() {
     safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'old keyboard restore failed'
 }
 
-candidate_authorized() {
-    [ "${EMACSOS_WVKBD_CANDIDATE_SHA256-}" = "$new_sha" ] &&
-        safe_target && [ "$(sha "$target")" = "$new_sha" ]
+safe_service_cgroup() {
+    [ -d "$service_cgroup" ] && [ ! -L "$service_cgroup" ] &&
+        [ "$(stat -c '%U:%G:%F' "$service_cgroup")" = 'root:root:directory' ] &&
+        root_cgroup_file "$service_cgroup/cgroup.procs" &&
+        root_cgroup_file "$service_cgroup/cgroup.events"
+}
+
+root_cgroup_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    case $(stat -c '%U:%G:%F' "$1") in
+        'root:root:regular file'|'root:root:regular empty file') return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 keyboard_pid() {
-    for proc in /proc/[0-9]*; do
+    safe_service_cgroup || return 1
+    count=0
+    while IFS= read -r pid; do
+        case $pid in ''|*[!0-9]*) return 1;; esac
+        count=$((count + 1))
+        [ "$count" -le 256 ] || return 1
+        proc=/proc/$pid
         [ "$(stat -c '%U' "$proc" 2>/dev/null || true)" = emacsos-lab ] || continue
         [ -r "$proc/cmdline" ] || continue
         actual=$(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null | sed 's/ $//' || true)
-        [ "$actual" = "$command" ] && printf '%s\n' "${proc##*/}"
-    done
+        [ "$actual" = "$command" ] && printf '%s\n' "$pid"
+    done <"$service_cgroup/cgroup.procs"
 }
 
-gate() {
+session_gate() {
     expected=$1
-    rc-service "$service" status >/dev/null 2>&1 || return 1
-    checkpoint gate-status
+    safe_service_cgroup || return 1
+    checkpoint session-cgroup
     [ -f "$ready" ] && [ ! -L "$ready" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$ready")" = 'emacsos-lab:emacsos-lab:600:1:regular file' ] || return 1
-    checkpoint gate-ready-metadata
+    checkpoint session-ready-metadata
     [ "$(wc -c <"$ready")" -eq 5 ] && [ "$(cat "$ready")" = ready ] || return 1
-    checkpoint gate-ready-content
-    pids=$(keyboard_pid)
+    checkpoint session-ready-content
+    pids=$(keyboard_pid) || return 1
     [ "$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l)" -eq 1 ] || return 1
-    checkpoint gate-process
+    checkpoint session-keyboard
     pid=$(printf '%s\n' "$pids" | sed -n '1p')
     case $pid in ''|*[!0-9]*) return 1;; esac
     [ -e "/proc/$pid/exe" ] || return 1
-    checkpoint gate-proc-exe
+    checkpoint session-proc-exe
     [ "$(sha "/proc/$pid/exe")" = "$expected" ]
 }
 
-wait_gate() {
+service_gate() {
+    rc-service "$service" status >/dev/null 2>&1 && session_gate "$1"
+}
+
+wait_session() {
     expected=$1 attempt=0
     while [ "$attempt" -lt 100 ]; do
-        gate "$expected" && return 0
+        session_gate "$expected" && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
+wait_service_gate() {
+    expected=$1 attempt=0
+    while [ "$attempt" -lt 100 ]; do
+        service_gate "$expected" && return 0
         attempt=$((attempt + 1))
         sleep 0.1
     done
@@ -225,14 +270,14 @@ restart_candidate() {
     checkpoint before-candidate-restart
     rm -f -- "$ready"
     checkpoint during-candidate-restart
-    timeout 30 env EMACSOS_WVKBD_CANDIDATE_SHA256="$1" rc-service "$service" restart >/dev/null 2>&1 &&
-        wait_gate "$1" && checkpoint after-candidate-restart
+    timeout 30 rc-service "$service" restart >/dev/null 2>&1 &&
+        wait_service_gate "$1" && checkpoint after-candidate-restart
 }
 
 normal_recovery() {
     rm -f -- "$ready"
-    timeout 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service "$service" restart >/dev/null 2>&1 &&
-        wait_gate "$old_sha"
+    timeout 30 rc-service "$service" restart >/dev/null 2>&1 &&
+        wait_service_gate "$old_sha"
 }
 
 prepare_start() {
@@ -250,9 +295,19 @@ prepare_start() {
     fi
     read_state
     case $phase in
-        pending)
+        armed)
             verified_backup
-            candidate_authorized && return 0
+            if [ "$boot_id" = "$(current_boot_id)" ] && safe_target && [ "$(sha "$target")" = "$new_sha" ]; then
+                owner_live "$owner_pid" || { write_state rollback "$old_sha" "$new_sha" "$prior_notice" - 0 0; restore_old; return 0; }
+                write_state testing "$old_sha" "$new_sha" "$prior_notice" "$boot_id" "$owner_pid" "$owner_start"
+                return 0
+            fi
+            write_state rollback "$old_sha" "$new_sha" "$prior_notice" - 0 0
+            restore_old
+            ;;
+        pending|testing|rollback)
+            verified_backup
+            write_state rollback "$old_sha" "$new_sha" "$prior_notice" - 0 0
             restore_old
             ;;
         committed)
@@ -262,23 +317,37 @@ prepare_start() {
     esac
 }
 
-finalize_start() {
+# This ordinary post-start proof has no transaction-state behavior.
+verify_current() {
+    safe_target || fail 'current keyboard is unsafe'
+    current_sha=$(sha "$target")
+    session_gate "$current_sha" || fail 'current keyboard session did not become ready'
+}
+
+verify_start() {
     if [ ! -e "$state" ] && [ ! -L "$state" ]; then
         return 0
     fi
     read_state
     case $phase in
-        pending)
-            if candidate_authorized; then
-                wait_gate "$new_sha" || fail 'candidate keyboard did not pass readiness gate'
-                return 0
-            fi
+        testing)
+            verified_backup
+            [ "$boot_id" = "$(current_boot_id)" ] && owner_live "$owner_pid" || fail 'candidate testing owner is stale'
+            safe_target && [ "$(sha "$target")" = "$new_sha" ] || fail 'candidate keyboard digest mismatch'
+            wait_session "$new_sha" || fail 'candidate keyboard session did not become ready'
+            ;;
+        rollback)
+            verified_backup
             safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'restored keyboard digest mismatch'
-            wait_gate "$old_sha" || fail 'restored keyboard did not pass readiness gate'
+            wait_session "$old_sha" || fail 'restored keyboard session did not become ready'
             clear_state
+            ;;
+        armed|pending)
+            fail 'candidate state reached start_post without preparation'
             ;;
         committed)
             safe_target && [ "$(sha "$target")" = "$new_sha" ] || fail 'committed keyboard digest mismatch'
+            wait_session "$new_sha" || fail 'committed keyboard session did not become ready'
             clear_state
             ;;
     esac
@@ -313,25 +382,34 @@ activate() {
     fi
     sync_state
     checkpoint before-pending
-    write_state pending "$old_sha" "$expected_new" "$prior_notice"
+    write_state pending "$old_sha" "$expected_new" "$prior_notice" - 0 0
     checkpoint after-pending
     install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
     copy_checked "$notice_snapshot" "$notice" 644 "$expected_notice"
     checkpoint after-notice-install
     copy_checked "$candidate_snapshot" "$target" 755 "$expected_new"
     checkpoint after-candidate-rename
+    owner_pid=$$; owner_start=$(owner_starttime "$$"); printf '%s\n' "$owner_start" | grep -Eq '^[0-9]+$' || fail 'cannot bind activation owner'
+    boot_id=$(current_boot_id) || fail 'cannot bind activation boot'
+    write_state armed "$old_sha" "$expected_new" "$prior_notice" "$boot_id" "$owner_pid" "$owner_start"
     if restart_candidate "$expected_new"; then
         checkpoint after-candidate-gate
-        write_state committed "$old_sha" "$expected_new" "$prior_notice"
+        read_state
+        [ "$phase" = testing ] || fail "candidate state is not testing: $phase"
+        [ "$boot_id" = "$(current_boot_id)" ] || fail 'candidate boot changed'
+        safe_target && [ "$(sha "$target")" = "$expected_new" ] || fail 'candidate keyboard digest changed'
+        owner_live "$$" || fail 'candidate owner changed'
+        write_state committed "$old_sha" "$expected_new" "$prior_notice" - 0 0
         checkpoint after-committed
         clear_state
         remove_file "$candidate_snapshot"
         remove_file "$notice_snapshot"
         return 0
     fi
+    read_state
+    write_state rollback "$old_sha" "$new_sha" "$prior_notice" - 0 0
     restore_old || fail 'candidate failed and old keyboard could not be restored'
     if normal_recovery; then
-        finalize_start
         remove_file "$candidate_snapshot"
         remove_file "$notice_snapshot"
         printf '%s\n' 'candidate failed; old keyboard restored' >&2
@@ -344,6 +422,7 @@ activate() {
 case $1 in
     activate) activate ;;
     prepare-start) prepare_start ;;
-    finalize-start) finalize_start ;;
+    verify-start) verify_start ;;
+    verify-current) verify_current ;;
     *) fail 'unknown action' ;;
 esac

@@ -1,0 +1,88 @@
+#+title: OpenRC session-gate recovery amendment
+#+date: 2026-09-10
+
+* Lineage
+
+This amends [[file:2026-09-07-wvkbd-persistent-activation.org][the persistent keyboard activation design]],
+[[file:2026-09-08-glide-modifier-keyboard.org][the glide-modifier keyboard design]], and
+[[file:2026-09-09-glide-modifier-keyboard-implementation.org][the glide-modifier implementation record]].
+The second record's old =finalize-start=, environment-authorized, version-1
+lifecycle is amended here.  This records a deployment failure found while
+combining the tested chat and keyboard revisions; it does not revise those
+historical records.
+
+* Observed boundary
+
+The keyboard process, ready file, and Sway/Emacs session could be healthy while
+OpenRC reported =emacsos-ui= stopped.  The service's =start_post= hook ran
+before OpenRC recorded the started marker.  The previous transaction finalizer
+required both signals from inside that hook, so it rejected the healthy session
+and rolled back.
+
+* Contract
+
+The transaction now has two deliberately separate proofs:
+
+- The session gate proves the root-owned OpenRC cgroup, the root-owned cgroup
+  control files, the exact ready file, and exactly one =emacsos-lab= keyboard
+  process whose argv and executable digest match the expected installed binary.
+- The service gate adds ordinary =rc-service emacsos-ui status= to that session
+  gate.  It is used only after =rc-service restart= returns to the activation
+  caller.
+
+=start_post= performs only the session proof. It cannot commit or clear a
+candidate. The activation caller commits only after the full service gate
+passes.
+
+The root-only state marker is version 2 and has exactly these fields: version,
+phase, old_sha, new_sha, prior_notice, boot_id, owner_pid, and owner_start.
+Phases are =pending=, =armed=, =testing=, =rollback=, and =committed=. The
+candidate is authorized only by an =armed= or =testing= marker containing the
+canonical boot UUID and the activation shell's PID plus Linux start-time
+generation. All other phases use =-=/=0=/=0= for those fields. The old
+environment candidate authorization is gone.
+
+After candidate installation, the caller durably writes =armed= before its
+synchronous restart. The service pre-start hook changes only a same-boot,
+same-generation, still-new =armed= state to =testing= and starts once. Any
+other recoverable state first becomes =rollback=, then restores the old binary
+idempotently. The post-start hook accepts =testing= only with the same live
+owner and a session proof. It never commits. A =committed= recovery before a
+new service start proves only the installed target digest, then clears the
+marker, because no session is expected while the service is stopped. The
+post-start =committed= path still requires the session proof. The original activation caller
+rereads that =testing= state after ordinary OpenRC service status succeeds,
+then commits and cleans it. A reboot or a dead activation owner therefore
+cannot bless the candidate.
+
+The updater uses the separate =verify-current= action after ordinary service
+status. It has no transaction-state behavior: it proves the current safe target
+and the exact in-cgroup session. Thus an ordinary update cannot treat a ready
+file alone, a missing keyboard, a wrong keyboard, or a matching process outside
+the OpenRC cgroup as a healthy UI.
+
+Boot recovery proves the restored old session before cleanup. A committed
+marker retains a verified new binary and cleans only the transaction records.
+Rollback reports success only after the full old service gate passes.
+
+* Existing-status reconciliation
+
+The updater treats a stopped OpenRC status plus a populated validated
+=openrc.emacsos-ui= cgroup as an interrupted service state, not as permission
+to delete arbitrary processes.  Under its existing lock it asks OpenRC to stop,
+requires every lab process to be listed in that cgroup, kills only that cgroup,
+waits for it to drain, confirms no lab process remains, removes the validated
+runtime directory, and starts normally once.  Completion requires ordinary
+service status, the session proof, and exactly one default-runlevel entry.
+
+* Deterministic evidence
+
+The keyboard transaction fixture proves that =start_post= succeeds before the
+OpenRC started marker, rejects a matching process outside the cgroup and two
+matching processes inside it, rolls back a candidate when the started marker
+never arrives, and recovers both pending and stopped-service committed reboot
+transactions. It also exercises the state-free =verify-current= proof for a
+missing, wrong, and out-of-cgroup keyboard. The updater fixture models status 3
+with a populated cgroup, rejects each of those no-state proof failures, and
+verifies one safe reconciliation and restart. The full failure checkpoint matrix
+remains in the keyboard test.

@@ -51,7 +51,7 @@ start_pre() {
 }
 
 start_post() {
-    /usr/local/sbin/emacsos-wvkbd-transaction finalize-start
+    /usr/local/sbin/emacsos-wvkbd-transaction verify-start
 }
 
 stop_post() {

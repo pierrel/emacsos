@@ -17,7 +17,7 @@ fail() { printf 'wvkbd-install: %s\n' "$1" >&2; exit 1; }
 [ -f "$initd" ] && [ ! -L "$initd" ] &&
     [ "$(stat -c '%U:%G:%a:%h:%F' "$initd")" = 'root:root:755:1:regular file' ] &&
     grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1' "$initd" >/dev/null &&
-    grep -F '/usr/local/sbin/emacsos-wvkbd-transaction finalize-start' "$initd" >/dev/null ||
+    grep -F '/usr/local/sbin/emacsos-wvkbd-transaction verify-start' "$initd" >/dev/null ||
     fail 'OpenRC UI transaction hooks are not installed safely'
 touch "$lock"; chown root:root "$lock"; chmod 0600 "$lock"
 exec 9>"$lock"; flock -n -x 9 || fail 'install is already running'

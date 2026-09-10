@@ -14,7 +14,7 @@ doas_tmp=
 reference_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-manifest_hash=03a1d4e788629d4a7770ba81341d735b0a2c5a1e8f26d15c8080b8458d148716
+manifest_hash=17ab550faf53339f76ae8e0f5d87c5fdae0cb5b1b9dfecdd6de20d54ca169c07
 mutating=0
 committed=0
 restart_only=0
@@ -22,6 +22,7 @@ reference_restore_failed=0
 config_dir_created=0
 token_parent_dir_created=0
 token_config_dir_created=0
+service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
@@ -62,18 +63,39 @@ render_ipv4_template() {
     mv -f -- "$rendered" "$source"
 }
 
-ui_quiescent() {
-    service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
-    ! rc-service emacsos-ui status >/dev/null 2>&1 || return 1
-    if [ -e "$service_cgroup" ] || [ -L "$service_cgroup" ]; then
-        [ -d "$service_cgroup" ] && [ ! -L "$service_cgroup" ] &&
-            [ "$(stat -c '%U:%G:%F' "$service_cgroup")" = \
-                'root:root:directory' ] &&
-            [ -f "$service_cgroup/cgroup.events" ] &&
-            [ ! -L "$service_cgroup/cgroup.events" ] &&
-            grep -Fx 'populated 0' "$service_cgroup/cgroup.events" \
-                >/dev/null 2>&1 || return 1
-    fi
+safe_service_cgroup() {
+    [ -d "$service_cgroup" ] && [ ! -L "$service_cgroup" ] &&
+        [ "$(stat -c '%U:%G:%F' "$service_cgroup")" = 'root:root:directory' ] &&
+        root_cgroup_file "$service_cgroup/cgroup.procs" &&
+        root_cgroup_file "$service_cgroup/cgroup.events" &&
+        root_cgroup_file "$service_cgroup/cgroup.kill" &&
+        [ -w "$service_cgroup/cgroup.kill" ]
+}
+
+root_cgroup_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    case $(stat -c '%U:%G:%F' "$1") in
+        'root:root:regular file'|'root:root:regular empty file') return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cgroup_empty() {
+    safe_service_cgroup && grep -Fx 'populated 0' "$service_cgroup/cgroup.events" >/dev/null 2>&1
+}
+
+lab_processes_outside_cgroup() {
+    lab_uid=$(id -u emacsos-lab) || return 0
+    safe_service_cgroup || return 0
+    for proc in /proc/[0-9]*; do
+        pid=${proc##*/}
+        [ "$(stat -c '%u' "$proc" 2>/dev/null || true)" = "$lab_uid" ] || continue
+        grep -Fx "$pid" "$service_cgroup/cgroup.procs" >/dev/null 2>&1 || return 0
+    done
+    return 1
+}
+
+no_lab_processes() {
     lab_uid=$(id -u emacsos-lab) || return 1
     if pgrep -u "$lab_uid" >/dev/null 2>&1; then
         return 1
@@ -83,9 +105,50 @@ ui_quiescent() {
     fi
 }
 
+safe_runtime() {
+    [ -d /run/emacsos-ui ] && [ ! -L /run/emacsos-ui ] &&
+        [ "$(stat -c '%U:%G:%F' /run/emacsos-ui)" = 'emacsos-lab:emacsos-lab:directory' ] &&
+        ! findmnt -rn -o TARGET /run/emacsos-ui | grep -Fx /run/emacsos-ui >/dev/null
+}
+
+remove_runtime() {
+    [ ! -e /run/emacsos-ui ] && [ ! -L /run/emacsos-ui ] && return 0
+    safe_runtime || return 1
+    rm -rf -- /run/emacsos-ui
+}
+
+ui_quiescent() {
+    ! rc-service emacsos-ui status >/dev/null 2>&1 || return 1
+    if [ -e "$service_cgroup" ] || [ -L "$service_cgroup" ]; then
+        cgroup_empty || return 1
+    fi
+    no_lab_processes
+}
+
+reconcile_untracked_ui() {
+    ! rc-service emacsos-ui status >/dev/null 2>&1 || return 1
+    safe_service_cgroup || return 1
+    cgroup_empty && return 1
+    lab_processes_outside_cgroup && return 1
+    printf '%s\n' 1 >"$service_cgroup/cgroup.kill"
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        cgroup_empty && break
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    cgroup_empty && no_lab_processes && remove_runtime
+}
+
 stop_ui() {
     timeout -s TERM -k 5 30 rc-service emacsos-ui stop 8>&- 9>&- || true
-    ui_quiescent
+    ui_quiescent && return 0
+    reconcile_untracked_ui && ui_quiescent
+}
+
+default_ui_entry() {
+    rc-update add emacsos-ui default >/dev/null 2>&1 || return 1
+    [ "$(rc-update show default 2>/dev/null | awk '$1 == "emacsos-ui" && $2 == "|" && $3 == "default" { count++ } END { print count + 0 }')" = 1 ]
 }
 
 start_ui() {
@@ -94,17 +157,14 @@ start_ui() {
     attempt=0
     while [ "$attempt" -lt 150 ]; do
         if rc-service emacsos-ui status >/dev/null 2>&1 &&
-           [ -f /run/emacsos-ui/ready ] && [ ! -L /run/emacsos-ui/ready ] &&
-           [ "$(stat -c '%U:%G:%a:%h:%F' /run/emacsos-ui/ready)" = \
-               'emacsos-lab:emacsos-lab:600:1:regular file' ] &&
-           [ "$(sed -n '1p' /run/emacsos-ui/ready)" = ready ]; then
+           /usr/local/sbin/emacsos-wvkbd-transaction verify-current >/dev/null 2>&1; then
             ready=1
             break
         fi
         attempt=$((attempt + 1))
         sleep 0.2
     done
-    [ "$ready" -eq 1 ]
+    [ "$ready" -eq 1 ] && default_ui_entry
 }
 
 restore_file() {

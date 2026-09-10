@@ -95,7 +95,7 @@ grep -F 'NO_AT_BRIDGE=1' "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'need localmount seatd cgroups' "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start' \
     "$deploy_dir/emacsos-ui.initd" >/dev/null
-grep -F '/usr/local/sbin/emacsos-wvkbd-transaction finalize-start' \
+grep -F '/usr/local/sbin/emacsos-wvkbd-transaction verify-start' \
     "$deploy_dir/emacsos-ui.initd" >/dev/null
 grep -F 'cgroup=/sys/fs/cgroup/openrc.emacsos-ui' \
     "$deploy_dir/emacsos-ui.initd" >/dev/null
