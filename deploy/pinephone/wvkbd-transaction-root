@@ -311,7 +311,7 @@ session_gate() {
     [ -f "$ready" ] && [ ! -L "$ready" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$ready")" = 'emacsos-lab:emacsos-lab:600:1:regular file' ] || return 1
     checkpoint session-ready-metadata
-    [ "$(wc -c <"$ready")" -eq 5 ] && [ "$(cat "$ready")" = ready ] || return 1
+    printf '%s\n' ready | cmp -s - "$ready" || return 1
     checkpoint session-ready-content
     pids=$(keyboard_pid) || return 1
     [ "$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l)" -eq 1 ] || return 1

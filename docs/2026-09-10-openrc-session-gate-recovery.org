@@ -66,6 +66,14 @@ Boot recovery proves the restored old session before cleanup. A committed
 marker retains a verified new binary and cleans only the transaction records.
 Rollback reports success only after the full old service gate passes.
 
+* Historical supersessions
+
+The [[file:2026-09-08-glide-modifier-keyboard.org::*Cross-repository interface][glide-modifier design's cross-repository interface section]] uses
+“containing exactly =ready=” as shorthand.  That wording is superseded by the
+session's actual byte contract: the marker contains exactly one =ready= line,
+including its newline.  The gate compares all six bytes and rejects partial,
+extra-byte, and NUL-containing markers.
+
 * Existing-status reconciliation
 
 The updater treats a stopped OpenRC status plus a populated validated

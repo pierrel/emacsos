@@ -186,7 +186,7 @@ EOF
 cgroup=/tmp/openrc.emacsos-ui
 case $2 in
  status) [ -f /run/emacsos-ui/service ] ;;
- start|restart) /usr/local/sbin/emacsos-wvkbd-transaction prepare-start || exit 1; mkdir -p /run/emacsos-ui "$cgroup"; rm -f /run/emacsos-ui/ready /run/emacsos-ui/service /tmp/startpost-session-verified; [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300 >/dev/null 2>&1 & echo \$!" >/run/emacsos-ui/pid; chown emacsos-lab:emacsos-lab /run/emacsos-ui/pid; cat /run/emacsos-ui/pid >"$cgroup/cgroup.procs"; printf "populated 1\\n" >"$cgroup/cgroup.events"; : >"$cgroup/cgroup.kill"; printf ready >/run/emacsos-ui/ready; chown emacsos-lab:emacsos-lab /run/emacsos-ui/ready; chmod 0600 /run/emacsos-ui/ready; [ ! -e /run/emacsos-ui/service ]; /usr/local/sbin/emacsos-wvkbd-transaction verify-start || exit 1; : >/tmp/startpost-session-verified; [ ! -e /tmp/suppress-service-marker ] || { rm -f /tmp/suppress-service-marker; exit 0; }; : >/run/emacsos-ui/service ;;
+ start|restart) /usr/local/sbin/emacsos-wvkbd-transaction prepare-start || exit 1; mkdir -p /run/emacsos-ui "$cgroup"; rm -f /run/emacsos-ui/ready /run/emacsos-ui/service /tmp/startpost-session-verified; [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300 >/dev/null 2>&1 & echo \$!" >/run/emacsos-ui/pid; chown emacsos-lab:emacsos-lab /run/emacsos-ui/pid; cat /run/emacsos-ui/pid >"$cgroup/cgroup.procs"; printf "populated 1\\n" >"$cgroup/cgroup.events"; : >"$cgroup/cgroup.kill"; printf "ready\\n" >/run/emacsos-ui/ready; chown emacsos-lab:emacsos-lab /run/emacsos-ui/ready; chmod 0600 /run/emacsos-ui/ready; [ ! -e /run/emacsos-ui/service ]; /usr/local/sbin/emacsos-wvkbd-transaction verify-start || exit 1; : >/tmp/startpost-session-verified; [ ! -e /tmp/suppress-service-marker ] || { rm -f /tmp/suppress-service-marker; exit 0; }; : >/run/emacsos-ui/service ;;
  stop) [ -f /run/emacsos-ui/pid ] && kill "$(cat /run/emacsos-ui/pid)" 2>/dev/null || true; printf "populated 0\\n" >"$cgroup/cgroup.events"; : >"$cgroup/cgroup.procs"; rm -f /run/emacsos-ui/service /run/emacsos-ui/ready ;;
 esac
 EOF
@@ -214,6 +214,9 @@ EOF
         : >/tmp/openrc.emacsos-ui/cgroup.procs
         if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
         cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        printf "ready\000" >/run/emacsos-ui/ready
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        printf "ready\n" >/run/emacsos-ui/ready
         /usr/local/sbin/emacsos-wvkbd-transaction verify-current
         # A crash just after commit can meet a stopped service: pre-start must
         # retain only the verified target, clear the marker, then start once.
