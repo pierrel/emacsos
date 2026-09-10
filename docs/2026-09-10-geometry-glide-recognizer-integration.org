@@ -15,7 +15,7 @@ produced no word.  The follow-up wvkbd amendment replaces literal
 crossed-letter matching with bounded active-layout geometry matching.
 
 EmacsOS now pins reviewed wvkbd commit
-=96657a05ce3d06f25d3afaa2f897e2632e42b3f8=.  Its AArch64 builder reads the two
+=3d24c2e498e5795b4ced4199dac6381aca1edb63=.  Its AArch64 builder reads the two
 retained dictionary symbol sizes in forced decimal and rejects their combined
 payload above 256 KiB after the unused rank table was removed.  Archive
 isolation and the transactional phone installer are unchanged.
