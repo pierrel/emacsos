@@ -1,0 +1,28 @@
+#+title: Glide Shift follow-up integration amendment
+#+date: 2026-09-11
+
+* Historical supersessions
+
+This supersedes only =2026-09-11-glide-effective-shift-integration.org=,
+=Integration='s exact source pin and artifact hash, plus =Verification before
+deployment='s live-verification gate. Its earlier build record remains evidence
+about that earlier artifact and is not reattributed here.
+
+* Integration
+
+The pinned wvkbd revision retains the effective-Shift punctuation behavior and
+treats a Shift tap as preparatory input. It preserves the pending glide
+separator decision for the next accepted key, so shifted numeric punctuation
+can replace the automatic separator through the normal on-screen key path.
+
+The exact source pin is
+=ae3f232a93b4be7bc338e729ff7ad4bc3f836078=. The resulting AArch64 artifact is
+=fef620a3e927bfc7746954cf22768990c444039b1871b3f70c9f4f7553ab0189=.
+
+* Verification before deployment
+
+The pin was built from a clean =git archive= by the digest-pinned Alpine 3.22
+builder. The full 427-test Emacs Lisp suite and the atomic side-by-side wvkbd
+build and installer checks passed. The wvkbd unit suite covers the preparatory
+Shift transition and its targeted ASan/UBSan execution passed. Live
+verification remains the deployment gate.
