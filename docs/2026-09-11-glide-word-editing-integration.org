@@ -30,3 +30,16 @@ builder. The resulting AArch64 artifact is
 =bea92930cd50e9343f9cc00deba306f2a181fe0536e1b86461e570f2ed67e8b2=.
 The full 427-test Emacs Lisp suite and the atomic side-by-side wvkbd build and
 installer checks passed before deployment.
+
+* Live verification
+
+The artifact was installed side by side as =/usr/local/bin/wvkbd-emacos=; the
+stock package path was not replaced. On the running PinePhone, its SHA-256 was
+the exact build hash above, =emacsos-ui= remained started, and the running
+keyboard process used that path.
+
+Synthetic touchscreen input against the real EmacsOS display verified these
+visible results: gliding =test= produced =test= plus one separator; an immediate
+Space left exactly that one separator; an immediate comma produced =test,=;
+and one immediate Backspace returned the input to empty. A short upward swipe
+on =a= still sent =C-a= and moved point to the start of visible =abc= text.
