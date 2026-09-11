@@ -3,14 +3,17 @@
 
 * Historical supersessions
 
-This supersedes that record's =Integration= pin =4714930=, which lacks the
-post-recognition editing unit. The keyboard command and deployment path remain
-unchanged.
+This supersedes only =2026-09-10-geometry-glide-recognizer-integration.org=,
+=Observed correction='s pin =4714930=, and the no-automatic-Space/retraction
+parts of =2026-09-08-glide-modifier-keyboard.org=, =Phone experience=,
+=Resource and safety acceptance='s event count, and =Explicit non-goals=. The
+keyboard command and deployment path remain unchanged.
 
 * Integration
 
-The pinned wvkbd revision emits a recognized glide word followed by Space. Its
-immediate plain Backspace retracts that exact word-space unit. Punctuation and
-an explicit Space follow the emitted separator, and external focus, cursor, or
-hardware edits cannot be observed. No Emacs integration or persistence is added.
-Keyboard lifecycle and layout-context resets also disarm the one-shot undo.
+The pinned wvkbd revision emits up to 24 glide letters and one balanced Space.
+Its immediate plain Backspace is a one-shot retraction of that exact word-space
+unit. Punctuation and an explicit Space follow the emitted separator, and
+external focus, cursor, or hardware edits cannot be observed. No Emacs
+integration or persistence is added. Keyboard lifecycle and layout-context
+resets also disarm the one-shot undo.
