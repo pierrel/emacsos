@@ -6,8 +6,9 @@
 This supersedes only =2026-09-10-geometry-glide-recognizer-integration.org=,
 =Observed correction='s pin =4714930=, and the no-automatic-Space/retraction
 parts of =2026-09-08-glide-modifier-keyboard.org=, =Phone experience=,
-=Resource and safety acceptance='s event count, and =Explicit non-goals=. The
-keyboard command and deployment path remain unchanged.
+=Resource and safety acceptance='s event count, =Tradeoffs and risks=,
+=Explicit non-goals=, and =Decision='s explicit-separator/automatic-spacing
+statements. The keyboard command and deployment path remain unchanged.
 
 * Integration
 
