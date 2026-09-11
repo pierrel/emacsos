@@ -1,0 +1,29 @@
+#+title: Glide effective Shift integration amendment
+#+date: 2026-09-11
+
+* Historical supersessions
+
+This supersedes only =2026-09-11-glide-word-editing-integration.org=,
+=Integration='s exact source pin and unqualified punctuation statement, and
+=Build verification='s artifact hash. Its recorded live verification remains
+evidence about that earlier artifact and is not reattributed here.
+
+* Integration
+
+The pinned wvkbd revision retains the accepted glide word-editing behavior and
+uses the same effective modifier calculation for key emission and separator
+replacement. Shifted numeric punctuation therefore replaces the automatic
+separator whether Shift is latched or forced by the key. The calculation also
+preserves the existing forced-modifier and reset-modifier behavior.
+
+The exact source pin is
+=810544ade7f9479cead0e92a7027fe91b1a0ca62=. The resulting AArch64 artifact is
+=7f924d12c1c4cf5df7566c88c30b71e8c35c5d453a6e4dee283d7dda9fec942b=.
+
+* Verification before deployment
+
+The pin was built from a clean =git archive= by the digest-pinned Alpine 3.22
+builder. The full 427-test Emacs Lisp suite and the atomic side-by-side wvkbd
+build and installer checks passed. The wvkbd unit suite pins the effective-Shift
+truth table, and its targeted ASan/UBSan execution passed. Live verification
+remains the deployment gate.
