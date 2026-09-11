@@ -3,9 +3,9 @@
 
 * Historical supersessions
 
-This follows =2026-09-10-geometry-glide-recognizer-integration.org=. The
-keyboard command and deployment path remain unchanged; this pins its editing
-amendment.
+This supersedes that record's =Integration= pin =4714930=, which lacks the
+post-recognition editing unit. The keyboard command and deployment path remain
+unchanged.
 
 * Integration
 
