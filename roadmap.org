@@ -152,6 +152,12 @@ per-buffer command list or persistent utility pane remains.  A temporary
 control window appears only for call and SMS confirmations, then is deleted.
 See [[file:docs/2026-09-08-remove-control-pane.org][the corrective design]].
 
+** TODO Glide decoder improvements
+
+Build a locally captured correction comparison set, then add a bounded frequency
+prior, DTW/SHARK2 geometry, and context ranking through a separately reviewed
+context seam. Privacy and storage need their own reviewed design first.
+
 ** DONE Tab button on the keyboard
 
 Shipped in PR #11: TAB is the 4th button on the SPC/RET/DEL action row

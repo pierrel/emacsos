@@ -1,0 +1,15 @@
+#+title: Glide word editing integration amendment
+#+date: 2026-09-11
+
+* Historical supersessions
+
+This follows =2026-09-10-geometry-glide-recognizer-integration.org=. The
+keyboard command and deployment path remain unchanged; this pins its editing
+amendment.
+
+* Integration
+
+The pinned wvkbd revision emits a recognized glide word followed by Space. Its
+immediate plain Backspace retracts that exact word-space unit. Punctuation and
+an explicit Space follow the emitted separator, and external focus, cursor, or
+hardware edits cannot be observed. No Emacs integration or persistence is added.
