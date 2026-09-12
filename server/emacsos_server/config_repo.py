@@ -82,9 +82,12 @@ def _skip_block_comment(body: str, index: int) -> int:
     raise _incomplete_config("unterminated block comment")
 
 
-def _skip_char_component(body: str, index: int) -> int:
+def _skip_char_component(body: str, index: int, allow_missing: bool = False) -> int:
     """Return the index after one Emacs Lisp character component."""
     if index >= len(body):
+        if allow_missing:
+            # Emacs reads terminal `?\\C-` and `?\\^` as -1.
+            return index
         raise _incomplete_config("missing character literal")
     if body[index] != "\\":
         return index + 1
@@ -96,7 +99,22 @@ def _skip_char_component(body: str, index: int) -> int:
     if marker in "CMSHA":
         if index + 1 >= len(body) or body[index + 1] != "-":
             raise _incomplete_config("unfinished character modifier")
-        return _skip_char_component(body, index + 2)
+        return _skip_char_component(body, index + 2, allow_missing=True)
+    if marker == "s" and index + 1 < len(body) and body[index + 1] == "-":
+        return _skip_char_component(body, index + 2, allow_missing=True)
+    if marker == "^":
+        index += 1
+        if index >= len(body):
+            return index
+        if body[index] == "\\":
+            return _skip_char_component(body, index, allow_missing=True)
+        return index + 1
+    if marker in "01234567":
+        end = index
+        while (end < len(body) and end - index < 3 and
+               body[end] in "01234567"):
+            end += 1
+        return end
     if marker == "N":
         if index + 1 >= len(body) or body[index + 1] != "{":
             raise _incomplete_config("malformed named character")

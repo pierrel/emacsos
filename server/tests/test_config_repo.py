@@ -1,7 +1,9 @@
 """Unit tests for the git-backed ConfigRepo — pure git+fs, tmp repo, no mocks."""
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 from unittest.mock import patch
 
@@ -13,6 +15,16 @@ from emacsos_server.config_repo import (
     _extract_body,
     migrate_emacos_symbols,
     render,
+)
+
+
+_EMACS_CHARACTER_LITERALS = (
+    "?;", '?"', r"?\;", r'?\"', r"?\\",
+    r"?\^?", r"?\^x", r"?\^;", r'?\^"', r"?\^\\",
+    r"?\123", r"?\777", r"?\x41", r"?\u0041", r"?\U00000041",
+    r"?\N{LATIN CAPITAL LETTER A}", r"?\C-a", r"?\M-a", r"?\S-a",
+    r"?\H-a", r"?\A-a", r"?\s-a", r"?\C-\M-\S-\H-\A-\s-a",
+    r"?\C-", r"?\^", r"?\s",
 )
 
 
@@ -46,6 +58,31 @@ def test_namespace_migration_skips_characters_before_later_symbols():
     )
 
 
+@pytest.mark.parametrize("literal", _EMACS_CHARACTER_LITERALS)
+def test_namespace_migration_skips_complete_emacs_character_literals(literal):
+    body = f"(list {literal} (emacos-call \"+1\"))"
+    assert migrate_emacos_symbols(body) == (
+        f"(list {literal} (emacsos-call \"+1\"))")
+
+
+@pytest.mark.skipif(shutil.which("emacs") is None,
+                    reason="requires the installed Emacs reader")
+def test_namespace_migration_character_corpus_is_accepted_by_emacs(tmp_path):
+    source = tmp_path / "characters.el"
+    source.write_text("(list " + " ".join(_EMACS_CHARACTER_LITERALS) + ")")
+    form = (
+        "(with-temp-buffer "
+        f"(insert-file-contents {json.dumps(str(source))}) "
+        "(goto-char (point-min)) (read (current-buffer)) "
+        "(skip-chars-forward \" \\t\\r\\n\") "
+        "(unless (eobp) (error \"trailing reader input\")))"
+    )
+    result = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_namespace_migration_changes_only_complete_symbol_atoms():
     body = '(list `emacos-call ,emacos-call ,@emacos-calls :emacos-call foo/emacos-call)'
     assert migrate_emacos_symbols(body) == (
@@ -73,7 +110,7 @@ def test_namespace_migration_noops_exact_canonical_body():
     '"emacos-call',
     '#| emacos-call',
     '?',
-    r'?\C-',
+    r'?\C',
     '(emacos-call "+1"',
     ']',
 ])
