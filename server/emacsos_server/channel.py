@@ -205,18 +205,16 @@ def migrate_legacy_config(ctx: PhoneContext) -> str:
 
     This is the release path, not an agent instruction: it reads the complete
     server-recorded body, transforms exact Lisp tokens, and uses the ordinary
-    apply-before-record transaction.  Any unconfirmed, unrecorded, or broken
-    result stops startup of the chat turn for reconciliation.
+    apply-before-record transaction.  A pending result retries that transaction
+    from the recorded body on a later chat turn; it blocks chat until a retry
+    confirms and records cleanly.
     """
     try:
         repo = ConfigRepo(_CONFIG.config_dir)
-        if repo.namespace_migration_reconciliation_pending():
-            return ("error: namespace migration requires reconciliation: "
-                    "a previous migration was not cleanly confirmed and "
-                    "recorded; an operator must reconcile it before chat")
+        pending = repo.namespace_migration_reconciliation_pending()
         current = repo.current()
         migrated = migrate_emacos_symbols(current.body)
-        if migrated != current.body:
+        if migrated != current.body and not pending:
             # Persist the block BEFORE writing the phone.  A broken or
             # unrecorded write can leave canonical symbols in HEAD, so a later
             # lexical no-op must never erase the reconciliation requirement.
@@ -224,10 +222,12 @@ def migrate_legacy_config(ctx: PhoneContext) -> str:
     except Exception as e:  # noqa: BLE001 — do not guess a replacement body
         log.exception("namespace config migration: could not read complete config")
         return f"error: namespace migration could not read complete config: {type(e).__name__}: {e}"
-    if migrated == current.body:
+    if migrated == current.body and not pending:
         return "unchanged: no legacy EmacsOS config symbols"
     outcome = _apply_config_body(
-        ctx, migrated, "migrate EmacsOS Lisp symbols", repo)
+        ctx, migrated,
+        "reconcile EmacsOS Lisp symbols" if pending else "migrate EmacsOS Lisp symbols",
+        repo)
     if outcome.startswith("applied:"):
         try:
             repo.clear_namespace_migration_reconciliation()

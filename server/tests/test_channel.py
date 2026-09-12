@@ -361,7 +361,7 @@ def test_release_stops_namespace_migration_after_unconfirmed_apply(tmp_path):
     assert repo.namespace_migration_reconciliation_pending()
 
 
-def test_release_refuses_a_second_turn_after_broken_migration(tmp_path):
+def test_release_clean_second_turn_reconciles_broken_migration(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.write_and_commit('(emacos-call "+1")', "legacy config")
     with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
@@ -372,15 +372,16 @@ def test_release_refuses_a_second_turn_after_broken_migration(tmp_path):
     assert repo.current().body == '(emacsos-call "+1")'
     assert repo.namespace_migration_reconciliation_pending()
     with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
-         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply_again:
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply_again:
         second = migrate_legacy_config(_CTX)
-    assert second.startswith("error: namespace migration requires reconciliation:")
-    assert "previous migration" in second
+    assert second.startswith("applied: reconcile EmacsOS Lisp symbols")
     assert apply.call_count == 1
-    apply_again.assert_not_called()
+    assert apply_again.call_count == 1
+    assert not repo.namespace_migration_reconciliation_pending()
 
 
-def test_release_refuses_a_second_turn_after_unrecorded_migration(tmp_path):
+def test_release_clean_second_turn_reconciles_unrecorded_migration(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.write_and_commit('(emacos-call "+1")', "legacy config")
     with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
@@ -391,10 +392,30 @@ def test_release_refuses_a_second_turn_after_unrecorded_migration(tmp_path):
     assert first.startswith("error: namespace migration requires reconciliation:")
     assert repo.namespace_migration_reconciliation_pending()
     with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
-         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply:
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply:
+        second = migrate_legacy_config(_CTX)
+    assert second.startswith("applied: reconcile EmacsOS Lisp symbols")
+    assert apply.call_count == 1
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert not repo.namespace_migration_reconciliation_pending()
+
+
+def test_release_keeps_marker_when_reconciliation_retry_fails(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "load failed")):
+        first = migrate_legacy_config(_CTX)
+    assert first.startswith("error: namespace migration requires reconciliation:")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "still broken")) as apply:
         second = migrate_legacy_config(_CTX)
     assert second.startswith("error: namespace migration requires reconciliation:")
-    apply.assert_not_called()
+    assert apply.call_count == 1
+    assert repo.namespace_migration_reconciliation_pending()
 
 
 # --- get_config --------------------------------------------------------------

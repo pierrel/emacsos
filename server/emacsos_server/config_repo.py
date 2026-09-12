@@ -285,7 +285,7 @@ class ConfigRepo:
             return 0
 
     def namespace_migration_reconciliation_pending(self) -> bool:
-        """Whether a non-clean namespace migration needs operator reconciliation."""
+        """Whether a non-clean namespace migration still needs a clean retry."""
         self.ensure()
         result = subprocess.run(
             ["git", "-C", self.repo_dir, "config", "--bool", "--get",
@@ -300,12 +300,12 @@ class ConfigRepo:
         return True
 
     def mark_namespace_migration_reconciliation(self) -> None:
-        """Block future release migration turns until reconciliation succeeds."""
+        """Require a clean retry before the release migration can proceed."""
         self.ensure()
         self._git("config", _NAMESPACE_MIGRATION_KEY, "true")
 
     def clear_namespace_migration_reconciliation(self) -> None:
-        """Clear the migration block after an explicit clean reconciliation."""
+        """Clear the migration block after a clean retry."""
         if self.namespace_migration_reconciliation_pending():
             self._git("config", "--unset-all", _NAMESPACE_MIGRATION_KEY)
 

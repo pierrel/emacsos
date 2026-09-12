@@ -100,6 +100,18 @@ def test_release_migration_failure_stops_chat_before_agent_construction(client):
     start.assert_not_called()
 
 
+def test_release_migration_retry_allows_chat_after_clean_result(client):
+    scripted = [("messages", (_FakeAIMessageChunk(content="ready"), {}))]
+    with patch("emacsos_server.app.migrate_legacy_config",
+               return_value="applied: reconcile EmacsOS Lisp symbols"), \
+         patch("emacsos_server.app._start_stream_iter",
+               return_value=iter(scripted)) as start:
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert [event["type"] for event in events] == ["start", "token", "end"]
+    start.assert_called_once()
+
+
 def test_chat_log_omits_message(client, caplog):
     caplog.set_level("INFO")
     message = "call +14155550123"
