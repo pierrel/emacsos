@@ -30,7 +30,13 @@ from langchain_core.tools import tool
 from . import apply as apply_mod
 from . import phone as phone_mod
 from .config import Config
-from .config_repo import ConfigRepo, ConfigRepoError, SCAFFOLD_SUMMARY, render
+from .config_repo import (
+    ConfigRepo,
+    ConfigRepoError,
+    SCAFFOLD_SUMMARY,
+    migrate_emacos_symbols,
+    render,
+)
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +144,86 @@ def eval_elisp(code: str, config: RunnableConfig) -> str:
     return f"error: {output}"
 
 
+def _apply_config_body(ctx: PhoneContext, elisp: str, summary: str,
+                       repo: ConfigRepo | None = None) -> str:
+    """Apply and record one complete config body through the shared contract.
+
+    REPO is supplied only by release migrations that already read
+    ``ConfigRepo.current()``.  It keeps that confirmed read and the later
+    record in one ordered flow; ordinary tool calls keep the lazy
+    post-confirmation repository construction below.
+    """
+    # Apply FIRST, commit only if the phone actually received it: this
+    # keeps the git repo aligned after every confirmed-and-recorded write (no
+    # phantom commit for an unconfirmed config).  A load_error still counts as
+    # "received" — the phone wrote the file, then its load or platform
+    # finalization failed, so it IS the phone's current config and belongs
+    # in history.
+    #
+    # Apply the RENDERED file (the same content git commits, via
+    # config_repo.render) — NOT the bare elisp — so the phone's agent.el
+    # carries the lexical-binding cookie + provide and matches git byte
+    # for byte.  write_and_commit renders the same body identically.
+    ar = apply_mod.apply_to_phone(ctx, render(elisp))
+    if ar.status == "too_large":
+        return f"error: config too large: {ar.detail}"
+    if ar.status == "unreachable":
+        return (f"error: phone unreachable: {ar.detail} "
+                "(do not retry — surface to user)")
+    if ar.status == "apply_error":
+        return (f"error: config application unconfirmed: {ar.detail}; the "
+                "server did not commit it; reconcile the phone file before "
+                "another persistent config change")
+
+    try:
+        repo = repo or ConfigRepo(_CONFIG.config_dir)
+        repo.ensure()
+        sha = repo.write_and_commit(elisp, summary)
+    except Exception as e:  # noqa: BLE001 — report as a tool-result string
+        log.exception("apply_config: git commit failed")
+        activation = ("loaded cleanly" if ar.status == "applied" else
+                      f"activation failed ({ar.detail})")
+        return (f"applied-but-unrecorded: written on the phone and {activation}, "
+                f"but the server failed to record it in git ({e}); it cannot "
+                "be rolled back from history; reconcile the phone file before "
+                "another persistent config change")
+
+    version = f" (v{sha[:7]})" if sha else ""
+    if ar.status == "applied":
+        return (f"applied: {summary}{version} — loaded cleanly on the "
+                "phone; the user can run M-x emacsos--chat-rollback")
+    # load_error: HEAD is the new saved config, but loading or platform
+    # finalization failed.  Remediation depends on the tagged phase.
+    return (f"applied-but-broken: {summary}{version} — committed as the "
+            f"new config but loading or platform finalization errored "
+            f"({ar.detail}); inspect that failure before rolling back or "
+            "sending a corrected config")
+
+
+def migrate_legacy_config(ctx: PhoneContext) -> str:
+    """Confirm and record the one-generation namespace config migration.
+
+    This is the release path, not an agent instruction: it reads the complete
+    server-recorded body, transforms exact Lisp tokens, and uses the ordinary
+    apply-before-record transaction.  Any unconfirmed, unrecorded, or broken
+    result stops startup of the chat turn for reconciliation.
+    """
+    try:
+        repo = ConfigRepo(_CONFIG.config_dir)
+        current = repo.current()
+    except Exception as e:  # noqa: BLE001 — do not guess a replacement body
+        log.exception("namespace config migration: could not read current config")
+        return f"error: namespace migration could not read current config: {type(e).__name__}: {e}"
+    migrated = migrate_emacos_symbols(current.body)
+    if migrated == current.body:
+        return "unchanged: no legacy EmacsOS config symbols"
+    outcome = _apply_config_body(
+        ctx, migrated, "migrate EmacsOS Lisp symbols", repo)
+    if outcome.startswith("applied:"):
+        return outcome
+    return f"error: namespace migration requires reconciliation: {outcome}"
+
+
 @tool
 def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     """Replace the user's emacs config with ELISP and load it live on
@@ -188,51 +274,7 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
                 "tool invoked outside a /chat turn)")
 
     log.info("apply_config on %s: %s", ctx.phone_host, _redact(summary))
-    # Apply FIRST, commit only if the phone actually received it: this
-    # keeps the git repo aligned after every confirmed-and-recorded write (no
-    # phantom commit for an unconfirmed config).  A load_error still counts as
-    # "received" — the phone wrote the file, then its load or platform
-    # finalization failed, so it IS the phone's current config and belongs
-    # in history.
-    #
-    # Apply the RENDERED file (the same content git commits, via
-    # config_repo.render) — NOT the bare elisp — so the phone's agent.el
-    # carries the lexical-binding cookie + provide and matches git byte
-    # for byte.  write_and_commit renders the same body identically.
-    ar = apply_mod.apply_to_phone(ctx, render(elisp))
-    if ar.status == "too_large":
-        return f"error: config too large: {ar.detail}"
-    if ar.status == "unreachable":
-        return (f"error: phone unreachable: {ar.detail} "
-                "(do not retry — surface to user)")
-    if ar.status == "apply_error":
-        return (f"error: config application unconfirmed: {ar.detail}; the "
-                "server did not commit it; reconcile the phone file before "
-                "another persistent config change")
-
-    try:
-        repo = ConfigRepo(_CONFIG.config_dir)
-        repo.ensure()
-        sha = repo.write_and_commit(elisp, summary)
-    except Exception as e:  # noqa: BLE001 — report as a tool-result string
-        log.exception("apply_config: git commit failed")
-        activation = ("loaded cleanly" if ar.status == "applied" else
-                      f"activation failed ({ar.detail})")
-        return (f"applied-but-unrecorded: written on the phone and {activation}, "
-                f"but the server failed to record it in git ({e}); it cannot "
-                "be rolled back from history; reconcile the phone file before "
-                "another persistent config change")
-
-    version = f" (v{sha[:7]})" if sha else ""
-    if ar.status == "applied":
-        return (f"applied: {summary}{version} — loaded cleanly on the "
-                "phone; the user can run M-x emacsos--chat-rollback")
-    # load_error: HEAD is the new saved config, but loading or platform
-    # finalization failed.  Remediation depends on the tagged phase.
-    return (f"applied-but-broken: {summary}{version} — committed as the "
-            f"new config but loading or platform finalization errored "
-            f"({ar.detail}); inspect that failure before rolling back or "
-            "sending a corrected config")
+    return _apply_config_body(ctx, elisp, summary)
 
 
 @tool

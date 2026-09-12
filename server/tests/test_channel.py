@@ -16,6 +16,7 @@ from emacsos_server.channel import (
     config_history,
     eval_elisp,
     get_config,
+    migrate_legacy_config,
     revert_config,
 )
 from emacsos_server.config_repo import ConfigRepo, ConfigRepoError, render
@@ -305,6 +306,45 @@ def test_apply_config_missing_context_is_server_bug_error(tmp_path):
     out, _repo = _apply("(setq x 1)", "set x", tmp_path, ctx=None,
                         apply_result=ApplyResult("applied", "ok: loaded"))
     assert out.startswith("error: phone context not set")
+
+
+def test_release_migrates_persisted_legacy_config_through_apply_and_commit(tmp_path):
+    """A release migrates ConfigRepo.current(), never the phone path directly."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    legacy = '(emacos-call "+1")\n(message "emacos-call stays text")'
+    repo.write_and_commit(legacy, "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")) as apply:
+        out = migrate_legacy_config(_CTX)
+    assert out.startswith("applied: migrate EmacsOS Lisp symbols")
+    assert repo.current().body == (
+        '(emacsos-call "+1")\n(message "emacos-call stays text")')
+    assert apply.call_args.args[1] == render(repo.current().body)
+
+
+def test_release_leaves_legacy_text_without_symbol_tokens_untouched(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    body = '(message "emacos-call is historical text")\n; emacos-call comment'
+    repo.write_and_commit(body, "legacy text")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply:
+        out = migrate_legacy_config(_CTX)
+    assert out == "unchanged: no legacy EmacsOS config symbols"
+    assert repo.current().body == body
+    apply.assert_not_called()
+
+
+def test_release_stops_namespace_migration_after_unconfirmed_apply(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    legacy = "(emacos-call \"+1\")"
+    repo.write_and_commit(legacy, "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("apply_error", "timed out")):
+        out = migrate_legacy_config(_CTX)
+    assert out.startswith("error: namespace migration requires reconciliation:")
+    assert repo.current().body == legacy
 
 
 # --- get_config --------------------------------------------------------------

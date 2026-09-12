@@ -25,7 +25,11 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     from emacsos_server.app import app
-    return TestClient(app)
+    # Most endpoint tests exercise streaming, not the release migration.
+    # Keep their config repo isolated while dedicated tests cover that gate.
+    with patch("emacsos_server.app.migrate_legacy_config",
+               return_value="unchanged: no legacy EmacsOS config symbols"):
+        yield TestClient(app)
 
 
 # Minimal but parseable auth file: `host:port pid\nsecret\n`.  Host gets
@@ -83,6 +87,17 @@ def test_streams_start_token_end_for_simple_response(client):
     assert [t["text"] for t in tokens] == ["Hello!"]
     end = [e for e in events if e["type"] == "end"][-1]
     assert end["text"] == "Hello!"
+
+
+def test_release_migration_failure_stops_chat_before_agent_construction(client):
+    with patch("emacsos_server.app.migrate_legacy_config",
+               return_value="error: namespace migration requires reconciliation: unconfirmed"), \
+         patch("emacsos_server.app._start_stream_iter") as start:
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert [event["type"] for event in events] == ["start", "error"]
+    assert "namespace migration requires reconciliation" in events[-1]["reason"]
+    start.assert_not_called()
 
 
 def test_chat_log_omits_message(client, caplog):

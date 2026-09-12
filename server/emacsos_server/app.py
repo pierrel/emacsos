@@ -32,7 +32,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .channel import EMACS_TOOLS, PHONE_CONTEXT_KEY, PhoneContext, revert_head_and_apply
+from .channel import (
+    EMACS_TOOLS,
+    PHONE_CONTEXT_KEY,
+    PhoneContext,
+    migrate_legacy_config,
+    revert_head_and_apply,
+)
 from .config import Config
 from .config_repo import ConfigRepo
 from . import stream as ndjson
@@ -439,6 +445,17 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     # an immediate ack of receipt.
     await _STREAM_LOCK.acquire()
     try:
+        # Namespace aliases are deliberately absent from the released Lisp.
+        # Before this turn can run against a freshly restarted phone, migrate
+        # the complete recorded config through the normal confirmed apply
+        # transaction.  A non-clean result is a reconciliation boundary, not
+        # something the agent may paper over with another write.
+        migration = await loop.run_in_executor(None, migrate_legacy_config, phone_ctx)
+        if migration.startswith("error:"):
+            yield ndjson.event("error", reason=migration)
+            return
+        if not migration.startswith("unchanged:"):
+            log.info("completed namespace config migration for %s", phone_ctx.phone_host)
         # `runaway_at` is set HERE (not before the lock acquire) so a
         # long wait behind the lock doesn't burn the budget before
         # we've even started.  Inside the try so the finally is the
