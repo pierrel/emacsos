@@ -43,7 +43,7 @@ chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
     'printf "%s\\n" "apk $*" >>/tmp/transaction-log' \
-    'if [ -e /tmp/block-apk ]; then trap "exit 143" TERM; while :; do sleep 1; done; fi' \
+    'if [ -e /tmp/block-apk ]; then exec sleep 300; fi' \
     'if [ "${1-}" = add ]; then for package do [ "$package" != py3-dbus ] || touch /tmp/py3-dbus-present; done; fi' \
     'exit 0' \
     >/usr/bin/apk
@@ -195,7 +195,7 @@ sed \
 chmod 0755 /tmp/openrc-update-root
 awk '
     { print }
-    /^    bootstrap_tmp=\$\(mktemp / { print "    sleep 30" }
+    /^    bootstrap_tmp=\$\(mktemp / { print "    exec 6>&- 7>&- 8>&- 9>&-; sleep 30" }
 ' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-signal
 chmod 0755 /tmp/openrc-update-bootstrap-signal
 
@@ -240,6 +240,7 @@ printf '%s\n' '#!/bin/sh' \
     'fi' \
     'exit 0' >/usr/local/sbin/test-wvkbd-proof
 chmod 0755 /usr/local/sbin/test-wvkbd-proof
+: >/tmp/wvkbd-proof-log
 install -d -o root -g root -m 0755 /etc/nftables.d
 printf '%s\n' 'table inet filter { chain input { type filter hook input priority 0; policy drop; } }' \
     >/etc/nftables.nft
@@ -507,6 +508,12 @@ fi
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 [ -f /run/emacsos-ui/ready ]
+if ! (
+    flock -n -x 9
+) 9>/run/emacsos-openrc-install.lock; then
+    printf '%s\n' 'blocked apk retained the updater lock' >&2
+    exit 1
+fi
 [ "$(cat /usr/local/bin/wvkbd-emacos)" = legacy-keyboard ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
 [ "$(cat /usr/local/share/emacsos-openrc/emacos-assist.el)" = legacy-assist ]
@@ -614,6 +621,12 @@ if find /usr/local/sbin -maxdepth 1 -name '.emacsos-wvkbd-transaction.*' \
 fi
 if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
     printf '%s\n' 'interrupted bootstrap stopped the UI' >&2
+    exit 1
+fi
+if ! (
+    flock -n -x 9
+) 9>/run/emacsos-openrc-install.lock; then
+    printf '%s\n' 'interrupted bootstrap retained the updater lock' >&2
     exit 1
 fi
 
