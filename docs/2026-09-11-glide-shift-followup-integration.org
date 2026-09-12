@@ -6,7 +6,10 @@
 This supersedes only =2026-09-11-glide-effective-shift-integration.org=,
 =Integration='s exact source pin and artifact hash, plus =Verification before
 deployment='s live-verification gate. Its earlier build record remains evidence
-about that earlier artifact and is not reattributed here.
+about that earlier artifact and is not reattributed here. It also supersedes
+wvkbd's =2026-09-11-glide-word-editing.org= statement that every other accepted
+key or gesture clears the pending word-space unit: a Shift tap deliberately
+preserves it for the following punctuation key.
 
 * Integration
 
