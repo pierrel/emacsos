@@ -69,17 +69,49 @@ new_lock_line=$(grep -nF 'exec 7>"$wvkbd_lock"' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 [ "$legacy_lock_line" -lt "$new_lock_line" ]
 grep -F 'validate-upgrade' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 33 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'restore_file legacy-emacos-assist.el' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rm -f -- "$legacy_assist"' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos" "$current_wvkbd"' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+keyboard_install_line=$(grep -nF \
+    'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos" "$current_wvkbd"' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+session_install_line=$(grep -nF \
+    'install -o root -g root -m 0755 "$snapshot/openrc-session"' \
+    "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+[ "$keyboard_install_line" -lt "$session_install_line" ]
+grep -F 'WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd}' \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'WVKBD_BUILD_DIR=$keyboard_build "$deploy_dir/build-wvkbd-emacsos.sh"' \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F '"$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"' \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
 simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+keyboard_snapshot_line=$(grep -nF 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
 bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
-install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 [ "$simulate_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
     [ "$bootstrap_line" -lt "$stop_line" ] && [ "$bootstrap_line" -lt "$mutating_line" ] &&
     [ "$mutating_line" -lt "$install_line" ]
+[ "$preflight_line" -lt "$keyboard_snapshot_line" ] &&
+    [ "$keyboard_snapshot_line" -lt "$bootstrap_line" ]
 expected='EMACSOS-COMMANDS.org
 assist-web.el
 chat.el

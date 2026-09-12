@@ -70,6 +70,12 @@ printf '%s\n' '#!/bin/sh' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
     '  for fd in 6 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/wvkbd-emacsos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
+    '  if [ -e /tmp/require-new-keyboard ]; then' \
+    '    [ -x /usr/local/bin/wvkbd-emacsos ] || exit 1' \
+    '    [ -f /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ] || exit 1' \
+    '    /usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 || exit 1' \
+    '    rm -f /tmp/require-new-keyboard' \
+    '  fi' \
     '  if [ -e /tmp/race-command-reference ]; then' \
     '    rm -f /tmp/race-command-reference' \
     '    printf "%s\\n" raced-user-file >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
@@ -184,6 +190,16 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
+    'if [ "${1-}" = - ] && [ "$#" -eq 4 ]; then' \
+    '  source=$2 destination=$3 maximum=$4' \
+    '  [ -f "$source" ] && [ ! -L "$source" ] || exit 1' \
+    '  [ "$(/bin/busybox stat -c "%U:%G:%a:%h:%F" "$source")" = user:user:600:1:"regular file" ] || exit 1' \
+    '  [ "$(/bin/busybox stat -c "%s" "$source")" -le "$maximum" ] || exit 1' \
+    '  /bin/cat -- "$source" >"$destination"' \
+    '  chown root:root "$destination"' \
+    '  chmod 0600 "$destination"' \
+    '  exit 0' \
+    'fi' \
     'case ${2-} in' \
     '  *EMACSOS-COMMANDS.org*) exec /bin/cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ;;' \
     '  *) exit 0 ;;' \
@@ -406,8 +422,20 @@ if grep -F '@ASSIST_WEB_SERVER_IP@' /etc/emacsos-openrc/assist-web-url >/dev/nul
     exit 1
 fi
 
+printf '%s\n' '#!/bin/sh' \
+    '[ "$*" = "--mod-swipe -H 300 -L 300" ]' \
+    '[ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]' \
+    'printf "%s\\n" "$*" >>/tmp/wvkbd-command-log' \
+    >/home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+printf '%s\n' new-notice \
+    >/home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+chown user:user /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
 cp -a /home/user/.cache/emacsos-openrc-stage \
     /home/user/.cache/emacsos-openrc-update
+touch /tmp/require-new-keyboard
 install -o root -g root -m 0755 /bin/true \
     /usr/local/sbin/emacsos-openrc-suspend
 printf '%s\n' \
@@ -438,6 +466,9 @@ chmod 0755 /usr/local/bin/wvkbd-emacos
 printf '%s\n' legacy-notice >/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 chown root:root /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 chmod 0644 /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+printf '%s\n' legacy-assist >/usr/local/share/emacsos-openrc/emacos-assist.el
+chown root:root /usr/local/share/emacsos-openrc/emacos-assist.el
+chmod 0644 /usr/local/share/emacsos-openrc/emacos-assist.el
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
@@ -450,12 +481,21 @@ fi
 [ -f /run/emacsos-ui/ready ]
 [ "$(cat /usr/local/bin/wvkbd-emacos)" = legacy-keyboard ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
+[ "$(cat /usr/local/share/emacsos-openrc/emacos-assist.el)" = legacy-assist ]
+[ ! -e /usr/local/bin/wvkbd-emacsos ]
+[ ! -e /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ]
 
+rm -f /tmp/wvkbd-command-log
+touch /tmp/require-new-keyboard
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
+[ -x /usr/local/bin/wvkbd-emacsos ]
+[ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]
+grep -Fx -- '--mod-swipe -H 300 -L 300' /tmp/wvkbd-command-log >/dev/null
 [ ! -e /usr/local/bin/wvkbd-emacos ]
 [ ! -e /usr/local/share/licenses/wvkbd-emacos/wordninja.txt ]
+[ ! -e /usr/local/share/emacsos-openrc/emacos-assist.el ]
 
 # Runtime cleanup must fail closed when mount metadata cannot be read.  Exercise
 # the actual updater function without mutating the live fixture directory.
@@ -565,6 +605,27 @@ assert_preflight_rejection() {
         exit 1
     fi
 }
+
+# The update-only keyboard inputs retain the installer helper's strict staged
+# file contract before this transaction stops the UI or changes any payload.
+restore_keyboard_stage() {
+    install -o user -g user -m 0600 \
+        /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+        /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+    install -o user -g user -m 0600 \
+        /home/user/.cache/emacsos-openrc-stage/wvkbd-notice \
+        /home/user/.cache/emacsos-openrc-update/wvkbd-notice
+}
+rm -f /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+ln -s /bin/true /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+assert_preflight_rejection staged-keyboard-symlink
+restore_keyboard_stage
+chown root:root /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+assert_preflight_rejection staged-keyboard-owner
+chown user:user /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+chmod 0644 /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+assert_preflight_rejection staged-keyboard-mode
+restore_keyboard_stage
 
 chmod 0644 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
 assert_preflight_rejection token
