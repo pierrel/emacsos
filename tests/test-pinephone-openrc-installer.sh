@@ -42,10 +42,13 @@ chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
+    'printf "%s\\n" "apk $*" >>/tmp/transaction-log' \
+    'if [ "${1-}" = add ]; then for package do [ "$package" != py3-dbus ] || touch /tmp/py3-dbus-present; done; fi' \
     'exit 0' \
     >/usr/bin/apk
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "rc-service $*" >>/tmp/rc-service-log' \
+    'printf "%s\\n" "rc-service $*" >>/tmp/transaction-log' \
     'if [ "$1 $2" = "seatd status" ]; then' \
     '  [ -e /tmp/seatd-running ]; exit $?' \
     'elif [ "$1 $2" = "seatd start" ]; then' \
@@ -193,6 +196,10 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus" ]; then' \
+    '  [ -e /tmp/py3-dbus-present ]' \
+    '  exit $?' \
+    'fi' \
     'if [ "${1-}" = - ] && [ "$#" -eq 4 ]; then' \
     '  source=$2 destination=$3 maximum=$4' \
     '  [ -f "$source" ] && [ ! -L "$source" ] || exit 1' \
@@ -743,6 +750,24 @@ grep -Fx 'populated 0' /tmp/openrc.emacsos-ui/cgroup.events >/dev/null
 [ ! -s /tmp/openrc.emacsos-ui/cgroup.procs ]
 [ -f /run/emacsos-ui/ready ]
 [ "$(rc-update show default | awk '$1 == "emacsos-ui" && $2 == "|" && $3 == "default" { count++ } END { print count + 0 }')" = 1 ]
+
+# Python can already exist without its D-Bus binding on an upgrade.  Installing
+# and proving that binding must precede the UI stop, and no apk may run after.
+[ -x /usr/bin/python3 ]
+rm -f /tmp/py3-dbus-present
+: >/tmp/apk-log
+: >/tmp/rc-service-log
+: >/tmp/transaction-log
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-root
+[ -e /tmp/py3-dbus-present ]
+dbus_install_line=$(grep -nFx 'apk add py3-dbus' /tmp/transaction-log | cut -d: -f1)
+ui_stop_line=$(grep -nFx 'rc-service emacsos-ui stop' /tmp/transaction-log | cut -d: -f1)
+[ "$dbus_install_line" -lt "$ui_stop_line" ]
+if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; then
+    printf '%s\n' 'updater ran apk after stopping the UI' >&2
+    exit 1
+fi
 
 # The updater's ordinary post-start verification must reject each state-free
 # keyboard-proof failure. The test proof fails once so rollback can start the

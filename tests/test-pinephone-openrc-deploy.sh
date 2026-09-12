@@ -107,6 +107,9 @@ grep -F '"$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"' \
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
 simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus'" \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 keyboard_snapshot_line=$(grep -nF 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
@@ -115,10 +118,10 @@ helper_backup_line=$(grep -nF \
 bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
-install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
-[ "$simulate_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
+[ "$simulate_line" -lt "$install_line" ] && [ "$install_line" -lt "$dbus_check_line" ] &&
+    [ "$dbus_check_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
     [ "$bootstrap_line" -lt "$stop_line" ] && [ "$bootstrap_line" -lt "$mutating_line" ] &&
-    [ "$mutating_line" -lt "$install_line" ]
+    [ "$stop_line" -lt "$mutating_line" ]
 [ "$preflight_line" -lt "$keyboard_snapshot_line" ] &&
     [ "$keyboard_snapshot_line" -lt "$bootstrap_line" ]
 [ "$helper_backup_line" -lt "$bootstrap_line" ]
