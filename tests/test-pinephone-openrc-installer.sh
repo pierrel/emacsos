@@ -43,6 +43,7 @@ chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
     'printf "%s\\n" "apk $*" >>/tmp/transaction-log' \
+    'if [ -e /tmp/block-apk ]; then trap "exit 143" TERM; while :; do sleep 1; done; fi' \
     'if [ "${1-}" = add ]; then for package do [ "$package" != py3-dbus ] || touch /tmp/py3-dbus-present; done; fi' \
     'exit 0' \
     >/usr/bin/apk
@@ -167,6 +168,16 @@ printf '%s\n' \
     'while [ "$#" -gt 0 ]; do' \
     '  case $1 in -s|-k) shift 2 ;; [0-9]*) shift; break ;; *) break ;; esac' \
     'done' \
+    'if [ -e /tmp/block-apk ] && [ "${1-}" = apk ]; then' \
+    '  "$@" &' \
+    '  child=$!' \
+    '  sleep 0.1' \
+    '  kill -TERM "$child" 2>/dev/null || true' \
+    '  sleep 0.1' \
+    '  kill -KILL "$child" 2>/dev/null || true' \
+    '  wait "$child" 2>/dev/null || true' \
+    '  exit 124' \
+    'fi' \
     'exec "$@"' >/usr/bin/timeout
 chmod 0755 /usr/bin/timeout
 
@@ -768,6 +779,24 @@ if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; th
     printf '%s\n' 'updater ran apk after stopping the UI' >&2
     exit 1
 fi
+
+# A stalled package manager must time out while the UI still runs.  The updater
+# has its locks, so this protects both the visible session and later updates.
+: >/tmp/rc-service-log
+: >/tmp/transaction-log
+touch /tmp/block-apk
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-root >/tmp/update-apk-timeout.out 2>&1; then
+    printf '%s\n' 'blocked apk was accepted' >&2
+    exit 1
+fi
+rm -f /tmp/block-apk
+grep -F 'apk add --simulate py3-dbus' /tmp/transaction-log >/dev/null
+if grep -F 'rc-service emacsos-ui stop' /tmp/transaction-log >/dev/null; then
+    printf '%s\n' 'blocked apk stopped the UI' >&2
+    exit 1
+fi
+[ -f /run/emacsos-ui/ready ]
 
 # The updater's ordinary post-start verification must reject each state-free
 # keyboard-proof failure. The test proof fails once so rollback can start the

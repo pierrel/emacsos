@@ -659,11 +659,11 @@ done
 [ -x /usr/bin/doas ] && [ -x /usr/bin/callaudiocli ] && \
     [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
-apk add --simulate py3-dbus >/dev/null
+timeout -s TERM -k 5 30 apk add --simulate py3-dbus >/dev/null
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 # This can fetch packages, so it must finish before stopping the UI.  The
 # remaining transaction uses its already-proven Python D-Bus dependency only.
-apk add py3-dbus >/dev/null
+timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null
 [ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
     /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
 preflight_backup_sources

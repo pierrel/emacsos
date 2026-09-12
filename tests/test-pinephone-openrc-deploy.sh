@@ -106,8 +106,10 @@ grep -F '"$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"' \
     "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
-simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-update-root" | cut -d: -f1)
-install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
 dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus'" \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
