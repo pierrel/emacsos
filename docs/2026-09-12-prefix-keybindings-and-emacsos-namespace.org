@@ -48,4 +48,7 @@ replacement is not a migration path.
 
 The lexical migration preserves strings, line and block comments, character
 literals, and Emacs =#@NUMBER= byte-skipping reader payloads byte-for-byte.
-Malformed or truncated reader input fails before the phone apply.
+Malformed or truncated instances of those recognized forms, plus unbalanced
+list or vector delimiters, fail before the phone apply.  This scanner is not a
+complete Emacs Lisp reader; the phone's normal load remains the final syntax
+check.
