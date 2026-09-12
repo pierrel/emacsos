@@ -335,6 +335,18 @@ def test_release_leaves_legacy_text_without_symbol_tokens_untouched(tmp_path):
     apply.assert_not_called()
 
 
+def test_release_rejects_incomplete_legacy_config_before_apply(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    legacy = '(emacos-call "+1"'
+    repo.write_and_commit(legacy, "incomplete legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply:
+        out = migrate_legacy_config(_CTX)
+    assert out.startswith("error: namespace migration could not read complete config:")
+    assert repo.current().body == legacy
+    apply.assert_not_called()
+
+
 def test_release_stops_namespace_migration_after_unconfirmed_apply(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     legacy = "(emacos-call \"+1\")"

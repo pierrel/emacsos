@@ -211,10 +211,10 @@ def migrate_legacy_config(ctx: PhoneContext) -> str:
     try:
         repo = ConfigRepo(_CONFIG.config_dir)
         current = repo.current()
+        migrated = migrate_emacos_symbols(current.body)
     except Exception as e:  # noqa: BLE001 — do not guess a replacement body
-        log.exception("namespace config migration: could not read current config")
-        return f"error: namespace migration could not read current config: {type(e).__name__}: {e}"
-    migrated = migrate_emacos_symbols(current.body)
+        log.exception("namespace config migration: could not read complete config")
+        return f"error: namespace migration could not read complete config: {type(e).__name__}: {e}"
     if migrated == current.body:
         return "unchanged: no legacy EmacsOS config symbols"
     outcome = _apply_config_body(

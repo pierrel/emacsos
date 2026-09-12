@@ -33,6 +33,55 @@ def test_namespace_migration_changes_only_lisp_symbols():
     )
 
 
+def test_namespace_migration_skips_characters_before_later_symbols():
+    body = (
+        '(list ?; (emacos-call "+1"))\n'
+        '(list ?" (emacos--chat-show-top-buffer))\n'
+        r'(list ?\; ?\" ?\\ ?\C-a emacos\-call)' "\n"
+    )
+    assert migrate_emacos_symbols(body) == (
+        '(list ?; (emacsos-call "+1"))\n'
+        '(list ?" (emacsos--chat-show-top-buffer))\n'
+        r'(list ?\; ?\" ?\\ ?\C-a emacsos\-call)' "\n"
+    )
+
+
+def test_namespace_migration_changes_only_complete_symbol_atoms():
+    body = '(list `emacos-call ,emacos-call ,@emacos-calls :emacos-call foo/emacos-call)'
+    assert migrate_emacos_symbols(body) == (
+        '(list `emacsos-call ,emacsos-call ,@emacsos-calls :emacsos-call '
+        'foo/emacos-call)'
+    )
+
+
+def test_namespace_migration_preserves_noncode_and_canonical_body():
+    body = (
+        '(message "emacos-call string")\n'
+        '; emacos-call line comment\n'
+        '#| emacos-call block comment #| nested emacos-call |# |#\n'
+        '(emacsos-call "+1")\n'
+    )
+    assert migrate_emacos_symbols(body) == body
+
+
+def test_namespace_migration_noops_exact_canonical_body():
+    body = '(emacsos-call "+1")'
+    assert migrate_emacos_symbols(body) == body
+
+
+@pytest.mark.parametrize("body", [
+    '"emacos-call',
+    '#| emacos-call',
+    '?',
+    r'?\C-',
+    '(emacos-call "+1"',
+    ']',
+])
+def test_namespace_migration_rejects_incomplete_lisp_before_apply(body):
+    with pytest.raises(ConfigRepoError, match="incomplete Lisp config"):
+        migrate_emacos_symbols(body)
+
+
 def _repo(tmp_path):
     return ConfigRepo(str(tmp_path / "config-repo"))
 

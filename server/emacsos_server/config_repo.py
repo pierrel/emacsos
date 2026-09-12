@@ -42,19 +42,103 @@ _GIT_IDENTITY = [
     "-c", "user.name=emacsos-server",
 ]
 
-_LEGACY_SYMBOL = re.compile(r"(?<![A-Za-z0-9_-])emacos-(?=[A-Za-z0-9_-])")
+_LEGACY_SYMBOL = re.compile(
+    r"^(?P<keyword>:?)emacos(?P<hyphen>-|\\-)(?=[A-Za-z0-9_\\-])")
+
+
+def _incomplete_config(detail: str) -> ConfigRepoError:
+    return ConfigRepoError(f"incomplete Lisp config: {detail}")
+
+
+def _skip_string(body: str, index: int) -> int:
+    """Return the index just after the string beginning at INDEX."""
+    index += 1
+    while index < len(body):
+        if body[index] == "\\":
+            index += 1
+            if index >= len(body):
+                raise _incomplete_config("unfinished string escape")
+        elif body[index] == '"':
+            return index + 1
+        index += 1
+    raise _incomplete_config("unterminated string")
+
+
+def _skip_block_comment(body: str, index: int) -> int:
+    """Return the index just after a nested block comment at INDEX."""
+    depth = 1
+    index += 2
+    while index < len(body):
+        if body.startswith("#|", index):
+            depth += 1
+            index += 2
+        elif body.startswith("|#", index):
+            depth -= 1
+            index += 2
+            if depth == 0:
+                return index
+        else:
+            index += 1
+    raise _incomplete_config("unterminated block comment")
+
+
+def _skip_char_component(body: str, index: int) -> int:
+    """Return the index after one Emacs Lisp character component."""
+    if index >= len(body):
+        raise _incomplete_config("missing character literal")
+    if body[index] != "\\":
+        return index + 1
+
+    index += 1
+    if index >= len(body):
+        raise _incomplete_config("unfinished character escape")
+    marker = body[index]
+    if marker in "CMSHA":
+        if index + 1 >= len(body) or body[index + 1] != "-":
+            raise _incomplete_config("unfinished character modifier")
+        return _skip_char_component(body, index + 2)
+    if marker == "N":
+        if index + 1 >= len(body) or body[index + 1] != "{":
+            raise _incomplete_config("malformed named character")
+        end = body.find("}", index + 2)
+        if end < 0 or end == index + 2:
+            raise _incomplete_config("unterminated named character")
+        return end + 1
+    if marker in "uU":
+        count = 4 if marker == "u" else 8
+        digits = body[index + 1:index + 1 + count]
+        if len(digits) != count or any(c not in "0123456789abcdefABCDEF"
+                                       for c in digits):
+            raise _incomplete_config("malformed Unicode character")
+        return index + 1 + count
+    if marker == "x":
+        end = index + 1
+        while end < len(body) and body[end] in "0123456789abcdefABCDEF":
+            end += 1
+        if end == index + 1:
+            raise _incomplete_config("malformed hexadecimal character")
+        return end
+    return index + 1
+
+
+def _skip_char_literal(body: str, index: int) -> int:
+    """Return the index just after the character literal beginning at INDEX."""
+    return _skip_char_component(body, index + 1)
 
 
 def migrate_emacos_symbols(body: str) -> str:
-    """Return BODY with legacy Lisp symbols renamed, never strings/comments.
+    """Return complete BODY with legacy Lisp symbols renamed.
 
     The caller still owns the confirmed full-body ConfigRepo -> apply_config
     transaction.  This pure transform deliberately does not inspect or write a
-    phone file, so only complete Lisp-symbol tokens change.
+    phone file.  It changes only lexical atoms, including an escaped hyphen in
+    a symbol, and fails closed before apply on incomplete strings, comments,
+    characters, or list/vector delimiters.
     """
     pieces: list[str] = []
     index = 0
     length = len(body)
+    delimiters: list[str] = []
     while index < length:
         start = index
         if body[index] == ";":
@@ -66,32 +150,50 @@ def migrate_emacos_symbols(body: str) -> str:
             pieces.append(body[start:index])
             continue
         if body.startswith("#|", index):
-            end = body.find("|#", index + 2)
-            if end < 0:
-                pieces.append(body[start:])
-                break
-            index = end + 2
+            index = _skip_block_comment(body, index)
             pieces.append(body[start:index])
             continue
         if body[index] == '"':
-            index += 1
-            while index < length:
-                if body[index] == "\\":
-                    index += 2
-                elif body[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
+            index = _skip_string(body, index)
             pieces.append(body[start:index])
             continue
-        while index < length and body[index] not in " \t\r\n()[]{}\";'":
+        if body[index] == "?":
+            index = _skip_char_literal(body, index)
+            pieces.append(body[start:index])
+            continue
+        if body[index] in "([":
+            delimiters.append(body[index])
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        if body[index] in ")]":
+            expected = "(" if body[index] == ")" else "["
+            if not delimiters or delimiters.pop() != expected:
+                raise _incomplete_config("unmatched closing delimiter")
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        if body.startswith(",@", index):
+            index += 2
+            pieces.append(body[start:index])
+            continue
+        if body[index] in "`,":
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        while (index < length and not body[index].isspace() and
+               body[index] not in "()[]\";'?"):
             index += 1
         if start == index:
             index += 1
             pieces.append(body[start:index])
         else:
-            pieces.append(_LEGACY_SYMBOL.sub("emacsos-", body[start:index]))
+            pieces.append(_LEGACY_SYMBOL.sub(
+                lambda match: (
+                    f"{match.group('keyword')}emacsos{match.group('hyphen')}"),
+                body[start:index]))
+    if delimiters:
+        raise _incomplete_config("unclosed list or vector")
     return "".join(pieces)
 
 
