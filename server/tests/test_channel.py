@@ -321,6 +321,7 @@ def test_release_migrates_persisted_legacy_config_through_apply_and_commit(tmp_p
     assert repo.current().body == (
         '(emacsos-call "+1")\n(message "emacos-call stays text")')
     assert apply.call_args.args[1] == render(repo.current().body)
+    assert not repo.namespace_migration_reconciliation_pending()
 
 
 def test_release_leaves_legacy_text_without_symbol_tokens_untouched(tmp_path):
@@ -357,6 +358,43 @@ def test_release_stops_namespace_migration_after_unconfirmed_apply(tmp_path):
         out = migrate_legacy_config(_CTX)
     assert out.startswith("error: namespace migration requires reconciliation:")
     assert repo.current().body == legacy
+    assert repo.namespace_migration_reconciliation_pending()
+
+
+def test_release_refuses_a_second_turn_after_broken_migration(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "load failed")) as apply:
+        first = migrate_legacy_config(_CTX)
+    assert first.startswith("error: namespace migration requires reconciliation:")
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert repo.namespace_migration_reconciliation_pending()
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply_again:
+        second = migrate_legacy_config(_CTX)
+    assert second.startswith("error: namespace migration requires reconciliation:")
+    assert "previous migration" in second
+    assert apply.call_count == 1
+    apply_again.assert_not_called()
+
+
+def test_release_refuses_a_second_turn_after_unrecorded_migration(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")), \
+         patch.object(repo, "write_and_commit", side_effect=OSError("disk full")):
+        first = migrate_legacy_config(_CTX)
+    assert first.startswith("error: namespace migration requires reconciliation:")
+    assert repo.namespace_migration_reconciliation_pending()
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply:
+        second = migrate_legacy_config(_CTX)
+    assert second.startswith("error: namespace migration requires reconciliation:")
+    apply.assert_not_called()
 
 
 # --- get_config --------------------------------------------------------------

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 AGENT_FILE = "agent.el"
+_NAMESPACE_MIGRATION_KEY = "emacsos.namespace-migration-reconciliation"
 
 # Commit message of the empty-config bootstrap commit.  Not a user-applied
 # version — config_history filters it out so the agent isn't offered "restore
@@ -282,6 +283,31 @@ class ConfigRepo:
             return int(r.stdout.strip())
         except ValueError:
             return 0
+
+    def namespace_migration_reconciliation_pending(self) -> bool:
+        """Whether a non-clean namespace migration needs operator reconciliation."""
+        self.ensure()
+        result = subprocess.run(
+            ["git", "-C", self.repo_dir, "config", "--bool", "--get",
+             _NAMESPACE_MIGRATION_KEY],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 1:
+            return False
+        if result.returncode != 0 or result.stdout.strip() != "true":
+            raise ConfigRepoError(
+                "could not read namespace migration reconciliation state")
+        return True
+
+    def mark_namespace_migration_reconciliation(self) -> None:
+        """Block future release migration turns until reconciliation succeeds."""
+        self.ensure()
+        self._git("config", _NAMESPACE_MIGRATION_KEY, "true")
+
+    def clear_namespace_migration_reconciliation(self) -> None:
+        """Clear the migration block after an explicit clean reconciliation."""
+        if self.namespace_migration_reconciliation_pending():
+            self._git("config", "--unset-all", _NAMESPACE_MIGRATION_KEY)
 
     # --- lifecycle ---
 

@@ -210,8 +210,17 @@ def migrate_legacy_config(ctx: PhoneContext) -> str:
     """
     try:
         repo = ConfigRepo(_CONFIG.config_dir)
+        if repo.namespace_migration_reconciliation_pending():
+            return ("error: namespace migration requires reconciliation: "
+                    "a previous migration was not cleanly confirmed and "
+                    "recorded; an operator must reconcile it before chat")
         current = repo.current()
         migrated = migrate_emacos_symbols(current.body)
+        if migrated != current.body:
+            # Persist the block BEFORE writing the phone.  A broken or
+            # unrecorded write can leave canonical symbols in HEAD, so a later
+            # lexical no-op must never erase the reconciliation requirement.
+            repo.mark_namespace_migration_reconciliation()
     except Exception as e:  # noqa: BLE001 — do not guess a replacement body
         log.exception("namespace config migration: could not read complete config")
         return f"error: namespace migration could not read complete config: {type(e).__name__}: {e}"
@@ -220,6 +229,13 @@ def migrate_legacy_config(ctx: PhoneContext) -> str:
     outcome = _apply_config_body(
         ctx, migrated, "migrate EmacsOS Lisp symbols", repo)
     if outcome.startswith("applied:"):
+        try:
+            repo.clear_namespace_migration_reconciliation()
+        except Exception as e:  # noqa: BLE001 — a remaining marker must block later turns
+            log.exception("namespace config migration: could not clear reconciliation state")
+            return ("error: namespace migration requires reconciliation: "
+                    f"migration applied but its reconciliation state could not "
+                    f"be cleared ({type(e).__name__}: {e})")
         return outcome
     return f"error: namespace migration requires reconciliation: {outcome}"
 

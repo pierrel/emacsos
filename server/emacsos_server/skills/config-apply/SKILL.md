@@ -42,7 +42,8 @@ construction.  Do not attempt it through `get_config`, `eval_elisp`, or
 `apply_config`: the server reads its recorded complete body, changes exact Lisp
 symbol tokens, then confirms and records the replacement.  If the chat turn
 reports that migration needs reconciliation, surface that result and do no
-persistent config work until an operator resolves it.
+persistent config work until an operator completes and records a clean
+reconciliation.
 
 ## Idioms for common requests
 

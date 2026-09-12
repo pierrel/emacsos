@@ -41,4 +41,6 @@ An existing agent configuration is read from =ConfigRepo.current()=, changed
 only at complete executable Lisp-symbol tokens, verified, and passed as the
 full body through =apply_config=.  The server records it only after the phone
 confirms the write.  Unconfirmed or unrecorded results stop the migration for
-reconciliation; direct phone-file replacement is not a migration path.
+reconciliation and persist that block across later chat turns; only an explicit
+clean reconciliation clears it.  Direct phone-file replacement is not a
+migration path.

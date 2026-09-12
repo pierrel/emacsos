@@ -135,6 +135,18 @@ def test_ensure_idempotent_and_scaffolds(tmp_path):
     assert cur.body == ""  # scaffold body is empty
 
 
+def test_namespace_migration_reconciliation_state_survives_reset(tmp_path):
+    r = _repo(tmp_path)
+    r.ensure()
+    assert not r.namespace_migration_reconciliation_pending()
+    r.mark_namespace_migration_reconciliation()
+    assert r.namespace_migration_reconciliation_pending()
+    r.ensure()
+    assert r.namespace_migration_reconciliation_pending()
+    r.clear_namespace_migration_reconciliation()
+    assert not r.namespace_migration_reconciliation_pending()
+
+
 def test_write_and_commit_round_trips_body(tmp_path):
     r = _repo(tmp_path)
     sha = r.write_and_commit("(setq foo 1)", "set foo")
