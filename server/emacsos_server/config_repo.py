@@ -83,6 +83,40 @@ def _skip_block_comment(body: str, index: int) -> int:
     raise _incomplete_config("unterminated block comment")
 
 
+def _skip_byte_comment(body: str, index: int) -> int:
+    """Return the index just after an Emacs ``#@NUMBER`` byte payload."""
+    digit_index = index + 2
+    if digit_index >= len(body) or not "0" <= body[digit_index] <= "9":
+        raise _incomplete_config("malformed byte-skipping comment count")
+
+    count = 0
+    byte_limit = len(body.encode("utf-8"))
+    while (digit_index < len(body) and
+           "0" <= body[digit_index] <= "9"):
+        digit = ord(body[digit_index]) - ord("0")
+        if count <= byte_limit:
+            count = count * 10 + digit
+        digit_index += 1
+    if count > byte_limit:
+        raise _incomplete_config("byte-skipping comment count exceeds config")
+    # Emacs treats #@00 as a special end-of-file marker, including #@000...
+    # where its reader stops after the first two zero digits.
+    if body[index + 2:index + 4] == "00":
+        return len(body)
+
+    payload_end = digit_index
+    bytes_left = count
+    while bytes_left:
+        if payload_end >= len(body):
+            raise _incomplete_config("truncated byte-skipping comment payload")
+        char_bytes = len(body[payload_end].encode("utf-8"))
+        if char_bytes > bytes_left:
+            raise _incomplete_config("byte-skipping comment splits UTF-8 character")
+        bytes_left -= char_bytes
+        payload_end += 1
+    return payload_end
+
+
 def _skip_char_component(body: str, index: int, allow_missing: bool = False) -> int:
     """Return the index after one Emacs Lisp character component."""
     if index >= len(body):
@@ -152,7 +186,7 @@ def migrate_emacos_symbols(body: str) -> str:
     transaction.  This pure transform deliberately does not inspect or write a
     phone file.  It changes only lexical atoms, including an escaped hyphen in
     a symbol, and fails closed before apply on incomplete strings, comments,
-    characters, or list/vector delimiters.
+    characters, byte-skipping comments, or list/vector delimiters.
     """
     pieces: list[str] = []
     index = 0
@@ -170,6 +204,10 @@ def migrate_emacos_symbols(body: str) -> str:
             continue
         if body.startswith("#|", index):
             index = _skip_block_comment(body, index)
+            pieces.append(body[start:index])
+            continue
+        if body.startswith("#@", index):
+            index = _skip_byte_comment(body, index)
             pieces.append(body[start:index])
             continue
         if body[index] == '"':

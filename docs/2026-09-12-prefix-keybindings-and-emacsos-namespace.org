@@ -45,3 +45,7 @@ reconciliation and persist that block across later chat turns.  Each later turn
 recomputes the canonical target from the complete recorded body and retries it;
 only a clean confirmed-and-recorded retry clears the block.  Direct phone-file
 replacement is not a migration path.
+
+The lexical migration preserves strings, line and block comments, character
+literals, and Emacs =#@NUMBER= byte-skipping reader payloads byte-for-byte.
+Malformed or truncated reader input fails before the phone apply.

@@ -101,6 +101,60 @@ def test_namespace_migration_preserves_noncode_and_canonical_body():
     assert migrate_emacos_symbols(body) == body
 
 
+def test_namespace_migration_preserves_byte_skipping_comment_payload():
+    payload = '(emacos-call "inert")'
+    body = f"#@{len(payload.encode())}{payload}\n(emacos-call \"+1\")"
+    assert migrate_emacos_symbols(body) == (
+        f"#@{len(payload.encode())}{payload}\n(emacsos-call \"+1\")")
+
+
+def test_namespace_migration_counts_byte_comment_payload_as_utf8_bytes():
+    payload = ' é(emacos-call "inert")'
+    body = f"#@{len(payload.encode())}{payload}\n(emacos-call \"+1\")"
+    assert migrate_emacos_symbols(body) == (
+        f"#@{len(payload.encode())}{payload}\n(emacsos-call \"+1\")")
+
+
+def test_namespace_migration_preserves_byte_comment_end_marker():
+    body = '#@00(emacos-call "+1"'
+    assert migrate_emacos_symbols(body) == body
+
+
+@pytest.mark.skipif(shutil.which("emacs") is None,
+                    reason="requires the installed Emacs reader")
+def test_namespace_migration_byte_comment_matches_emacs_reader(tmp_path):
+    payload = '(emacos-call "inert")'
+    body = (
+        f"#@{len(payload.encode())}{payload}"
+        "(progn (setq emacsos-reader-parity 'ok) "
+        "(princ (format \"%S:%S\" (boundp 'emacsos-skipped) "
+        "emacsos-reader-parity)))")
+    migrated = migrate_emacos_symbols(body)
+    assert migrated == body
+    source = tmp_path / "byte-comment.elc"
+    version = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", "(princ emacs-version)"],
+        capture_output=True, text=True, check=True).stdout
+    compiled_header = (b";ELC\x1e\0\0\0\n"
+                       b";;; Compiled\n" +
+                       f";;; in Emacs version {version}\n".encode() +
+                       b";;; with all optimizations.\n\n\n")
+    source.write_bytes(compiled_header + body.encode())
+    form = (
+        f"(load {json.dumps(str(source))} nil t)"
+    )
+    original = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    source.write_bytes(compiled_header + migrated.encode())
+    transformed = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    assert original.returncode == transformed.returncode == 0
+    assert original.stdout == transformed.stdout == "nil:ok"
+    assert original.stderr == transformed.stderr == ""
+
+
 def test_namespace_migration_noops_exact_canonical_body():
     body = '(emacsos-call "+1")'
     assert migrate_emacos_symbols(body) == body
@@ -113,6 +167,11 @@ def test_namespace_migration_noops_exact_canonical_body():
     r'?\C',
     '(emacos-call "+1"',
     ']',
+    '#@',
+    '#@x',
+    '#@١',
+    '#@5abc',
+    '#@1é',
 ])
 def test_namespace_migration_rejects_incomplete_lisp_before_apply(body):
     with pytest.raises(ConfigRepoError, match="incomplete Lisp config"):
