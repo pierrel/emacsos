@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy install-local phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-install-local test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install wvkbd-phone-bench test-wvkbd-build
+.PHONY: start start-server local-connect-server local-deploy install-local phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-install-local test-local-deploy-restart test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install wvkbd-phone-bench test-wvkbd-build
 
 PINEPHONE_HOST ?= phone
 export PINEPHONE_HOST
@@ -30,6 +30,7 @@ local-connect-server:
 	ssh -t $(PINEPHONE_HOST) emacsclient -f server -t
 
 test-pinephone-scripts:
+	tests/test-local-deploy-restart.sh
 	tests/test-pinephone-diagnostic-recovery.sh
 	tests/test-pinephone-openrc-deploy.sh
 	tests/test-pinephone-openrc-boot-mode.sh
@@ -54,21 +55,15 @@ pinephone-openrc-console:
 #
 # Two targets:
 #
-#   phone-install   First-time setup, chat/Assist endpoint changes, and
-#                   Assist token or CA rotation.  Persists across reboots:
-#                   .el files + emacsos-init.el snippet land in
-#                   ~/.emacs.d/.  After the first run, add the
-#                   printed (load-file ...) line to the phone's own
-#                   init.el ONCE.
+#   phone-install   First-time setup for the standalone user Emacs session.
+#                   It persists .el files + emacsos-init.el under
+#                   ~/.emacs.d/.  After the first run, add the printed
+#                   (load-file ...) line to the phone's own init.el ONCE.
 #
-#   local-deploy    Hot-reload only.  scp's the .el files to the
-#                   persistent location and re-loads them into the
-#                   running emacs daemon.  Use during dev iteration
-#                   when you don't want to bounce the phone's emacs.
-#
-# Both targets write to ~/.emacs.d/emacsos/ so a hot-reload survives
-# the next reboot too (until you change emacsos-init.el — then
-# re-run phone-install).
+#   local-deploy    Atomically updates the installed OpenRC UI payload, then
+#                   starts a fresh Emacs process.  Structural Lisp namespace
+#                   changes cannot safely leave old functions, variables, or
+#                   maps in memory.
 
 PHONE_EMACSOS_DIR ?= ~/.emacs.d/emacsos
 PHONE_INIT_SNIPPET ?= ~/.emacs.d/emacsos-init.el
@@ -111,16 +106,12 @@ phone-install:
 	@echo
 	@echo "✓ Installed.  If this is the first run, add ONE line to phone's init.el:"
 	@echo "    (load-file \"$(PHONE_INIT_SNIPPET)\")"
-	@echo "  then bounce the phone's emacs (or run \`make local-deploy\` to hot-reload now)."
+	@echo "  then restart the phone's standalone Emacs session."
 
 local-deploy:
-	ssh $(PINEPHONE_HOST) mkdir -p $(PHONE_EMACSOS_DIR)
-	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
-	# Also (load-file) the init snippet if phone-install has been
-	# run -- the snippet re-applies both chat and Assist Web API URLs,
-	# which their reloaded defcustoms would otherwise reset.  Conditional
-	# so a fresh phone still gets a working code reload.
-	ssh $(PINEPHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacsos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-sms.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacsos--render-page))"'
+	# The updater's root transaction validates, installs, and proves the staged
+	# payload before its bounded OpenRC restart.  Never load Lisp in-process.
+	deploy/pinephone/update-openrc-session.sh
 
 # Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
 # docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific
@@ -214,6 +205,9 @@ playground-install:
 
 test-install-local:
 	tests/test-install-local.sh
+
+test-local-deploy-restart:
+	tests/test-local-deploy-restart.sh
 
 test-elisp: test-install-local
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -f ert-run-tests-batch-and-exit

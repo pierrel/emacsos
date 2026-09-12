@@ -9,6 +9,13 @@ default_phone_host=$(env -u PINEPHONE_HOST make -s -f "$repo_dir/Makefile" -pn \
     2>/dev/null | awk -F ' = ' '$1 == "PINEPHONE_HOST" { print $2; exit }')
 [ "$default_phone_host" = phone ]
 
+local_deploy=$(make -s -n -f "$repo_dir/Makefile" local-deploy)
+printf '%s\n' "$local_deploy" | grep -F 'deploy/pinephone/update-openrc-session.sh' >/dev/null
+if printf '%s\n' "$local_deploy" | grep -E 'emacsclient|^[[:space:]]*scp ' >/dev/null; then
+    printf '%s\n' 'local-deploy must use the OpenRC updater, not hot-reload Emacs' >&2
+    exit 1
+fi
+
 dry_run=$(make -s -n -f "$repo_dir/Makefile" phone-install \
     ASSIST_WEB_API_URL=https://203.0.113.8:5050/api/v1/phone \
     ASSIST_WEB_TOKEN_FILE=/tmp/token ASSIST_WEB_CA_FILE=/tmp/ca 2>&1)

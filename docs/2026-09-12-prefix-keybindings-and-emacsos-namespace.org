@@ -11,10 +11,10 @@ record.
 * Live namespace
 
 The live Lisp namespace is =emacsos-=.  The earlier =emacos-= spelling remains
-only as a bounded one-generation updater migration literal and in tests that
-prove that migration.  There are no Lisp aliases: loaded code, generated
-apply expressions, skills, deployment payloads, and installed module names all
-use the canonical spelling.
+only as bounded one-generation OpenRC-updater and persisted-configuration
+migration literals, and in tests that prove those migrations.  There are no
+Lisp aliases: loaded code, generated apply expressions, skills, deployment
+payloads, and installed module names all use the canonical spelling.
 
 * Commands
 

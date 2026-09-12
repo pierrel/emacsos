@@ -37,13 +37,12 @@ exploring unrelated emacs state.
 
 ## EmacsOS namespace migration
 
-When migrating an existing agent config from `emacos-` to `emacsos-`, first
-call `get_config`, change only complete Lisp symbol tokens in that returned
-body, verify the resulting full body live, then call `apply_config` with that
-complete body.  Do not rewrite a phone file, use aliases, or replace broad text:
-comments and strings are historical text, not executable symbols.  After an
-unconfirmed or unrecorded result, stop and reconcile before another migration
-attempt.  Treat only an `applied:` result with a recorded version as success.
+The one-generation EmacsOS namespace migration is release-owned, before agent
+construction.  Do not attempt it through `get_config`, `eval_elisp`, or
+`apply_config`: the server reads its recorded complete body, changes exact Lisp
+symbol tokens, then confirms and records the replacement.  If the chat turn
+reports that migration needs reconciliation, surface that result and do no
+persistent config work until an operator resolves it.
 
 ## Idioms for common requests
 
