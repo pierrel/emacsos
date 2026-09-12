@@ -6,9 +6,9 @@ description: "Place a phone call — 'call 415-555-0123', 'call Ana', 'phone the
 # Place a call
 
 Your job is the *interpretive* part — turn what the user said into one concrete
-phone number — then hand it to the deterministic `emacos-call` proposal
+phone number — then hand it to the deterministic `emacsos-call` proposal
 command. You work through `eval_elisp`: **evaluate elisp to SEARCH for the
-number, then invoke `emacos-call` to SHOW the phone's local confirmation
+number, then invoke `emacsos-call` to SHOW the phone's local confirmation
 surface.** Stay on the call task.
 
 ## 1. Did the user already give a number? Use it.
@@ -75,12 +75,12 @@ From the matched block, take the phone number (digits, optional leading `+`).
 
 ## 3. Stage the phone confirmation (`eval_elisp`)
 
-Evaluate `emacos-call` with the resolved number (a NUMBER, never a name). It
+Evaluate `emacsos-call` with the resolved number (a NUMBER, never a name). It
 does not dial. It shows the number on the phone with a local two-tap Call
 control:
 
 ```elisp
-(emacos-call "+14155550123")
+(emacsos-call "+14155550123")
 ```
 
 - `"confirmation-required: confirm on phone"` → tell the user the target is
@@ -98,7 +98,7 @@ handler, and never synthesize the confirmation actions.
 ## 4. Hang up (on request)
 
 ```elisp
-(emacos-hang-up)
+(emacsos-hang-up)
 ```
 
 On the PinePhone this returns `"pending: hangup requested"` once the bounded
@@ -109,12 +109,12 @@ transport returns `"hung-up: ..."` or `"error: ..."` directly.
 
 ## Rules
 
-- `emacos-call` takes a phone NUMBER. Resolve it first — from the request
+- `emacsos-call` takes a phone NUMBER. Resolve it first — from the request
   (§1) or the files (§2) — never pass a name or description.
 - Search by *evaluating elisp* (`grep` via `shell-command-to-string`); stage the
-  local proposal by invoking `emacos-call`. That split is the point.
+  local proposal by invoking `emacsos-call`. That split is the point.
 - Never fabricate a number. If you can't find it, say so.
-- Never claim the phone is dialing from `emacos-call`'s confirmation-required
+- Never claim the phone is dialing from `emacsos-call`'s confirmation-required
   result. The user-visible phone state is the authority.
 - Just read enough to find the number; keep other contacts' data out of the
   result (the caps above).

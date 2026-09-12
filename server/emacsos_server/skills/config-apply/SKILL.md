@@ -35,6 +35,17 @@ exploring unrelated emacs state.
 - Persist the DURABLE form, not a one-shot interactive call — usually via
   `default-frame-alist`, `custom-set-variables`, `setq`, or a mode hook.
 
+## EmacsOS namespace migration
+
+The one-generation EmacsOS namespace migration is release-owned, before agent
+construction.  Do not attempt it through `get_config`, `eval_elisp`, or
+`apply_config`: the server reads its recorded complete body, changes exact Lisp
+symbol tokens, then confirms and records the replacement.  If the chat turn
+reports that migration needs reconciliation, surface that result and do no
+persistent config work in that turn.  The next chat turn recomputes the
+canonical target from the complete recorded body and retries it; only a clean
+confirmed-and-recorded retry clears it.
+
 ## Idioms for common requests
 
 Use these as the shape; adapt to whatever the user actually asked for.

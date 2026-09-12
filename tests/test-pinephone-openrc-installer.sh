@@ -25,7 +25,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -42,10 +42,14 @@ chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
+    'printf "%s\\n" "apk $*" >>/tmp/transaction-log' \
+    'if [ -e /tmp/block-apk ]; then exec sleep 300; fi' \
+    'if [ "${1-}" = add ]; then for package do [ "$package" != py3-dbus ] || touch /tmp/py3-dbus-present; done; fi' \
     'exit 0' \
     >/usr/bin/apk
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "rc-service $*" >>/tmp/rc-service-log' \
+    'printf "%s\\n" "rc-service $*" >>/tmp/transaction-log' \
     'if [ "$1 $2" = "seatd status" ]; then' \
     '  [ -e /tmp/seatd-running ]; exit $?' \
     'elif [ "$1 $2" = "seatd start" ]; then' \
@@ -68,8 +72,17 @@ printf '%s\n' '#!/bin/sh' \
     'elif [ "$1 $2" = "emacsos-ui status" ]; then' \
     '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
-    '  for fd in 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
+    '  for fd in 6 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/wvkbd-emacsos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
+    '  if [ "$(cat /usr/local/share/emacsos-openrc/session)" = legacy-session ]; then' \
+    '    /usr/local/sbin/emacsos-wvkbd-transaction verify-current || exit 1' \
+    '  fi' \
+    '  if [ -e /tmp/require-new-keyboard ]; then' \
+    '    [ -x /usr/local/bin/wvkbd-emacsos ] || exit 1' \
+    '    [ -f /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ] || exit 1' \
+    '    /usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 || exit 1' \
+    '    rm -f /tmp/require-new-keyboard' \
+    '  fi' \
     '  if [ -e /tmp/race-command-reference ]; then' \
     '    rm -f /tmp/race-command-reference' \
     '    printf "%s\\n" raced-user-file >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org' \
@@ -155,6 +168,16 @@ printf '%s\n' \
     'while [ "$#" -gt 0 ]; do' \
     '  case $1 in -s|-k) shift 2 ;; [0-9]*) shift; break ;; *) break ;; esac' \
     'done' \
+    'if [ -e /tmp/block-apk ] && [ "${1-}" = apk ]; then' \
+    '  "$@" &' \
+    '  child=$!' \
+    '  sleep 0.1' \
+    '  kill -TERM "$child" 2>/dev/null || true' \
+    '  sleep 0.1' \
+    '  kill -KILL "$child" 2>/dev/null || true' \
+    '  wait "$child" 2>/dev/null || true' \
+    '  exit 124' \
+    'fi' \
     'exec "$@"' >/usr/bin/timeout
 chmod 0755 /usr/bin/timeout
 
@@ -172,7 +195,7 @@ sed \
 chmod 0755 /tmp/openrc-update-root
 awk '
     { print }
-    /^    bootstrap_tmp=\$\(mktemp / { print "    sleep 30" }
+    /^    bootstrap_tmp=\$\(mktemp / { print "    exec 6>&- 7>&- 8>&- 9>&-; sleep 30" }
 ' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-signal
 chmod 0755 /tmp/openrc-update-bootstrap-signal
 
@@ -184,6 +207,20 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus" ]; then' \
+    '  [ -e /tmp/py3-dbus-present ]' \
+    '  exit $?' \
+    'fi' \
+    'if [ "${1-}" = - ] && [ "$#" -eq 4 ]; then' \
+    '  source=$2 destination=$3 maximum=$4' \
+    '  [ -f "$source" ] && [ ! -L "$source" ] || exit 1' \
+    '  [ "$(/bin/busybox stat -c "%U:%G:%a:%h:%F" "$source")" = user:user:600:1:"regular file" ] || exit 1' \
+    '  [ "$(/bin/busybox stat -c "%s" "$source")" -le "$maximum" ] || exit 1' \
+    '  /bin/cat -- "$source" >"$destination"' \
+    '  chown root:root "$destination"' \
+    '  chmod 0600 "$destination"' \
+    '  exit 0' \
+    'fi' \
     'case ${2-} in' \
     '  *EMACSOS-COMMANDS.org*) exec /bin/cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ;;' \
     '  *) exit 0 ;;' \
@@ -203,6 +240,7 @@ printf '%s\n' '#!/bin/sh' \
     'fi' \
     'exit 0' >/usr/local/sbin/test-wvkbd-proof
 chmod 0755 /usr/local/sbin/test-wvkbd-proof
+: >/tmp/wvkbd-proof-log
 install -d -o root -g root -m 0755 /etc/nftables.d
 printf '%s\n' 'table inet filter { chain input { type filter hook input priority 0; policy drop; } }' \
     >/etc/nftables.nft
@@ -406,8 +444,20 @@ if grep -F '@ASSIST_WEB_SERVER_IP@' /etc/emacsos-openrc/assist-web-url >/dev/nul
     exit 1
 fi
 
+printf '%s\n' '#!/bin/sh' \
+    '[ "$*" = "--mod-swipe -H 300 -L 300" ]' \
+    '[ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]' \
+    'printf "%s\\n" "$*" >>/tmp/wvkbd-command-log' \
+    >/home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+printf '%s\n' new-notice \
+    >/home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+chown user:user /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
 cp -a /home/user/.cache/emacsos-openrc-stage \
     /home/user/.cache/emacsos-openrc-update
+touch /tmp/require-new-keyboard
 install -o root -g root -m 0755 /bin/true \
     /usr/local/sbin/emacsos-openrc-suspend
 printf '%s\n' \
@@ -424,13 +474,30 @@ mv /etc/nftables.d/49-emacsos-callback.nft \
 rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/chat.el \
     /usr/local/share/emacsos-openrc/assist-web.el \
-    /usr/local/share/emacsos-openrc/emacos-assist.el \
+    /usr/local/share/emacsos-openrc/emacsos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/share/emacsos-openrc/phone-sms.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network
+install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+printf '%s\n' legacy-keyboard >/usr/local/bin/wvkbd-emacos
+chown root:root /usr/local/bin/wvkbd-emacos
+chmod 0755 /usr/local/bin/wvkbd-emacos
+printf '%s\n' legacy-notice >/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+chown root:root /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+chmod 0644 /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+printf '%s\n' legacy-assist >/usr/local/share/emacsos-openrc/emacos-assist.el
+chown root:root /usr/local/share/emacsos-openrc/emacos-assist.el
+chmod 0644 /usr/local/share/emacsos-openrc/emacos-assist.el
+printf '%s\n' '#!/bin/sh' \
+    'case "$1" in validate-upgrade|normalize-upgrade|verify-current) exit 0 ;; *) exit 1 ;; esac' \
+    >/usr/local/sbin/emacsos-wvkbd-transaction
+chown root:root /usr/local/sbin/emacsos-wvkbd-transaction
+chmod 0755 /usr/local/sbin/emacsos-wvkbd-transaction
+printf '%s\n' legacy-session >/usr/local/share/emacsos-openrc/session
+chmod 0755 /usr/local/share/emacsos-openrc/session
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
@@ -441,10 +508,25 @@ fi
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 [ -f /run/emacsos-ui/ready ]
+[ "$(cat /usr/local/bin/wvkbd-emacos)" = legacy-keyboard ]
+[ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
+[ "$(cat /usr/local/share/emacsos-openrc/emacos-assist.el)" = legacy-assist ]
+[ "$(cat /usr/local/share/emacsos-openrc/session)" = legacy-session ]
+grep -F 'verify-current) exit 0' /usr/local/sbin/emacsos-wvkbd-transaction >/dev/null
+[ ! -e /usr/local/bin/wvkbd-emacsos ]
+[ ! -e /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ]
 
+rm -f /tmp/wvkbd-command-log
+touch /tmp/require-new-keyboard
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
+[ -x /usr/local/bin/wvkbd-emacsos ]
+[ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]
+grep -Fx -- '--mod-swipe -H 300 -L 300' /tmp/wvkbd-command-log >/dev/null
+[ ! -e /usr/local/bin/wvkbd-emacos ]
+[ ! -e /usr/local/share/licenses/wvkbd-emacos/wordninja.txt ]
+[ ! -e /usr/local/share/emacsos-openrc/emacos-assist.el ]
 
 # Runtime cleanup must fail closed when mount metadata cannot be read.  Exercise
 # the actual updater function without mutating the live fixture directory.
@@ -535,6 +617,12 @@ if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
     printf '%s\n' 'interrupted bootstrap stopped the UI' >&2
     exit 1
 fi
+if ! (
+    flock -n -x 9
+) 9>/run/emacsos-openrc-install.lock; then
+    printf '%s\n' 'interrupted bootstrap retained the updater lock' >&2
+    exit 1
+fi
 
 # Every existing file that the update might later snapshot is checked before
 # the forward-only compatibility-helper replacement or any UI stop.  Exercise
@@ -555,6 +643,27 @@ assert_preflight_rejection() {
     fi
 }
 
+# The update-only keyboard inputs retain the installer helper's strict staged
+# file contract before this transaction stops the UI or changes any payload.
+restore_keyboard_stage() {
+    install -o user -g user -m 0600 \
+        /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+        /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+    install -o user -g user -m 0600 \
+        /home/user/.cache/emacsos-openrc-stage/wvkbd-notice \
+        /home/user/.cache/emacsos-openrc-update/wvkbd-notice
+}
+rm -f /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+ln -s /bin/true /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+assert_preflight_rejection staged-keyboard-symlink
+restore_keyboard_stage
+chown root:root /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+assert_preflight_rejection staged-keyboard-owner
+chown user:user /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+chmod 0644 /home/user/.cache/emacsos-openrc-update/wvkbd-emacsos
+assert_preflight_rejection staged-keyboard-mode
+restore_keyboard_stage
+
 chmod 0644 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
 assert_preflight_rejection token
 chmod 0600 /var/lib/emacsos-lab/.config/emacsos/assist-web-token
@@ -572,6 +681,36 @@ for unsafe_mode in 0664 0646; do
     assert_preflight_rejection "backup-source-mode-$unsafe_mode"
 done
 chmod 0644 /usr/local/share/emacsos-openrc/os.el
+
+# The one-generation bridge accepts only the exact old root-owned paths.
+# Reject each unsafe old installation before changing the helper or stopping UI.
+install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+install -o root -g root -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
+install -o root -g root -m 0644 /dev/null \
+    /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+rm -f /usr/local/bin/wvkbd-emacos
+ln -s /bin/true /usr/local/bin/wvkbd-emacos
+assert_preflight_rejection legacy-keyboard-symlink
+rm -f /usr/local/bin/wvkbd-emacos
+install -o root -g root -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
+chown user:user /usr/local/bin/wvkbd-emacos
+assert_preflight_rejection legacy-keyboard-owner
+chown root:root /usr/local/bin/wvkbd-emacos
+chmod 0700 /usr/local/bin/wvkbd-emacos
+assert_preflight_rejection legacy-keyboard-mode
+chmod 0755 /usr/local/bin/wvkbd-emacos
+
+# An unfinished durable keyboard state belongs to recovery, not this rename.
+install -d -o root -g root -m 0700 /var/lib/emacsos-wvkbd-transaction
+printf '%s\n' unfinished >/var/lib/emacsos-wvkbd-transaction/state
+chown root:root /var/lib/emacsos-wvkbd-transaction/state
+chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+assert_preflight_rejection unfinished-keyboard-transaction
+rm -f /var/lib/emacsos-wvkbd-transaction/state
+rmdir /var/lib/emacsos-wvkbd-transaction
+rm -f /usr/local/bin/wvkbd-emacos \
+    /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+rmdir /usr/local/share/licenses/wvkbd-emacos
 
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config
@@ -629,6 +768,48 @@ grep -Fx 'populated 0' /tmp/openrc.emacsos-ui/cgroup.events >/dev/null
 [ ! -s /tmp/openrc.emacsos-ui/cgroup.procs ]
 [ -f /run/emacsos-ui/ready ]
 [ "$(rc-update show default | awk '$1 == "emacsos-ui" && $2 == "|" && $3 == "default" { count++ } END { print count + 0 }')" = 1 ]
+
+# Python can already exist without its D-Bus binding on an upgrade.  Installing
+# and proving that binding must precede the UI stop, and no apk may run after.
+[ -x /usr/bin/python3 ]
+rm -f /tmp/py3-dbus-present
+: >/tmp/apk-log
+: >/tmp/rc-service-log
+: >/tmp/transaction-log
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-root
+[ -e /tmp/py3-dbus-present ]
+dbus_install_line=$(grep -nFx 'apk add py3-dbus' /tmp/transaction-log | cut -d: -f1)
+ui_stop_line=$(grep -nFx 'rc-service emacsos-ui stop' /tmp/transaction-log | cut -d: -f1)
+[ "$dbus_install_line" -lt "$ui_stop_line" ]
+if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; then
+    printf '%s\n' 'updater ran apk after stopping the UI' >&2
+    exit 1
+fi
+
+# A stalled package manager must time out while the UI still runs.  The updater
+# has its locks, so this protects both the visible session and later updates.
+: >/tmp/rc-service-log
+: >/tmp/transaction-log
+touch /tmp/block-apk
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-root >/tmp/update-apk-timeout.out 2>&1; then
+    printf '%s\n' 'blocked apk was accepted' >&2
+    exit 1
+fi
+rm -f /tmp/block-apk
+grep -F 'apk add --simulate py3-dbus' /tmp/transaction-log >/dev/null
+if grep -F 'rc-service emacsos-ui stop' /tmp/transaction-log >/dev/null; then
+    printf '%s\n' 'blocked apk stopped the UI' >&2
+    exit 1
+fi
+[ -f /run/emacsos-ui/ready ]
+if ! (
+    flock -n -x 9
+) 9>/run/emacsos-openrc-install.lock; then
+    printf '%s\n' 'blocked apk retained the updater lock' >&2
+    exit 1
+fi
 
 # The updater's ordinary post-start verification must reject each state-free
 # keyboard-proof failure. The test proof fails once so rollback can start the

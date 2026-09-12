@@ -212,35 +212,35 @@ rm -f "$ELISP_EVENTS"
 # 7. Round-trip via chat.el inside the daemon.  Proves the full
 #    client surface: chat.el's NDJSON process filter + incremental
 #    insertion + marker lifecycle.  SEND is async now — polls *chat*
-#    until emacos--chat-in-flight clears and asserts the bot line
+#    until emacsos--chat-in-flight clears and asserts the bot line
 #    GREW between polls (proving incremental render).
 log "round-trip via chat.el in the daemon"
 
 # Load chat.el and point it at the server + the daemon's own auth file.
 emacsclient -f "$HOST_AUTH" -e "(progn
   (load-file \"/opt/emacsos/chat.el\")
-  (setq emacos-chat-server-url \"http://127.0.0.1:$SERVER_PORT/chat\")
-  (setq emacos-chat-auth-file \"/home/phone/.emacs.d/server/server\"))" \
+  (setq emacsos-chat-server-url \"http://127.0.0.1:$SERVER_PORT/chat\")
+  (setq emacsos-chat-auth-file \"/home/phone/.emacs.d/server/server\"))" \
   >/dev/null 2>&1 \
   || fail "chat.el did not load in the daemon"
 
 # Simulate the user typing into the input region and pressing SEND.
 # SEND returns immediately (async); the stream renders in background.
 SEND_RESULT=$(emacsclient -f "$HOST_AUTH" -e "(progn
-  (with-current-buffer (emacos--chat-buffer)
+  (with-current-buffer (emacsos--chat-buffer)
     (goto-char (point-max))
     (insert \"$CHAT_MSG\"))
-  (emacos--chat-send)
-  (list :in-flight emacos--chat-in-flight
-        :process (and emacos--chat-process (process-status emacos--chat-process))))" 2>/tmp/emacsclient-chat.err) \
-  || fail "emacos--chat-send signaled; stderr:\n$(cat /tmp/emacsclient-chat.err)"
+  (emacsos--chat-send)
+  (list :in-flight emacsos--chat-in-flight
+        :process (and emacsos--chat-process (process-status emacsos--chat-process))))" 2>/tmp/emacsclient-chat.err) \
+  || fail "emacsos--chat-send signaled; stderr:\n$(cat /tmp/emacsclient-chat.err)"
 log "post-send daemon state: $SEND_RESULT"
 
 # Poll *chat* every 200ms; record each transcript snapshot.  Stop
-# when emacos--chat-in-flight clears (stream ended) or after 20s.
+# when emacsos--chat-in-flight clears (stream ended) or after 20s.
 INCREMENTAL_FILE=$(mktemp /tmp/sim-chat-poll-XXXXXX)
 for i in $(seq 1 100); do
-  STATE=$(emacsclient -f "$HOST_AUTH" -e '(list :in-flight emacos--chat-in-flight :transcript (with-current-buffer "*chat*" (buffer-substring-no-properties (point-min) (point-max))))' 2>/dev/null)
+  STATE=$(emacsclient -f "$HOST_AUTH" -e '(list :in-flight emacsos--chat-in-flight :transcript (with-current-buffer "*chat*" (buffer-substring-no-properties (point-min) (point-max))))' 2>/dev/null)
   printf '%s\t%s\n' "$i" "$STATE" >> "$INCREMENTAL_FILE"
   if printf '%s' "$STATE" | grep -q ':in-flight nil'; then
     break

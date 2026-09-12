@@ -1,7 +1,9 @@
 """Unit tests for the git-backed ConfigRepo — pure git+fs, tmp repo, no mocks."""
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 from unittest.mock import patch
 
@@ -11,8 +13,169 @@ from emacsos_server.config_repo import (
     ConfigRepo,
     ConfigRepoError,
     _extract_body,
+    migrate_emacos_symbols,
     render,
 )
+
+
+_EMACS_CHARACTER_LITERALS = (
+    "?;", '?"', r"?\;", r'?\"', r"?\\",
+    r"?\^?", r"?\^x", r"?\^;", r'?\^"', r"?\^\\",
+    r"?\123", r"?\777", r"?\x41", r"?\u0041", r"?\U00000041",
+    r"?\N{LATIN CAPITAL LETTER A}", r"?\C-a", r"?\M-a", r"?\S-a",
+    r"?\H-a", r"?\A-a", r"?\s-a", r"?\C-\M-\S-\H-\A-\s-a",
+    r"?\C-", r"?\^", r"?\s",
+)
+
+
+def test_namespace_migration_changes_only_lisp_symbols():
+    body = ('(emacos-call "+1")\n'
+            "#'emacos--chat-show-top-buffer\n"
+            "; keep emacos-call as the historical spelling\n"
+            "#| keep emacos-call in a block comment |#\n"
+            '(message "emacos-call is old")\n'
+            '(not-emacos-call)\n')
+    assert migrate_emacos_symbols(body) == (
+        '(emacsos-call "+1")\n'
+        "#'emacsos--chat-show-top-buffer\n"
+        "; keep emacos-call as the historical spelling\n"
+        "#| keep emacos-call in a block comment |#\n"
+        '(message "emacos-call is old")\n'
+        '(not-emacos-call)\n'
+    )
+
+
+def test_namespace_migration_skips_characters_before_later_symbols():
+    body = (
+        '(list ?; (emacos-call "+1"))\n'
+        '(list ?" (emacos--chat-show-top-buffer))\n'
+        r'(list ?\; ?\" ?\\ ?\C-a emacos\-call)' "\n"
+    )
+    assert migrate_emacos_symbols(body) == (
+        '(list ?; (emacsos-call "+1"))\n'
+        '(list ?" (emacsos--chat-show-top-buffer))\n'
+        r'(list ?\; ?\" ?\\ ?\C-a emacsos\-call)' "\n"
+    )
+
+
+@pytest.mark.parametrize("literal", _EMACS_CHARACTER_LITERALS)
+def test_namespace_migration_skips_complete_emacs_character_literals(literal):
+    body = f"(list {literal} (emacos-call \"+1\"))"
+    assert migrate_emacos_symbols(body) == (
+        f"(list {literal} (emacsos-call \"+1\"))")
+
+
+@pytest.mark.skipif(shutil.which("emacs") is None,
+                    reason="requires the installed Emacs reader")
+def test_namespace_migration_character_corpus_is_accepted_by_emacs(tmp_path):
+    source = tmp_path / "characters.el"
+    source.write_text("(list " + " ".join(_EMACS_CHARACTER_LITERALS) + ")")
+    form = (
+        "(with-temp-buffer "
+        f"(insert-file-contents {json.dumps(str(source))}) "
+        "(goto-char (point-min)) (read (current-buffer)) "
+        "(skip-chars-forward \" \\t\\r\\n\") "
+        "(unless (eobp) (error \"trailing reader input\")))"
+    )
+    result = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_namespace_migration_changes_only_complete_symbol_atoms():
+    body = '(list `emacos-call ,emacos-call ,@emacos-calls :emacos-call foo/emacos-call)'
+    assert migrate_emacos_symbols(body) == (
+        '(list `emacsos-call ,emacsos-call ,@emacsos-calls :emacsos-call '
+        'foo/emacos-call)'
+    )
+
+
+def test_namespace_migration_preserves_noncode_and_canonical_body():
+    body = (
+        '(message "emacos-call string")\n'
+        '; emacos-call line comment\n'
+        '#| emacos-call block comment #| nested emacos-call |# |#\n'
+        '(emacsos-call "+1")\n'
+    )
+    assert migrate_emacos_symbols(body) == body
+
+
+def test_namespace_migration_preserves_byte_skipping_comment_payload():
+    payload = '(emacos-call "inert")'
+    body = f"#@{len(payload.encode())}{payload}\n(emacos-call \"+1\")"
+    assert migrate_emacos_symbols(body) == (
+        f"#@{len(payload.encode())}{payload}\n(emacsos-call \"+1\")")
+
+
+def test_namespace_migration_counts_byte_comment_payload_as_utf8_bytes():
+    payload = ' é(emacos-call "inert")'
+    body = f"#@{len(payload.encode())}{payload}\n(emacos-call \"+1\")"
+    assert migrate_emacos_symbols(body) == (
+        f"#@{len(payload.encode())}{payload}\n(emacsos-call \"+1\")")
+
+
+def test_namespace_migration_preserves_byte_comment_end_marker():
+    body = '#@00(emacos-call "+1"'
+    assert migrate_emacos_symbols(body) == body
+
+
+@pytest.mark.skipif(shutil.which("emacs") is None,
+                    reason="requires the installed Emacs reader")
+def test_namespace_migration_byte_comment_matches_emacs_reader(tmp_path):
+    payload = '(emacos-call "inert")'
+    body = (
+        f"#@{len(payload.encode())}{payload}"
+        "(progn (setq emacsos-reader-parity 'ok) "
+        "(princ (format \"%S:%S\" (boundp 'emacsos-skipped) "
+        "emacsos-reader-parity)))")
+    migrated = migrate_emacos_symbols(body)
+    assert migrated == body
+    source = tmp_path / "byte-comment.elc"
+    version = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", "(princ emacs-version)"],
+        capture_output=True, text=True, check=True).stdout
+    compiled_header = (b";ELC\x1e\0\0\0\n"
+                       b";;; Compiled\n" +
+                       f";;; in Emacs version {version}\n".encode() +
+                       b";;; with all optimizations.\n\n\n")
+    source.write_bytes(compiled_header + body.encode())
+    form = (
+        f"(load {json.dumps(str(source))} nil t)"
+    )
+    original = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    source.write_bytes(compiled_header + migrated.encode())
+    transformed = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    assert original.returncode == transformed.returncode == 0
+    assert original.stdout == transformed.stdout == "nil:ok"
+    assert original.stderr == transformed.stderr == ""
+
+
+def test_namespace_migration_noops_exact_canonical_body():
+    body = '(emacsos-call "+1")'
+    assert migrate_emacos_symbols(body) == body
+
+
+@pytest.mark.parametrize("body", [
+    '"emacos-call',
+    '#| emacos-call',
+    '?',
+    r'?\C',
+    '(emacos-call "+1"',
+    ']',
+    '#@',
+    '#@x',
+    '#@١',
+    '#@5abc',
+    '#@1é',
+])
+def test_namespace_migration_rejects_incomplete_lisp_before_apply(body):
+    with pytest.raises(ConfigRepoError, match="incomplete Lisp config"):
+        migrate_emacos_symbols(body)
 
 
 def _repo(tmp_path):
@@ -29,6 +192,18 @@ def test_ensure_idempotent_and_scaffolds(tmp_path):
     cur = r.current()
     assert "scaffold" in cur.summary
     assert cur.body == ""  # scaffold body is empty
+
+
+def test_namespace_migration_reconciliation_state_survives_reset(tmp_path):
+    r = _repo(tmp_path)
+    r.ensure()
+    assert not r.namespace_migration_reconciliation_pending()
+    r.mark_namespace_migration_reconciliation()
+    assert r.namespace_migration_reconciliation_pending()
+    r.ensure()
+    assert r.namespace_migration_reconciliation_pending()
+    r.clear_namespace_migration_reconciliation()
+    assert not r.namespace_migration_reconciliation_pending()
 
 
 def test_write_and_commit_round_trips_body(tmp_path):

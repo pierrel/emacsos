@@ -15,8 +15,9 @@ reference_tmp=
 bootstrap_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-wvkbd_lock=/run/wvkbd-emacos-install.lock
-manifest_hash=7bcbaf65ba1f8628b8822e1d06abddffdc63ac688b3cdafff65b30c17e6338b6
+wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
+wvkbd_lock=/run/wvkbd-emacsos-install.lock
+manifest_hash=80818a6c62ed868d39f1824df16afef20031c0572c646441677d3f1c52fb87fd
 mutating=0
 committed=0
 restart_only=0
@@ -24,6 +25,8 @@ reference_restore_failed=0
 config_dir_created=0
 token_parent_dir_created=0
 token_config_dir_created=0
+keyboard_notice_dir_created=0
+bootstrap_helper_replaced=0
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 backup_pairs='
 openrc-init.el:/usr/local/share/emacsos-openrc/init.el
@@ -35,10 +38,15 @@ openrc-session-power:/usr/local/share/emacsos-openrc/session-power
 os.el:/usr/local/share/emacsos-openrc/os.el
 chat.el:/usr/local/share/emacsos-openrc/chat.el
 assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el
-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el
+emacsos-assist.el:/usr/local/share/emacsos-openrc/emacsos-assist.el
 network.el:/usr/local/share/emacsos-openrc/network.el
 phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el
 phone-sms.el:/usr/local/share/emacsos-openrc/phone-sms.el
+legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el
+current-wvkbd:/usr/local/bin/wvkbd-emacsos
+current-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+legacy-wvkbd:/usr/local/bin/wvkbd-emacos
+legacy-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend
 wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction
 emacsos-ui.initd:/etc/init.d/emacsos-ui
@@ -53,6 +61,53 @@ assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token
 openrc-emacs-server.nft:/etc/nftables.d/49-emacsos-callback.nft
 95-emacsos-callback.nft:/etc/nftables.d/95-emacsos-callback.nft
 95-emacsos-ui.conf:/etc/doas.d/95-emacsos-ui.conf'
+
+legacy_wvkbd=/usr/local/bin/wvkbd-emacos
+legacy_notice=/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+current_wvkbd=/usr/local/bin/wvkbd-emacsos
+current_notice=/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+legacy_assist=/usr/local/share/emacsos-openrc/emacos-assist.el
+
+legacy_keyboard_paths() {
+    if [ ! -e "$legacy_wvkbd" ] && [ ! -L "$legacy_wvkbd" ] &&
+       [ ! -e "$legacy_notice" ] && [ ! -L "$legacy_notice" ]; then
+        return 1
+    fi
+    [ -f "$legacy_wvkbd" ] && [ ! -L "$legacy_wvkbd" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$legacy_wvkbd")" = \
+            'root:root:755:1:regular file' ] &&
+        [ -f "$legacy_notice" ] && [ ! -L "$legacy_notice" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$legacy_notice")" = \
+            'root:root:644:1:regular file' ] ||
+        fail 'unsafe incomplete legacy keyboard installation'
+    return 0
+}
+
+current_keyboard_paths() {
+    if [ ! -e "$current_wvkbd" ] && [ ! -L "$current_wvkbd" ] &&
+       [ ! -e "$current_notice" ] && [ ! -L "$current_notice" ]; then
+        return 1
+    fi
+    [ -f "$current_wvkbd" ] && [ ! -L "$current_wvkbd" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$current_wvkbd")" = \
+            'root:root:755:1:regular file' ] &&
+        [ -f "$current_notice" ] && [ ! -L "$current_notice" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$current_notice")" = \
+            'root:root:644:1:regular file' ] ||
+        fail 'unsafe incomplete current keyboard installation'
+    return 0
+}
+
+legacy_assist_module() {
+    if [ ! -e "$legacy_assist" ] && [ ! -L "$legacy_assist" ]; then
+        return 1
+    fi
+    [ -f "$legacy_assist" ] && [ ! -L "$legacy_assist" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$legacy_assist")" = \
+            'root:root:644:1:regular file' ] ||
+        fail 'unsafe legacy Assist module'
+    return 0
+}
 
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
@@ -77,6 +132,54 @@ for path in sys.argv[1:]:
 PY
 }
 
+# Copy the keyboard payload through the descriptor whose metadata we checked.
+# The update stage is user-writable until this root-only snapshot is complete.
+snapshot_keyboard_stage() {
+    source=$1
+    destination=$2
+    maximum=$3
+    /usr/bin/python3 - "$source" "$destination" "$maximum" <<'PY'
+import os
+import pwd
+import stat
+import sys
+
+source, destination, maximum = sys.argv[1], sys.argv[2], int(sys.argv[3])
+user = pwd.getpwnam("user")
+fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+try:
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != user.pw_uid or
+            info.st_gid != user.pw_gid or stat.S_IMODE(info.st_mode) != 0o600 or
+            info.st_nlink != 1 or info.st_size > maximum):
+        raise SystemExit("unsafe staged keyboard input")
+    out = os.open(destination,
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit("oversized staged keyboard input")
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(out, view):]
+        os.fsync(out)
+    finally:
+        os.close(out)
+finally:
+    os.close(fd)
+PY
+    [ -f "$destination" ] && [ ! -L "$destination" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$destination")" = \
+            'root:root:600:1:regular file' ] &&
+        [ "$(stat -c '%s' "$destination")" -le "$maximum" ] ||
+        fail 'unsafe keyboard root snapshot'
+}
+
 bootstrap_compat_helper() {
     destination=/usr/local/sbin/emacsos-wvkbd-transaction
     bootstrap_tmp=$(mktemp /usr/local/sbin/.emacsos-wvkbd-transaction.XXXXXX) || return 1
@@ -90,6 +193,7 @@ bootstrap_compat_helper() {
         return 1
     fi
     bootstrap_tmp=
+    bootstrap_helper_replaced=1
     sync_file_and_parent "$destination" /usr/local/sbin || return 1
 }
 
@@ -258,7 +362,7 @@ reconcile_untracked_ui() {
 
 stop_ui() {
     timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
-        rc-service emacsos-ui stop 7>&- 8>&- 9>&- || true
+        rc-service emacsos-ui stop 6>&- 7>&- 8>&- 9>&- || true
     ui_quiescent && return 0
     reconcile_untracked_ui && ui_quiescent
 }
@@ -270,7 +374,7 @@ default_ui_entry() {
 
 start_ui() {
     timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
-        rc-service emacsos-ui start 7>&- 8>&- 9>&- || return 1
+        rc-service emacsos-ui start 6>&- 7>&- 8>&- 9>&- || return 1
     ready=0
     attempt=0
     while [ "$attempt" -lt 150 ]; do
@@ -347,11 +451,19 @@ cleanup() {
             restore_file os.el /usr/local/share/emacsos-openrc/os.el 0644
             restore_file chat.el /usr/local/share/emacsos-openrc/chat.el 0644
             restore_file assist-web.el /usr/local/share/emacsos-openrc/assist-web.el 0644
-            restore_file emacos-assist.el \
-                /usr/local/share/emacsos-openrc/emacos-assist.el 0644
+            restore_file emacsos-assist.el \
+                /usr/local/share/emacsos-openrc/emacsos-assist.el 0644
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
             restore_file phone-call.el /usr/local/share/emacsos-openrc/phone-call.el 0644
             restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
+            restore_file legacy-emacos-assist.el \
+                /usr/local/share/emacsos-openrc/emacos-assist.el 0644
+            restore_file current-wvkbd /usr/local/bin/wvkbd-emacsos 0755
+            restore_file current-wvkbd-notice \
+                /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt 0644
+            restore_file legacy-wvkbd /usr/local/bin/wvkbd-emacos 0755
+            restore_file legacy-wvkbd-notice \
+                /usr/local/share/licenses/wvkbd-emacos/wordninja.txt 0644
             restore_file openrc-suspend-root \
                 /usr/local/sbin/emacsos-openrc-suspend 0755
             restore_file wvkbd-transaction-root \
@@ -385,6 +497,8 @@ cleanup() {
                 /etc/doas.d/95-emacsos-ui.conf 0600
             [ "$config_dir_created" -eq 0 ] || \
                 rmdir /etc/emacsos-openrc 2>/dev/null || true
+            [ "$keyboard_notice_dir_created" -eq 0 ] || \
+                rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
             /usr/sbin/nft -f /etc/nftables.nft >/dev/null 2>&1 || true
             if ! start_ui >/dev/null 2>&1; then
                 printf '%s\n' \
@@ -395,7 +509,13 @@ cleanup() {
                 retain_backup
             fi
         fi
+    elif [ "$bootstrap_helper_replaced" -eq 1 ] && [ "$restart_only" -eq 0 ]; then
+        restore_file wvkbd-transaction-root \
+            /usr/local/sbin/emacsos-wvkbd-transaction 0755
     elif [ "$restart_only" -eq 1 ] && [ "$committed" -eq 0 ]; then
+        [ "$bootstrap_helper_replaced" -eq 0 ] ||
+            restore_file wvkbd-transaction-root \
+                /usr/local/sbin/emacsos-wvkbd-transaction 0755
         if stop_ui >/dev/null 2>&1; then
             start_ui >/dev/null 2>&1 ||
                 printf '%s\n' \
@@ -433,6 +553,11 @@ chown root:root "$boot_lock"
 chmod 0600 "$boot_lock"
 exec 8>"$boot_lock"
 flock -n -x 8 || fail 'boot mode transition is busy'
+touch "$wvkbd_legacy_lock"
+chown root:root "$wvkbd_legacy_lock"
+chmod 0600 "$wvkbd_legacy_lock"
+exec 6>"$wvkbd_legacy_lock"
+flock -n -x 6 || fail 'legacy keyboard install lock is busy'
 touch "$wvkbd_lock"
 chown root:root "$wvkbd_lock"
 chmod 0600 "$wvkbd_lock"
@@ -448,17 +573,21 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
     [ "$(stat -c '%U:%G:%h:%F' "$path")" = 'user:user:1:regular file' ] ||
         fail "unsafe staged owner or links: $name"
-    [ "$(stat -c '%s' "$path")" -le 1048576 ] ||
+    case $name in
+        wvkbd-emacsos) maximum=16777216 ;;
+        *) maximum=1048576 ;;
+    esac
+    [ "$(stat -c '%s' "$path")" -le "$maximum" ] ||
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 31 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 33 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
@@ -468,7 +597,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
-    emacos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
+    emacsos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
     openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
@@ -500,8 +629,8 @@ render_ipv4_template "$snapshot/openrc-assist-web-url" '@ASSIST_WEB_SERVER_IP@' 
 render_ipv4_template "$snapshot/openrc-emacs-server.nft" '@DEPLOY_CLIENT_IP@' \
     "$deploy_client_ip"
 
-for directory in /usr/local/share/emacsos-openrc /usr/local/sbin \
-    /etc/nftables.d /etc/doas.d; do
+for directory in /usr/local/bin /usr/local/share/emacsos-openrc /usr/local/sbin \
+    /usr/local/share/licenses /etc/nftables.d /etc/doas.d; do
     [ -d "$directory" ] && [ ! -L "$directory" ] ||
         fail "unsafe installed directory: $directory"
 done
@@ -530,14 +659,28 @@ done
 [ -x /usr/bin/doas ] && [ -x /usr/bin/callaudiocli ] && \
     [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
-apk add --simulate py3-dbus >/dev/null
+timeout -s TERM -k 5 30 apk add --simulate py3-dbus >/dev/null
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
+# This can fetch packages, so it must finish before stopping the UI.  The
+# remaining transaction uses its already-proven Python D-Bus dependency only.
+timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null
+[ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
+    /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
 preflight_backup_sources
+current_keyboard_paths || true
+legacy_keyboard_paths || true
+legacy_assist_module || true
+snapshot_keyboard_stage "$stage/wvkbd-emacsos" "$snapshot/wvkbd-emacsos" 16777216
+snapshot_keyboard_stage "$stage/wvkbd-notice" "$snapshot/wvkbd-notice" 1048576
 
-bootstrap_compat_helper || fail 'could not durably bootstrap keyboard compatibility helper'
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
 chown root:root "$backup"
 chmod 0700 "$backup"
+if [ -e /usr/local/sbin/emacsos-wvkbd-transaction ]; then
+    install -o root -g root -m 0600 /usr/local/sbin/emacsos-wvkbd-transaction \
+        "$backup/wvkbd-transaction-root"
+fi
+bootstrap_compat_helper || fail 'could not durably bootstrap keyboard compatibility helper'
 restart_only=1
 stop_ui || fail 'UI did not become quiescent'
 /usr/local/sbin/emacsos-wvkbd-transaction normalize-upgrade ||
@@ -545,7 +688,8 @@ stop_ui || fail 'UI did not become quiescent'
 for pair in $backup_pairs; do
     name=${pair%%:*}
     target=${pair#*:}
-    [ ! -e "$target" ] || install -o root -g root -m 0600 "$target" "$backup/$name"
+    [ ! -e "$target" ] || [ -f "$backup/$name" ] ||
+        install -o root -g root -m 0600 "$target" "$backup/$name"
 done
 if [ -e "$reference_target" ]; then
     install -o root -g root -m 0600 /dev/null "$backup/EMACSOS-COMMANDS.org"
@@ -582,12 +726,6 @@ fi
 
 mutating=1
 restart_only=0
-# Package installation is intentionally retained: it is the verified system
-# dependency for both the old and new UI.  A failure below rolls back the UI
-# payload and restarts it through the ordinary transaction cleanup.
-apk add py3-dbus >/dev/null
-[ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
-    /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
 boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
 doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
 install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
@@ -604,13 +742,26 @@ install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
     /usr/local/sbin/emacsos-openrc-suspend
 install -o root -g root -m 0755 "$snapshot/wvkbd-transaction-root" \
     /usr/local/sbin/emacsos-wvkbd-transaction
+if [ ! -d /usr/local/share/licenses/wvkbd-emacsos ]; then
+    keyboard_notice_dir_created=1
+    install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
+fi
+install -o root -g root -m 0644 "$snapshot/wvkbd-notice" "$current_notice"
+install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos" "$current_wvkbd"
+cmp -s "$snapshot/wvkbd-notice" "$current_notice" &&
+    cmp -s "$snapshot/wvkbd-emacsos" "$current_wvkbd" &&
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$current_notice")" = \
+        'root:root:644:1:regular file' ] &&
+    [ "$(stat -c '%U:%G:%a:%h:%F' "$current_wvkbd")" = \
+        'root:root:755:1:regular file' ] ||
+    fail 'could not install the new keyboard payload'
 install -o root -g root -m 0755 "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
 mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf
 doas_tmp=
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -671,6 +822,8 @@ cmp -s "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
 cmp -s "$snapshot/wvkbd-transaction-root" /usr/local/sbin/emacsos-wvkbd-transaction
+cmp -s "$snapshot/wvkbd-emacsos" "$current_wvkbd"
+cmp -s "$snapshot/wvkbd-notice" "$current_notice"
 cmp -s "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
 [ "$(stat -c '%U:%G:%a:%h:%F' /usr/local/sbin/emacsos-wvkbd-transaction)" = \
     'root:root:755:1:regular file' ]
@@ -693,7 +846,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done
@@ -702,6 +855,18 @@ if ! start_ui; then
     detail=$(head -c 4096 /run/emacsos-ui/failure 2>/dev/null || true)
     [ -n "$detail" ] || detail='no session diagnostic'
     fail "updated UI did not become ready: $detail"
+fi
+if legacy_keyboard_paths; then
+    rm -f -- "$legacy_wvkbd" "$legacy_notice"
+    rmdir /usr/local/share/licenses/wvkbd-emacos 2>/dev/null || true
+    [ ! -e "$legacy_wvkbd" ] && [ ! -L "$legacy_wvkbd" ] &&
+        [ ! -e "$legacy_notice" ] && [ ! -L "$legacy_notice" ] ||
+        fail 'could not remove legacy keyboard installation after proof'
+fi
+if legacy_assist_module; then
+    rm -f -- "$legacy_assist"
+    [ ! -e "$legacy_assist" ] && [ ! -L "$legacy_assist" ] ||
+        fail 'could not remove legacy Assist module after proof'
 fi
 committed=1
 printf '%s\n' 'OpenRC UI updated and ready'

@@ -13,6 +13,12 @@ stage=/home/user/.cache/emacsos-openrc-update
 token_file=${ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token}
 ca_file=${ASSIST_WEB_CA_FILE:-$HOME/.local/share/mkcert/rootCA.pem}
 assist_web_server_ip=${ASSIST_WEB_SERVER_IP:?set ASSIST_WEB_SERVER_IP to the certificate-covered Assist address}
+keyboard_build=$(mktemp -d)
+
+cleanup() {
+    rm -rf -- "$keyboard_build"
+}
+trap cleanup EXIT HUP INT TERM
 
 [ -f "$token_file" ] && [ ! -L "$token_file" ] &&
     LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
@@ -38,6 +44,13 @@ set -- -o User=user -o BatchMode=yes -o PreferredAuthentications=publickey \
     -o ServerAliveInterval=5 -o ServerAliveCountMax=3
 
 "$repo_dir/tests/test-pinephone-openrc-deploy.sh"
+WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd} \
+    WVKBD_BUILD_DIR=$keyboard_build "$deploy_dir/build-wvkbd-emacsos.sh"
+[ -f "$keyboard_build/wvkbd-emacsos" ] && [ ! -L "$keyboard_build/wvkbd-emacsos" ] &&
+    [ -f "$keyboard_build/wordninja.txt" ] && [ ! -L "$keyboard_build/wordninja.txt" ] || {
+    printf '%s\n' 'wvkbd build did not produce the reviewed payload' >&2
+    exit 1
+}
 ssh -T "$@" "$phone_host" "rm -rf -- '$stage' && install -d -m 0700 '$stage'"
 scp -q "$@" \
     "$deploy_dir/openrc-manifest.sha256" \
@@ -63,12 +76,14 @@ scp -q "$@" \
     "$deploy_dir/waydroid-container-wrapper" \
     "$phone_host:$stage/"
 scp -q "$@" "$repo_dir/os.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
-    "$repo_dir/emacos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
+    "$repo_dir/emacsos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
     "$repo_dir/phone-sms.el" \
     "$repo_dir/EMACSOS-COMMANDS.org" \
     "$phone_host:$stage/"
 scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
 scp -q "$@" "$ca_file" "$phone_host:$stage/assist-web-ca.pem"
+scp -q "$@" "$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"
+scp -q "$@" "$keyboard_build/wordninja.txt" "$phone_host:$stage/wvkbd-notice"
 ssh -T "$@" "$phone_host" "chmod 0600 '$stage'/*"
 ssh -T "$@" "$phone_host" \
     "deploy_client_ip=\${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP=\"\$deploy_client_ip\" ASSIST_WEB_SERVER_IP='$assist_web_server_ip' /bin/sh" \

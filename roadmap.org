@@ -258,7 +258,7 @@ The next experiment *immediately after* conversation history — we go
 straight here, deliberately skipping any intermediate "N-level only"
 chat-revert step.
 
-Today =M-x emacos--chat-rollback= is strictly one-level: it calls
+Today =M-x emacsos--chat-rollback= is strictly one-level: it calls
 =config_repo.rollback()= → =git revert --no-edit HEAD=, undoing only the
 most recent =apply_config=.  It remains the quick "undo the thing I just did"
 path.
@@ -469,7 +469,7 @@ cheapest cellular win (no audio), so it's the natural first proof the modem work
 ** TODO Wifi connection flow
 I need a mode for seeing and connecting to wifi.
 
-A =emacos-wifi-mode= buffer (=tabulated-list-mode=) that scans and lists SSIDs with
+A =emacsos-wifi-mode= buffer (=tabulated-list-mode=) that scans and lists SSIDs with
 signal + security, shows the current connection, and offers Connect / Disconnect /
 Forget as interactive commands; passphrase entry runs through the existing
 keyboard into a masked minibuffer prompt.  Back it with the image's network stack —
@@ -486,7 +486,7 @@ The T9 grid is letters-only, so there's no way to type a digit — which blocks 
 passwords, URLs, and phone numbers.  Add a =123/ABC= toggle on the utility row that
 swaps the 3x3 letter grid for a digit + common-punctuation layer (phone-keyboard
 style), keeping multi-tap so one key still reaches the rarer symbols.  Lives in
-=os.el= next to =emacos--tap-key= and the layout table.  Decide on the phone which
+=os.el= next to =emacsos--tap-key= and the layout table.  Decide on the phone which
 symbols earn a slot (=. : / @ - _= are the high-frequency ones for passwords/URLs).
 Prerequisite for Wifi and Phone calling.  Done when you can type a WPA password and
 a phone number without leaving the keyboard.
@@ -552,7 +552,7 @@ everything else from the modeline.
 ([[file:docs/2026-05-26-cellular-data-connectivity.org][docs/2026-05-26-cellular-data-connectivity.org]]):
 =mode-line-format= is now a minimal global default (=setq-default= at the top of
 =os.el=) carrying the =" EmacsOS"= label + a tappable =:eval= segment from
-=emacos-net-mode-line-string= (=network.el=), with the stock clutter (buffer
+=emacsos-net-mode-line-string= (=network.el=), with the stock clutter (buffer
 position, minor modes, encoding) stripped.  *REMAINING:* time + date
 (=display-time-mode=), battery % (=display-battery-mode= reads
 =/sys/class/power_supply/=), and any residual clutter — append into the same list.

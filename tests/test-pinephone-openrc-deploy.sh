@@ -9,6 +9,13 @@ default_phone_host=$(env -u PINEPHONE_HOST make -s -f "$repo_dir/Makefile" -pn \
     2>/dev/null | awk -F ' = ' '$1 == "PINEPHONE_HOST" { print $2; exit }')
 [ "$default_phone_host" = phone ]
 
+local_deploy=$(make -s -n -f "$repo_dir/Makefile" local-deploy)
+printf '%s\n' "$local_deploy" | grep -F 'deploy/pinephone/update-openrc-session.sh' >/dev/null
+if printf '%s\n' "$local_deploy" | grep -E 'emacsclient|^[[:space:]]*scp ' >/dev/null; then
+    printf '%s\n' 'local-deploy must use the OpenRC updater, not hot-reload Emacs' >&2
+    exit 1
+fi
+
 dry_run=$(make -s -n -f "$repo_dir/Makefile" phone-install \
     ASSIST_WEB_API_URL=https://203.0.113.8:5050/api/v1/phone \
     ASSIST_WEB_TOKEN_FILE=/tmp/token ASSIST_WEB_CA_FILE=/tmp/ca 2>&1)
@@ -46,7 +53,7 @@ for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
@@ -56,27 +63,77 @@ manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
 manifest_hash=${manifest_hash%% *}
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'wvkbd_lock=/run/wvkbd-emacos-install.lock' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'wvkbd_lock=/run/wvkbd-emacsos-install.lock' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'flock -n -x 7 || fail '\''keyboard install lock is busy'\''' \
     "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'flock -n -x 6 || fail '\''legacy keyboard install lock is busy'\''' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rc-service emacsos-ui start 6>&- 7>&- 8>&- 9>&-' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+legacy_lock_line=$(grep -nF 'exec 6>"$wvkbd_legacy_lock"' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+new_lock_line=$(grep -nF 'exec 7>"$wvkbd_lock"' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+[ "$legacy_lock_line" -lt "$new_lock_line" ]
 grep -F 'validate-upgrade' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 33 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'restore_file legacy-emacos-assist.el' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rm -f -- "$legacy_assist"' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos" "$current_wvkbd"' \
+    "$deploy_dir/openrc-update-root" >/dev/null
+keyboard_install_line=$(grep -nF \
+    'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos" "$current_wvkbd"' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+session_install_line=$(grep -nF \
+    'install -o root -g root -m 0755 "$snapshot/openrc-session"' \
+    "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+[ "$keyboard_install_line" -lt "$session_install_line" ]
+grep -F 'WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd}' \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'WVKBD_BUILD_DIR=$keyboard_build "$deploy_dir/build-wvkbd-emacsos.sh"' \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F '"$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"' \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
-simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-update-root" | cut -d: -f1)
+simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus'" \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+keyboard_snapshot_line=$(grep -nF 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
+helper_backup_line=$(grep -nF \
+    '"$backup/wvkbd-transaction-root"' "$deploy_dir/openrc-update-root" | head -1 | cut -d: -f1)
 bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
-install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update-root" | cut -d: -f1)
-[ "$simulate_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
+[ "$simulate_line" -lt "$install_line" ] && [ "$install_line" -lt "$dbus_check_line" ] &&
+    [ "$dbus_check_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
     [ "$bootstrap_line" -lt "$stop_line" ] && [ "$bootstrap_line" -lt "$mutating_line" ] &&
-    [ "$mutating_line" -lt "$install_line" ]
+    [ "$stop_line" -lt "$mutating_line" ]
+[ "$preflight_line" -lt "$keyboard_snapshot_line" ] &&
+    [ "$keyboard_snapshot_line" -lt "$bootstrap_line" ]
+[ "$helper_backup_line" -lt "$bootstrap_line" ]
+grep -F 'bootstrap_helper_replaced=1' "$deploy_dir/openrc-update-root" >/dev/null
 expected='EMACSOS-COMMANDS.org
 assist-web.el
 chat.el
 dtach-shell-init.el
 dtach-shell.el
-emacos-assist.el
+emacsos-assist.el
 emacsos-ui.initd
 network.el
 openrc-assist-web-url
@@ -154,21 +211,21 @@ grep -F 'rm -f -- "$runtime/failure"' \
     "$deploy_dir/openrc-session" >/dev/null
 grep -F 'grep -Fx t "$probe_file"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'Goodix Capacitive TouchScreen' "$deploy_dir/openrc-session" >/dev/null
-grep -F '/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300' \
+grep -F '/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300' \
     "$deploy_dir/openrc-session" >/dev/null
 if grep -F '/usr/bin/wvkbd-mobintl' "$deploy_dir/openrc-session" >/dev/null; then
     printf '%s\n' 'OpenRC session still launches the stock keyboard' >&2
     exit 1
 fi
 grep -F 'export EMACSOS_WVKBD_PID=$keyboard_pid' "$deploy_dir/openrc-session" >/dev/null
-keyboard_line=$(grep -nF '/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300' \
+keyboard_line=$(grep -nF '/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300' \
     "$deploy_dir/openrc-session")
 keyboard_line=${keyboard_line%%:*}
 emacs_line=$(grep -nF '/usr/bin/emacs -Q --load "$root/init.el" &' \
     "$deploy_dir/openrc-session")
 emacs_line=${emacs_line%%:*}
 [ "$keyboard_line" -lt "$emacs_line" ]
-grep -F 'emacos-call-control-gap-lines 1' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacsos-call-control-gap-lines 1' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F "'SIGUSR1" "$deploy_dir/openrc-init.el" >/dev/null
 grep -F "'SIGUSR2" "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'emacsos-pinephone-keyboard-mode-line-map' "$deploy_dir/openrc-init.el" >/dev/null
@@ -340,8 +397,8 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'source.read(65537)' "$deploy_dir/openrc-update-root" >/dev/null
 for command in emacsos-firefox-start emacsos-firefox-quit \
     emacsos-android-start emacsos-android-quit \
-    emacos--chat-show-top-buffer emacos-send-message emacos-call emacos-answer \
-    emacos-hang-up emacos-net-show dtach-shell; do
+    emacsos--chat-show-top-buffer emacsos-send-message emacsos-call emacsos-answer \
+    emacsos-hang-up emacsos-net-show dtach-shell; do
     grep -F "$command" "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 done
 grep -F '=C-c C-a=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
@@ -413,8 +470,8 @@ fi
 grep -F 'for_window [app_id="firefox"] focus' "$deploy_dir/openrc-sway.config" >/dev/null
 
 grep -F '"--new-instance" "about:blank"' "$deploy_dir/openrc-init.el" >/dev/null
-grep -F 'emacos-use-internal-keyboard nil' "$deploy_dir/openrc-init.el" >/dev/null
-grep -F 'emacos-initial-buffer-function #'"'"'emacos--chat-buffer' \
+grep -F 'emacsos-use-internal-keyboard nil' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacsos-initial-buffer-function #'"'"'emacsos--chat-buffer' \
     "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F '"/etc/emacsos-openrc/assist-web-url"' "$deploy_dir/openrc-init.el" >/dev/null
@@ -424,7 +481,7 @@ if grep -F '(setq gnutls-trustfiles' "$deploy_dir/openrc-init.el" \
     printf '%s\n' 'Assist CA trust escaped the request-local binding' >&2
     exit 1
 fi
-grep -F 'emacos-assist-web-api-url' "$deploy_dir/openrc-init.el" >/dev/null
+grep -F 'emacsos-assist-web-api-url' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'make-process' "$deploy_dir/openrc-init.el" >/dev/null
 if grep -E 'openrc-home|openrc-buffer|status-marker|pinephone-set-status|pinephone-insert-button|Lab home' \
         "$deploy_dir/openrc-init.el" \
@@ -449,7 +506,7 @@ fi
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'rc-service emacsos-ui start 7>&- 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'rc-service emacsos-ui start 6>&- 7>&- 8>&- 9>&-' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \

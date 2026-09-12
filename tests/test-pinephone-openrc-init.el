@@ -26,7 +26,7 @@
         (emacsos-pinephone-keyboard-hidden nil)
         signal)
     (cl-letf (((symbol-function 'process-attributes)
-               (lambda (_) '((comm . "wvkbd-emacos") (user . "emacsos-lab"))))
+               (lambda (_) '((comm . "wvkbd-emacsos") (user . "emacsos-lab"))))
               ((symbol-function 'signal-process)
                (lambda (pid value) (setq signal (list pid value))))
               ((symbol-function 'force-mode-line-update) #'ignore))
@@ -85,7 +85,7 @@
     (should (equal directory "/"))
     (should (equal command
                    '("/usr/bin/pgrep" "-u" "emacsos-lab" "-f"
-                     "^/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300$")))))
+                     "^/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300$")))))
 
 (ert-deftest emacsos-openrc-keyboard-validates-pid-locally ()
   (let (directory)
@@ -93,7 +93,7 @@
       (cl-letf (((symbol-function 'process-attributes)
                  (lambda (_)
                    (setq directory default-directory)
-                   '((comm . "wvkbd-emacos") (user . "emacsos-lab")))))
+                   '((comm . "wvkbd-emacsos") (user . "emacsos-lab")))))
         (should (emacsos-pinephone-valid-wvkbd-pid-p "43"))))
     (should (equal directory "/"))))
 
@@ -123,23 +123,23 @@
 
 (ert-deftest emacsos-openrc-registers-frame-layout-finalizer ()
   (should (eq (symbol-function 'emacsos-pinephone-enforce-frame-layout)
-              emacos-agent-config-applied-function)))
+              emacsos-agent-config-applied-function)))
 
 (ert-deftest emacsos-openrc-agent-config-finalizer-survives-config-mutation ()
   (let ((file (make-temp-file "emacsos-agent-" nil ".el"))
-        (emacos-agent-config-applied-function
+        (emacsos-agent-config-applied-function
          (symbol-function 'emacsos-pinephone-enforce-frame-layout))
         seen)
     (unwind-protect
         (progn
           (with-temp-file file
-            (insert "(setq emacos-agent-config-applied-function #'ignore)\n"))
+            (insert "(setq emacsos-agent-config-applied-function #'ignore)\n"))
           (cl-letf (((symbol-function 'set-frame-parameter)
                      (lambda (frame parameter value)
                        (setq seen (list frame parameter value)))))
             (emacsos-pinephone-load-agent-config file))
           (should (equal seen '(nil fullscreen maximized)))
-          (should (eq emacos-agent-config-applied-function
+          (should (eq emacsos-agent-config-applied-function
                       (symbol-function
                        'emacsos-pinephone-enforce-frame-layout))))
       (delete-file file))))
@@ -147,7 +147,7 @@
 (ert-deftest emacsos-openrc-agent-config-finalizer-runs-after-quit ()
   (let ((file (make-temp-file "emacsos-agent-" nil ".el"))
         finalized)
-    (let ((emacos-agent-config-applied-function
+    (let ((emacsos-agent-config-applied-function
            (lambda () (setq finalized t))))
       (unwind-protect
           (progn
@@ -161,7 +161,7 @@
   (let (seen)
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args) (setq seen args) 'process))
-              ((symbol-function 'emacos-call--modem-manager-owner)
+              ((symbol-function 'emacsos-call--modem-manager-owner)
                (lambda () ":1.42")))
       (should (string-prefix-p
                "pending:"
@@ -179,10 +179,10 @@
                   (hangup "/org/freedesktop/ModemManager1/Call/4"
                           "pending: hangup requested")))
     (let (seen
-          (emacos-call--call-owner ":1.42"))
+          (emacsos-call--call-owner ":1.42"))
       (cl-letf (((symbol-function 'make-process)
                  (lambda (&rest args) (setq seen args) 'process))
-                ((symbol-function 'emacos-call--modem-manager-owner)
+                ((symbol-function 'emacsos-call--modem-manager-owner)
                  (lambda () ":1.42")))
         (should (equal
                  (emacsos-pinephone-call-operation
@@ -298,7 +298,7 @@
 
 (ert-deftest emacsos-openrc-call-operation-needs-stable-owner-before-launch ()
   (let ((before (buffer-list)) launched)
-    (cl-letf (((symbol-function 'emacos-call--modem-manager-owner)
+    (cl-letf (((symbol-function 'emacsos-call--modem-manager-owner)
                (lambda () ":1.fallback"))
               ((symbol-function 'make-process)
                (lambda (&rest _) (setq launched t))))

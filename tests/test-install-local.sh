@@ -21,7 +21,7 @@ cmp "$repo/assist-web.el" "$destination/assist-web.el"
   "assist-web.el chat.el sentinel " ]
 grep -Fq 'Credentials, certificates, and Emacs configuration were not changed.' \
   "$temporary/install.out"
-grep -Fq 'Set emacos-assist-web-api-url to your HTTPS Assist phone API endpoint.' \
+grep -Fq 'Set emacsos-assist-web-api-url to your HTTPS Assist phone API endpoint.' \
   "$temporary/install.out"
 
 if make -C "$repo" install-local LOCAL_EMACSOS_DIR= \
@@ -38,18 +38,18 @@ INSTALL_DESTINATION="$destination" HOME="$temporary/home" \
      (require 'assist-web)
      (let ((checks (list (featurep 'chat)
                          (featurep 'assist-web)
-                         (commandp 'emacos-assist-web-open-thread)
+                         (commandp 'emacsos-assist-web-open-thread)
                          (with-temp-buffer
-                           (emacos-assist-web-mode)
+                           (emacsos-assist-web-mode)
                            (eq (key-binding (kbd \"C-c C-a s\"))
-                               #'emacos-conversation-send))
+                               #'emacsos-conversation-send))
                          (equal (file-truename
-                                 (symbol-file 'emacos--chat-enable-presentation 'defun))
+                                 (symbol-file 'emacsos--chat-enable-presentation 'defun))
                                 (file-truename
                                  (expand-file-name \"chat.el\"
                                                    (getenv \"INSTALL_DESTINATION\"))))
                          (equal (file-truename
-                                 (symbol-file 'emacos-assist-web-open-thread 'defun))
+                                 (symbol-file 'emacsos-assist-web-open-thread 'defun))
                                 (file-truename
                                  (expand-file-name \"assist-web.el\"
                                                    (getenv \"INSTALL_DESTINATION\")))))))

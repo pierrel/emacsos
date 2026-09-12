@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
 AGENT_FILE = "agent.el"
+_NAMESPACE_MIGRATION_KEY = "emacsos.namespace-migration-reconciliation"
 
 # Commit message of the empty-config bootstrap commit.  Not a user-applied
 # version — config_history filters it out so the agent isn't offered "restore
@@ -40,6 +42,216 @@ _GIT_IDENTITY = [
     "-c", "user.email=emacsos@localhost",
     "-c", "user.name=emacsos-server",
 ]
+
+_LEGACY_SYMBOL = re.compile(
+    r"^(?P<keyword>:?)emacos(?P<hyphen>-|\\-)(?=[A-Za-z0-9_\\-])")
+
+
+def _incomplete_config(detail: str) -> ConfigRepoError:
+    return ConfigRepoError(f"incomplete Lisp config: {detail}")
+
+
+def _skip_string(body: str, index: int) -> int:
+    """Return the index just after the string beginning at INDEX."""
+    index += 1
+    while index < len(body):
+        if body[index] == "\\":
+            index += 1
+            if index >= len(body):
+                raise _incomplete_config("unfinished string escape")
+        elif body[index] == '"':
+            return index + 1
+        index += 1
+    raise _incomplete_config("unterminated string")
+
+
+def _skip_block_comment(body: str, index: int) -> int:
+    """Return the index just after a nested block comment at INDEX."""
+    depth = 1
+    index += 2
+    while index < len(body):
+        if body.startswith("#|", index):
+            depth += 1
+            index += 2
+        elif body.startswith("|#", index):
+            depth -= 1
+            index += 2
+            if depth == 0:
+                return index
+        else:
+            index += 1
+    raise _incomplete_config("unterminated block comment")
+
+
+def _skip_byte_comment(body: str, index: int) -> int:
+    """Return the index just after an Emacs ``#@NUMBER`` byte payload."""
+    digit_index = index + 2
+    if digit_index >= len(body) or not "0" <= body[digit_index] <= "9":
+        raise _incomplete_config("malformed byte-skipping comment count")
+
+    count = 0
+    byte_limit = len(body.encode("utf-8"))
+    while (digit_index < len(body) and
+           "0" <= body[digit_index] <= "9"):
+        digit = ord(body[digit_index]) - ord("0")
+        if count <= byte_limit:
+            count = count * 10 + digit
+        digit_index += 1
+    if count > byte_limit:
+        raise _incomplete_config("byte-skipping comment count exceeds config")
+    # Emacs treats #@00 as a special end-of-file marker, including #@000...
+    # where its reader stops after the first two zero digits.
+    if body[index + 2:index + 4] == "00":
+        return len(body)
+
+    payload_end = digit_index
+    bytes_left = count
+    while bytes_left:
+        if payload_end >= len(body):
+            raise _incomplete_config("truncated byte-skipping comment payload")
+        char_bytes = len(body[payload_end].encode("utf-8"))
+        if char_bytes > bytes_left:
+            raise _incomplete_config("byte-skipping comment splits UTF-8 character")
+        bytes_left -= char_bytes
+        payload_end += 1
+    return payload_end
+
+
+def _skip_char_component(body: str, index: int, allow_missing: bool = False) -> int:
+    """Return the index after one Emacs Lisp character component."""
+    if index >= len(body):
+        if allow_missing:
+            # Emacs reads terminal `?\\C-` and `?\\^` as -1.
+            return index
+        raise _incomplete_config("missing character literal")
+    if body[index] != "\\":
+        return index + 1
+
+    index += 1
+    if index >= len(body):
+        raise _incomplete_config("unfinished character escape")
+    marker = body[index]
+    if marker in "CMSHA":
+        if index + 1 >= len(body) or body[index + 1] != "-":
+            raise _incomplete_config("unfinished character modifier")
+        return _skip_char_component(body, index + 2, allow_missing=True)
+    if marker == "s" and index + 1 < len(body) and body[index + 1] == "-":
+        return _skip_char_component(body, index + 2, allow_missing=True)
+    if marker == "^":
+        index += 1
+        if index >= len(body):
+            return index
+        if body[index] == "\\":
+            return _skip_char_component(body, index, allow_missing=True)
+        return index + 1
+    if marker in "01234567":
+        end = index
+        while (end < len(body) and end - index < 3 and
+               body[end] in "01234567"):
+            end += 1
+        return end
+    if marker == "N":
+        if index + 1 >= len(body) or body[index + 1] != "{":
+            raise _incomplete_config("malformed named character")
+        end = body.find("}", index + 2)
+        if end < 0 or end == index + 2:
+            raise _incomplete_config("unterminated named character")
+        return end + 1
+    if marker in "uU":
+        count = 4 if marker == "u" else 8
+        digits = body[index + 1:index + 1 + count]
+        if len(digits) != count or any(c not in "0123456789abcdefABCDEF"
+                                       for c in digits):
+            raise _incomplete_config("malformed Unicode character")
+        return index + 1 + count
+    if marker == "x":
+        end = index + 1
+        while end < len(body) and body[end] in "0123456789abcdefABCDEF":
+            end += 1
+        if end == index + 1:
+            raise _incomplete_config("malformed hexadecimal character")
+        return end
+    return index + 1
+
+
+def _skip_char_literal(body: str, index: int) -> int:
+    """Return the index just after the character literal beginning at INDEX."""
+    return _skip_char_component(body, index + 1)
+
+
+def migrate_emacos_symbols(body: str) -> str:
+    """Return complete BODY with legacy Lisp symbols renamed.
+
+    The caller still owns the confirmed full-body ConfigRepo -> apply_config
+    transaction.  This pure transform deliberately does not inspect or write a
+    phone file.  It changes only lexical atoms, including an escaped hyphen in
+    a symbol, and fails closed before apply on incomplete strings, comments,
+    characters, byte-skipping comments, or list/vector delimiters.
+    """
+    pieces: list[str] = []
+    index = 0
+    length = len(body)
+    delimiters: list[str] = []
+    while index < length:
+        start = index
+        if body[index] == ";":
+            index = body.find("\n", index)
+            if index < 0:
+                pieces.append(body[start:])
+                break
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        if body.startswith("#|", index):
+            index = _skip_block_comment(body, index)
+            pieces.append(body[start:index])
+            continue
+        if body.startswith("#@", index):
+            index = _skip_byte_comment(body, index)
+            pieces.append(body[start:index])
+            continue
+        if body[index] == '"':
+            index = _skip_string(body, index)
+            pieces.append(body[start:index])
+            continue
+        if body[index] == "?":
+            index = _skip_char_literal(body, index)
+            pieces.append(body[start:index])
+            continue
+        if body[index] in "([":
+            delimiters.append(body[index])
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        if body[index] in ")]":
+            expected = "(" if body[index] == ")" else "["
+            if not delimiters or delimiters.pop() != expected:
+                raise _incomplete_config("unmatched closing delimiter")
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        if body.startswith(",@", index):
+            index += 2
+            pieces.append(body[start:index])
+            continue
+        if body[index] in "`,":
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        while (index < length and not body[index].isspace() and
+               body[index] not in "()[]\";'?"):
+            index += 1
+        if start == index:
+            index += 1
+            pieces.append(body[start:index])
+        else:
+            pieces.append(_LEGACY_SYMBOL.sub(
+                lambda match: (
+                    f"{match.group('keyword')}emacsos{match.group('hyphen')}"),
+                body[start:index]))
+    if delimiters:
+        raise _incomplete_config("unclosed list or vector")
+    return "".join(pieces)
 
 
 class ConfigRepoError(RuntimeError):
@@ -109,6 +321,31 @@ class ConfigRepo:
             return int(r.stdout.strip())
         except ValueError:
             return 0
+
+    def namespace_migration_reconciliation_pending(self) -> bool:
+        """Whether a non-clean namespace migration still needs a clean retry."""
+        self.ensure()
+        result = subprocess.run(
+            ["git", "-C", self.repo_dir, "config", "--bool", "--get",
+             _NAMESPACE_MIGRATION_KEY],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 1:
+            return False
+        if result.returncode != 0 or result.stdout.strip() != "true":
+            raise ConfigRepoError(
+                "could not read namespace migration reconciliation state")
+        return True
+
+    def mark_namespace_migration_reconciliation(self) -> None:
+        """Require a clean retry before the release migration can proceed."""
+        self.ensure()
+        self._git("config", _NAMESPACE_MIGRATION_KEY, "true")
+
+    def clear_namespace_migration_reconciliation(self) -> None:
+        """Clear the migration block after a clean retry."""
+        if self.namespace_migration_reconciliation_pending():
+            self._git("config", "--unset-all", _NAMESPACE_MIGRATION_KEY)
 
     # --- lifecycle ---
 
