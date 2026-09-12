@@ -508,12 +508,6 @@ fi
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 [ -f /run/emacsos-ui/ready ]
-if ! (
-    flock -n -x 9
-) 9>/run/emacsos-openrc-install.lock; then
-    printf '%s\n' 'blocked apk retained the updater lock' >&2
-    exit 1
-fi
 [ "$(cat /usr/local/bin/wvkbd-emacos)" = legacy-keyboard ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
 [ "$(cat /usr/local/share/emacsos-openrc/emacos-assist.el)" = legacy-assist ]
@@ -810,6 +804,12 @@ if grep -F 'rc-service emacsos-ui stop' /tmp/transaction-log >/dev/null; then
     exit 1
 fi
 [ -f /run/emacsos-ui/ready ]
+if ! (
+    flock -n -x 9
+) 9>/run/emacsos-openrc-install.lock; then
+    printf '%s\n' 'blocked apk retained the updater lock' >&2
+    exit 1
+fi
 
 # The updater's ordinary post-start verification must reject each state-free
 # keyboard-proof failure. The test proof fails once so rollback can start the
