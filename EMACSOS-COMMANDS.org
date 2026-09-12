@@ -1,7 +1,7 @@
 #+title: EmacsOS commands and keys
 
 Swipe downward from =x= on the modifier-swipe keyboard to type =Meta+x=, then
-type a command name and press =RET=.  Run =M-x emacos-open-command-reference=
+type a command name and press =RET=.  Run =M-x emacsos-open-command-reference=
 to return to this file.
 
 * Applications
@@ -14,40 +14,49 @@ to return to this file.
 | Stop Android | =emacsos-android-quit= |
 
 Use =Alt+Tab= to move between full-screen applications.  Return to ordinary
-chat with =M-x emacos--chat-show-top-buffer=.
+chat with =M-x emacsos--chat-show-top-buffer=.
 
 * Chat and messages
 
 | Action | M-x command |
 |--------+-------------|
-| Return to ordinary chat | =emacos--chat-show-top-buffer= |
-| Start a new ordinary chat | =emacos--chat-new-chat= |
-| Stop the current ordinary-chat response | =emacos--chat-abort= |
-| Open an Assist Web thread | =emacos-assist-web-open-thread= |
-| Start an Assist Web thread | =emacos-assist-web-new-thread= |
-| Send from an Assist Web thread | =emacos-assist-web-send= |
-| Refresh an Assist Web thread | =emacos-assist-web-refresh-thread= |
-| Refresh the Assist Web thread list | =emacos-assist-web-refresh-threads= |
-| Conversation actions available in this buffer | =emacos-conversation-command= |
-| Load older Assist Web messages | =emacos-assist-web-load-older= |
-| Stop or detach from an Assist Web response | =emacos-assist-web-abort= |
-| Start a file-backed chat | =emacos-assist-new-file= |
-| Reload an unchanged file-backed chat from disk without prompting | =emacos-assist-refresh= |
-| Forget a file-backed chat checkpoint | =emacos-assist-forget= |
-| Compose an SMS | =emacos-send-message= |
+| Return to ordinary chat | =emacsos--chat-show-top-buffer= |
+| Start a new ordinary chat | =emacsos--chat-new-chat= |
+| Stop the current ordinary-chat response | =emacsos--chat-abort= |
+| Open an Assist Web thread | =emacsos-assist-web-open-thread= |
+| Start an Assist Web thread | =emacsos-assist-web-new-thread= |
+| Send from an Assist Web thread | =emacsos-assist-web-send= |
+| Refresh an Assist Web thread | =emacsos-assist-web-refresh-thread= |
+| Refresh the Assist Web thread list | =emacsos-assist-web-refresh-threads= |
+| Conversation actions available in this buffer | =emacsos-conversation-command= |
+| Load older Assist Web messages | =emacsos-assist-web-load-older= |
+| Stop or detach from an Assist Web response | =emacsos-assist-web-abort= |
+| Start a file-backed chat | =emacsos-assist-new-file= |
+| Reload an unchanged file-backed chat from disk without prompting | =emacsos-assist-refresh= |
+| Forget a file-backed chat checkpoint | =emacsos-assist-forget= |
+| Compose an SMS | =emacsos-send-message= |
 
-On the =C-c C-a= prefix, opening or starting a canonical Assist thread is
-global navigation: =t= and =n= work in every buffer.  The other prefix commands
-act on the current conversation.  The =M-x emacos-conversation-command= chooser
-lists actions supported by the current buffer plus distinctly named =new Assist
-thread= and =open Assist thread= navigation, so local =new= is never confused
-with starting a canonical thread.
+The global =C-c e= prefix works in every buffer.  On the touchscreen, swipe up
+from =c= on the keyboard, then tap =e=, to type it.  =C-c C-a= remains the
+contextual conversation prefix; its =n= and =t= leaves are retained globally
+for canonical thread navigation.
+
+| Key | Action |
+|-----+--------|
+| =C-c e c= | Ordinary chat |
+| =C-c e t= | Open canonical thread |
+| =C-c e n= | New canonical thread |
+| =C-c e r= | Refresh thread list |
+| =C-c e f= | New .assist file |
+| =C-c e d= | Stage call |
+| =C-c e m= | Stage SMS |
+| =C-c e w= | Network controls |
+| =C-c e h= | This command reference |
 
 | Key | Action |
 |-----+--------|
 | =C-c C-a t= | Open thread |
 | =C-c C-a n= | New canonical Assist thread |
-| =C-c C-a r= | Refresh thread list |
 | =C-c C-a g= | Refresh current conversation |
 | =C-c C-a s= | Send |
 | =C-c C-a a= | Abort or detach |
@@ -62,12 +71,12 @@ otherwise they insert a newline.  RET accepts an active minibuffer first.
 
 | Action | M-x command |
 |--------+-------------|
-| Stage a call for confirmation | =emacos-call= |
-| Answer the ringing call | =emacos-answer= |
-| Hang up | =emacos-hang-up= |
-| Open network controls | =emacos-net-show= |
-| Toggle Wi-Fi | =emacos-net-toggle-wifi= |
-| Toggle cellular data | =emacos-net-toggle-cell= |
+| Stage a call for confirmation | =emacsos-call= |
+| Answer the ringing call | =emacsos-answer= |
+| Hang up | =emacsos-hang-up= |
+| Open network controls | =emacsos-net-show= |
+| Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
+| Toggle cellular data | =emacsos-net-toggle-cell= |
 | Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
 
 The modeline network, call, SMS, and keyboard labels are touch controls for

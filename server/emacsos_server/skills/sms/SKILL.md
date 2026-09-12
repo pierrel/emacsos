@@ -6,7 +6,7 @@ description: "Prepare a text message on the phone — 'text Ana that I am runnin
 # Prepare an SMS
 
 Resolve the user's intent to one concrete phone number and exact message body,
-then use `eval_elisp` to invoke the deterministic `emacos-send-message`
+then use `eval_elisp` to invoke the deterministic `emacsos-send-message`
 proposal command. It shows the complete message on the phone. It does not send.
 
 ## Resolve the number
@@ -27,7 +27,7 @@ Invoke the public command with the concrete number and the exact requested
 message body:
 
 ```elisp
-(emacos-send-message "+14155550123" "I am running ten minutes late.")
+(emacsos-send-message "+14155550123" "I am running ten minutes late.")
 ```
 
 Encode a Lisp string correctly: escape each backslash as `\\`, each double
@@ -40,7 +40,7 @@ content the user did not request.
   Stop.
 - `error: ...` means staging failed. Surface the reason and do not retry blindly.
 
-Never invoke a private `emacos-sms--...` function, the platform operation
+Never invoke a private `emacsos-sms--...` function, the platform operation
 function, the root helper, or either tap handler. Never synthesize confirmation
 actions. A conversational yes is not a tap. Never claim a staged proposal was
 sent; only the phone's terminal screen is authoritative.

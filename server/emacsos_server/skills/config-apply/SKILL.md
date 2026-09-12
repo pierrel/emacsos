@@ -35,6 +35,16 @@ exploring unrelated emacs state.
 - Persist the DURABLE form, not a one-shot interactive call — usually via
   `default-frame-alist`, `custom-set-variables`, `setq`, or a mode hook.
 
+## EmacsOS namespace migration
+
+When migrating an existing agent config from `emacos-` to `emacsos-`, first
+call `get_config`, change only complete Lisp symbol tokens in that returned
+body, verify the resulting full body live, then call `apply_config` with that
+complete body.  Do not rewrite a phone file, use aliases, or replace broad text:
+comments and strings are historical text, not executable symbols.  After an
+unconfirmed or unrecorded result, stop and reconcile before another migration
+attempt.  Treat only an `applied:` result with a recorded version as success.
+
 ## Idioms for common requests
 
 Use these as the shape; adapt to whatever the user actually asked for.

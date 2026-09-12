@@ -1,0 +1,44 @@
+#+title: EmacsOS namespace and command prefix
+
+* Lineage
+
+This implementation follows the command-surface design in
+[[file:2026-09-07-command-surface.org]] and the configuration apply/rollback
+contract in [[file:2026-05-21-config-apply-rollback.org]].  It changes their
+live spelling and global-command ownership without rewriting either historical
+record.
+
+* Live namespace
+
+The live Lisp namespace is =emacsos-=.  The earlier =emacos-= spelling remains
+only as a bounded one-generation updater migration literal and in tests that
+prove that migration.  There are no Lisp aliases: loaded code, generated
+apply expressions, skills, deployment payloads, and installed module names all
+use the canonical spelling.
+
+* Commands
+
+=os.el= owns one global =emacsos-command-mode=.  =C-c e= opens the portable
+command map: =c= ordinary chat, =t=/=n= canonical Assist threads, =r= thread
+refresh, =f= a file-backed chat, =d= staged call, =m= staged SMS, =w= network,
+and =h= this reference.  The retained global =C-c C-a n/t= leaves reach the
+same canonical thread commands.  =chat.el= owns only buffer-contextual
+=C-c C-a= actions.  PinePhone setup augments the existing global map with
+keyboard, Firefox, and Android leaves after loading =os.el=.
+
+* Upgrade boundary
+
+The OpenRC updater takes the old keyboard lock before the new lock.  If legacy
+keyboard paths exist, they must be the exact root-owned regular binary and
+license paths.  They are backed up, the new transaction is installed and
+proven through the exact new supervised command, and only then are the old
+paths removed.  Any failure before commit restores both path generations.
+Fresh keyboard installation accepts only the new names.
+
+* Agent configuration
+
+An existing agent configuration is read from =ConfigRepo.current()=, changed
+only at complete executable Lisp-symbol tokens, verified, and passed as the
+full body through =apply_config=.  The server records it only after the phone
+confirms the write.  Unconfirmed or unrecorded results stop the migration for
+reconciliation; direct phone-file replacement is not a migration path.

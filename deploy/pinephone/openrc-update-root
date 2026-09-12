@@ -15,8 +15,9 @@ reference_tmp=
 bootstrap_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
-wvkbd_lock=/run/wvkbd-emacos-install.lock
-manifest_hash=7bcbaf65ba1f8628b8822e1d06abddffdc63ac688b3cdafff65b30c17e6338b6
+wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
+wvkbd_lock=/run/wvkbd-emacsos-install.lock
+manifest_hash=80818a6c62ed868d39f1824df16afef20031c0572c646441677d3f1c52fb87fd
 mutating=0
 committed=0
 restart_only=0
@@ -35,10 +36,12 @@ openrc-session-power:/usr/local/share/emacsos-openrc/session-power
 os.el:/usr/local/share/emacsos-openrc/os.el
 chat.el:/usr/local/share/emacsos-openrc/chat.el
 assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el
-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el
+emacsos-assist.el:/usr/local/share/emacsos-openrc/emacsos-assist.el
 network.el:/usr/local/share/emacsos-openrc/network.el
 phone-call.el:/usr/local/share/emacsos-openrc/phone-call.el
 phone-sms.el:/usr/local/share/emacsos-openrc/phone-sms.el
+legacy-wvkbd:/usr/local/bin/wvkbd-emacos
+legacy-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend
 wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction
 emacsos-ui.initd:/etc/init.d/emacsos-ui
@@ -53,6 +56,24 @@ assist-web-token:/var/lib/emacsos-lab/.config/emacsos/assist-web-token
 openrc-emacs-server.nft:/etc/nftables.d/49-emacsos-callback.nft
 95-emacsos-callback.nft:/etc/nftables.d/95-emacsos-callback.nft
 95-emacsos-ui.conf:/etc/doas.d/95-emacsos-ui.conf'
+
+legacy_wvkbd=/usr/local/bin/wvkbd-emacos
+legacy_notice=/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+
+legacy_keyboard_paths() {
+    if [ ! -e "$legacy_wvkbd" ] && [ ! -L "$legacy_wvkbd" ] &&
+       [ ! -e "$legacy_notice" ] && [ ! -L "$legacy_notice" ]; then
+        return 1
+    fi
+    [ -f "$legacy_wvkbd" ] && [ ! -L "$legacy_wvkbd" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$legacy_wvkbd")" = \
+            'root:root:755:1:regular file' ] &&
+        [ -f "$legacy_notice" ] && [ ! -L "$legacy_notice" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$legacy_notice")" = \
+            'root:root:644:1:regular file' ] ||
+        fail 'unsafe incomplete legacy keyboard installation'
+    return 0
+}
 
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
@@ -258,7 +279,7 @@ reconcile_untracked_ui() {
 
 stop_ui() {
     timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
-        rc-service emacsos-ui stop 7>&- 8>&- 9>&- || true
+        rc-service emacsos-ui stop 6>&- 7>&- 8>&- 9>&- || true
     ui_quiescent && return 0
     reconcile_untracked_ui && ui_quiescent
 }
@@ -270,7 +291,7 @@ default_ui_entry() {
 
 start_ui() {
     timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256 \
-        rc-service emacsos-ui start 7>&- 8>&- 9>&- || return 1
+        rc-service emacsos-ui start 6>&- 7>&- 8>&- 9>&- || return 1
     ready=0
     attempt=0
     while [ "$attempt" -lt 150 ]; do
@@ -347,11 +368,14 @@ cleanup() {
             restore_file os.el /usr/local/share/emacsos-openrc/os.el 0644
             restore_file chat.el /usr/local/share/emacsos-openrc/chat.el 0644
             restore_file assist-web.el /usr/local/share/emacsos-openrc/assist-web.el 0644
-            restore_file emacos-assist.el \
-                /usr/local/share/emacsos-openrc/emacos-assist.el 0644
+            restore_file emacsos-assist.el \
+                /usr/local/share/emacsos-openrc/emacsos-assist.el 0644
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
             restore_file phone-call.el /usr/local/share/emacsos-openrc/phone-call.el 0644
             restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
+            restore_file legacy-wvkbd /usr/local/bin/wvkbd-emacos 0755
+            restore_file legacy-wvkbd-notice \
+                /usr/local/share/licenses/wvkbd-emacos/wordninja.txt 0644
             restore_file openrc-suspend-root \
                 /usr/local/sbin/emacsos-openrc-suspend 0755
             restore_file wvkbd-transaction-root \
@@ -433,6 +457,11 @@ chown root:root "$boot_lock"
 chmod 0600 "$boot_lock"
 exec 8>"$boot_lock"
 flock -n -x 8 || fail 'boot mode transition is busy'
+touch "$wvkbd_legacy_lock"
+chown root:root "$wvkbd_legacy_lock"
+chmod 0600 "$wvkbd_legacy_lock"
+exec 6>"$wvkbd_legacy_lock"
+flock -n -x 6 || fail 'legacy keyboard install lock is busy'
 touch "$wvkbd_lock"
 chown root:root "$wvkbd_lock"
 chmod 0600 "$wvkbd_lock"
@@ -448,7 +477,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -468,7 +497,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
-    emacos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
+    emacsos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
     openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
@@ -533,6 +562,7 @@ done
 apk add --simulate py3-dbus >/dev/null
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 preflight_backup_sources
+legacy_keyboard_paths || true
 
 bootstrap_compat_helper || fail 'could not durably bootstrap keyboard compatibility helper'
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
@@ -610,7 +640,7 @@ doas_tmp=
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -693,7 +723,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done
@@ -702,6 +732,13 @@ if ! start_ui; then
     detail=$(head -c 4096 /run/emacsos-ui/failure 2>/dev/null || true)
     [ -n "$detail" ] || detail='no session diagnostic'
     fail "updated UI did not become ready: $detail"
+fi
+if legacy_keyboard_paths; then
+    rm -f -- "$legacy_wvkbd" "$legacy_notice"
+    rmdir /usr/local/share/licenses/wvkbd-emacos 2>/dev/null || true
+    [ ! -e "$legacy_wvkbd" ] && [ ! -L "$legacy_wvkbd" ] &&
+        [ ! -e "$legacy_notice" ] && [ ! -L "$legacy_notice" ] ||
+        fail 'could not remove legacy keyboard installation after proof'
 fi
 committed=1
 printf '%s\n' 'OpenRC UI updated and ready'

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -40,6 +41,58 @@ _GIT_IDENTITY = [
     "-c", "user.email=emacsos@localhost",
     "-c", "user.name=emacsos-server",
 ]
+
+_LEGACY_SYMBOL = re.compile(r"(?<![A-Za-z0-9_-])emacos-(?=[A-Za-z0-9_-])")
+
+
+def migrate_emacos_symbols(body: str) -> str:
+    """Return BODY with legacy Lisp symbols renamed, never strings/comments.
+
+    The caller still owns the confirmed full-body ConfigRepo -> apply_config
+    transaction.  This pure transform deliberately does not inspect or write a
+    phone file, so only complete Lisp-symbol tokens change.
+    """
+    pieces: list[str] = []
+    index = 0
+    length = len(body)
+    while index < length:
+        start = index
+        if body[index] == ";":
+            index = body.find("\n", index)
+            if index < 0:
+                pieces.append(body[start:])
+                break
+            index += 1
+            pieces.append(body[start:index])
+            continue
+        if body.startswith("#|", index):
+            end = body.find("|#", index + 2)
+            if end < 0:
+                pieces.append(body[start:])
+                break
+            index = end + 2
+            pieces.append(body[start:index])
+            continue
+        if body[index] == '"':
+            index += 1
+            while index < length:
+                if body[index] == "\\":
+                    index += 2
+                elif body[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            pieces.append(body[start:index])
+            continue
+        while index < length and body[index] not in " \t\r\n()[]{}\";'":
+            index += 1
+        if start == index:
+            index += 1
+            pieces.append(body[start:index])
+        else:
+            pieces.append(_LEGACY_SYMBOL.sub("emacsos-", body[start:index]))
+    return "".join(pieces)
 
 
 class ConfigRepoError(RuntimeError):

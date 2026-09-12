@@ -492,7 +492,7 @@ def test_skill_sources_has_call_skill_with_phone_local_confirmation():
     path = os.path.join(app_mod._SKILLS_DIR, "call", "SKILL.md")
     assert os.path.exists(path)
     text = open(path).read()
-    assert "emacos-call" in text
+    assert "emacsos-call" in text
     assert "confirmation-required: confirm on phone" in text
     assert "actual dial is a later local UI action" in text
     assert "never synthesize the confirmation actions" in text
@@ -504,7 +504,7 @@ def test_skill_sources_has_sms_skill_with_phone_local_confirmation():
     path = os.path.join(app_mod._SKILLS_DIR, "sms", "SKILL.md")
     assert os.path.exists(path)
     text = open(path).read()
-    assert "emacos-send-message" in text
+    assert "emacsos-send-message" in text
     assert "confirmation-required: confirm on phone" in text
     assert "It does not send." in text
     assert "Never synthesize confirmation actions." in " ".join(text.split())

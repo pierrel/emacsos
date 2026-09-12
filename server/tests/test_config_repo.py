@@ -11,8 +11,26 @@ from emacsos_server.config_repo import (
     ConfigRepo,
     ConfigRepoError,
     _extract_body,
+    migrate_emacos_symbols,
     render,
 )
+
+
+def test_namespace_migration_changes_only_lisp_symbols():
+    body = ('(emacos-call "+1")\n'
+            "#'emacos--chat-show-top-buffer\n"
+            "; keep emacos-call as the historical spelling\n"
+            "#| keep emacos-call in a block comment |#\n"
+            '(message "emacos-call is old")\n'
+            '(not-emacos-call)\n')
+    assert migrate_emacos_symbols(body) == (
+        '(emacsos-call "+1")\n'
+        "#'emacsos--chat-show-top-buffer\n"
+        "; keep emacos-call as the historical spelling\n"
+        "#| keep emacos-call in a block comment |#\n"
+        '(message "emacos-call is old")\n'
+        '(not-emacos-call)\n'
+    )
 
 
 def _repo(tmp_path):

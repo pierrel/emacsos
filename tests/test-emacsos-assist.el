@@ -1,4 +1,4 @@
-;;; test-emacos-assist.el --- Tests for file-backed chat (.assist) -*- lexical-binding: t -*-
+;;; test-emacsos-assist.el --- Tests for file-backed chat (.assist) -*- lexical-binding: t -*-
 
 ;; Covers the pure / buffer-level pieces of the file-backed chat surface:
 ;; the header parse + thread-id mint, the surface context, the command set,
@@ -11,21 +11,21 @@
 ;; no-real-paths audit).
 
 (require 'ert)
-(require 'emacos-assist)
+(require 'emacsos-assist)
 
 ;;; Header + thread id
 
 (ert-deftest test-assist-read-header ()
   (with-temp-buffer
     (insert "#+assist_thread: abc123DEF-_\n\nyou> hi\n")
-    (should (equal (emacos-assist--read-header) "abc123DEF-_")))
+    (should (equal (emacsos-assist--read-header) "abc123DEF-_")))
   (with-temp-buffer
     (insert "no header here\n")
-    (should (null (emacos-assist--read-header)))))
+    (should (null (emacsos-assist--read-header)))))
 
 (ert-deftest test-assist-physical-ret-in-file-chat-remains-newline-without-an-object ()
   (with-temp-buffer
-    (emacos-assist-mode)
+    (emacsos-assist-mode)
     (goto-char (point-max))
     (call-interactively (lookup-key (current-local-map) (kbd "RET")))
     (should (string-suffix-p "\n" (buffer-string)))))
@@ -33,31 +33,25 @@
 (ert-deftest test-assist-send-targets-the-current-file-chat-surface ()
   "The shared action map must not fall back to the unrelated *chat* buffer."
   (with-temp-buffer
-    (emacos-assist-mode)
+    (emacsos-assist-mode)
     (let (surface)
-      (cl-letf (((symbol-function 'emacos--chat-send)
+      (cl-letf (((symbol-function 'emacsos--chat-send)
                  (lambda (&optional value) (setq surface value))))
-        (emacos-conversation--run 'send))
+        (emacsos-conversation--run 'send))
       (should (eq surface (current-buffer))))))
 
-(ert-deftest test-assist-command-chooser-names-canonical-new-separately ()
-  "A .assist local new-file action cannot mask canonical thread navigation."
+(ert-deftest test-assist-command-chooser-stays-contextual ()
+  "A .assist local new-file action is the only new action in its chooser."
   (with-temp-buffer
-    (emacos-assist-mode)
-    (let (choices started local-new)
+    (emacsos-assist-mode)
+    (let (choices)
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (_prompt collection &rest _)
                    (setq choices collection)
-                   "new Assist thread"))
-                ((symbol-function 'emacos-conversation-new)
-                 (lambda () (setq started t)))
-                ((symbol-function 'emacos-assist-new-file)
-                 (lambda () (setq local-new t))))
-        (emacos-conversation-command))
+                   nil)))
+        (emacsos-conversation-command))
       (should (member "new" choices))
-      (should (member "new Assist thread" choices))
-      (should started)
-      (should-not local-new))))
+      (should-not (member "new Assist thread" choices)))))
 
 (ert-deftest test-assist-read-header-rejects-malformed-value ()
   ;; The whole value must be a valid slug to end-of-line; a header with an
@@ -65,47 +59,47 @@
   ;; that would key a different server conversation.
   (with-temp-buffer
     (insert "#+assist_thread: abc/def\n\nyou> hi\n")
-    (should (null (emacos-assist--read-header))))
+    (should (null (emacsos-assist--read-header))))
   (with-temp-buffer
     (insert "#+assist_thread: " (make-string 200 ?a) "\n")   ; over 128
-    (should (null (emacos-assist--read-header))))
+    (should (null (emacsos-assist--read-header))))
   (with-temp-buffer                                          ; trailing ws ok
     (insert "#+assist_thread: ok123  \n")
-    (should (equal (emacos-assist--read-header) "ok123"))))
+    (should (equal (emacsos-assist--read-header) "ok123"))))
 
 (ert-deftest test-assist-mint-id-is-a-slug ()
-  (let ((id (emacos-assist--mint-id)))
+  (let ((id (emacsos-assist--mint-id)))
     (should (string-match-p "\\`[A-Za-z0-9_-]+\\'" id))
     (should (= (length id) 32))))
 
 (ert-deftest test-assist-ensure-thread-id-mints-and-writes-header-once ()
   (with-temp-buffer
     (insert "\n> ")                       ; a bare prompt, no header yet
-    (setq emacos-assist--thread-id nil)
-    (let ((id (emacos-assist--ensure-thread-id)))
+    (setq emacsos-assist--thread-id nil)
+    (let ((id (emacsos-assist--ensure-thread-id)))
       (should (stringp id))
-      (should (equal emacos-assist--thread-id id))
-      (should (string-prefix-p (concat emacos-assist--header-prefix id)
+      (should (equal emacsos-assist--thread-id id))
+      (should (string-prefix-p (concat emacsos-assist--header-prefix id)
                                (buffer-string)))
       ;; idempotent: same id, no duplicate header line
-      (should (equal (emacos-assist--ensure-thread-id) id))
-      (should (= 1 (how-many (regexp-quote emacos-assist--header-prefix)
+      (should (equal (emacsos-assist--ensure-thread-id) id))
+      (should (= 1 (how-many (regexp-quote emacsos-assist--header-prefix)
                              (point-min) (point-max)))))))
 
 (ert-deftest test-assist-ensure-thread-id-keeps-existing ()
   (with-temp-buffer
     (insert "#+assist_thread: existing123\n\n> ")
-    (setq emacos-assist--thread-id (emacos-assist--read-header))
-    (should (equal (emacos-assist--ensure-thread-id) "existing123"))))
+    (setq emacsos-assist--thread-id (emacsos-assist--read-header))
+    (should (equal (emacsos-assist--ensure-thread-id) "existing123"))))
 
 ;;; Surface context (what chat.el's send sends)
 
 (ert-deftest test-assist-surface-context ()
   (with-temp-buffer
     (insert "#+assist_thread: ctx1\n\n> ")
-    (setq emacos-assist--thread-id "ctx1"
-          emacos-assist--workdir "/data/proj")
-    (let ((ctx (emacos-assist--surface-context)))
+    (setq emacsos-assist--thread-id "ctx1"
+          emacsos-assist--workdir "/data/proj")
+    (let ((ctx (emacsos-assist--surface-context)))
       (should (equal (plist-get ctx :thread-id) "ctx1"))
       (should (equal (plist-get ctx :workdir) "/data/proj")))))
 
@@ -116,14 +110,14 @@
 (ert-deftest test-assist-forget-first-tap-arms ()
   "First invocation arms confirmation and does not POST /forget yet."
   (with-temp-buffer
-    (setq emacos-assist--thread-id "abc"
-          emacos-assist--forget-confirm-pending nil)
+    (setq emacsos-assist--thread-id "abc"
+          emacsos-assist--forget-confirm-pending nil)
     (let ((posted nil))
-      (cl-letf (((symbol-function 'emacos-assist--post-forget)
+      (cl-letf (((symbol-function 'emacsos-assist--post-forget)
                  (lambda (_id) (setq posted t))))
-        (let ((emacos--chat-in-flight nil))
-          (emacos-assist-forget))
-        (should emacos-assist--forget-confirm-pending)
+        (let ((emacsos--chat-in-flight nil))
+          (emacsos-assist-forget))
+        (should emacsos-assist--forget-confirm-pending)
         (should-not posted)))))
 
 (ert-deftest test-assist-forget-second-tap-confirms ()
@@ -136,26 +130,26 @@
           (with-temp-file file
             (insert "#+assist_thread: abc\n\nyou> earlier\nbot> reply\n> "))
           (with-current-buffer (find-file-noselect file)
-            (setq emacos-assist--thread-id "abc"
-                  emacos-assist--forget-confirm-pending t)
+            (setq emacsos-assist--thread-id "abc"
+                  emacsos-assist--forget-confirm-pending t)
             (let ((posted-with nil))
-              (cl-letf (((symbol-function 'emacos-assist--post-forget)
+              (cl-letf (((symbol-function 'emacsos-assist--post-forget)
                          (lambda (id) (setq posted-with id))))
-                (let ((emacos--chat-in-flight nil))
-                  (emacos-assist-forget))
-                (should-not emacos-assist--forget-confirm-pending)
+                (let ((emacsos--chat-in-flight nil))
+                  (emacsos-assist-forget))
+                (should-not emacsos-assist--forget-confirm-pending)
                 ;; /forget was posted against the OLD thread-id (not nil —
                 ;; the wipe clears it but we capture it first).
                 (should (equal posted-with "abc"))
                 ;; Local buffer was wiped: thread-id cleared, transcript
                 ;; gone, only a trailing prompt remains.
-                (should-not emacos-assist--thread-id)
+                (should-not emacsos-assist--thread-id)
                 (should-not (string-match-p "earlier\\|reply"
                                             (buffer-string)))))))
       (when (file-exists-p file) (delete-file file)))))
 
 (ert-deftest test-assist-wipe-buffer-resets-and-persists ()
-  "`emacos-assist--wipe-buffer' clears thread-id, erases the transcript,
+  "`emacsos-assist--wipe-buffer' clears thread-id, erases the transcript,
 re-runs init (which appends a fresh trailing prompt), and saves.  The
 next send would mint a new thread-id and write its header."
   (let ((file (make-temp-file "test-assist-wipe" nil ".assist")))
@@ -164,14 +158,14 @@ next send would mint a new thread-id and write its header."
           (with-temp-file file
             (insert "#+assist_thread: old123\n\nyou> hi\nbot> bye\n> "))
           (with-current-buffer (find-file-noselect file)
-            (setq emacos-assist--thread-id "old123")
-            (emacos-assist--wipe-buffer)
-            (should-not emacos-assist--thread-id)
+            (setq emacsos-assist--thread-id "old123")
+            (emacsos-assist--wipe-buffer)
+            (should-not emacsos-assist--thread-id)
             ;; Old transcript and header are gone.
             (let ((body (buffer-string)))
               (should-not (string-match-p "old123\\|hi\\|bye" body))
               ;; A trailing prompt was re-added by --init-buffer.
-              (should (emacos--chat-input-start (current-buffer))))
+              (should (emacsos--chat-input-start (current-buffer))))
             ;; And it was saved (no longer modified).
             (should-not (buffer-modified-p))
             ;; On-disk content reflects the wipe (no old header / transcript).
@@ -184,47 +178,47 @@ next send would mint a new thread-id and write its header."
 (ert-deftest test-assist-forget-disarm-on-unrelated-tap ()
   "Another EmacsOS button action disarms Forget; Forget itself does not."
   (with-temp-buffer
-    (setq emacos-assist--thread-id "abc"
-          emacos-assist--forget-confirm-pending t)
+    (setq emacsos-assist--thread-id "abc"
+          emacsos-assist--forget-confirm-pending t)
     (let ((buf (current-buffer)))
-      (cl-letf (((symbol-function 'emacos--target)
+      (cl-letf (((symbol-function 'emacsos--target)
                  (lambda () (selected-window)))
                 ((symbol-function 'window-buffer)
                  (lambda (&optional _) buf)))
         ;; Some unrelated command was tapped → disarm.
-        (emacos-assist--maybe-disarm-forget #'emacos--run-command
+        (emacsos-assist--maybe-disarm-forget #'emacsos--run-command
                                             #'save-buffer)
-        (should-not emacos-assist--forget-confirm-pending))))
+        (should-not emacsos-assist--forget-confirm-pending))))
   (with-temp-buffer
-    (setq emacos-assist--thread-id "abc"
-          emacos-assist--forget-confirm-pending t)
+    (setq emacsos-assist--thread-id "abc"
+          emacsos-assist--forget-confirm-pending t)
     (let ((buf (current-buffer)))
-      (cl-letf (((symbol-function 'emacos--target)
+      (cl-letf (((symbol-function 'emacsos--target)
                  (lambda () (selected-window)))
                 ((symbol-function 'window-buffer)
                  (lambda (&optional _) buf)))
         ;; The Forget command itself was tapped → keep armed (the handler
         ;; will see the flag and confirm).
-        (emacos-assist--maybe-disarm-forget #'emacos--run-command
-                                            #'emacos-assist-forget)
-        (should emacos-assist--forget-confirm-pending)))))
+        (emacsos-assist--maybe-disarm-forget #'emacsos--run-command
+                                            #'emacsos-assist-forget)
+        (should emacsos-assist--forget-confirm-pending)))))
 
 (ert-deftest test-assist-forget-no-modal-y-or-n-p ()
-  "Regression guard: `emacos-assist-forget' must NOT call any modal
+  "Regression guard: `emacsos-assist-forget' must NOT call any modal
 confirm primitive — the phone touchscreen can't answer it.  Verified
 by stubbing y-or-n-p/yes-or-no-p to raise if called."
   (with-temp-buffer
-    (setq emacos-assist--thread-id "abc"
-          emacos-assist--forget-confirm-pending nil)
+    (setq emacsos-assist--thread-id "abc"
+          emacsos-assist--forget-confirm-pending nil)
     (cl-letf (((symbol-function 'y-or-n-p)
                (lambda (&rest _) (error "y-or-n-p must not run on phone")))
               ((symbol-function 'yes-or-no-p)
                (lambda (&rest _) (error "yes-or-no-p must not run on phone"))))
-      (let ((emacos--chat-in-flight nil))
-        (emacos-assist-forget))     ; first invocation arms, never modal
-      (let ((emacos--chat-in-flight nil))
-        (cl-letf (((symbol-function 'emacos-assist--post-forget) #'ignore))
-          (emacos-assist-forget)))  ; second invocation confirms, never modal
+      (let ((emacsos--chat-in-flight nil))
+        (emacsos-assist-forget))     ; first invocation arms, never modal
+      (let ((emacsos--chat-in-flight nil))
+        (cl-letf (((symbol-function 'emacsos-assist--post-forget) #'ignore))
+          (emacsos-assist-forget)))  ; second invocation confirms, never modal
       )))
 
 ;;; Mode open-time setup
@@ -232,9 +226,9 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
 (ert-deftest test-assist-mode-adds-prompt-and-marks-transcript-readonly ()
   (with-temp-buffer
     (insert "#+assist_thread: m1\n\nyou> hi\nbot> hello")   ; no trailing prompt
-    (emacos-assist-mode)
-    (should (emacos--chat-input-start (current-buffer)))     ; a prompt was appended
-    (should (equal emacos-assist--thread-id "m1"))           ; header parsed
+    (emacsos-assist-mode)
+    (should (emacsos--chat-input-start (current-buffer)))     ; a prompt was appended
+    (should (equal emacsos-assist--thread-id "m1"))           ; header parsed
     (should (get-text-property (point-min) 'read-only))))    ; transcript locked
 
 (ert-deftest test-assist-mode-reused-prompt-is-read-only ()
@@ -243,15 +237,15 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
   ;; input region after it editable.
   (with-temp-buffer
     (insert "#+assist_thread: m2\n\nyou> hi\nbot> hello\n> ")
-    (emacos-assist-mode)
-    (let* ((istart (emacos--chat-input-start (current-buffer)))
-           (prompt-start (- istart (length emacos--chat-prompt))))
+    (emacsos-assist-mode)
+    (let* ((istart (emacsos--chat-input-start (current-buffer)))
+           (prompt-start (- istart (length emacsos--chat-prompt))))
       (should (= istart (point-max)))                        ; reused, none appended
       (should (get-text-property prompt-start 'read-only))))) ; prompt itself locked
 
 (ert-deftest test-assist-refresh-is-nonconfirming-and-refuses-an-active-stream ()
   (with-temp-buffer
-    (emacos-assist-mode)
+    (emacsos-assist-mode)
     (let (revert-args)
       (cl-letf (((symbol-function 'revert-buffer)
                  (lambda (&rest args) (setq revert-args args)))
@@ -259,16 +253,16 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
                  (lambda (&rest _) (error "refresh must not prompt")))
                 ((symbol-function 'yes-or-no-p)
                  (lambda (&rest _) (error "refresh must not prompt"))))
-        (emacos-assist-refresh)
+        (emacsos-assist-refresh)
         (should (equal revert-args '(t t)))
         (setq revert-args nil)
         (set-buffer-modified-p t)
-        (should-error (emacos-assist-refresh) :type 'user-error)
+        (should-error (emacsos-assist-refresh) :type 'user-error)
         (should-not revert-args)
         (set-buffer-modified-p nil)
-        (let ((emacos--chat-in-flight t)
-              (emacos--chat-stream-buffer (current-buffer)))
-          (should-error (emacos-assist-refresh) :type 'user-error)
+        (let ((emacsos--chat-in-flight t)
+              (emacsos--chat-stream-buffer (current-buffer)))
+          (should-error (emacsos-assist-refresh) :type 'user-error)
           (should-not revert-args))))))
 
 (ert-deftest test-assist-refresh-refuses-other-buffer-types ()
@@ -276,7 +270,7 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
     (let (reverted)
       (cl-letf (((symbol-function 'revert-buffer)
                  (lambda (&rest _) (setq reverted t))))
-        (should-error (emacos-assist-refresh) :type 'user-error)
+        (should-error (emacsos-assist-refresh) :type 'user-error)
         (should-not reverted)))))
 
 (ert-deftest test-assist-mode-presents-reopened-markdown-without-changing-file-text ()
@@ -284,37 +278,37 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
     (insert "#+assist_thread: m3\n\nyou> # Question\nbot> - answer\n> ")
     (let ((source (buffer-string)))
       (set-buffer-modified-p nil)
-      (emacos-assist-mode)
+      (emacsos-assist-mode)
       (should visual-line-mode)
       (should (equal (buffer-string) source))
       (should-not (buffer-modified-p))
       (goto-char (point-min))
       (search-forward "Question")
-      (should (memq 'emacos-chat-heading-face
+      (should (memq 'emacsos-chat-heading-face
                     (get-text-property (match-beginning 0) 'font-lock-face)))
       (search-forward "answer")
       (should (stringp
                (get-text-property (match-beginning 0) 'wrap-prefix))))))
 
 (ert-deftest test-assist-mode-registered-in-auto-mode-alist ()
-  (should (eq (cdr (assoc "\\.assist\\'" auto-mode-alist)) 'emacos-assist-mode)))
+  (should (eq (cdr (assoc "\\.assist\\'" auto-mode-alist)) 'emacsos-assist-mode)))
 
 ;;; chat.el engine: buffer-agnostic target + thread_id/workdir encoding
 
 (ert-deftest test-chat-render-buffer-prefers-stream-buffer ()
   (let ((b (generate-new-buffer " *t-render*")))
     (unwind-protect
-        (let ((emacos--chat-stream-buffer b))
-          (should (eq (emacos--chat-render-buffer) b)))
+        (let ((emacsos--chat-stream-buffer b))
+          (should (eq (emacsos--chat-render-buffer) b)))
       (kill-buffer b)))
   ;; unset -> falls back to (creates) the *chat* buffer
-  (let ((emacos--chat-stream-buffer nil))
-    (should (eq (emacos--chat-render-buffer)
-                (get-buffer emacos--chat-buffer-name)))))
+  (let ((emacsos--chat-stream-buffer nil))
+    (should (eq (emacsos--chat-render-buffer)
+                (get-buffer emacsos--chat-buffer-name)))))
 
 (ert-deftest test-chat-encode-request-includes-thread-and-workdir ()
   (let ((s (decode-coding-string
-            (emacos--chat-encode-request "hi" nil "tid9" "/data/proj") 'utf-8)))
+            (emacsos--chat-encode-request "hi" nil "tid9" "/data/proj") 'utf-8)))
     (should (string-match-p "thread_id" s))
     (should (string-match-p "tid9" s))
     (should (string-match-p "workdir" s))
@@ -322,9 +316,9 @@ by stubbing y-or-n-p/yes-or-no-p to raise if called."
     (should (string-match-p "hi" s)))
   ;; omitted when nil (legacy *chat* path is byte-for-byte unaffected)
   (let ((s (decode-coding-string
-            (emacos--chat-encode-request "hi" nil) 'utf-8)))
+            (emacsos--chat-encode-request "hi" nil) 'utf-8)))
     (should-not (string-match-p "thread_id" s))
     (should-not (string-match-p "workdir" s))))
 
-(provide 'test-emacos-assist)
-;;; test-emacos-assist.el ends here
+(provide 'test-emacsos-assist)
+;;; test-emacsos-assist.el ends here

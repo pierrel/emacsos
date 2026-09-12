@@ -162,7 +162,7 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
 
     Returns one of:
     - `applied: ...` — committed and loaded cleanly.  The user can run the
-      phone's `emacos--chat-rollback` command; tell them it's applied.
+      phone's `emacsos--chat-rollback` command; tell them it's applied.
     - `applied-but-broken: ...` — committed as the new config but it
       errored while loading or restoring platform state on the phone.  Tell
       the user and suggest
@@ -226,7 +226,7 @@ def apply_config(elisp: str, summary: str, config: RunnableConfig) -> str:
     version = f" (v{sha[:7]})" if sha else ""
     if ar.status == "applied":
         return (f"applied: {summary}{version} — loaded cleanly on the "
-                "phone; the user can run M-x emacos--chat-rollback")
+                "phone; the user can run M-x emacsos--chat-rollback")
     # load_error: HEAD is the new saved config, but loading or platform
     # finalization failed.  Remediation depends on the tagged phase.
     return (f"applied-but-broken: {summary}{version} — committed as the "

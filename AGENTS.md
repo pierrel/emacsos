@@ -50,7 +50,7 @@ boot too).
 - **Layers: deterministic emacs primitives + an interpretive agent** (README "Layers"). Every
   device action is an emacs interactive command; the dividing line is *determinism*. Emacs
   commands are **deterministic primitives** — concrete arg in, same action out, no model in the
-  loop (e.g. `(emacos-call "+1XXXXXXXXXX")` stages that number in the local call UI). The
+  loop (e.g. `(emacsos-call "+1XXXXXXXXXX")` stages that number in the local call UI). The
   **agent is the interpretive layer**: turning fuzzy intent ("call Ana") into a concrete primitive
   call — resolution and disambiguation — is skill work. Safety-critical authorization may remain
   a deterministic local UI boundary; the ordinary public flow dials a staged call only after two

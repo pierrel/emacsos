@@ -5,15 +5,15 @@ PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
 umask 077
 
-target=/usr/local/bin/wvkbd-emacos
-notice=/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+target=/usr/local/bin/wvkbd-emacsos
+notice=/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
 state_dir=/var/lib/emacsos-wvkbd-transaction
 state=$state_dir/state
 previous=$state_dir/previous
 previous_notice=$state_dir/previous-notice
 service=emacsos-ui
 ready=/run/emacsos-ui/ready
-command='/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300'
+command='/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300'
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 
 fail() { printf 'wvkbd-transaction: %s\n' "$1" >&2; exit 1; }
@@ -214,8 +214,7 @@ validate_upgrade() {
         legacy_cleanup_metadata
         return 0
     fi
-    read_state
-    [ "$state_version" = 1 ] || fail 'version-2 transaction requires its original helper'
+    fail 'unfinished keyboard transaction requires recovery before migration'
 }
 
 normalize_upgrade() {
@@ -271,13 +270,13 @@ restore_old() {
     verified_backup
     copy_checked "$previous" "$target" 755 "$old_sha"
     if [ "$prior_notice" = 1 ]; then
-        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
         copy_checked "$previous_notice" "$notice" 644 "$(sha "$previous_notice")"
     else
         if [ -e "$notice" ] || [ -L "$notice" ]; then
             safe_notice || fail 'unsafe current notice during restore'
             remove_file "$notice"
-            sync /usr/local/share/licenses/wvkbd-emacos
+            sync /usr/local/share/licenses/wvkbd-emacsos
         fi
     fi
     safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'old keyboard restore failed'
@@ -385,12 +384,12 @@ restore_legacy_old() {
     verified_backup
     copy_checked "$previous" "$target" 755 "$old_sha"
     if [ "$prior_notice" = 1 ]; then
-        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
         copy_checked "$previous_notice" "$notice" 644 "$(sha "$previous_notice")"
     elif [ -e "$notice" ] || [ -L "$notice" ]; then
         safe_notice || fail 'unsafe current notice during legacy restore'
         remove_file "$notice"
-        sync /usr/local/share/licenses/wvkbd-emacos
+        sync /usr/local/share/licenses/wvkbd-emacsos
     fi
     safe_target && [ "$(sha "$target")" = "$old_sha" ] || fail 'legacy old keyboard restore failed'
 }
@@ -492,7 +491,7 @@ activate() {
     stage=${WVKBD_STAGE-} expected_new=${WVKBD_SHA256-}
     notice_stage=${WVKBD_NOTICE_STAGE-} expected_notice=${WVKBD_NOTICE_SHA256-}
     valid_sha256 "$expected_new" && valid_sha256 "$expected_notice" || fail 'invalid staged digest'
-    printf '%s\n' "$stage" | grep -Eq '^/home/user/\.cache/wvkbd-emacos\.[A-Za-z0-9]{6}$' || fail 'unsafe keyboard stage path'
+    printf '%s\n' "$stage" | grep -Eq '^/home/user/\.cache/wvkbd-emacsos\.[A-Za-z0-9]{6}$' || fail 'unsafe keyboard stage path'
     printf '%s\n' "$notice_stage" | grep -Eq '^/home/user/\.cache/wvkbd-notice\.[A-Za-z0-9]{6}$' || fail 'unsafe notice stage path'
     ensure_state_dir
     [ ! -e "$state" ] && [ ! -L "$state" ] || fail 'unfinished transaction requires recovery'
@@ -516,7 +515,7 @@ activate() {
     checkpoint before-pending
     write_state pending "$old_sha" "$expected_new" "$prior_notice" - 0 0
     checkpoint after-pending
-    install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+    install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
     copy_checked "$notice_snapshot" "$notice" 644 "$expected_notice"
     checkpoint after-notice-install
     copy_checked "$candidate_snapshot" "$target" 755 "$expected_new"

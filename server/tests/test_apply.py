@@ -26,17 +26,17 @@ def test_elisp_string_escapes_quotes_and_backslashes():
 
 def test_build_apply_expr_uses_phone_defvar_and_loads():
     expr = _build_apply_expr("(setq foo 1)")
-    assert "emacos-agent-file" in expr          # phone owns the path
+    assert "emacsos-agent-file" in expr          # phone owns the path
     assert "rename-file" in expr                 # atomic write
     assert "load-file" in expr
-    assert "emacos-agent-config-applied-function" in expr
+    assert "emacsos-agent-config-applied-function" in expr
     assert "indirect-function" in expr
     assert "funcall finalizer" in expr
     assert "finalizer-failure" in expr
     assert "unwind-protect" in expr
     assert "(t (setq load-failure caught))" in expr
     assert expr.index("(funcall finalizer)") < expr.index(
-        "(setq emacos-agent-config-applied-function"
+        "(setq emacsos-agent-config-applied-function"
     )
     assert "load-error: config-load:" in expr
     assert "load-error: platform-finalizer:" in expr

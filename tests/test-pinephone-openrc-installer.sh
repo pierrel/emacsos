@@ -25,7 +25,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el \
+for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -68,7 +68,7 @@ printf '%s\n' '#!/bin/sh' \
     'elif [ "$1 $2" = "emacsos-ui status" ]; then' \
     '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
-    '  for fd in 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
+    '  for fd in 6 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/wvkbd-emacsos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
     '  if [ -e /tmp/race-command-reference ]; then' \
     '    rm -f /tmp/race-command-reference' \
@@ -424,13 +424,20 @@ mv /etc/nftables.d/49-emacsos-callback.nft \
 rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/chat.el \
     /usr/local/share/emacsos-openrc/assist-web.el \
-    /usr/local/share/emacsos-openrc/emacos-assist.el \
+    /usr/local/share/emacsos-openrc/emacsos-assist.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/share/emacsos-openrc/phone-sms.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network
+install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+printf '%s\n' legacy-keyboard >/usr/local/bin/wvkbd-emacos
+chown root:root /usr/local/bin/wvkbd-emacos
+chmod 0755 /usr/local/bin/wvkbd-emacos
+printf '%s\n' legacy-notice >/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+chown root:root /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+chmod 0644 /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
@@ -441,10 +448,14 @@ fi
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ]
 [ -f /etc/doas.d/95-emacsos-ui.conf ]
 [ -f /run/emacsos-ui/ready ]
+[ "$(cat /usr/local/bin/wvkbd-emacos)" = legacy-keyboard ]
+[ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
 
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -f /run/emacsos-ui/ready ]
+[ ! -e /usr/local/bin/wvkbd-emacos ]
+[ ! -e /usr/local/share/licenses/wvkbd-emacos/wordninja.txt ]
 
 # Runtime cleanup must fail closed when mount metadata cannot be read.  Exercise
 # the actual updater function without mutating the live fixture directory.
@@ -572,6 +583,36 @@ for unsafe_mode in 0664 0646; do
     assert_preflight_rejection "backup-source-mode-$unsafe_mode"
 done
 chmod 0644 /usr/local/share/emacsos-openrc/os.el
+
+# The one-generation bridge accepts only the exact old root-owned paths.
+# Reject each unsafe old installation before changing the helper or stopping UI.
+install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
+install -o root -g root -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
+install -o root -g root -m 0644 /dev/null \
+    /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+rm -f /usr/local/bin/wvkbd-emacos
+ln -s /bin/true /usr/local/bin/wvkbd-emacos
+assert_preflight_rejection legacy-keyboard-symlink
+rm -f /usr/local/bin/wvkbd-emacos
+install -o root -g root -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
+chown user:user /usr/local/bin/wvkbd-emacos
+assert_preflight_rejection legacy-keyboard-owner
+chown root:root /usr/local/bin/wvkbd-emacos
+chmod 0700 /usr/local/bin/wvkbd-emacos
+assert_preflight_rejection legacy-keyboard-mode
+chmod 0755 /usr/local/bin/wvkbd-emacos
+
+# An unfinished durable keyboard state belongs to recovery, not this rename.
+install -d -o root -g root -m 0700 /var/lib/emacsos-wvkbd-transaction
+printf '%s\n' unfinished >/var/lib/emacsos-wvkbd-transaction/state
+chown root:root /var/lib/emacsos-wvkbd-transaction/state
+chmod 0600 /var/lib/emacsos-wvkbd-transaction/state
+assert_preflight_rejection unfinished-keyboard-transaction
+rm -f /var/lib/emacsos-wvkbd-transaction/state
+rmdir /var/lib/emacsos-wvkbd-transaction
+rm -f /usr/local/bin/wvkbd-emacos \
+    /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+rmdir /usr/local/share/licenses/wvkbd-emacos
 
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config

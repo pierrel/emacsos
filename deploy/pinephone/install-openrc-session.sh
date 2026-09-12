@@ -76,7 +76,7 @@ scp -q "$@" \
     "$repo_dir/os.el" \
     "$repo_dir/chat.el" \
     "$repo_dir/assist-web.el" \
-    "$repo_dir/emacos-assist.el" \
+    "$repo_dir/emacsos-assist.el" \
     "$repo_dir/network.el" \
     "$repo_dir/phone-call.el" \
     "$repo_dir/phone-sms.el" \

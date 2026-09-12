@@ -5,7 +5,7 @@ export PINEPHONE_HOST
 
 WVKBD_REPO_DIR ?= $(CURDIR)/../wvkbd
 WVKBD_BUILD_DIR ?= $(CURDIR)/.build/wvkbd
-WVKBD_ARTIFACT := $(WVKBD_BUILD_DIR)/wvkbd-emacos
+WVKBD_ARTIFACT := $(WVKBD_BUILD_DIR)/wvkbd-emacsos
 WVKBD_BENCH_ARTIFACT := $(WVKBD_BUILD_DIR)/bench-glide
 LOCAL_EMACSOS_DIR ?= $(HOME)/.local/share/emacsos
 export LOCAL_EMACSOS_DIR
@@ -15,13 +15,13 @@ install-local:
 
 wvkbd-build:
 	WVKBD_REPO_DIR="$(WVKBD_REPO_DIR)" WVKBD_BUILD_DIR="$(WVKBD_BUILD_DIR)" \
-		deploy/pinephone/build-wvkbd-emacos.sh
+		deploy/pinephone/build-wvkbd-emacsos.sh
 
 wvkbd-phone-install: wvkbd-build
-	deploy/pinephone/install-wvkbd-emacos.sh "$(WVKBD_ARTIFACT)"
+	deploy/pinephone/install-wvkbd-emacsos.sh "$(WVKBD_ARTIFACT)"
 
 wvkbd-phone-bench: wvkbd-build
-	deploy/pinephone/bench-wvkbd-emacos.sh "$(WVKBD_BENCH_ARTIFACT)"
+	deploy/pinephone/bench-wvkbd-emacsos.sh "$(WVKBD_BENCH_ARTIFACT)"
 
 test-wvkbd-build:
 	WVKBD_REPO_DIR="$(WVKBD_REPO_DIR)" tests/test-wvkbd-build.sh
@@ -101,7 +101,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
 	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token && chmod 0644 ~/.config/emacsos/assist-web-ca.pem"
@@ -115,12 +115,12 @@ phone-install:
 
 local-deploy:
 	ssh $(PINEPHONE_HOST) mkdir -p $(PHONE_EMACSOS_DIR)
-	scp os.el chat.el assist-web.el emacos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	# Also (load-file) the init snippet if phone-install has been
 	# run -- the snippet re-applies both chat and Assist Web API URLs,
 	# which their reloaded defcustoms would otherwise reset.  Conditional
 	# so a fresh phone still gets a working code reload.
-	ssh $(PINEPHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-sms.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacos--render-page))"'
+	ssh $(PINEPHONE_HOST) emacsclient -f server -e '"(progn (load-file \"$(PHONE_EMACSOS_DIR)/chat.el\") (load-file \"$(PHONE_EMACSOS_DIR)/emacsos-assist.el\") (load-file \"$(PHONE_EMACSOS_DIR)/assist-web.el\") (load-file \"$(PHONE_EMACSOS_DIR)/network.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-call.el\") (load-file \"$(PHONE_EMACSOS_DIR)/phone-sms.el\") (load-file \"$(PHONE_EMACSOS_DIR)/os.el\") (when (file-exists-p \"$(PHONE_INIT_SNIPPET)\") (load-file \"$(PHONE_INIT_SNIPPET)\")) (emacsos--render-page))"'
 
 # Provision the SIM7600G-H 4G HAT for cellular DATA on the phone.  See
 # docs/2026-05-26-cellular-data-connectivity.org.  APN is carrier-specific
@@ -148,9 +148,9 @@ cellular-bringup:
 # data remain on cdc-wdm0.  Re-run only if the rule changes.
 MODEM_AT_HOST ?= phone
 install-modem-at-ports:
-	scp deploy/99-emacos-free-at-ports.rules $(MODEM_AT_HOST):/tmp/99-emacos-free-at-ports.rules
-	ssh $(MODEM_AT_HOST) "sudo mv /tmp/99-emacos-free-at-ports.rules /etc/udev/rules.d/ \
-	  && sudo rm -f /etc/udev/rules.d/99-emacos-free-ttyusb3.rules \
+	scp deploy/99-emacsos-free-at-ports.rules $(MODEM_AT_HOST):/tmp/99-emacsos-free-at-ports.rules
+	ssh $(MODEM_AT_HOST) "sudo mv /tmp/99-emacsos-free-at-ports.rules /etc/udev/rules.d/ \
+	  && sudo rm -f /etc/udev/rules.d/99-emacsos-free-ttyusb3.rules \
 	  && sudo udevadm control --reload-rules \
 	  && sudo udevadm trigger --action=change /dev/ttyUSB2 /dev/ttyUSB3 \
 	  && sudo systemctl restart ModemManager"
@@ -216,7 +216,7 @@ test-install-local:
 	tests/test-install-local.sh
 
 test-elisp: test-install-local
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -f ert-run-tests-batch-and-exit
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

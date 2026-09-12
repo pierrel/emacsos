@@ -51,7 +51,7 @@ def test_eval_elisp_returns_emacsclient_stdout_on_success():
 
 def test_eval_elisp_log_omits_source(caplog):
     caplog.set_level("INFO")
-    source = '(emacos-call "+14155550123")'
+    source = '(emacsos-call "+14155550123")'
     with patch("emacsos_server.channel.phone_mod.call_emacs",
                return_value=(True, "ok")):
         _invoke(source)
