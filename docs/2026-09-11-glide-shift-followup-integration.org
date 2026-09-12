@@ -1,0 +1,38 @@
+#+title: Glide Shift follow-up integration amendment
+#+date: 2026-09-11
+
+* Historical supersessions
+
+This supersedes only =2026-09-11-glide-effective-shift-integration.org=,
+=Integration='s exact source pin and artifact hash, plus =Verification before
+deployment='s live-verification gate. Its earlier build record remains evidence
+about that earlier artifact and is not reattributed here. It also supersedes
+wvkbd's =2026-09-11-glide-word-editing.org= statement that every other accepted
+key or gesture clears the pending word-space unit: a Shift tap deliberately
+preserves it for the following punctuation key.
+
+* Integration
+
+The pinned wvkbd revision retains the effective-Shift punctuation behavior and
+treats a Shift tap as preparatory input. It preserves the pending glide
+separator decision for the next accepted key, so shifted numeric punctuation
+can replace the automatic separator through the normal on-screen key path.
+
+The final live evidence below records the exact source and installed artifact.
+
+* Final live verification
+
+The pin was built from a clean =git archive= by the digest-pinned Alpine 3.22
+builder. The full 427-test Emacs Lisp suite and the atomic side-by-side wvkbd
+build and installer checks passed. The wvkbd unit/sanitizer coverage includes
+the preparatory Shift transition and Shift punctuation.
+
+The final live source was =ae3f232a93b4be7bc338e729ff7ad4bc3f836078=.  It
+installed =/usr/local/bin/wvkbd-emacos= with SHA-256
+=fef620a3e927bfc7746954cf22768990c444039b1871b3f70c9f4f7553ab0189=.  The
+=emacsos-ui= service cgroup contained exactly one matching =emacsos-lab=
+keyboard process with command =/usr/local/bin/wvkbd-emacos --mod-swipe -H 300
+-L 300=.  The touchscreen/screenshot check observed a successful glide with
+one trailing separator, then immediate Backspace returning input to empty.
+Pierre reported the keyboard responsive and working well, and that the
+modifier still worked.  No additional screen or cursor state was recorded.
