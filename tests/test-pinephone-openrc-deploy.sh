@@ -103,6 +103,8 @@ simulate_line=$(grep -nF 'apk add --simulate py3-dbus' "$deploy_dir/openrc-updat
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 keyboard_snapshot_line=$(grep -nF 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
+helper_backup_line=$(grep -nF \
+    '"$backup/wvkbd-transaction-root"' "$deploy_dir/openrc-update-root" | head -1 | cut -d: -f1)
 bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
@@ -112,6 +114,8 @@ install_line=$(grep -nF 'apk add py3-dbus >/dev/null' "$deploy_dir/openrc-update
     [ "$mutating_line" -lt "$install_line" ]
 [ "$preflight_line" -lt "$keyboard_snapshot_line" ] &&
     [ "$keyboard_snapshot_line" -lt "$bootstrap_line" ]
+[ "$helper_backup_line" -lt "$bootstrap_line" ]
+grep -F 'bootstrap_helper_replaced=1' "$deploy_dir/openrc-update-root" >/dev/null
 expected='EMACSOS-COMMANDS.org
 assist-web.el
 chat.el

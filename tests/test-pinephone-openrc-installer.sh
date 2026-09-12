@@ -70,6 +70,9 @@ printf '%s\n' '#!/bin/sh' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
     '  for fd in 6 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/wvkbd-emacsos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
+    '  if [ "$(cat /usr/local/share/emacsos-openrc/session)" = legacy-session ]; then' \
+    '    /usr/local/sbin/emacsos-wvkbd-transaction verify-current || exit 1' \
+    '  fi' \
     '  if [ -e /tmp/require-new-keyboard ]; then' \
     '    [ -x /usr/local/bin/wvkbd-emacsos ] || exit 1' \
     '    [ -f /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ] || exit 1' \
@@ -469,6 +472,13 @@ chmod 0644 /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 printf '%s\n' legacy-assist >/usr/local/share/emacsos-openrc/emacos-assist.el
 chown root:root /usr/local/share/emacsos-openrc/emacos-assist.el
 chmod 0644 /usr/local/share/emacsos-openrc/emacos-assist.el
+printf '%s\n' '#!/bin/sh' \
+    'case "$1" in validate-upgrade|normalize-upgrade|verify-current) exit 0 ;; *) exit 1 ;; esac' \
+    >/usr/local/sbin/emacsos-wvkbd-transaction
+chown root:root /usr/local/sbin/emacsos-wvkbd-transaction
+chmod 0755 /usr/local/sbin/emacsos-wvkbd-transaction
+printf '%s\n' legacy-session >/usr/local/share/emacsos-openrc/session
+chmod 0755 /usr/local/share/emacsos-openrc/session
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
@@ -482,6 +492,8 @@ fi
 [ "$(cat /usr/local/bin/wvkbd-emacos)" = legacy-keyboard ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
 [ "$(cat /usr/local/share/emacsos-openrc/emacos-assist.el)" = legacy-assist ]
+[ "$(cat /usr/local/share/emacsos-openrc/session)" = legacy-session ]
+grep -F 'verify-current) exit 0' /usr/local/sbin/emacsos-wvkbd-transaction >/dev/null
 [ ! -e /usr/local/bin/wvkbd-emacsos ]
 [ ! -e /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ]
 

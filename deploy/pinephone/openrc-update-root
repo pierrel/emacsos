@@ -26,6 +26,7 @@ config_dir_created=0
 token_parent_dir_created=0
 token_config_dir_created=0
 keyboard_notice_dir_created=0
+bootstrap_helper_replaced=0
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 backup_pairs='
 openrc-init.el:/usr/local/share/emacsos-openrc/init.el
@@ -192,6 +193,7 @@ bootstrap_compat_helper() {
         return 1
     fi
     bootstrap_tmp=
+    bootstrap_helper_replaced=1
     sync_file_and_parent "$destination" /usr/local/sbin || return 1
 }
 
@@ -507,7 +509,13 @@ cleanup() {
                 retain_backup
             fi
         fi
+    elif [ "$bootstrap_helper_replaced" -eq 1 ] && [ "$restart_only" -eq 0 ]; then
+        restore_file wvkbd-transaction-root \
+            /usr/local/sbin/emacsos-wvkbd-transaction 0755
     elif [ "$restart_only" -eq 1 ] && [ "$committed" -eq 0 ]; then
+        [ "$bootstrap_helper_replaced" -eq 0 ] ||
+            restore_file wvkbd-transaction-root \
+                /usr/local/sbin/emacsos-wvkbd-transaction 0755
         if stop_ui >/dev/null 2>&1; then
             start_ui >/dev/null 2>&1 ||
                 printf '%s\n' \
@@ -667,10 +675,14 @@ fi
 snapshot_keyboard_stage "$stage/wvkbd-emacsos" "$snapshot/wvkbd-emacsos" 16777216
 snapshot_keyboard_stage "$stage/wvkbd-notice" "$snapshot/wvkbd-notice" 1048576
 
-bootstrap_compat_helper || fail 'could not durably bootstrap keyboard compatibility helper'
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
 chown root:root "$backup"
 chmod 0700 "$backup"
+if [ -e /usr/local/sbin/emacsos-wvkbd-transaction ]; then
+    install -o root -g root -m 0600 /usr/local/sbin/emacsos-wvkbd-transaction \
+        "$backup/wvkbd-transaction-root"
+fi
+bootstrap_compat_helper || fail 'could not durably bootstrap keyboard compatibility helper'
 restart_only=1
 stop_ui || fail 'UI did not become quiescent'
 /usr/local/sbin/emacsos-wvkbd-transaction normalize-upgrade ||
@@ -678,7 +690,8 @@ stop_ui || fail 'UI did not become quiescent'
 for pair in $backup_pairs; do
     name=${pair%%:*}
     target=${pair#*:}
-    [ ! -e "$target" ] || install -o root -g root -m 0600 "$target" "$backup/$name"
+    [ ! -e "$target" ] || [ -f "$backup/$name" ] ||
+        install -o root -g root -m 0600 "$target" "$backup/$name"
 done
 if [ -e "$reference_target" ]; then
     install -o root -g root -m 0600 /dev/null "$backup/EMACSOS-COMMANDS.org"
