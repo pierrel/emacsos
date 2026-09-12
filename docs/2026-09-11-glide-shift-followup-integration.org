@@ -27,7 +27,8 @@ Shift transition and its targeted ASan/UBSan execution passed.
 The final live source was =ae3f232a93b4be7bc338e729ff7ad4bc3f836078=.  It
 installed =/usr/local/bin/wvkbd-emacos= with SHA-256
 =fef620a3e927bfc7746954cf22768990c444039b1871b3f70c9f4f7553ab0189=.  The
-=emacsos-ui= service supervised exactly one =emacsos-lab= process with command
-=/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300=.  Pierre accepted the
+=emacsos-ui= service cgroup contained exactly one matching =emacsos-lab=
+keyboard process with command =/usr/local/bin/wvkbd-emacos --mod-swipe -H 300
+-L 300=.  Pierre accepted the
 touchscreen Shift, punctuation, spacing, and Backspace results.  No additional
 screen or cursor state was recorded.
