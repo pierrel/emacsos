@@ -9,20 +9,20 @@
 
 (ert-deftest test-os-default-modeline-includes-sms-status ()
   "Every ordinary EmacsOS buffer exposes pending SMS status."
-  (should (member '(:eval (emacos-sms-mode-line-string))
+  (should (member '(:eval (emacsos-sms-mode-line-string))
                   (default-value 'mode-line-format))))
 
 (ert-deftest test-os-command-list-surface-is-absent ()
-  (dolist (symbol '(emacos--render-commands emacos--top-commands
-                    emacos--mode-commands-for emacos--chat-command-set
-                    emacos-assist--command-set emacos-net--command-set))
+  (dolist (symbol '(emacsos--render-commands emacsos--top-commands
+                    emacsos--mode-commands-for emacsos--chat-command-set
+                    emacsos-assist--command-set emacsos-net--command-set))
     (should-not (fboundp symbol)))
-  (dolist (symbol '(emacos-mode-commands emacos-global-commands
-                    emacos--last-commands emacos--max-commands))
+  (dolist (symbol '(emacsos-mode-commands emacsos-global-commands
+                    emacsos--last-commands emacsos--max-commands))
     (should-not (boundp symbol))))
 
 (ert-deftest test-os-open-command-reference-uses-current-home ()
-  (let ((home (make-temp-file "emacos-reference-home" t))
+  (let ((home (make-temp-file "emacsos-reference-home" t))
         (process-environment (copy-sequence process-environment))
         opened)
     (unwind-protect
@@ -32,53 +32,68 @@
             (with-temp-file path (insert "commands"))
             (cl-letf (((symbol-function 'find-file)
                        (lambda (file) (setq opened file))))
-              (emacos-open-command-reference))
+              (emacsos-open-command-reference))
             (should (equal opened path))))
       (delete-directory home t))))
 
-;;; emacos--unit-width (pure per-unit width math)
+(ert-deftest test-os-global-command-prefix-owns-portable-actions ()
+  (should emacsos-command-mode)
+  (dolist (binding '(("C-c e c" . emacsos--chat-show-top-buffer)
+                     ("C-c e t" . emacsos-command-open-thread)
+                     ("C-c e n" . emacsos-command-new-thread)
+                     ("C-c e r" . emacsos-assist-web-refresh-threads)
+                     ("C-c e f" . emacsos-assist-new-file)
+                     ("C-c e d" . emacsos-call)
+                     ("C-c e m" . emacsos-send-message)
+                     ("C-c e w" . emacsos-net-show)
+                     ("C-c e h" . emacsos-open-command-reference)
+                     ("C-c C-a n" . emacsos-command-new-thread)
+                     ("C-c C-a t" . emacsos-command-open-thread)))
+    (should (eq (key-binding (kbd (car binding))) (cdr binding)))))
 
-;; These pin the MATH, so they bind `emacos--btn-label-scale' to a fixed
+;;; emacsos--unit-width (pure per-unit width math)
+
+;; These pin the MATH, so they bind `emacsos--btn-label-scale' to a fixed
 ;; value rather than reading the production default — tuning the default
 ;; (the keyboard label font) must not break the width-math assertions.
 (ert-deftest test-os-unit-width-full-width-single-button ()
   "1 unit, 0 gaps → floor(win-w / scale).  At scale 1.75, win-w 35 → 20."
-  (let ((emacos--btn-label-scale 1.75))
-    (should (= (emacos--unit-width 35 1.5 1 0) 20))))
+  (let ((emacsos--btn-label-scale 1.75))
+    (should (= (emacsos--unit-width 35 1.5 1 0) 20))))
 
 (ert-deftest test-os-unit-width-accounts-for-gaps ()
   "N units with G gaps subtract G*gap before dividing by N*scale:
 floor((36 - 3*1.5) / (4*1.75)) = floor(31.5/7.0) = 4."
-  (let ((emacos--btn-label-scale 1.75))
-    (should (= (emacos--unit-width 36 1.5 4 3) 4))))
+  (let ((emacsos--btn-label-scale 1.75))
+    (should (= (emacsos--unit-width 36 1.5 4 3) 4))))
 
 (ert-deftest test-os-unit-width-min-1 ()
   "A pathologically narrow window can't drive a width <= 0."
-  (let ((emacos--btn-label-scale 1.75))
-    (should (= (emacos--unit-width 1 1.5 4 3) 1))))
+  (let ((emacsos--btn-label-scale 1.75))
+    (should (= (emacsos--unit-width 1 1.5 4 3) 1))))
 
 (ert-deftest test-os-label-scale-fits-longest-t9-group ()
-  "Regression: the production `emacos--btn-label-scale' must leave enough
+  "Regression: the production `emacsos--btn-label-scale' must leave enough
 per-group cells that the longest T9 group renders in full — decoupling the
 font from button height is what lets it be small enough to (the \"ert…\"
 truncation bug).  3 groups, 2 gaps; the render `substring's each label to
 the budget.  Pinned at win-w 20 (the phone's keyboard width); re-derives
-the longest group from `emacos-t9-layout' so it tracks layout edits."
+the longest group from `emacsos-t9-layout' so it tracks layout edits."
   (let* ((longest (apply #'max (mapcar #'length
-                                       (apply #'append emacos-t9-layout))))
-         (budget (emacos--unit-width 20 emacos--btn-gap 3 2)))
+                                       (apply #'append emacsos-t9-layout))))
+         (budget (emacsos--unit-width 20 emacsos--btn-gap 3 2)))
     (should (>= budget longest))))
 
 (ert-deftest test-os-btn-applies-vertical-box-padding ()
-  "A button's tap-target height comes from `emacos--btn-vpad' via the face
+  "A button's tap-target height comes from `emacsos--btn-vpad' via the face
 box `:line-width' (HWIDTH = top/bottom), decoupled from the label font —
-so a small label still yields a big button.  `emacos--btn-hpad' is the
+so a small label still yields a big button.  `emacsos--btn-hpad' is the
 VWIDTH (left/right); both land in the (VWIDTH . HWIDTH) cons."
   (with-temp-buffer
-    (emacos--btn "x" #'ignore)
+    (emacsos--btn "x" #'ignore)
     (let* ((face (get-text-property (point-min) 'face))
            (line-width (plist-get (plist-get face :box) :line-width)))
-      (should (equal line-width (cons emacos--btn-hpad emacos--btn-vpad))))))
+      (should (equal line-width (cons emacsos--btn-hpad emacsos--btn-vpad))))))
 
 (ert-deftest test-os-action-row-widths ()
   "Row 4: DEL 1/3 (1 unit) + SPC 2/3 (2 units).
@@ -87,8 +102,8 @@ RET are both `(* 2 unit)' so the state-toggle and the most-tapped key get
 equal fingertip-friendly width on a 320x240 screen.  All positive; the
 wide ones beat the narrow."
   (let* ((win-w 36) (gap 1.5)
-         (third (emacos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
-         (unit  (emacos--unit-width win-w gap 6 3)))   ; mode/TAB=1u, MOD/RET=2u
+         (third (emacsos--unit-width win-w gap 3 1))    ; DEL=1u, SPC=2u
+         (unit  (emacsos--unit-width win-w gap 6 3)))   ; mode/TAB=1u, MOD/RET=2u
     (should (> third 0))
     (should (> unit 0))
     (should (> (* 2 third) third))   ; SPC (2/3) wider than DEL (1/3)
@@ -96,8 +111,8 @@ wide ones beat the narrow."
 
 (ert-deftest test-os-action-row-renders-del-spc-mode-tab-ret ()
   (with-temp-buffer
-    (let ((emacos--kbd-mode 'lower))    ; bind, don't rely on the global default
-      (emacos--render-action-row)
+    (let ((emacsos--kbd-mode 'lower))    ; bind, don't rely on the global default
+      (emacsos--render-action-row)
       (let ((s (buffer-string)))
         (should (string-match-p "DEL" s))
         (should (string-match-p "SPC" s))
@@ -112,55 +127,55 @@ wide ones beat the narrow."
 the threshold → convert."
   (with-temp-buffer
     (insert "word ")
-    (let ((emacos--last-space-time (- 100.0 0.1)))
-      (should (emacos--double-space-p 100.0)))))
+    (let ((emacsos--last-space-time (- 100.0 0.1)))
+      (should (emacsos--double-space-p 100.0)))))
 
 (ert-deftest test-os-double-space-not-when-slow ()
   "Past the threshold the two taps are just two ordinary spaces."
   (with-temp-buffer
     (insert "word ")
-    (let ((emacos--last-space-time
-           (- 100.0 (* 2 emacos--double-space-threshold))))
-      (should-not (emacos--double-space-p 100.0)))))
+    (let ((emacsos--last-space-time
+           (- 100.0 (* 2 emacsos--double-space-threshold))))
+      (should-not (emacsos--double-space-p 100.0)))))
 
 (ert-deftest test-os-double-space-not-after-punctuation ()
   "Char before the space isn't alphanumeric (already \". \") → no fire, so
 the gesture can't double-period."
   (with-temp-buffer
     (insert "word. ")
-    (let ((emacos--last-space-time (- 100.0 0.1)))
-      (should-not (emacos--double-space-p 100.0)))))
+    (let ((emacsos--last-space-time (- 100.0 0.1)))
+      (should-not (emacsos--double-space-p 100.0)))))
 
 (ert-deftest test-os-double-space-not-without-prior-space ()
   "No prior SPC tap recorded → never fires (a lone first space)."
   (with-temp-buffer
     (insert "word ")
-    (let ((emacos--last-space-time nil))
-      (should-not (emacos--double-space-p 100.0)))))
+    (let ((emacsos--last-space-time nil))
+      (should-not (emacsos--double-space-p 100.0)))))
 
 (ert-deftest test-os-double-space-not-mid-word ()
   "Point not preceded by a space → no fire (you're inside a word)."
   (with-temp-buffer
     (insert "word")
-    (let ((emacos--last-space-time (- 100.0 0.1)))
-      (should-not (emacos--double-space-p 100.0)))))
+    (let ((emacsos--last-space-time (- 100.0 0.1)))
+      (should-not (emacsos--double-space-p 100.0)))))
 
 (ert-deftest test-os-tap-space-double-writes-period-space ()
   "Integration: a rapid second SPC rewrites the trailing space to \". \"
-and consumes the gesture (`emacos--last-space-time' back to nil)."
+and consumes the gesture (`emacsos--last-space-time' back to nil)."
   (let ((buf (get-buffer-create " *dst-test*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'emacos--commit) #'ignore)
-                  ((symbol-function 'emacos--refocus) #'ignore)
-                  ((symbol-function 'emacos--target) (lambda () (selected-window))))
+        (cl-letf (((symbol-function 'emacsos--commit) #'ignore)
+                  ((symbol-function 'emacsos--refocus) #'ignore)
+                  ((symbol-function 'emacsos--target) (lambda () (selected-window))))
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (with-current-buffer buf
               (erase-buffer) (insert "word ") (goto-char (point-max)))
-            (setq emacos--last-space-time (- (float-time) 0.05))
-            (emacos--tap-space)
+            (setq emacsos--last-space-time (- (float-time) 0.05))
+            (emacsos--tap-space)
             (should (equal (with-current-buffer buf (buffer-string)) "word. "))
-            (should-not emacos--last-space-time)))
+            (should-not emacsos--last-space-time)))
       (let ((kill-buffer-query-functions nil)) (kill-buffer buf)))))
 
 (ert-deftest test-os-tap-space-single-inserts-space ()
@@ -168,72 +183,72 @@ and consumes the gesture (`emacos--last-space-time' back to nil)."
 so a follow-up tap can complete the gesture."
   (let ((buf (get-buffer-create " *dst-test2*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'emacos--commit) #'ignore)
-                  ((symbol-function 'emacos--refocus) #'ignore)
-                  ((symbol-function 'emacos--target) (lambda () (selected-window))))
+        (cl-letf (((symbol-function 'emacsos--commit) #'ignore)
+                  ((symbol-function 'emacsos--refocus) #'ignore)
+                  ((symbol-function 'emacsos--target) (lambda () (selected-window))))
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (with-current-buffer buf
               (erase-buffer) (insert "word") (goto-char (point-max)))
-            (setq emacos--last-space-time nil)
-            (emacos--tap-space)
+            (setq emacsos--last-space-time nil)
+            (emacsos--tap-space)
             (should (equal (with-current-buffer buf (buffer-string)) "word "))
-            (should emacos--last-space-time)))
+            (should emacsos--last-space-time)))
       (let ((kill-buffer-query-functions nil)) (kill-buffer buf)))))
 
 ;;; Pending confirmations: disarm on another EmacsOS button action
 
 (ert-deftest test-os-maybe-cancel-confirm-disarms-on-other-command ()
   "A different utility action cancels pending confirmation."
-  (let ((emacos--chat-confirm-pending t))
-    (emacos--maybe-cancel-confirm #'emacos--run-command #'save-buffer)
-    (should-not emacos--chat-confirm-pending)))
+  (let ((emacsos--chat-confirm-pending t))
+    (emacsos--maybe-cancel-confirm #'emacsos--run-command #'save-buffer)
+    (should-not emacsos--chat-confirm-pending)))
 
 (ert-deftest test-os-maybe-cancel-confirm-disarms-on-keyboard-tap ()
   "Tapping any keyboard key (a direct action, not run-command) while armed
 cancels the confirm."
-  (let ((emacos--chat-confirm-pending t))
-    (emacos--maybe-cancel-confirm #'emacos--tap-key "abc")
-    (should-not emacos--chat-confirm-pending)))
+  (let ((emacsos--chat-confirm-pending t))
+    (emacsos--maybe-cancel-confirm #'emacsos--tap-key "abc")
+    (should-not emacsos--chat-confirm-pending)))
 
 (ert-deftest test-os-maybe-cancel-confirm-keeps-armed-on-newchat-tap ()
   "A New-chat invocation through an EmacsOS button remains confirmable."
-  (let ((emacos--chat-confirm-pending t))
-    (emacos--maybe-cancel-confirm #'emacos--run-command #'emacos--chat-new-chat)
-    (should emacos--chat-confirm-pending)))
+  (let ((emacsos--chat-confirm-pending t))
+    (emacsos--maybe-cancel-confirm #'emacsos--run-command #'emacsos--chat-new-chat)
+    (should emacsos--chat-confirm-pending)))
 
 (ert-deftest test-os-maybe-cancel-confirm-noop-when-unarmed ()
   "Nothing armed remains a no-op."
-  (let ((emacos--chat-confirm-pending nil))
-    (emacos--maybe-cancel-confirm #'emacos--tap-key "abc")
-    (should-not emacos--chat-confirm-pending)))
+  (let ((emacsos--chat-confirm-pending nil))
+    (emacsos--maybe-cancel-confirm #'emacsos--tap-key "abc")
+    (should-not emacsos--chat-confirm-pending)))
 
 (ert-deftest test-os-follower-noop-when-plane-unchanged ()
   (let ((rendered nil)
-        (emacos--in-render nil)
-        (emacos--last-plane nil))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-keyboard-plane) (lambda () nil)))
-      (emacos--on-window-buffer-change nil)
+        (emacsos--in-render nil)
+        (emacsos--last-plane nil))
+    (cl-letf (((symbol-function 'emacsos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil)))
+      (emacsos--on-window-buffer-change nil)
       (should-not rendered))))
 
 (ert-deftest test-os-follower-rerenders-on-plane-change ()
   "A keyboard-plane change creates or removes the temporary control window."
   (let ((rendered nil)
-        (emacos--in-render nil)
-        (emacos--last-plane nil))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-keyboard-plane) (lambda () #'ignore)))
-      (emacos--on-window-buffer-change nil)
+        (emacsos--in-render nil)
+        (emacsos--last-plane nil))
+    (cl-letf (((symbol-function 'emacsos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () #'ignore)))
+      (emacsos--on-window-buffer-change nil)
       (should rendered))))
 
 (ert-deftest test-os-follower-noop-during-render ()
   "Re-entry guard (the brick-insurance): the follower bails when a render
 is already in progress, even if the plane differs."
-  (let ((rendered nil) (emacos--in-render t))
-    (cl-letf (((symbol-function 'emacos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacos--top-keyboard-plane) (lambda () #'ignore)))
-      (emacos--on-window-buffer-change nil)
+  (let ((rendered nil) (emacsos--in-render t))
+    (cl-letf (((symbol-function 'emacsos--render-page) (lambda () (setq rendered t)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () #'ignore)))
+      (emacsos--on-window-buffer-change nil)
       (should-not rendered))))
 
 ;;; Render dispatch: keyboard plane vs the T9 bands
@@ -242,9 +257,9 @@ is already in progress, even if the plane differs."
   "When the top buffer declares a keyboard plane, render-page paints THAT into
 *keyboard* instead of the keyboard and utility rows."
   (unwind-protect       ; *keyboard* is a shared global buffer — clean it up even on failure
-      (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
+      (cl-letf (((symbol-function 'emacsos--top-keyboard-plane)
                  (lambda () (lambda () (insert "PLANE-SENTINEL")))))
-        (emacos--render-page)
+        (emacsos--render-page)
         (with-current-buffer "*keyboard*"
           (let ((s (buffer-string)))
             (should (string-match-p "PLANE-SENTINEL" s))
@@ -255,8 +270,8 @@ is already in progress, even if the plane differs."
   "With no plane on the top buffer, render-page paints the normal keyboard
 \(the utility row's QUIT is present, no plane content)."
   (unwind-protect
-      (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil)))
-        (emacos--render-page)
+      (cl-letf (((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil)))
+        (emacsos--render-page)
         (with-current-buffer "*keyboard*"
           (let ((s (buffer-string)))
             (should (string-match-p "QUIT" s))
@@ -265,26 +280,26 @@ is already in progress, even if the plane differs."
 
 (ert-deftest test-os-render-page-external-keyboard-removes-control-window ()
   "An external keyboard leaves ordinary Emacs content unsplit."
-  (let ((emacos-use-internal-keyboard nil)
+  (let ((emacsos-use-internal-keyboard nil)
         (text-rows 0))
     (unwind-protect
-        (cl-letf (((symbol-function 'emacos--top-keyboard-plane) (lambda () nil))
-                  ((symbol-function 'emacos--render-keyboard)
+        (cl-letf (((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+                  ((symbol-function 'emacsos--render-keyboard)
                    (lambda () (cl-incf text-rows)))
-                  ((symbol-function 'emacos--render-action-row)
+                  ((symbol-function 'emacsos--render-action-row)
                    (lambda () (cl-incf text-rows))))
-          (emacos--render-page)
+          (emacsos--render-page)
           (should (= text-rows 0))
           (should-not (get-buffer "*keyboard*")))
       (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
 
 (ert-deftest test-os-render-page-external-keyboard-keeps-special-plane ()
   "Call/SMS safety planes still get a temporary control window."
-  (let ((emacos-use-internal-keyboard nil))
+  (let ((emacsos-use-internal-keyboard nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'emacos--top-keyboard-plane)
+        (cl-letf (((symbol-function 'emacsos--top-keyboard-plane)
                    (lambda () (lambda () (insert "SAFETY")))))
-          (emacos--render-page)
+          (emacsos--render-page)
           (should (get-buffer-window "*keyboard*"))
           (with-current-buffer "*keyboard*"
             (should (equal (buffer-string) "SAFETY"))))
@@ -296,8 +311,8 @@ is already in progress, even if the plane differs."
 
 (ert-deftest test-os-utility-row-has-quit-mx-chat ()
   (with-temp-buffer
-    (let ((emacos--kbd-mode 'lower))
-      (emacos--render-utility-row)
+    (let ((emacsos--kbd-mode 'lower))
+      (emacsos--render-utility-row)
       (let ((s (buffer-string)))
         (should (string-match-p "QUIT" s))
         (should (string-match-p "M-x" s))
@@ -305,19 +320,19 @@ is already in progress, even if the plane differs."
         ;; the mode button lives on the action row, not here
         (should-not (string-match-p "abc\\|ABC" s))))))
 
-;;; emacos--tap-quit (smart escape)
+;;; emacsos--tap-quit (smart escape)
 
 (ert-deftest test-os-tap-quit-aborts-active-minibuffer ()
   "With a minibuffer active, QUIT aborts it and does NOT touch windows."
   (let ((aborted nil) (quit-win nil) (del-others nil))
-    (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+    (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
               ((symbol-function 'active-minibuffer-window) (lambda () 'mb))
               ((symbol-function 'abort-recursive-edit)
                (lambda () (setq aborted t)))
               ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
               ((symbol-function 'delete-other-windows)
                (lambda (&rest _) (setq del-others t))))
-      (emacos--tap-quit)
+      (emacsos--tap-quit)
       (should aborted)
       (should-not quit-win)
       (should-not del-others))))
@@ -330,16 +345,16 @@ parameter on a real frame)."
     (with-temp-buffer
       (special-mode)
       (let ((buf (current-buffer)))
-        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
                   ((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'emacsos--target) (lambda () (selected-window)))
                   ((symbol-function 'window-buffer) (lambda (&rest _) buf))
-                  ((symbol-function 'emacos--render-page) (lambda () nil))
-                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'emacsos--render-page) (lambda () nil))
+                  ((symbol-function 'emacsos--refocus) (lambda () nil))
                   ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
                   ((symbol-function 'delete-other-windows)
                    (lambda (&rest _) (setq del-others t))))
-          (emacos--tap-quit)
+          (emacsos--tap-quit)
           (should quit-win)
           (should del-others))))))
 
@@ -350,15 +365,15 @@ the predicate must catch it explicitly — quit-window must fire."
     (with-temp-buffer
       (setq-local major-mode 'completion-list-mode)
       (let ((buf (current-buffer)))
-        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
                   ((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'emacsos--target) (lambda () (selected-window)))
                   ((symbol-function 'window-buffer) (lambda (&rest _) buf))
-                  ((symbol-function 'emacos--render-page) (lambda () nil))
-                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'emacsos--render-page) (lambda () nil))
+                  ((symbol-function 'emacsos--refocus) (lambda () nil))
                   ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
                   ((symbol-function 'delete-other-windows) (lambda (&rest _) nil)))
-          (emacos--tap-quit)
+          (emacsos--tap-quit)
           (should quit-win))))))
 
 (ert-deftest test-os-tap-quit-ordinary-buffer-no-quit-window ()
@@ -368,47 +383,47 @@ collapse popup windows (harmless no-op when there are none)."
     (with-temp-buffer
       (fundamental-mode)
       (let ((buf (current-buffer)))
-        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
+        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
                   ((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
+                  ((symbol-function 'emacsos--target) (lambda () (selected-window)))
                   ((symbol-function 'window-buffer) (lambda (&rest _) buf))
-                  ((symbol-function 'emacos--render-page) (lambda () nil))
-                  ((symbol-function 'emacos--refocus) (lambda () nil))
+                  ((symbol-function 'emacsos--render-page) (lambda () nil))
+                  ((symbol-function 'emacsos--refocus) (lambda () nil))
                   ((symbol-function 'quit-window) (lambda (&rest _) (setq quit-win t)))
                   ((symbol-function 'delete-other-windows)
                    (lambda (&rest _) (setq del-others t))))
-          (emacos--tap-quit)
+          (emacsos--tap-quit)
           (should-not quit-win)
           (should del-others))))))
 
-;;; emacos--tap-tab dispatch
+;;; emacsos--tap-tab dispatch
 
 (ert-deftest test-os-tap-tab-indents-in-buffer ()
   ;; Stubs must be commands (`call-interactively' rejects non-commands),
   ;; hence the (interactive) form in each.
   (let ((called nil))
-    (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
-              ((symbol-function 'emacos--target) (lambda () (selected-window)))
-              ((symbol-function 'emacos--refocus) (lambda () nil))
+    (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
+              ((symbol-function 'emacsos--target) (lambda () (selected-window)))
+              ((symbol-function 'emacsos--refocus) (lambda () nil))
               ((symbol-function 'active-minibuffer-window) (lambda () nil))
               ((symbol-function 'indent-for-tab-command)
                (lambda (&rest _) (interactive) (setq called 'indent)))
               ((symbol-function 'minibuffer-complete)
                (lambda (&rest _) (interactive) (setq called 'complete))))
-      (emacos--tap-tab)
+      (emacsos--tap-tab)
       (should (eq called 'indent)))))
 
 (ert-deftest test-os-tap-tab-completes-in-minibuffer ()
   (let ((called nil))
-    (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
-              ((symbol-function 'emacos--target) (lambda () (selected-window)))
-              ((symbol-function 'emacos--refocus) (lambda () nil))
+    (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
+              ((symbol-function 'emacsos--target) (lambda () (selected-window)))
+              ((symbol-function 'emacsos--refocus) (lambda () nil))
               ((symbol-function 'active-minibuffer-window) (lambda () 'mb))
               ((symbol-function 'indent-for-tab-command)
                (lambda (&rest _) (interactive) (setq called 'indent)))
               ((symbol-function 'minibuffer-complete)
                (lambda (&rest _) (interactive) (setq called 'complete))))
-      (emacos--tap-tab)
+      (emacsos--tap-tab)
       (should (eq called 'complete)))))
 
 (ert-deftest test-os-tap-return-uses-conversation-activation-or-newline-and-minibuffer-ret ()
@@ -416,23 +431,23 @@ collapse popup windows (harmless no-op when there are none)."
   (let (activated accepted)
     (with-temp-buffer
       (let ((target-buffer (window-buffer (selected-window))))
-        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
-                  ((symbol-function 'emacos--target) (lambda () (selected-window)))
-                  ((symbol-function 'emacos--refocus) (lambda () nil))
+        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
+                  ((symbol-function 'emacsos--target) (lambda () (selected-window)))
+                  ((symbol-function 'emacsos--refocus) (lambda () nil))
                   ((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacos-conversation-activate-or-newline)
+                  ((symbol-function 'emacsos-conversation-activate-or-newline)
                    (lambda () (setq activated (current-buffer)))))
-          (emacos--tap-return)
+          (emacsos--tap-return)
           (should (eq activated target-buffer)))))
     (with-temp-buffer
-      (cl-letf (((symbol-function 'emacos--commit) (lambda () nil))
-                ((symbol-function 'emacos--target) (lambda () (selected-window)))
-                ((symbol-function 'emacos--refocus) (lambda () nil))
+      (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
+                ((symbol-function 'emacsos--target) (lambda () (selected-window)))
+                ((symbol-function 'emacsos--refocus) (lambda () nil))
                 ((symbol-function 'active-minibuffer-window) (lambda () 'minibuffer))
                 ((symbol-function 'exit-minibuffer) (lambda () (setq accepted t)))
-                ((symbol-function 'emacos-conversation-activate-or-newline)
+                ((symbol-function 'emacsos-conversation-activate-or-newline)
                  (lambda () (ert-fail "minibuffer RET must not activate chat"))))
-        (emacos--tap-return)
+        (emacsos--tap-return)
         (should accepted)))))
 
 ;;; Modifier keys (Ctrl / Meta / Ctrl-Meta) — see
@@ -442,16 +457,16 @@ collapse popup windows (harmless no-op when there are none)."
 
 (ert-deftest test-os-modifier-cycle-none-C-M-CM-none ()
   "Pure cycle, no state side effects."
-  (should (eq (emacos--modifier-next nil) 'C))
-  (should (eq (emacos--modifier-next 'C) 'M))
-  (should (eq (emacos--modifier-next 'M) 'C-M))
-  (should (eq (emacos--modifier-next 'C-M) nil)))
+  (should (eq (emacsos--modifier-next nil) 'C))
+  (should (eq (emacsos--modifier-next 'C) 'M))
+  (should (eq (emacsos--modifier-next 'M) 'C-M))
+  (should (eq (emacsos--modifier-next 'C-M) nil)))
 
 (ert-deftest test-os-modifier-prefix-strings ()
-  (should (equal (emacos--modifier-prefix nil) ""))
-  (should (equal (emacos--modifier-prefix 'C) "C-"))
-  (should (equal (emacos--modifier-prefix 'M) "M-"))
-  (should (equal (emacos--modifier-prefix 'C-M) "C-M-")))
+  (should (equal (emacsos--modifier-prefix nil) ""))
+  (should (equal (emacsos--modifier-prefix 'C) "C-"))
+  (should (equal (emacsos--modifier-prefix 'M) "M-"))
+  (should (equal (emacsos--modifier-prefix 'C-M) "C-M-")))
 
 ;;; Filter — empty / partial / all-bound (Decision B)
 ;;
@@ -485,11 +500,11 @@ Covers the empty / partial / all-bound cases in one shot."
         (lambda ()
           (let ((buf (current-buffer)))
             ;; partial: only q,y bound in "qwerty"
-            (should (equal (emacos--bound-letters-in-group "qwerty" 'C buf) "qy"))
+            (should (equal (emacsos--bound-letters-in-group "qwerty" 'C buf) "qy"))
             ;; empty: nothing bound under M
-            (should (equal (emacos--bound-letters-in-group "qwerty" 'M buf) ""))
+            (should (equal (emacsos--bound-letters-in-group "qwerty" 'M buf) ""))
             ;; single-letter result preserved
-            (should (equal (emacos--bound-letters-in-group "qw" 'C buf) "q"))))))))
+            (should (equal (emacsos--bound-letters-in-group "qw" 'C buf) "q"))))))))
 
 (ert-deftest test-os-letter-bound-p-rejects-non-command ()
   "Prefix keys (function-value is a keymap) must NOT be commandp."
@@ -498,19 +513,19 @@ Covers the empty / partial / all-bound cases in one shot."
       (define-key map (kbd "C-z") (make-sparse-keymap))   ; prefix
       (test-os--with-map map
         (lambda ()
-          (should-not (emacos--letter-bound-p ?z 'C (current-buffer))))))))
+          (should-not (emacsos--letter-bound-p ?z 'C (current-buffer))))))))
 
 (ert-deftest test-os-bound-groups-preserves-shape ()
-  "bound-groups returns the same row/col shape as emacos-t9-layout."
+  "bound-groups returns the same row/col shape as emacsos-t9-layout."
   (with-temp-buffer
     (let ((map (make-sparse-keymap)))
       (define-key map (kbd "C-q") #'ignore)
       (test-os--with-map map
         (lambda ()
-          (let ((bg (emacos--bound-groups 'C (current-buffer))))
-            (should (= (length bg) (length emacos-t9-layout)))
+          (let ((bg (emacsos--bound-groups 'C (current-buffer))))
+            (should (= (length bg) (length emacsos-t9-layout)))
             (cl-loop for filt-row in bg
-                     for orig-row in emacos-t9-layout
+                     for orig-row in emacsos-t9-layout
                      do (should (= (length filt-row) (length orig-row))))
             ;; q lives in the first group of the first row; only q bound.
             (should (equal (caar bg) "q"))))))))
@@ -530,10 +545,10 @@ Covers the empty / partial / all-bound cases in one shot."
 
 Stubs:
 - `key-binding' → consults only the test map (no global noise).
-- `emacos--target' → returns the selected window.
+- `emacsos--target' → returns the selected window.
 - `window-buffer' → returns the temp buffer (so D3 validation passes;
   in batch mode the selected window doesn't display the temp buffer).
-- `emacos--refocus', `emacos--render-page', `run-with-timer' → no-ops.
+- `emacsos--refocus', `emacsos--render-page', `run-with-timer' → no-ops.
 
 BINDINGS is a list of (KEY CMD) pairs; `kbd' is applied to KEY."
   (declare (indent 1))
@@ -547,9 +562,9 @@ BINDINGS is a list of (KEY CMD) pairs; `kbd' is applied to KEY."
                     (let ((b (lookup-key map kseq)))
                       (if (numberp b) nil b))))
                  ((symbol-function 'window-buffer) (lambda (&optional _) buf))
-                 ((symbol-function 'emacos--target) (lambda () win))
-                 ((symbol-function 'emacos--refocus) (lambda () nil))
-                 ((symbol-function 'emacos--render-page) (lambda () nil))
+                 ((symbol-function 'emacsos--target) (lambda () win))
+                 ((symbol-function 'emacsos--refocus) (lambda () nil))
+                 ((symbol-function 'emacsos--render-page) (lambda () nil))
                  ((symbol-function 'run-with-timer) (lambda (&rest _) nil)))
          ,@body))))
 
@@ -557,67 +572,67 @@ BINDINGS is a list of (KEY CMD) pairs; `kbd' is applied to KEY."
   "Single-letter fast-path: only one letter bound under MOD → fire on
 tap, no arm, no timer.  Honors the user's literal \"click is C-q\"."
   (let ((fired nil)
-        (emacos--modifier 'C)
-        (emacos--armed-tap nil))
+        (emacsos--modifier 'C)
+        (emacsos--armed-tap nil))
     (with-temp-buffer
       (test-os--with-tap-env (("C-q" (lambda () (interactive) (setq fired t))))
-        (emacos--tap-modified-key "qw")
+        (emacsos--tap-modified-key "qw")
         (should fired)
-        (should-not emacos--armed-tap)))))
+        (should-not emacsos--armed-tap)))))
 
 (ert-deftest test-os-tap-modified-key-arms-then-commits ()
   "Multi-letter subset: first tap arms (no fire), re-tap cycles,
 explicit commit fires the cycled letter."
   (let ((fired-cmd nil)
-        (emacos--modifier 'C)
-        (emacos--armed-tap nil)
-        (emacos--armed-tap-timer nil))
+        (emacsos--modifier 'C)
+        (emacsos--armed-tap nil)
+        (emacsos--armed-tap-timer nil))
     (with-temp-buffer
       (test-os--with-tap-env
           (("C-q" (lambda () (interactive) (setq fired-cmd 'q)))
            ("C-w" (lambda () (interactive) (setq fired-cmd 'w))))
         ;; First tap: arms at q.
-        (emacos--tap-modified-key "qw")
-        (should emacos--armed-tap)
-        (should (equal (plist-get emacos--armed-tap :group) "qw"))
-        (should (= (plist-get emacos--armed-tap :index) 0))
+        (emacsos--tap-modified-key "qw")
+        (should emacsos--armed-tap)
+        (should (equal (plist-get emacsos--armed-tap :group) "qw"))
+        (should (= (plist-get emacsos--armed-tap :index) 0))
         (should-not fired-cmd)
         ;; Re-tap: cycles to w.
-        (emacos--tap-modified-key "qw")
-        (should (= (plist-get emacos--armed-tap :index) 1))
+        (emacsos--tap-modified-key "qw")
+        (should (= (plist-get emacsos--armed-tap :index) 1))
         (should-not fired-cmd)
         ;; Commit fires C-w.
-        (emacos--commit-armed-tap)
+        (emacsos--commit-armed-tap)
         (should (eq fired-cmd 'w))
-        (should-not emacos--armed-tap)))))
+        (should-not emacsos--armed-tap)))))
 
 (ert-deftest test-os-tap-modified-key-empty-group-noop ()
   "Empty subset under MOD: silent no-op (no fire, no arm)."
-  (let ((emacos--modifier 'C)
-        (emacos--armed-tap nil))
+  (let ((emacsos--modifier 'C)
+        (emacsos--armed-tap nil))
     (with-temp-buffer
       (test-os--with-tap-env ()                       ; nothing bound
-        (emacos--tap-modified-key "qw")
-        (should-not emacos--armed-tap)))))
+        (emacsos--tap-modified-key "qw")
+        (should-not emacsos--armed-tap)))))
 
 (ert-deftest test-os-tap-modified-key-different-group-commits-prior ()
   "Arm group A (qw), tap group B (as): A's binding fires, B becomes armed."
   (let ((fired-cmd nil)
-        (emacos--modifier 'C)
-        (emacos--armed-tap nil)
-        (emacos--armed-tap-timer nil))
+        (emacsos--modifier 'C)
+        (emacsos--armed-tap nil)
+        (emacsos--armed-tap-timer nil))
     (with-temp-buffer
       (test-os--with-tap-env
           (("C-q" (lambda () (interactive) (setq fired-cmd 'q)))
            ("C-w" (lambda () (interactive) (setq fired-cmd 'w)))
            ("C-a" (lambda () (interactive) (setq fired-cmd 'a)))
            ("C-s" (lambda () (interactive) (setq fired-cmd 's))))
-        (emacos--tap-modified-key "qw")     ; arms C-q
+        (emacsos--tap-modified-key "qw")     ; arms C-q
         (should-not fired-cmd)
-        (emacos--tap-modified-key "as")     ; commits C-q, arms C-a
+        (emacsos--tap-modified-key "as")     ; commits C-q, arms C-a
         (should (eq fired-cmd 'q))
-        (should (equal (plist-get emacos--armed-tap :group) "as"))
-        (should (= (plist-get emacos--armed-tap :index) 0))))))
+        (should (equal (plist-get emacsos--armed-tap :group) "as"))
+        (should (= (plist-get emacsos--armed-tap :index) 0))))))
 
 ;;; A2: MOD-tap commits armed, advances state.  A3: QUIT abandons; SPC/RET/DEL/TAB commit.
 
@@ -625,49 +640,49 @@ explicit commit fires the cycled letter."
   "A2: MOD-tap with a binding armed COMMITS the armed binding, then
 advances the modifier cycle."
   (let ((fired nil)
-        (emacos--modifier 'C)
-        (emacos--armed-tap nil)
-        (emacos--armed-tap-timer nil))
+        (emacsos--modifier 'C)
+        (emacsos--armed-tap nil)
+        (emacsos--armed-tap-timer nil))
     (with-temp-buffer
       (test-os--with-tap-env
           (("C-q" (lambda () (interactive) (setq fired t)))
            ("C-w" #'ignore))                          ; force arm path
-        (cl-letf (((symbol-function 'emacos--commit) (lambda () nil)))
-          (setq emacos--armed-tap
+        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil)))
+          (setq emacsos--armed-tap
                 (list :group "qw" :index 0
                       :window win :buffer (current-buffer)))
-          (emacos--tap-modifier)
+          (emacsos--tap-modifier)
           (should fired)                              ; A2: armed fired
-          (should (eq emacos--modifier 'M))           ; ... then advanced
-          (should-not emacos--armed-tap))))))
+          (should (eq emacsos--modifier 'M))           ; ... then advanced
+          (should-not emacsos--armed-tap))))))
 
 (ert-deftest test-os-tap-quit-abandons-armed ()
   "A3: QUIT abandons (does NOT fire) the armed binding.
 QUIT is the phone's C-g; firing the armed command on QUIT would
 violate the documented escape-hatch contract."
   (let ((fired nil)
-        (emacos--armed-tap nil)
-        (emacos--modifier 'C))
+        (emacsos--armed-tap nil)
+        (emacsos--modifier 'C))
     (with-temp-buffer
       (test-os--with-tap-env
           (("C-q" (lambda () (interactive) (setq fired t))))
         (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil))
                   ((symbol-function 'delete-other-windows) #'ignore))
-          (setq emacos--armed-tap
+          (setq emacsos--armed-tap
                 (list :group "q" :index 0
                       :window win :buffer (current-buffer)))
-          (emacos--tap-quit)
+          (emacsos--tap-quit)
           (should-not fired)
-          (should-not emacos--armed-tap))))))
+          (should-not emacsos--armed-tap))))))
 
 (ert-deftest test-os-utility-taps-commit-armed ()
   "A3 (non-QUIT half): SPC / RET / DEL / TAB commit any armed binding
 before doing their thing.  QUIT is its own test (abandons)."
-  (dolist (tap-fn '(emacos--tap-space emacos--tap-return
-                    emacos--tap-backspace emacos--tap-tab))
+  (dolist (tap-fn '(emacsos--tap-space emacsos--tap-return
+                    emacsos--tap-backspace emacsos--tap-tab))
     (let ((fired nil)
-          (emacos--armed-tap nil)
-          (emacos--modifier 'C))
+          (emacsos--armed-tap nil)
+          (emacsos--modifier 'C))
       (with-temp-buffer
         (test-os--with-tap-env
             (("C-q" (lambda () (interactive) (setq fired t))))
@@ -675,24 +690,24 @@ before doing their thing.  QUIT is its own test (abandons)."
                     ;; suppress side effects of the real handlers
                     ((symbol-function 'indent-for-tab-command)
                      (lambda (&rest _) (interactive))))
-            (setq emacos--armed-tap
+            (setq emacsos--armed-tap
                   (list :group "q" :index 0
                         :window win :buffer (current-buffer)))
             (funcall tap-fn)
             (should fired)
-            (should-not emacos--armed-tap)))))))
+            (should-not emacsos--armed-tap)))))))
 
 ;;; A1: sticky modifier survives binding fire
 
 (ert-deftest test-os-modifier-survives-binding-fire ()
-  "After a command fires, emacos--modifier is unchanged — that's the
+  "After a command fires, emacsos--modifier is unchanged — that's the
 whole point of \"sticky\"."
-  (let ((emacos--modifier 'C)
-        (emacos--armed-tap nil))
+  (let ((emacsos--modifier 'C)
+        (emacsos--armed-tap nil))
     (with-temp-buffer
       (test-os--with-tap-env (("C-q" (lambda () (interactive))))
-        (emacos--tap-modified-key "qw")               ; single-letter fast-fire
-        (should (eq emacos--modifier 'C))))))
+        (emacsos--tap-modified-key "qw")               ; single-letter fast-fire
+        (should (eq emacsos--modifier 'C))))))
 
 ;;; Caps ignored under MOD (locked decision 2)
 
@@ -701,13 +716,13 @@ whole point of \"sticky\"."
 If caps influenced the lookup, the test would probe C-Q (unbound) and
 the binding would not fire."
   (let ((fired nil)
-        (emacos--modifier 'C)
-        (emacos--kbd-mode 'caps)
-        (emacos--armed-tap nil))
+        (emacsos--modifier 'C)
+        (emacsos--kbd-mode 'caps)
+        (emacsos--armed-tap nil))
     (with-temp-buffer
       (test-os--with-tap-env
           (("C-q" (lambda () (interactive) (setq fired t))))
-        (emacos--tap-modified-key "qw")               ; only q bound
+        (emacsos--tap-modified-key "qw")               ; only q bound
         (should fired)))))
 
 ;;; Race + teardown (Decision D)
@@ -715,41 +730,41 @@ the binding would not fire."
 (ert-deftest test-os-modifier-runtime-unbinding-is-silent ()
   "Race: armed letter unbound between arm and commit (e.g. minor mode
 disabled).  commit-armed-tap silently abandons — no error, no fire."
-  (let ((emacos--armed-tap nil)
-        (emacos--armed-tap-timer nil)
-        (emacos--modifier 'C))
+  (let ((emacsos--armed-tap nil)
+        (emacsos--armed-tap-timer nil)
+        (emacsos--modifier 'C))
     (with-temp-buffer
       (test-os--with-tap-env ()                       ; nothing bound NOW
-        (setq emacos--armed-tap
+        (setq emacsos--armed-tap
               (list :group "q" :index 0
                     :window win :buffer (current-buffer)))
         ;; Should not throw, should clear state.
-        (emacos--commit-armed-tap)
-        (should-not emacos--armed-tap)))))
+        (emacsos--commit-armed-tap)
+        (should-not emacsos--armed-tap)))))
 
 (ert-deftest test-os-modifier-armed-abandoned-on-buffer-killed ()
   "D3: captured buffer killed before commit → silent abandon.
 Defends against `with-current-buffer' on a dead buffer."
-  (let ((emacos--armed-tap nil)
-        (emacos--modifier 'C))
+  (let ((emacsos--armed-tap nil)
+        (emacsos--modifier 'C))
     (let ((win (selected-window))
           (buf (generate-new-buffer " *armed-buffer-killed*")))
       (with-current-buffer buf
         (let ((map (make-sparse-keymap)))
           (define-key map (kbd "C-q") #'ignore)
           (use-local-map map)))
-      (setq emacos--armed-tap
+      (setq emacsos--armed-tap
             (list :group "q" :index 0 :window win :buffer buf))
       (kill-buffer buf)
-      (emacos--commit-armed-tap)               ; must not throw
-      (should-not emacos--armed-tap))))
+      (emacsos--commit-armed-tap)               ; must not throw
+      (should-not emacsos--armed-tap))))
 
 (ert-deftest test-os-modifier-armed-abandoned-on-buffer-change ()
   "D3: window still live but now displays a DIFFERENT buffer (the
 captured buffer was killed or the user switched).  Silent abandon."
   (let ((fired nil)
-        (emacos--armed-tap nil)
-        (emacos--modifier 'C))
+        (emacsos--armed-tap nil)
+        (emacsos--modifier 'C))
     (let ((win (selected-window))
           (buf-arm (generate-new-buffer " *arm*"))
           (buf-now (generate-new-buffer " *now*")))
@@ -760,12 +775,12 @@ captured buffer was killed or the user switched).  Silent abandon."
                 (define-key map (kbd "C-q")
                   (lambda () (interactive) (setq fired t)))
                 (use-local-map map)))
-            (setq emacos--armed-tap
+            (setq emacsos--armed-tap
                   (list :group "q" :index 0 :window win :buffer buf-arm))
             (set-window-buffer win buf-now)
-            (emacos--commit-armed-tap)
+            (emacsos--commit-armed-tap)
             (should-not fired)
-            (should-not emacos--armed-tap))
+            (should-not emacsos--armed-tap))
         (kill-buffer buf-arm)
         (kill-buffer buf-now)))))
 
@@ -777,9 +792,9 @@ reflects the current state through all four positions of the cycle (and
 the row keeps showing DEL/SPC/the mode button (abc)/TAB/RET alongside)."
   (dolist (pair '((nil . "mod") (C . "C") (M . "M") (C-M . "C-M")))
     (with-temp-buffer
-      (let ((emacos--modifier (car pair))
-            (emacos--kbd-mode 'lower))
-        (emacos--render-action-row)
+      (let ((emacsos--modifier (car pair))
+            (emacsos--kbd-mode 'lower))
+        (emacsos--render-action-row)
         (let ((s (buffer-string)))
           (should (string-match-p (regexp-quote (cdr pair)) s))
           (should (string-match-p "DEL" s))
@@ -799,9 +814,9 @@ Regression for the APPEND=t-vs-nil choice in `add-face-text-property'."
     (define-key map (kbd "C-q") #'ignore)
     (define-key map (kbd "C-w") #'ignore)
     (with-temp-buffer
-      (let ((emacos--modifier 'C)
-            (emacos--kbd-mode 'lower)
-            (emacos--armed-tap (list :group "qw" :index 1
+      (let ((emacsos--modifier 'C)
+            (emacsos--kbd-mode 'lower)
+            (emacsos--armed-tap (list :group "qw" :index 1
                                      :window (selected-window)
                                      :buffer (current-buffer)))
             (kbd-buf (current-buffer)))
@@ -809,11 +824,11 @@ Regression for the APPEND=t-vs-nil choice in `add-face-text-property'."
                    (lambda (kseq &optional _accept-default &rest _)
                      (let ((b (lookup-key map kseq)))
                        (if (numberp b) nil b))))
-                  ((symbol-function 'emacos--target)
+                  ((symbol-function 'emacsos--target)
                    (lambda () (selected-window)))
                   ((symbol-function 'window-buffer)
                    (lambda (&optional _) kbd-buf)))
-          (emacos--render-keyboard)
+          (emacsos--render-keyboard)
           ;; Find the position whose face property mentions "yellow"
           ;; (the armed letter), then verify yellow precedes white in
           ;; THAT character's merged face spec.  Searching the whole
@@ -842,74 +857,74 @@ QUIT, timer, MOD-tap, etc.) the rendered yellow must go away — the
 abandon seam re-renders to make that true.  No render fires when there
 was nothing to clear (saves cycles)."
   (let ((renders 0))
-    (cl-letf (((symbol-function 'emacos--render-page)
+    (cl-letf (((symbol-function 'emacsos--render-page)
                (lambda () (cl-incf renders))))
       ;; No state to clear → no render.
-      (let ((emacos--armed-tap nil)
-            (emacos--armed-tap-timer nil))
-        (emacos--abandon-armed-tap)
+      (let ((emacsos--armed-tap nil)
+            (emacsos--armed-tap-timer nil))
+        (emacsos--abandon-armed-tap)
         (should (= renders 0)))
       ;; State was set → render once.
-      (let ((emacos--armed-tap (list :group "q" :index 0
+      (let ((emacsos--armed-tap (list :group "q" :index 0
                                      :window (selected-window)
                                      :buffer (current-buffer)))
-            (emacos--armed-tap-timer nil))
-        (emacos--abandon-armed-tap)
+            (emacsos--armed-tap-timer nil))
+        (emacsos--abandon-armed-tap)
         (should (= renders 1))
-        (should-not emacos--armed-tap)))))
+        (should-not emacsos--armed-tap)))))
 
 ;;; Follower under MOD re-renders on every buffer change
 
 (ert-deftest test-os-follower-rerenders-under-modifier-even-if-plane-same ()
   "Under MOD, keymap filtering is buffer-local, so every change re-renders."
   (let ((rendered nil)
-        (emacos--in-render nil)
-        (emacos--modifier 'C))
-    (cl-letf (((symbol-function 'emacos--render-page)
+        (emacsos--in-render nil)
+        (emacsos--modifier 'C))
+    (cl-letf (((symbol-function 'emacsos--render-page)
                (lambda () (setq rendered t))))
-      (emacos--on-window-buffer-change nil)
+      (emacsos--on-window-buffer-change nil)
       (should rendered))))
 
 ;;; Keyboard mode cycle: numbers / symbols ;;;
 
 (ert-deftest test-os-active-layout-per-mode ()
   "The active layout follows the mode; lower/caps both type letters."
-  (let ((emacos--kbd-mode 'lower))  (should (eq (emacos--active-layout) emacos-t9-layout)))
-  (let ((emacos--kbd-mode 'caps))   (should (eq (emacos--active-layout) emacos-t9-layout)))
-  (let ((emacos--kbd-mode 'number)) (should (eq (emacos--active-layout) emacos-123-layout)))
-  (let ((emacos--kbd-mode 'symbol)) (should (eq (emacos--active-layout) emacos-symbols-layout))))
+  (let ((emacsos--kbd-mode 'lower))  (should (eq (emacsos--active-layout) emacsos-t9-layout)))
+  (let ((emacsos--kbd-mode 'caps))   (should (eq (emacsos--active-layout) emacsos-t9-layout)))
+  (let ((emacsos--kbd-mode 'number)) (should (eq (emacsos--active-layout) emacsos-123-layout)))
+  (let ((emacsos--kbd-mode 'symbol)) (should (eq (emacsos--active-layout) emacsos-symbols-layout))))
 
 (ert-deftest test-os-char-str-upcases-only-in-caps ()
-  (let ((emacos--kbd-mode 'lower)) (should (equal (emacos--char-str ?a) "a")))
-  (let ((emacos--kbd-mode 'caps))  (should (equal (emacos--char-str ?a) "A")))
+  (let ((emacsos--kbd-mode 'lower)) (should (equal (emacsos--char-str ?a) "a")))
+  (let ((emacsos--kbd-mode 'caps))  (should (equal (emacsos--char-str ?a) "A")))
   ;; caps is a no-op for digits/symbols (upcase leaves them unchanged)
-  (let ((emacos--kbd-mode 'caps))
-    (should (equal (emacos--char-str ?7) "7"))
-    (should (equal (emacos--char-str ?@) "@"))))
+  (let ((emacsos--kbd-mode 'caps))
+    (should (equal (emacsos--char-str ?7) "7"))
+    (should (equal (emacsos--char-str ?@) "@"))))
 
 (ert-deftest test-os-cycle-mode-sequence ()
   "CAPS cycles lower -> caps -> number -> symbol -> lower."
-  (cl-letf (((symbol-function 'emacos--render-page) #'ignore)
-            ((symbol-function 'emacos--refocus) #'ignore)
-            ((symbol-function 'emacos--commit) #'ignore)
-            ((symbol-function 'emacos--commit-armed-tap) #'ignore))
-    (let ((emacos--kbd-mode 'lower))
-      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'caps))
-      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'number))
-      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'symbol))
-      (emacos--tap-cycle-mode) (should (eq emacos--kbd-mode 'lower)))))
+  (cl-letf (((symbol-function 'emacsos--render-page) #'ignore)
+            ((symbol-function 'emacsos--refocus) #'ignore)
+            ((symbol-function 'emacsos--commit) #'ignore)
+            ((symbol-function 'emacsos--commit-armed-tap) #'ignore))
+    (let ((emacsos--kbd-mode 'lower))
+      (emacsos--tap-cycle-mode) (should (eq emacsos--kbd-mode 'caps))
+      (emacsos--tap-cycle-mode) (should (eq emacsos--kbd-mode 'number))
+      (emacsos--tap-cycle-mode) (should (eq emacsos--kbd-mode 'symbol))
+      (emacsos--tap-cycle-mode) (should (eq emacsos--kbd-mode 'lower)))))
 
 (ert-deftest test-os-mode-button-label-per-mode ()
   "The mode button shows abc/ABC/123/#+= for each mode."
   (dolist (pair '((lower . "abc") (caps . "ABC") (number . "123") (symbol . "#+=")))
     (with-temp-buffer
-      (let ((emacos--modifier nil) (emacos--kbd-mode (car pair)))
-        (emacos--render-action-row)
+      (let ((emacsos--modifier nil) (emacsos--kbd-mode (car pair)))
+        (emacsos--render-action-row)
         (should (string-match-p (regexp-quote (cdr pair)) (buffer-string)))))))
 
 (ert-deftest test-os-numbers-9-0-share-key ()
   "Numbers layer: 1-8 single-tap, 9 and 0 share the last key."
-  (let ((groups (apply #'append emacos-123-layout)))
+  (let ((groups (apply #'append emacsos-123-layout)))
     (should (member "90" groups))
     (dolist (d '("1" "2" "3" "4" "5" "6" "7" "8"))
       (should (member d groups)))))
@@ -920,9 +935,9 @@ letters): bound-groups returns the number layout's shape with the bound
 digit surviving the filter."
   (with-temp-buffer
     (test-os--with-tap-env (("C-7" (lambda () (interactive))))
-      (let* ((emacos--kbd-mode 'number)
-             (bg (emacos--bound-groups 'C (current-buffer))))
-        (should (= (length bg) (length emacos-123-layout)))
+      (let* ((emacsos--kbd-mode 'number)
+             (bg (emacsos--bound-groups 'C (current-buffer))))
+        (should (= (length bg) (length emacsos-123-layout)))
         (should (member "7" (apply #'append bg)))))))
 
 (provide 'test-os)

@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import asyncio
+import time as stdlib_time
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -25,7 +27,11 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     from emacsos_server.app import app
-    return TestClient(app)
+    # Most endpoint tests exercise streaming, not the release migration.
+    # Keep their config repo isolated while dedicated tests cover that gate.
+    with patch("emacsos_server.app.migrate_legacy_config",
+               return_value="unchanged: no legacy EmacsOS config symbols"):
+        yield TestClient(app)
 
 
 # Minimal but parseable auth file: `host:port pid\nsecret\n`.  Host gets
@@ -83,6 +89,206 @@ def test_streams_start_token_end_for_simple_response(client):
     assert [t["text"] for t in tokens] == ["Hello!"]
     end = [e for e in events if e["type"] == "end"][-1]
     assert end["text"] == "Hello!"
+
+
+def test_release_migration_failure_stops_chat_before_agent_construction(client):
+    with patch("emacsos_server.app.migrate_legacy_config",
+               return_value="error: namespace migration requires reconciliation: unconfirmed"), \
+         patch("emacsos_server.app._start_stream_iter") as start:
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert [event["type"] for event in events] == ["start", "error"]
+    assert "namespace migration requires reconciliation" in events[-1]["reason"]
+    start.assert_not_called()
+
+
+def test_release_migration_retry_allows_chat_after_clean_result(client):
+    scripted = [("messages", (_FakeAIMessageChunk(content="ready"), {}))]
+    with patch("emacsos_server.app.migrate_legacy_config",
+               return_value="applied: reconcile EmacsOS Lisp symbols"), \
+         patch("emacsos_server.app._start_stream_iter",
+               return_value=iter(scripted)) as start:
+        with client.stream("POST", "/chat", json=_chat_body()) as r:
+            events = _collect_events(r)
+    assert [event["type"] for event in events] == ["start", "token", "end"]
+    start.assert_called_once()
+
+
+def test_cancelled_chat_holds_single_flight_until_migration_finishes():
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    def migration(_phone_ctx):
+        started.set()
+        finish.wait()
+        return "unchanged: no legacy EmacsOS config symbols"
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+        async def is_disconnected(self):
+            return False
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)  # immediate start event precedes the lock
+        turn = asyncio.create_task(anext(stream))
+        assert await asyncio.to_thread(started.wait, 2)
+        assert app_mod._STREAM_LOCK.locked()
+        turn.cancel()
+        await asyncio.sleep(0)
+        assert app_mod._STREAM_LOCK.locked()
+        assert not turn.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        assert not app_mod._STREAM_LOCK.locked()
+        await stream.aclose()
+
+    try:
+        with patch("emacsos_server.app._STREAM_LOCK", asyncio.Lock()), \
+             patch("emacsos_server.app.migrate_legacy_config",
+                   side_effect=migration):
+            asyncio.run(scenario())
+    finally:
+        finish.set()
+
+
+def test_cancelled_chat_holds_single_flight_until_stream_build_finishes():
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    def start_stream(*_args):
+        started.set()
+        finish.wait()
+        return iter(())
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+        async def is_disconnected(self):
+            return False
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)
+        turn = asyncio.create_task(anext(stream))
+        assert await asyncio.to_thread(started.wait, 2)
+        turn.cancel()
+        await asyncio.sleep(0)
+        assert app_mod._STREAM_LOCK.locked()
+        assert not turn.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        assert not app_mod._STREAM_LOCK.locked()
+        await stream.aclose()
+
+    try:
+        with patch("emacsos_server.app._STREAM_LOCK", asyncio.Lock()), \
+             patch("emacsos_server.app.migrate_legacy_config",
+                   return_value="unchanged: no legacy EmacsOS config symbols"), \
+             patch("emacsos_server.app._start_stream_iter",
+                   side_effect=start_stream):
+            asyncio.run(scenario())
+    finally:
+        finish.set()
+
+
+@pytest.mark.parametrize("phase", ["migration", "stream build"])
+def test_runaway_wedged_setup_exits_for_supervised_restart(phase):
+    """A wedged setup worker cannot retain single-flight past the budget."""
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    class Clock:
+        expired = False
+
+        def monotonic(self):
+            return stdlib_time.monotonic() + (120 if self.expired else 0)
+
+        @staticmethod
+        def time():
+            return stdlib_time.time()
+
+    clock = Clock()
+
+    class RestartRequired(BaseException):
+        pass
+
+    def restart_required():
+        assert app_mod._STREAM_LOCK.locked()
+        finish.set()
+        raise RestartRequired
+
+    def blocked_result(result):
+        started.set()
+        finish.wait()
+        return result
+
+    migration = (
+        (lambda _ctx: blocked_result(
+            "unchanged: no legacy EmacsOS config symbols"))
+        if phase == "migration"
+        else (lambda _ctx: "unchanged: no legacy EmacsOS config symbols")
+    )
+    start_stream = (
+        (lambda *_args: blocked_result(iter(())))
+        if phase == "stream build"
+        else (lambda *_args: iter(()))
+    )
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+        async def is_disconnected(self):
+            return False
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)
+        turn = asyncio.create_task(anext(stream))
+        assert await asyncio.to_thread(started.wait, 2)
+        clock.expired = True
+        turn.cancel()
+        with pytest.raises(RestartRequired):
+            await turn
+        assert not app_mod._STREAM_LOCK.locked()
+
+    try:
+        with patch("emacsos_server.app._STREAM_LOCK", asyncio.Lock()), \
+             patch.object(app_mod, "time", clock), \
+             patch.object(app_mod, "RUNAWAY_SECONDS", 60.0), \
+             patch("emacsos_server.app.migrate_legacy_config",
+                   side_effect=migration), \
+             patch("emacsos_server.app._start_stream_iter",
+                   side_effect=start_stream), \
+             patch("emacsos_server.app._exit_for_wedged_worker",
+                   side_effect=restart_required):
+            asyncio.run(scenario())
+    finally:
+        finish.set()
+    assert started.is_set()
+
+
+def test_worker_timeout_is_not_a_deadline_expiry():
+    """A worker's own TimeoutError remains an ordinary worker failure."""
+    from emacsos_server import app as app_mod
+
+    async def scenario():
+        future = asyncio.get_running_loop().create_future()
+        future.set_exception(asyncio.TimeoutError("worker timed out"))
+        with pytest.raises(asyncio.TimeoutError, match="worker timed out"):
+            await app_mod._finish_before_cancelling(
+                future, deadline=stdlib_time.monotonic() + 60)
+
+    asyncio.run(scenario())
 
 
 def test_chat_log_omits_message(client, caplog):
@@ -492,7 +698,7 @@ def test_skill_sources_has_call_skill_with_phone_local_confirmation():
     path = os.path.join(app_mod._SKILLS_DIR, "call", "SKILL.md")
     assert os.path.exists(path)
     text = open(path).read()
-    assert "emacos-call" in text
+    assert "emacsos-call" in text
     assert "confirmation-required: confirm on phone" in text
     assert "actual dial is a later local UI action" in text
     assert "never synthesize the confirmation actions" in text
@@ -504,7 +710,7 @@ def test_skill_sources_has_sms_skill_with_phone_local_confirmation():
     path = os.path.join(app_mod._SKILLS_DIR, "sms", "SKILL.md")
     assert os.path.exists(path)
     text = open(path).read()
-    assert "emacos-send-message" in text
+    assert "emacsos-send-message" in text
     assert "confirmation-required: confirm on phone" in text
     assert "It does not send." in text
     assert "Never synthesize confirmation actions." in " ".join(text.split())
@@ -764,6 +970,73 @@ def test_clear_conversation_surfaces_wipe_failure(tmp_path, monkeypatch):
     assert "PermissionError" in out["detail"] or "denied" in out["detail"]
 
 
+def test_cancelled_clear_holds_single_flight_until_worker_finishes():
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    def clear_conversation():
+        started.set()
+        finish.wait()
+        return {"status": "cleared"}
+
+    async def scenario():
+        task = asyncio.create_task(app_mod.clear(None))
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert app_mod._STREAM_LOCK.locked()
+        assert not task.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not app_mod._STREAM_LOCK.locked()
+
+    try:
+        with patch("emacsos_server.app._STREAM_LOCK", asyncio.Lock()), \
+             patch("emacsos_server.app._clear_conversation",
+                   side_effect=clear_conversation):
+            asyncio.run(scenario())
+    finally:
+        finish.set()
+
+
+def test_serialized_worker_deadline_exits_before_releasing_single_flight():
+    """Finite executor operations fail closed when their worker wedges."""
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    class RestartRequired(BaseException):
+        pass
+
+    def worker():
+        started.set()
+        finish.wait()
+
+    def restart_required():
+        assert app_mod._STREAM_LOCK.locked()
+        finish.set()
+        raise RestartRequired
+
+    async def scenario():
+        with pytest.raises(RestartRequired):
+            await app_mod._run_serialized_worker(worker)
+        assert not app_mod._STREAM_LOCK.locked()
+
+    try:
+        with patch.object(app_mod, "_STREAM_LOCK", asyncio.Lock()), \
+             patch.object(app_mod, "RUNAWAY_SECONDS", 0.01), \
+             patch.object(app_mod, "_exit_for_wedged_worker",
+                          side_effect=restart_required):
+            asyncio.run(scenario())
+    finally:
+        finish.set()
+    assert started.is_set()
+
+
 # --- Bug B regression: thread-affinity of the stream generator -------------
 # assist's stream generator holds a thread-affine lock + ContextVar
 # (THREAD_QUEUE.acquire), so it MUST be built, advanced, and closed on one OS
@@ -827,7 +1100,205 @@ def test_disconnect_mid_stream_closes_generator_cleanly(client):
         with client.stream("POST", "/chat", json=_chat_body()) as r:
             events = _collect_events(r)
 
-    # The close is submitted fire-and-forget on the pump; wait (bounded) on
-    # the Event the generator's finally sets — no tight sleep-polling.
-    assert closed.wait(2.0), "generator finally never ran (leak)"
+    # Teardown awaits the pump-thread close, so response completion proves the
+    # generator's finally already ran.
+    assert closed.is_set(), "generator finally ran after response completion"
     assert "error" not in [e["type"] for e in events]
+
+
+def test_disconnect_holds_single_flight_until_inflight_next_closes():
+    """Rollback cannot pass the stream lock while an abandoned turn closes."""
+    from emacsos_server import app as app_mod
+
+    next_started = threading.Event()
+    finish_next = threading.Event()
+    disconnected = threading.Event()
+    close_started = threading.Event()
+    allow_close = threading.Event()
+    closed = threading.Event()
+
+    def gen():
+        try:
+            next_started.set()
+            finish_next.wait()
+            yield ("messages", (_FakeAIMessageChunk(content="late"), {}))
+        finally:
+            close_started.set()
+            allow_close.wait()
+            closed.set()
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+        calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            if self.calls > 1:
+                disconnected.set()
+                return True
+            return False
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)
+        turn = asyncio.create_task(anext(stream))
+        acquired = False
+        try:
+            assert await asyncio.to_thread(next_started.wait, 2)
+            assert await asyncio.to_thread(disconnected.wait, 2)
+            finish_next.set()
+            assert await asyncio.to_thread(close_started.wait, 2)
+
+            assert app_mod._STREAM_LOCK.locked()
+            assert not turn.done()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(app_mod._STREAM_LOCK.acquire(), 0.05)
+
+            allow_close.set()
+            with pytest.raises(StopAsyncIteration):
+                await turn
+            assert closed.is_set()
+            acquired = await asyncio.wait_for(app_mod._STREAM_LOCK.acquire(), 1)
+        finally:
+            finish_next.set()
+            allow_close.set()
+            if not turn.done():
+                try:
+                    await turn
+                except (StopAsyncIteration, asyncio.CancelledError):
+                    pass
+            if acquired:
+                app_mod._STREAM_LOCK.release()
+
+    with patch("emacsos_server.app._start_stream_iter",
+               side_effect=lambda m, p, *a: gen()), \
+         patch.object(app_mod, "_STREAM_LOCK", asyncio.Lock()), \
+         patch.object(app_mod, "DISCONNECT_POLL_SECONDS", 0.01), \
+         patch("emacsos_server.app.migrate_legacy_config",
+               return_value="unchanged: no legacy EmacsOS config symbols"):
+        asyncio.run(scenario())
+
+
+def test_runaway_wedged_worker_exits_instead_of_releasing_single_flight():
+    """A worker that cannot quiesce reaches the supervised-restart path."""
+    from emacsos_server import app as app_mod
+
+    next_started = threading.Event()
+    finish_next = threading.Event()
+    closed = threading.Event()
+
+    class Clock:
+        expired = False
+
+        def monotonic(self):
+            return stdlib_time.monotonic() + (120 if self.expired else 0)
+
+        @staticmethod
+        def time():
+            return stdlib_time.time()
+
+    clock = Clock()
+
+    class RestartRequired(BaseException):
+        pass
+
+    def restart_required():
+        assert app_mod._STREAM_LOCK.locked()
+        finish_next.set()
+        raise RestartRequired
+
+    def gen():
+        try:
+            next_started.set()
+            finish_next.wait()
+            yield ("messages", (_FakeAIMessageChunk(content="late"), {}))
+        finally:
+            closed.set()
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+        async def is_disconnected(self):
+            return False
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)
+        turn = asyncio.create_task(anext(stream))
+        assert await asyncio.to_thread(next_started.wait, 2)
+        clock.expired = True
+        error_event = await turn
+        assert b'"type": "error"' in error_event
+        assert app_mod._STREAM_LOCK.locked()
+        with pytest.raises(RestartRequired):
+            await anext(stream)
+        assert not app_mod._STREAM_LOCK.locked()
+
+    try:
+        with patch("emacsos_server.app._start_stream_iter",
+                   side_effect=lambda m, p, *a: gen()), \
+             patch.object(app_mod, "_STREAM_LOCK", asyncio.Lock()), \
+             patch.object(app_mod, "time", clock), \
+             patch.object(app_mod, "DISCONNECT_POLL_SECONDS", 0.005), \
+             patch.object(app_mod, "HEARTBEAT_SECONDS", 1000.0), \
+             patch.object(app_mod, "RUNAWAY_SECONDS", 60.0), \
+             patch.object(app_mod, "TEARDOWN_GRACE_SECONDS", 0.1), \
+             patch("emacsos_server.app._exit_for_wedged_worker",
+                   side_effect=restart_required), \
+             patch("emacsos_server.app.migrate_legacy_config",
+                   return_value="unchanged: no legacy EmacsOS config symbols"):
+            asyncio.run(scenario())
+    finally:
+        finish_next.set()
+    assert closed.wait(2), "pump worker did not exit after the test released it"
+
+
+def test_disconnect_wedged_worker_uses_short_teardown_grace():
+    """Disconnect restart does not wait out the remaining runaway budget."""
+    from emacsos_server import app as app_mod
+
+    next_started = threading.Event()
+    finish_next = threading.Event()
+
+    class RestartRequired(BaseException):
+        pass
+
+    def restart_required():
+        assert app_mod._STREAM_LOCK.locked()
+        finish_next.set()
+        raise RestartRequired
+
+    def gen():
+        next_started.set()
+        finish_next.wait()
+        yield ("messages", (_FakeAIMessageChunk(content="late"), {}))
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+        calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 1
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)
+        with pytest.raises(RestartRequired):
+            await anext(stream)
+
+    try:
+        with patch("emacsos_server.app._start_stream_iter",
+                   side_effect=lambda m, p, *a: gen()), \
+             patch.object(app_mod, "_STREAM_LOCK", asyncio.Lock()), \
+             patch.object(app_mod, "DISCONNECT_POLL_SECONDS", 0.005), \
+             patch.object(app_mod, "RUNAWAY_SECONDS", 60.0), \
+             patch.object(app_mod, "TEARDOWN_GRACE_SECONDS", 0.1), \
+             patch("emacsos_server.app._exit_for_wedged_worker",
+                   side_effect=restart_required), \
+             patch("emacsos_server.app.migrate_legacy_config",
+                   return_value="unchanged: no legacy EmacsOS config symbols"):
+            asyncio.run(asyncio.wait_for(scenario(), 1))
+    finally:
+        finish_next.set()
+    assert next_started.is_set()

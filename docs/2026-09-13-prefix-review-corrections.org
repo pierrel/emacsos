@@ -1,0 +1,44 @@
+#+title: Prefix release review corrections
+#+date: 2026-09-13
+
+* Lineage
+
+This amendment changes the late implementation details of
+=2026-09-12-prefix-keybindings-and-emacsos-namespace.org= and corrects the
+precedence claims in =2026-09-09-global-assist-thread-navigation.org= and
+=2026-09-09-conversation-interface-amendment.org=.  The September 12 document
+remains the design record for the namespace and command surface.
+
+* Historical supersessions
+
+This supersedes only =2026-09-09-global-assist-thread-navigation.org='s
+=Correction= section and =2026-09-09-conversation-interface-amendment.org='s
+=Global canonical navigation= section where they state that the global
+=C-c C-a n/t= leaves do not alter shared conversation-action precedence.
+Conversation buffers instead override the whole =C-c C-a= prefix locally and
+inherit the global map, so their contextual actions win while =C-c e= and the
+global =n/t= leaves remain available.  The September 12 =Commands= and =Upgrade
+boundary= sections remain true.  The server worker deadline, restore-ref
+validation, and fresh-install cleanup below supplement rather than replace those
+sections.
+
+* Corrections
+
+- The shared server operation lock now gives rollback, clear, and forget the
+  same finite worker deadline as chat setup.  A worker that cannot quiesce exits
+  for supervised restart before the lock can admit overlapping state changes.
+- The repository restore lookup accepts only a 7--40-character lowercase
+  hexadecimal SHA before repository initialization or a Git command.  The
+  public restore command still strips surrounding whitespace first; history
+  emits exactly seven characters.
+- Conversation buffers install a buffer-local override for the global EmacsOS
+  minor-mode map.  Their complete =C-c C-a= action map therefore wins locally,
+  while =C-c e= and the global =C-c C-a n/t= compatibility leaves remain
+  available.
+- A failed fresh OpenRC install removes the newly installed keyboard transaction
+  helper and removes its empty, root-owned state directory after the UI is
+  proven quiescent.  An unsafe or nonempty state directory is retained rather
+  than deleted recursively.
+
+The proposed =#;= migration special case was not added.  GNU Emacs 30.2 rejects
+=#;= as invalid reader syntax; it is not an Emacs Lisp sexp comment.

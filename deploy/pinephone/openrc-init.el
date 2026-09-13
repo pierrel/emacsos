@@ -157,13 +157,13 @@ keyboard, so the platform restores its maximized layout after
 every agent-config load."
   (set-frame-parameter nil 'fullscreen 'maximized))
 
-(defvar emacos-agent-config-applied-function
+(defvar emacsos-agent-config-applied-function
   (symbol-function 'emacsos-pinephone-enforce-frame-layout)
   "Platform function run after each persistent agent-config load attempt.")
 
 (defun emacsos-pinephone-load-agent-config (file)
   "Attempt to load agent config FILE, then restore the PinePhone layout."
-  (let ((finalizer emacos-agent-config-applied-function))
+  (let ((finalizer emacsos-agent-config-applied-function))
     (unwind-protect
         (when (file-readable-p file)
           (condition-case err
@@ -175,11 +175,11 @@ every agent-config load."
         (t (message "emacsos: platform config finalizer failed: %s"
                     (error-message-string err))))
       (condition-case err
-          (setq emacos-agent-config-applied-function finalizer)
+          (setq emacsos-agent-config-applied-function finalizer)
         (t (message "emacsos: platform finalizer restore failed: %s"
                     (error-message-string err)))))))
 
-(defvar emacos-call--call-owner nil
+(defvar emacsos-call--call-owner nil
   "Unique owner of the tracked call or pathless recovery state.")
 
 (defun emacsos-pinephone-sms-result (status success)
@@ -215,7 +215,7 @@ every agent-config load."
           (condition-case err
               (funcall completion result)
             (error
-             (message "emacos-sms: completion failed: %s"
+             (message "emacsos-sms: completion failed: %s"
                       (error-message-string err))))
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))))))
@@ -326,15 +326,15 @@ every agent-config load."
               (condition-case err
                   (funcall completion result)
                 (error
-                 (message "emacos-call: completion failed: %s"
+                 (message "emacsos-call: completion failed: %s"
                           (error-message-string err))))
             (if success
                 (message "%s" result)
               (when (memq operation '(dial answer))
-                (emacos-call--audio nil))
+                (emacsos-call--audio nil))
               (when (eq operation 'answer)
-                (emacos-call--dismiss))
-              (message "emacos-call: %s" result)))
+                (emacsos-call--dismiss))
+              (message "emacsos-call: %s" result)))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (defun emacsos-pinephone-call-operation
@@ -381,7 +381,7 @@ every agent-config load."
     (let ((buffer (process-buffer process)))
       (unwind-protect
           (unless (zerop (process-exit-status process))
-            (message "emacos-call: audio routing failed: %s"
+            (message "emacsos-call: audio routing failed: %s"
                      (if (buffer-live-p buffer)
                          (with-current-buffer buffer
                            (string-trim (buffer-string)))
@@ -469,7 +469,7 @@ every agent-config load."
   "Return non-nil when PID is the expected isolated keyboard process."
   (let* ((default-directory "/")
          (attributes (and pid (process-attributes (string-to-number pid)))))
-    (and (equal (alist-get 'comm attributes) "wvkbd-emacos")
+    (and (equal (alist-get 'comm attributes) "wvkbd-emacsos")
          (equal (alist-get 'user attributes) "emacsos-lab"))))
 
 (defun emacsos-pinephone-find-wvkbd-pid ()
@@ -478,7 +478,7 @@ every agent-config load."
     (with-temp-buffer
       (when (zerop (call-process "/usr/bin/pgrep" nil t nil
                                 "-u" "emacsos-lab" "-f"
-                                "^/usr/local/bin/wvkbd-emacos --mod-swipe -H 300 -L 300$"))
+                                "^/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300$"))
         (let ((pids (split-string (buffer-string) "\n" t)))
           (and (= (length pids) 1) (car pids)))))))
 
@@ -517,39 +517,39 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
               'mouse-face 'mode-line-highlight
               'help-echo "Tap to hide or show the keyboard"))
 
-(setq emacos-platform-mode-line-segments
+(setq emacsos-platform-mode-line-segments
       '((:eval (emacsos-pinephone-keyboard-mode-line-string))))
 
 (when (display-graphic-p)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
-  (setq emacos-use-internal-keyboard nil
-        emacos-control-window-percent 35
-        emacos-initial-buffer-function #'emacos--chat-buffer
-        emacos-net-cell-connection emacsos-pinephone-cell-connection
-        emacos-net-command-function #'emacsos-pinephone-network-command
-        emacos-chat-auth-file
+  (setq emacsos-use-internal-keyboard nil
+        emacsos-control-window-percent 35
+        emacsos-initial-buffer-function #'emacsos--chat-buffer
+        emacsos-net-cell-connection emacsos-pinephone-cell-connection
+        emacsos-net-command-function #'emacsos-pinephone-network-command
+        emacsos-chat-auth-file
         "/var/lib/emacsos-lab/.emacs.d/server/emacsos-openrc"
-        emacos-call-operation-function #'emacsos-pinephone-call-operation
-        emacos-call-audio-function #'emacsos-pinephone-call-audio
-        emacos-call-wake-function #'emacsos-pinephone-wake-display
-        emacos-sms-operation-function #'emacsos-pinephone-sms-operation
-        emacos-call-control-gap-lines 1)
+        emacsos-call-operation-function #'emacsos-pinephone-call-operation
+        emacsos-call-audio-function #'emacsos-pinephone-call-audio
+        emacsos-call-wake-function #'emacsos-pinephone-wake-display
+        emacsos-sms-operation-function #'emacsos-pinephone-sms-operation
+        emacsos-call-control-gap-lines 1)
   (let ((url-file "/etc/emacsos-openrc/chat-url"))
-    (setq emacos-chat-server-url
+    (setq emacsos-chat-server-url
           (if (file-readable-p url-file)
               (with-temp-buffer
                 (insert-file-contents url-file)
                 (string-trim (buffer-string)))
             "http://localhost:8765/chat")))
   (let ((url-file "/etc/emacsos-openrc/assist-web-url"))
-    (setq emacos-assist-web-api-url
+    (setq emacsos-assist-web-api-url
           (if (file-readable-p url-file)
               (with-temp-buffer
                 (insert-file-contents url-file)
                 (string-trim (buffer-string)))
             "https://assist.invalid/api/v1/phone")))
-  (setq emacos-assist-web-ca-file "/etc/emacsos-openrc/assist-web-ca.pem")
-  (defvar emacos-agent-file "/var/lib/emacsos-lab/.emacs.d/emacsos/agent.el"
+  (setq emacsos-assist-web-ca-file "/etc/emacsos-openrc/assist-web-ca.pem")
+  (defvar emacsos-agent-file "/var/lib/emacsos-lab/.emacs.d/emacsos/agent.el"
     "Persistent agent configuration applied by Assist.")
   (require 'server)
   (setq server-use-tcp t
@@ -559,8 +559,11 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
   (server-start)
   (set-face-attribute 'default nil :height 140)
   (require 'os)
+  (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)
+  (define-key emacsos-command-map (kbd "b") #'emacsos-firefox-start)
+  (define-key emacsos-command-map (kbd "a") #'emacsos-android-start)
   (load "/usr/local/share/emacsos-openrc/dtach-shell-init.el" nil nil t)
-  (emacsos-pinephone-load-agent-config emacos-agent-file))
+  (emacsos-pinephone-load-agent-config emacsos-agent-file))
 
 (provide 'emacsos-pinephone-openrc-init)
 ;;; openrc-init.el ends here

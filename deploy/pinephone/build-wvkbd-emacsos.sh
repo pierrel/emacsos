@@ -52,7 +52,7 @@ mkdir -p -- "$output_dir"
 [ -d "$output_dir" ] && [ ! -L "$output_dir" ] ||
     fail 'WVKBD_BUILD_DIR must be a directory, not a symlink'
 output_dir=$(CDPATH='' cd -- "$output_dir" && pwd)
-output=$output_dir/wvkbd-emacos
+output=$output_dir/wvkbd-emacsos
 benchmark=$output_dir/bench-glide
 notice=$output_dir/wordninja.txt
 archive=$(mktemp "$output_dir/.wvkbd-archive.XXXXXX")
@@ -87,13 +87,13 @@ docker run --rm --platform linux/arm64 \
             scdoc=1.11.3-r0 >/dev/null
         mkdir /build
         tar -xf /source.tar -C /build
-        make -C /build BIN=wvkbd-emacos LAYOUT=mobintl
+        make -C /build BIN=wvkbd-emacsos LAYOUT=mobintl
         make -C /build tests/bench-glide
-        temporary=$(mktemp /out/.wvkbd-emacos.XXXXXX)
+        temporary=$(mktemp /out/.wvkbd-emacsos.XXXXXX)
         trap '\''rm -f -- "$temporary"'\'' EXIT HUP INT TERM
         install -o "$HOST_UID" -g "$HOST_GID" -m 0755 \
-            /build/wvkbd-emacos "$temporary"
-        mv -f -- "$temporary" /out/wvkbd-emacos
+            /build/wvkbd-emacsos "$temporary"
+        mv -f -- "$temporary" /out/wvkbd-emacsos
         install -o "$HOST_UID" -g "$HOST_GID" -m 0755 \
             /build/tests/bench-glide /out/bench-glide
         install -o "$HOST_UID" -g "$HOST_GID" -m 0644 \

@@ -5,7 +5,7 @@ set -eu
 umask 077
 
 phone_host=${PINEPHONE_HOST:?set PINEPHONE_HOST to the SSH profile}
-artifact=${1:?pass the wvkbd-emacos artifact}
+artifact=${1:?pass the wvkbd-emacsos artifact}
 [ "$#" -eq 1 ] || { printf '%s\n' 'expected one artifact path' >&2; exit 1; }
 notice=$(dirname -- "$artifact")/wordninja.txt
 [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -x "$artifact" ] || {
@@ -35,7 +35,7 @@ expected=${expected%% *}
 notice_expected=$(sha256sum "$notice")
 notice_expected=${notice_expected%% *}
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-root_helper=$repo_dir/deploy/pinephone/install-wvkbd-emacos-root
+root_helper=$repo_dir/deploy/pinephone/install-wvkbd-emacsos-root
 stage=
 notice_stage=
 
@@ -55,9 +55,9 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 stage=$(ssh -T "$@" "$phone_host" \
-    'umask 077; install -d -m 0700 /home/user/.cache; mktemp /home/user/.cache/wvkbd-emacos.XXXXXX')
+    'umask 077; install -d -m 0700 /home/user/.cache; mktemp /home/user/.cache/wvkbd-emacsos.XXXXXX')
 printf '%s\n' "$stage" |
-    grep -Eq '^/home/user/\.cache/wvkbd-emacos\.[A-Za-z0-9]{6}$' || {
+    grep -Eq '^/home/user/\.cache/wvkbd-emacsos\.[A-Za-z0-9]{6}$' || {
     printf '%s\n' 'phone returned an unsafe staging path' >&2
     exit 1
 }
@@ -76,5 +76,5 @@ ssh -T "$@" "$phone_host" \
     "exec sudo -n /usr/bin/env SUDO_USER=user WVKBD_STAGE='$stage' WVKBD_SHA256='$expected' WVKBD_NOTICE_STAGE='$notice_stage' WVKBD_NOTICE_SHA256='$notice_expected' /bin/sh" \
     <"$root_helper"
 
-printf 'Installed %s as /usr/local/bin/wvkbd-emacos; stock /usr/bin/wvkbd-mobintl is unchanged.\n' \
+printf 'Installed %s as /usr/local/bin/wvkbd-emacsos; stock /usr/bin/wvkbd-mobintl is unchanged.\n' \
     "$expected"

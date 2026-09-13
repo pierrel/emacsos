@@ -10,7 +10,7 @@ to occur before dispatch are unreachable; timeout and other ambiguous
 post-dispatch failures are apply errors because the saved-file state is unknown.
 
 The phone owns the agent.el path: the apply expr reads
-`emacos-agent-file` (a defvar the boot snippet sets) with a hardcoded
+`emacsos-agent-file` (a defvar the boot snippet sets) with a hardcoded
 fallback, so the server constant and the boot path can't silently
 diverge.  Original design: docs/2026-05-21-config-apply-rollback.org.
 PinePhone finalizer: docs/2026-09-03-pinephone-assist-parity.org.
@@ -38,7 +38,7 @@ _CONFIG = Config.from_env()
 # doesn't import channel (which imports apply) — see the cycle note.
 APPLY_TIMEOUT_SECONDS = 15.0
 
-# Default phone path, matched by the boot snippet's `emacos-agent-file`
+# Default phone path, matched by the boot snippet's `emacsos-agent-file`
 # defvar (deploy/emacsos-init.el.in).  The apply expr prefers the
 # phone-side defvar and only falls back to this literal.
 DEFAULT_PHONE_AGENT_FILE = "~/.emacs.d/emacsos/agent.el"
@@ -64,7 +64,7 @@ def _elisp_string(s: str) -> str:
 def _build_apply_expr(content: str) -> str:
     """Elisp that atomically writes the agent.el CONTENT to the phone's
     agent file, loads it, and runs the phone's optional
-    `emacos-agent-config-applied-function`, returning `"ok: loaded"`,
+    `emacsos-agent-config-applied-function`, returning `"ok: loaded"`,
     `"load-error: <...>"`, or `"apply-error: <...>"`.  CONTENT is the full
     candidate file (header carrying the `lexical-binding` cookie + body +
     provide) produced by `config_repo.render`.  A confirmed-and-recorded
@@ -74,12 +74,12 @@ def _build_apply_expr(content: str) -> str:
     security boundary."""
     content_lit = _elisp_string(content)
     return f"""(condition-case err
-    (let* ((f (expand-file-name (or (bound-and-true-p emacos-agent-file)
+    (let* ((f (expand-file-name (or (bound-and-true-p emacsos-agent-file)
                                     {_elisp_string(DEFAULT_PHONE_AGENT_FILE)})))
            (content {content_lit})
            (raw-finalizer
-            (and (boundp 'emacos-agent-config-applied-function)
-                 emacos-agent-config-applied-function))
+            (and (boundp 'emacsos-agent-config-applied-function)
+                 emacsos-agent-config-applied-function))
            (finalizer
             (if (symbolp raw-finalizer)
                 (indirect-function raw-finalizer)
@@ -99,7 +99,7 @@ def _build_apply_expr(content: str) -> str:
               (funcall finalizer)
             (t (setq finalizer-failure caught))))
         (condition-case caught
-            (setq emacos-agent-config-applied-function finalizer)
+            (setq emacsos-agent-config-applied-function finalizer)
           (t
            (unless finalizer-failure
              (setq finalizer-failure caught)))))

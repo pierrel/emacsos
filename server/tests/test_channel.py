@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from emacsos_server.apply import ApplyResult
 from emacsos_server.channel import (
     EMACS_TOOLS,
@@ -16,6 +18,8 @@ from emacsos_server.channel import (
     config_history,
     eval_elisp,
     get_config,
+    migrate_legacy_config,
+    revert_head_and_apply,
     revert_config,
 )
 from emacsos_server.config_repo import ConfigRepo, ConfigRepoError, render
@@ -51,7 +55,7 @@ def test_eval_elisp_returns_emacsclient_stdout_on_success():
 
 def test_eval_elisp_log_omits_source(caplog):
     caplog.set_level("INFO")
-    source = '(emacos-call "+14155550123")'
+    source = '(emacsos-call "+14155550123")'
     with patch("emacsos_server.channel.phone_mod.call_emacs",
                return_value=(True, "ok")):
         _invoke(source)
@@ -307,6 +311,130 @@ def test_apply_config_missing_context_is_server_bug_error(tmp_path):
     assert out.startswith("error: phone context not set")
 
 
+def test_release_migrates_persisted_legacy_config_through_apply_and_commit(tmp_path):
+    """A release migrates ConfigRepo.current(), never the phone path directly."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    legacy = '(emacos-call "+1")\n(message "emacos-call stays text")'
+    repo.write_and_commit(legacy, "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")) as apply:
+        out = migrate_legacy_config(_CTX)
+    assert out.startswith("applied: migrate EmacsOS Lisp symbols")
+    assert repo.current().body == (
+        '(emacsos-call "+1")\n(message "emacos-call stays text")')
+    assert apply.call_args.args[1] == render(repo.current().body)
+    assert not repo.namespace_migration_reconciliation_pending()
+
+
+def test_undo_skips_canonical_equivalent_namespace_migration(tmp_path):
+    """Release migration is not a user-visible config for undo purposes."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit("(setq x 1)", "first config")
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    repo.write_and_commit('(emacsos-call "+1")', "migrate EmacsOS Lisp symbols")
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")) as apply:
+        status, detail = revert_head_and_apply(_CTX, repo)
+    assert (status, detail) == ("applied", "ok: loaded")
+    assert repo.current().body == "(setq x 1)"
+    assert apply.call_args.args[1] == render("(setq x 1)")
+
+
+def test_release_leaves_legacy_text_without_symbol_tokens_untouched(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    body = '(message "emacos-call is historical text")\n; emacos-call comment'
+    repo.write_and_commit(body, "legacy text")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply:
+        out = migrate_legacy_config(_CTX)
+    assert out == "unchanged: no legacy EmacsOS config symbols"
+    assert repo.current().body == body
+    apply.assert_not_called()
+
+
+def test_release_rejects_incomplete_legacy_config_before_apply(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    legacy = '(emacos-call "+1"'
+    repo.write_and_commit(legacy, "incomplete legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone") as apply:
+        out = migrate_legacy_config(_CTX)
+    assert out.startswith("error: namespace migration could not read complete config:")
+    assert repo.current().body == legacy
+    apply.assert_not_called()
+
+
+def test_release_stops_namespace_migration_after_unconfirmed_apply(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    legacy = "(emacos-call \"+1\")"
+    repo.write_and_commit(legacy, "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("apply_error", "timed out")):
+        out = migrate_legacy_config(_CTX)
+    assert out.startswith("error: namespace migration requires reconciliation:")
+    assert repo.current().body == legacy
+    assert repo.namespace_migration_reconciliation_pending()
+
+
+def test_release_clean_second_turn_reconciles_broken_migration(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "load failed")) as apply:
+        first = migrate_legacy_config(_CTX)
+    assert first.startswith("error: namespace migration requires reconciliation:")
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert repo.namespace_migration_reconciliation_pending()
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply_again:
+        second = migrate_legacy_config(_CTX)
+    assert second.startswith("applied: reconcile EmacsOS Lisp symbols")
+    assert apply.call_count == 1
+    assert apply_again.call_count == 1
+    assert not repo.namespace_migration_reconciliation_pending()
+
+
+def test_release_clean_second_turn_reconciles_unrecorded_migration(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")), \
+         patch.object(repo, "write_and_commit", side_effect=OSError("disk full")):
+        first = migrate_legacy_config(_CTX)
+    assert first.startswith("error: namespace migration requires reconciliation:")
+    assert repo.namespace_migration_reconciliation_pending()
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply:
+        second = migrate_legacy_config(_CTX)
+    assert second.startswith("applied: reconcile EmacsOS Lisp symbols")
+    assert apply.call_count == 1
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert not repo.namespace_migration_reconciliation_pending()
+
+
+def test_release_keeps_marker_when_reconciliation_retry_fails(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "load failed")):
+        first = migrate_legacy_config(_CTX)
+    assert first.startswith("error: namespace migration requires reconciliation:")
+    with patch("emacsos_server.channel.ConfigRepo", lambda _dir: repo), \
+         patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "still broken")) as apply:
+        second = migrate_legacy_config(_CTX)
+    assert second.startswith("error: namespace migration requires reconciliation:")
+    assert apply.call_count == 1
+    assert repo.namespace_migration_reconciliation_pending()
+
+
 # --- get_config --------------------------------------------------------------
 
 def _committed(tmp_path, body=None, summary="s"):
@@ -404,6 +532,37 @@ def test_revert_config_undo_last_reverts_and_applies(tmp_path):
     assert repo.current().body == ""  # back to the empty scaffold
 
 
+def test_revert_config_undo_migrates_legacy_historical_body(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit('(emacos-call "+1")', "legacy")
+    repo.write_and_commit('(emacsos-call "+2")', "current")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": ""}, config=cfg)
+    assert out.startswith("reverted:")
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert apply.call_args.args[1] == render('(emacsos-call "+1")')
+
+
+@pytest.mark.parametrize("broken", ["(setq x 1", '\"emacos-call'])
+def test_revert_config_undo_restores_recorded_incomplete_load_error(tmp_path, broken):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit(broken, "recorded load error")
+    repo.write_and_commit("(setq x 2)", "correction")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "read error")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": ""}, config=cfg)
+    assert out.startswith("reverted-but-broken:")
+    assert repo.current().body == broken
+    assert apply.call_args.args[1] == render(broken)
+
+
 def test_revert_config_noop_when_nothing_applied(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.ensure()  # scaffold only
@@ -446,6 +605,37 @@ def test_revert_config_restore_to_version_reapplies_old_body(tmp_path):
     assert out.startswith("restored:")
     assert repo.current().body == "(setq x 1)"  # rolled forward to v1
     assert m.call_args.args[1] == render("(setq x 1)")  # phone got rendered v1
+
+
+def test_revert_config_restore_migrates_legacy_historical_body(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    sha1 = repo.write_and_commit('(emacos-call "+1")', "legacy")
+    repo.write_and_commit('(emacsos-call "+2")', "current")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
+    assert out.startswith("restored:")
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert apply.call_args.args[1] == render('(emacsos-call "+1")')
+
+
+@pytest.mark.parametrize("body", ["(setq x 1", '\"emacos-call'])
+def test_revert_config_restore_recorded_incomplete_load_error(tmp_path, body):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    broken = repo.write_and_commit(body, "recorded load error")
+    repo.write_and_commit("(setq x 2)", "correction")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "read error")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": broken[:7]}, config=cfg)
+    assert out.startswith("restored-but-broken:")
+    assert repo.current().body == body
+    assert apply.call_args.args[1] == render(body)
 
 
 def test_revert_config_unknown_target_errors_without_applying(tmp_path):

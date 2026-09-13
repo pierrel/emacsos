@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; This is deliberately separate from emacos-assist.el.  A .assist file is a
+;; This is deliberately separate from emacsos-assist.el.  A .assist file is a
 ;; phone-local conversation owned by emacsos-server; this mode is a client of
 ;; Assist Web's canonical thread/run state.
 
@@ -17,7 +17,7 @@
 (require 'url-http)
 (require 'url-util)
 
-(declare-function emacos--render-page "os")
+(declare-function emacsos--render-page "os")
 (defvar url-http-content-type)
 (defvar url-http-end-of-headers)
 (defvar url-http-open-connections)
@@ -25,118 +25,118 @@
 (defvar url-http-attempt-keepalives)
 (defvar gnutls-trustfiles)
 
-(defgroup emacos-assist-web nil
+(defgroup emacsos-assist-web nil
   "Assist Web thread client for EmacsOS."
   :group 'emacsos)
 
-(defcustom emacos-assist-web-api-url "https://assist.invalid/api/v1/phone"
+(defcustom emacsos-assist-web-api-url "https://assist.invalid/api/v1/phone"
   "Base URL of the authenticated Assist Web phone API."
   :type 'string
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-token-file
+(defcustom emacsos-assist-web-token-file
   (expand-file-name "~/.config/emacsos/assist-web-token")
   "0600 file holding the Assist Web bearer token."
   :type 'file
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-ca-file nil
+(defcustom emacsos-assist-web-ca-file nil
   "Optional CA certificate trusted only for Assist Web requests."
   :type '(choice (const :tag "System trust only" nil) file)
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-cache-directory
+(defcustom emacsos-assist-web-cache-directory
   (expand-file-name "~/.cache/emacsos/assist-web")
   "Private on-phone cache for Assist Web catalogs, snapshots, and drafts."
   :type 'directory
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-max-cache-bytes (* 512 1024)
+(defcustom emacsos-assist-web-max-cache-bytes (* 512 1024)
   "Maximum encoded size of one private Assist Web cache record."
   :type 'integer
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-max-response-bytes (* 1024 1024)
+(defcustom emacsos-assist-web-max-response-bytes (* 1024 1024)
   "Maximum buffered JSON response accepted from Assist Web."
   :type 'integer
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-max-event-bytes (* 64 1024)
+(defcustom emacsos-assist-web-max-event-bytes (* 64 1024)
   "Maximum size of one complete or unfinished SSE event from Assist Web."
   :type 'integer
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-max-header-bytes (* 64 1024)
+(defcustom emacsos-assist-web-max-header-bytes (* 64 1024)
   "Maximum HTTP response-header size accepted from Assist Web."
   :type 'integer
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-request-timeout 30
+(defcustom emacsos-assist-web-request-timeout 30
   "Seconds allowed for one bounded Assist Web JSON request."
   :type 'integer
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defcustom emacos-assist-web-max-concurrent-requests 4
+(defcustom emacsos-assist-web-max-concurrent-requests 4
   "Maximum simultaneous bounded Assist Web JSON requests."
   :type 'integer
-  :group 'emacos-assist-web)
+  :group 'emacsos-assist-web)
 
-(defconst emacos-assist-web--prompt "\n> ")
-(defconst emacos-assist-web--catalog-file "threads.json")
-(defconst emacos-assist-web--id-regexp "\\`[A-Za-z0-9][A-Za-z0-9._-]\\{0,127\\}\\'")
-(defconst emacos-assist-web--record-id-regexp
+(defconst emacsos-assist-web--prompt "\n> ")
+(defconst emacsos-assist-web--catalog-file "threads.json")
+(defconst emacsos-assist-web--id-regexp "\\`[A-Za-z0-9][A-Za-z0-9._-]\\{0,127\\}\\'")
+(defconst emacsos-assist-web--record-id-regexp
   "\\`[A-Za-z0-9_-]\\{1,242\\}\\'")
-(defconst emacos-assist-web--idempotency-regexp "\\`emacsos-[0-9a-f]\\{32\\}\\'")
-(defvar emacos-assist-web--catalog nil)
-(defvar emacos-assist-web--catalog-loaded-p nil)
-(defvar emacos-assist-web--catalog-stale nil)
-(defvar emacos-assist-web--catalog-generation 0)
-(defvar emacos-assist-web--requests nil)
-(defvar-local emacos-assist-web--thread-id nil)
-(defvar-local emacos-assist-web--draft-repository nil)
-(defvar-local emacos-assist-web--draft-harness nil)
-(defvar-local emacos-assist-web--run-id nil)
-(defvar-local emacos-assist-web--pending-key nil)
-(defvar-local emacos-assist-web--in-flight nil)
-(defvar-local emacos-assist-web--snapshot nil)
-(defvar-local emacos-assist-web--stream-process nil)
-(defvar-local emacos-assist-web--stream-response nil)
-(defvar-local emacos-assist-web--stream-body-marker nil)
-(defvar-local emacos-assist-web--stream-scan-marker nil)
-(defvar-local emacos-assist-web--stream-unconsumed-bytes nil)
-(defvar-local emacos-assist-web--status-start nil)
-(defvar-local emacos-assist-web--status-end nil)
-(defvar-local emacos-assist-web--stream-status nil)
-(defvar-local emacos-assist-web--submitted-text nil)
-(defvar-local emacos-assist-web--draft-id nil)
-(defvar-local emacos-assist-web--draft-save-timer nil)
-(defvar-local emacos-assist-web--refresh-generation 0)
-(defvar-local emacos-assist-web--send-generation 0)
-(defvar-local emacos-assist-web--stream-generation 0)
-(defvar-local emacos-assist-web--stream-header-timer nil)
-(defvar-local emacos-assist-web--prompt-marker nil)
-(defvar-local emacos-assist-web--input-marker nil)
-(defvar-local emacos-assist-web--pending-accepted-p nil)
-(defvar-local emacos-assist-web--pending-rendered-p nil)
-(defvar-local emacos-assist-web--assistant-start nil)
-(defvar-local emacos-assist-web--assistant-end nil)
-(defvar-local emacos-assist-web--stream-attempt nil)
-(defvar-local emacos-assist-web--stream-index 0)
+(defconst emacsos-assist-web--idempotency-regexp "\\`emacsos-[0-9a-f]\\{32\\}\\'")
+(defvar emacsos-assist-web--catalog nil)
+(defvar emacsos-assist-web--catalog-loaded-p nil)
+(defvar emacsos-assist-web--catalog-stale nil)
+(defvar emacsos-assist-web--catalog-generation 0)
+(defvar emacsos-assist-web--requests nil)
+(defvar-local emacsos-assist-web--thread-id nil)
+(defvar-local emacsos-assist-web--draft-repository nil)
+(defvar-local emacsos-assist-web--draft-harness nil)
+(defvar-local emacsos-assist-web--run-id nil)
+(defvar-local emacsos-assist-web--pending-key nil)
+(defvar-local emacsos-assist-web--in-flight nil)
+(defvar-local emacsos-assist-web--snapshot nil)
+(defvar-local emacsos-assist-web--stream-process nil)
+(defvar-local emacsos-assist-web--stream-response nil)
+(defvar-local emacsos-assist-web--stream-body-marker nil)
+(defvar-local emacsos-assist-web--stream-scan-marker nil)
+(defvar-local emacsos-assist-web--stream-unconsumed-bytes nil)
+(defvar-local emacsos-assist-web--status-start nil)
+(defvar-local emacsos-assist-web--status-end nil)
+(defvar-local emacsos-assist-web--stream-status nil)
+(defvar-local emacsos-assist-web--submitted-text nil)
+(defvar-local emacsos-assist-web--draft-id nil)
+(defvar-local emacsos-assist-web--draft-save-timer nil)
+(defvar-local emacsos-assist-web--refresh-generation 0)
+(defvar-local emacsos-assist-web--send-generation 0)
+(defvar-local emacsos-assist-web--stream-generation 0)
+(defvar-local emacsos-assist-web--stream-header-timer nil)
+(defvar-local emacsos-assist-web--prompt-marker nil)
+(defvar-local emacsos-assist-web--input-marker nil)
+(defvar-local emacsos-assist-web--pending-accepted-p nil)
+(defvar-local emacsos-assist-web--pending-rendered-p nil)
+(defvar-local emacsos-assist-web--assistant-start nil)
+(defvar-local emacsos-assist-web--assistant-end nil)
+(defvar-local emacsos-assist-web--stream-attempt nil)
+(defvar-local emacsos-assist-web--stream-index 0)
 
-(defun emacos-assist-web--cache-path (&optional name)
+(defun emacsos-assist-web--cache-path (&optional name)
   "Return the cache path for NAME without changing the filesystem."
-  (expand-file-name (or name emacos-assist-web--catalog-file)
-                    emacos-assist-web-cache-directory))
+  (expand-file-name (or name emacsos-assist-web--catalog-file)
+                    emacsos-assist-web-cache-directory))
 
-(defun emacos-assist-web--write-cache (name value)
+(defun emacsos-assist-web--write-cache (name value)
   "Atomically save VALUE as JSON cache NAME."
   (let ((encoded (json-encode value))
-        (path (emacos-assist-web--cache-path name))
+        (path (emacsos-assist-web--cache-path name))
         (temporary nil))
-    (when (> (string-bytes encoded) emacos-assist-web-max-cache-bytes)
+    (when (> (string-bytes encoded) emacsos-assist-web-max-cache-bytes)
       (error "Assist Web cache record is too large"))
-    (make-directory emacos-assist-web-cache-directory t)
-    (set-file-modes emacos-assist-web-cache-directory #o700)
+    (make-directory emacsos-assist-web-cache-directory t)
+    (set-file-modes emacsos-assist-web-cache-directory #o700)
     (make-directory (file-name-directory path) t)
     (set-file-modes (file-name-directory path) #o700)
     (setq temporary (make-temp-file (concat path ".") nil ".tmp"))
@@ -150,19 +150,19 @@
       (when (and temporary (file-exists-p temporary))
         (delete-file temporary)))))
 
-(defun emacos-assist-web--try-write-cache (name value)
+(defun emacsos-assist-web--try-write-cache (name value)
   "Write cache NAME as VALUE, returning nil after a visible local failure."
   (condition-case error
-      (progn (emacos-assist-web--write-cache name value) t)
+      (progn (emacsos-assist-web--write-cache name value) t)
     (error
      (message "Assist Web could not update its local cache: %s"
               (error-message-string error))
      nil)))
 
-(defun emacos-assist-web--delete-cache (name)
+(defun emacsos-assist-web--delete-cache (name)
   "Delete cache NAME if present, reporting but containing local failures."
   (condition-case error
-      (let ((path (emacos-assist-web--cache-path name)))
+      (let ((path (emacsos-assist-web--cache-path name)))
         (when (file-exists-p path) (delete-file path))
         t)
     (error
@@ -170,48 +170,48 @@
               (error-message-string error))
      nil)))
 
-(defun emacos-assist-web--read-cache (name)
+(defun emacsos-assist-web--read-cache (name)
   "Return parsed JSON cache NAME, or nil when no valid cache exists."
   (condition-case nil
-      (let ((path (emacos-assist-web--cache-path name)))
+      (let ((path (emacsos-assist-web--cache-path name)))
         (when (and (file-readable-p path)
                    (<= (file-attribute-size (file-attributes path))
-                       emacos-assist-web-max-cache-bytes))
+                       emacsos-assist-web-max-cache-bytes))
           (with-temp-buffer
             (insert-file-contents path)
             (json-parse-buffer :object-type 'alist :array-type 'list
                                :null-object nil :false-object nil))))
     (error nil)))
 
-(defun emacos-assist-web--read-token ()
+(defun emacsos-assist-web--read-token ()
   "Return the bearer token without exposing it in a message or URL."
-  (when (file-readable-p emacos-assist-web-token-file)
+  (when (file-readable-p emacsos-assist-web-token-file)
     (with-temp-buffer
       ;; Two bytes beyond the token limit distinguish one optional final LF
       ;; from an oversized or multi-line file without an unbounded read.
-      (insert-file-contents-literally emacos-assist-web-token-file nil 0 514)
+      (insert-file-contents-literally emacsos-assist-web-token-file nil 0 514)
       (let ((contents (buffer-string)))
         (if (string-suffix-p "\n" contents)
             (substring contents 0 -1)
           contents)))))
 
-(defun emacos-assist-web--safe-token-p (token)
+(defun emacsos-assist-web--safe-token-p (token)
   "Return non-nil when TOKEN matches the provisioned bearer-token contract."
   (and (stringp token)
        (<= (length token) 512)
        (string-match-p "\\`[A-Za-z0-9._~-]+\\'" token)))
 
-(defun emacos-assist-web--endpoint (path)
+(defun emacsos-assist-web--endpoint (path)
   "Join API PATH without accepting a caller-controlled host."
-  (let ((parsed (url-generic-parse-url emacos-assist-web-api-url)))
+  (let ((parsed (url-generic-parse-url emacsos-assist-web-api-url)))
     (unless (and (equal (url-type parsed) "https")
                  (stringp (url-host parsed))
                  (not (string-empty-p (url-host parsed))))
       (error "Assist Web API URL must be HTTPS"))
-    (concat (replace-regexp-in-string "/+\\'" "" emacos-assist-web-api-url)
+    (concat (replace-regexp-in-string "/+\\'" "" emacsos-assist-web-api-url)
             "/" (replace-regexp-in-string "\\`/+" "" path))))
 
-(defun emacos-assist-web--trustfiles ()
+(defun emacsos-assist-web--trustfiles ()
   "Return GnuTLS trust files with the configured Assist CA first."
   (let* ((configured (and (boundp 'gnutls-trustfiles) gnutls-trustfiles))
          (system-trust (if (functionp configured)
@@ -219,15 +219,15 @@
                          configured)))
     (unless (listp system-trust)
       (error "GnuTLS trust configuration must return a list"))
-    (if (and emacos-assist-web-ca-file
-             (file-readable-p emacos-assist-web-ca-file))
-        (cons emacos-assist-web-ca-file
-              (cl-remove emacos-assist-web-ca-file system-trust :test #'equal))
+    (if (and emacsos-assist-web-ca-file
+             (file-readable-p emacsos-assist-web-ca-file))
+        (cons emacsos-assist-web-ca-file
+              (cl-remove emacsos-assist-web-ca-file system-trust :test #'equal))
       system-trust)))
 
-(defun emacos-assist-web--close-idle-origin-connections ()
+(defun emacsos-assist-web--close-idle-origin-connections ()
   "Close pooled URL connections for the configured Assist origin."
-  (let* ((parsed (url-generic-parse-url emacos-assist-web-api-url))
+  (let* ((parsed (url-generic-parse-url emacsos-assist-web-api-url))
          (key (cons (url-host parsed) (url-port parsed))))
     (when (hash-table-p url-http-open-connections)
       (dolist (process (copy-sequence
@@ -237,77 +237,77 @@
           (delete-process process)))
       (remhash key url-http-open-connections))))
 
-(defun emacos-assist-web--valid-id-p (value)
+(defun emacsos-assist-web--valid-id-p (value)
   "Return non-nil when VALUE is a safe opaque Assist Web identifier."
-  (and (stringp value) (string-match-p emacos-assist-web--id-regexp value)))
+  (and (stringp value) (string-match-p emacsos-assist-web--id-regexp value)))
 
-(defun emacos-assist-web--require-id (value)
+(defun emacsos-assist-web--require-id (value)
   "Return VALUE or reject it before it reaches an endpoint or cache path."
-  (unless (emacos-assist-web--valid-id-p value)
+  (unless (emacsos-assist-web--valid-id-p value)
     (error "Assist Web returned an invalid identifier"))
   value)
 
-(defun emacos-assist-web--require-record-id (value)
+(defun emacsos-assist-web--require-record-id (value)
   "Return a bounded opaque message or history-cursor VALUE."
   (unless (and (stringp value)
-               (string-match-p emacos-assist-web--record-id-regexp value))
+               (string-match-p emacsos-assist-web--record-id-regexp value))
     (error "Assist Web returned an invalid record identifier"))
   value)
 
-(defun emacos-assist-web--require-idempotency-key (value)
+(defun emacsos-assist-web--require-idempotency-key (value)
   "Return locally minted VALUE or reject it before HTTP header construction."
   (unless (and (stringp value)
-               (string-match-p emacos-assist-web--idempotency-regexp value))
+               (string-match-p emacsos-assist-web--idempotency-regexp value))
     (error "Assist Web retry identity is invalid"))
   value)
 
-(defun emacos-assist-web--object-p (value)
+(defun emacsos-assist-web--object-p (value)
   "Return non-nil when VALUE is an alist-shaped JSON object."
   (and (listp value) (seq-every-p #'consp value)))
 
-(defun emacos-assist-web--require-catalog (value)
+(defun emacsos-assist-web--require-catalog (value)
   "Return the validated thread/repository/harness catalog VALUE."
-  (unless (and (emacos-assist-web--object-p value)
+  (unless (and (emacsos-assist-web--object-p value)
                (assq 'threads value) (listp (alist-get 'threads value))
                (assq 'repositories value) (listp (alist-get 'repositories value))
                (assq 'harnesses value) (listp (alist-get 'harnesses value)))
     (error "Assist Web returned an invalid catalog"))
   (dolist (thread (alist-get 'threads value))
-    (unless (and (emacos-assist-web--object-p thread)
-                 (emacos-assist-web--valid-id-p (alist-get 'id thread))
+    (unless (and (emacsos-assist-web--object-p thread)
+                 (emacsos-assist-web--valid-id-p (alist-get 'id thread))
                  (stringp (alist-get 'description thread))
                  (stringp (alist-get 'search_description thread))
                  (stringp (alist-get 'repo_label thread))
                  (stringp (alist-get 'status thread)))
       (error "Assist Web returned an invalid thread catalog entry")))
   (dolist (repository (alist-get 'repositories value))
-    (unless (and (emacos-assist-web--object-p repository)
+    (unless (and (emacsos-assist-web--object-p repository)
                  (stringp (alist-get 'repo_key repository))
                  (not (string-empty-p (alist-get 'repo_key repository)))
                  (stringp (alist-get 'label repository)))
       (error "Assist Web returned an invalid repository choice")))
   (dolist (harness (alist-get 'harnesses value))
-    (unless (and (emacos-assist-web--object-p harness)
+    (unless (and (emacsos-assist-web--object-p harness)
                  (stringp (alist-get 'key harness))
                  (not (string-empty-p (alist-get 'key harness)))
                  (stringp (alist-get 'label harness)))
       (error "Assist Web returned an invalid harness choice")))
   value)
 
-(defun emacos-assist-web--require-snapshot (value &optional expected-thread-id)
+(defun emacsos-assist-web--require-snapshot (value &optional expected-thread-id)
   "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied."
-  (let ((thread (and (emacos-assist-web--object-p value)
+  (let ((thread (and (emacsos-assist-web--object-p value)
                      (alist-get 'thread value)))
-        (messages (and (emacos-assist-web--object-p value)
+        (messages (and (emacsos-assist-web--object-p value)
                        (alist-get 'messages value))))
-    (unless (and (emacos-assist-web--object-p thread)
+    (unless (and (emacsos-assist-web--object-p thread)
                  (assq 'messages value) (listp messages)
-                 (emacos-assist-web--valid-id-p (alist-get 'id thread))
+                 (emacsos-assist-web--valid-id-p (alist-get 'id thread))
                  (stringp (alist-get 'description thread))
                  (stringp (alist-get 'status thread))
                  (let ((remote-error (alist-get 'error thread)))
                    (or (null remote-error) (stringp remote-error)))
-                 (emacos-assist-web--object-p (alist-get 'workspace thread))
+                 (emacsos-assist-web--object-p (alist-get 'workspace thread))
                  (stringp (alist-get 'repo_label
                                      (alist-get 'workspace thread))))
       (error "Assist Web returned an invalid thread snapshot"))
@@ -316,10 +316,10 @@
       (error "Assist Web snapshot identity does not match request"))
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
-        (unless (and (emacos-assist-web--object-p message)
+        (unless (and (emacsos-assist-web--object-p message)
                      (condition-case nil
                          (progn
-                           (emacos-assist-web--require-record-id
+                           (emacsos-assist-web--require-record-id
                             (alist-get 'id message))
                            t)
                        (error nil))
@@ -332,12 +332,12 @@
             (error "Assist Web returned duplicate message identities"))
           (puthash identity t seen))))
     (when-let ((cursor (alist-get 'next_before value)))
-      (emacos-assist-web--require-record-id cursor))
+      (emacsos-assist-web--require-record-id cursor))
     value))
 
-(defun emacos-assist-web--require-history-page (page thread-id current before)
+(defun emacsos-assist-web--require-history-page (page thread-id current before)
   "Return PAGE after validating its identity and progress from CURRENT/BEFORE."
-  (emacos-assist-web--require-snapshot page thread-id)
+  (emacsos-assist-web--require-snapshot page thread-id)
   (let ((seen (make-hash-table :test #'equal))
         (next (alist-get 'next_before page)))
     (dolist (message (alist-get 'messages current))
@@ -353,7 +353,7 @@
       (error "Assist Web returned incomplete history progress")))
   page)
 
-(defun emacos-assist-web--run-store-unavailable-response-p (buffer)
+(defun emacsos-assist-web--run-store-unavailable-response-p (buffer)
   "Return non-nil only for Assist's bounded unavailable-Run-store response."
   (with-current-buffer buffer
     (let ((status (and (boundp 'url-http-response-status)
@@ -378,7 +378,7 @@
                         (equal (alist-get 'detail value) "run-store-unavailable"))))
              (error nil))))))
 
-(defun emacos-assist-web--response-json (buffer &optional allow-status)
+(defun emacsos-assist-web--response-json (buffer &optional allow-status)
   "Return BUFFER's JSON value or signal a useful local error.
 When ALLOW-STATUS is non-nil, require an integer HTTP status and a top-level
 object, retaining that status as `http_status' so the DELETE adapter can
@@ -389,7 +389,7 @@ distinguish its bounded structured 409 outcomes."
       (unless (and (integerp status)
                    (or (<= 200 status 299)
                        (and allow-status (= status 409))))
-        (if (emacos-assist-web--run-store-unavailable-response-p buffer)
+        (if (emacsos-assist-web--run-store-unavailable-response-p buffer)
             (error "Assist Web run store is unavailable")
           (error "Assist Web request failed (%s)" (or status "no response"))))
       (unless (and (stringp url-http-content-type)
@@ -408,7 +408,7 @@ distinguish its bounded structured 409 outcomes."
           (error "Assist Web returned an unexpected response body"))
         (if allow-status (cons (cons 'http_status status) value) value)))))
 
-(defun emacos-assist-web--guarded-filter (url-filter fail &optional streaming)
+(defun emacsos-assist-web--guarded-filter (url-filter fail &optional streaming)
   "Wrap URL-FILTER with raw HTTP bounds, invoking FAIL with a safe message.
 
 STREAMING permits an unbounded body only for a valid 200 SSE response; it
@@ -430,7 +430,7 @@ redirect or decompress them."
             (while (and (not failed) (string-match "\n\n" body start))
               (cl-incf stream-record-bytes
                        (string-bytes (substring body start (match-beginning 0))))
-              (if (> stream-record-bytes emacos-assist-web-max-event-bytes)
+              (if (> stream-record-bytes emacsos-assist-web-max-event-bytes)
                   (progn
                     (setq failed t)
                     (funcall fail process "Assist event is too large"))
@@ -442,7 +442,7 @@ redirect or decompress them."
                   (setq stream-delimiter-prefix "\n"
                         tail (substring tail 0 -1)))
                 (cl-incf stream-record-bytes (string-bytes tail))
-                (when (> stream-record-bytes emacos-assist-web-max-event-bytes)
+                (when (> stream-record-bytes emacsos-assist-web-max-event-bytes)
                   (setq failed t)
                   (funcall fail process "Assist event is too large")))))))
       (lambda (process bytes)
@@ -450,7 +450,7 @@ redirect or decompress them."
           (let ((body (and header-complete bytes)))
             (setq received (+ received (string-bytes bytes)))
             (when (and bounded-body
-                       (> received emacos-assist-web-max-response-bytes))
+                       (> received emacsos-assist-web-max-response-bytes))
               (setq failed t)
               (funcall fail process "Assist Web response is too large"))
             (unless (or failed header-complete)
@@ -458,13 +458,13 @@ redirect or decompress them."
               (let ((header-end (string-match "\r?\n\r?\n" header)))
                 (cond
                  ((and (not header-end)
-                       (> (string-bytes header) emacos-assist-web-max-header-bytes))
+                       (> (string-bytes header) emacsos-assist-web-max-header-bytes))
                   (setq failed t)
                   (funcall fail process "Assist Web response headers are too large"))
                  (header-end
                   (let ((headers-only (substring header 0 (match-end 0))))
                     (if (> (string-bytes headers-only)
-                           emacos-assist-web-max-header-bytes)
+                           emacsos-assist-web-max-header-bytes)
                         (progn
                           (setq failed t)
                           (funcall fail process "Assist Web response headers are too large"))
@@ -494,7 +494,7 @@ redirect or decompress them."
                           (setq position (match-end 0))))
                     (setq header nil)
                     (when (and (not failed) bounded-body
-                               (> received emacos-assist-web-max-response-bytes))
+                               (> received emacsos-assist-web-max-response-bytes))
                       (setq failed t)
                       (funcall fail process "Assist Web response is too large"))))))))
             (when (and (not failed) streaming header-complete (not bounded-body))
@@ -502,7 +502,7 @@ redirect or decompress them."
             (when (and (not failed) (functionp url-filter))
               (funcall url-filter process bytes))))))))
 
-(defun emacos-assist-web--request (method path payload callback &optional headers allow-status)
+(defun emacsos-assist-web--request (method path payload callback &optional headers allow-status)
   "Send METHOD to PATH with optional JSON PAYLOAD and HEADERS.
 
 Invoke CALLBACK with (VALUE ERROR).  Report network and parsing failures as
@@ -510,14 +510,14 @@ ERROR rather than raising them from url-http's asynchronous callback.  Pass
 ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
   (let (token token-error)
     (condition-case error
-        (setq token (emacos-assist-web--read-token))
+        (setq token (emacsos-assist-web--read-token))
       (error (setq token-error (error-message-string error))))
     (if token-error
         (funcall callback nil token-error)
-      (if (not (emacos-assist-web--safe-token-p token))
+      (if (not (emacsos-assist-web--safe-token-p token))
         (funcall callback nil "Assist Web token is missing or invalid")
-      (if (>= (length emacos-assist-web--requests)
-              emacos-assist-web-max-concurrent-requests)
+      (if (>= (length emacsos-assist-web--requests)
+              emacsos-assist-web-max-concurrent-requests)
           (funcall callback nil "Too many Assist Web requests are already running")
         (let* ((url-request-method method)
                (url-request-extra-headers
@@ -535,20 +535,20 @@ ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
 		 (unless finished
                    (setq finished t)
                    (when (timerp timer) (cancel-timer timer))
-                   (setq emacos-assist-web--requests
-			 (delq response emacos-assist-web--requests))
+                   (setq emacsos-assist-web--requests
+			 (delq response emacsos-assist-web--requests))
                    (funcall callback value problem))))
             (condition-case error
 		(progn
-                  (setq url (emacos-assist-web--endpoint path))
+                  (setq url (emacsos-assist-web--endpoint path))
                   (setq response
 			(let ((url-mime-encoding-string "identity")
                                       (url-debug nil)
                                       (url-automatic-caching nil)
                                       (url-http-attempt-keepalives nil)
                                       (gnutls-trustfiles
-                                       (emacos-assist-web--trustfiles)))
-                          (emacos-assist-web--close-idle-origin-connections)
+                                       (emacsos-assist-web--trustfiles)))
+                          (emacsos-assist-web--close-idle-origin-connections)
                           (url-retrieve
                            url
                            (lambda (_status)
@@ -556,7 +556,7 @@ ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
                                (unwind-protect
                                    (condition-case parse-error
                                        (setq value
-                                             (emacos-assist-web--response-json
+                                             (emacsos-assist-web--response-json
                                               (current-buffer) allow-status))
                                      (error
                                       (setq problem
@@ -570,12 +570,12 @@ ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
                                   url-http-no-retry t
                                   url-debug nil
                                   url-automatic-caching nil))
-                    (push response emacos-assist-web--requests))
+                    (push response emacsos-assist-web--requests))
                   (setq process (and (buffer-live-p response)
                                      (get-buffer-process response)))
                   (setq timer
 			(run-at-time
-			 emacos-assist-web-request-timeout nil
+			 emacsos-assist-web-request-timeout nil
 			 (lambda ()
                            (unless finished
                              (when (process-live-p process)
@@ -588,172 +588,172 @@ ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
                     (let ((url-filter (process-filter process)))
                       (set-process-filter
                        process
-                       (emacos-assist-web--guarded-filter
+                       (emacsos-assist-web--guarded-filter
 			url-filter
 			(lambda (active problem)
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
 			  (when (buffer-live-p (process-buffer active))
-                            (emacos-assist-web--kill-buffer-later
+                            (emacsos-assist-web--kill-buffer-later
                              (process-buffer active)))
 			  (finish nil problem)))))))
               (error (finish nil (error-message-string error)))))))))))
 
-(defun emacos-assist-web--display-status (status)
+(defun emacsos-assist-web--display-status (status)
   "Replace the visible STATUS without changing its durable state source."
-  (when (and (markerp emacos-assist-web--status-start)
-             (marker-buffer emacos-assist-web--status-start))
+  (when (and (markerp emacsos-assist-web--status-start)
+             (marker-buffer emacsos-assist-web--status-start))
     (let ((inhibit-read-only t) (inhibit-modification-hooks t))
-      (set-marker emacos-assist-web--status-end
-                  (emacos-conversation-set-status
-                   emacos-assist-web--status-start emacos-assist-web--status-end status)))))
+      (set-marker emacsos-assist-web--status-end
+                  (emacsos-conversation-set-status
+                   emacsos-assist-web--status-start emacsos-assist-web--status-end status)))))
 
-(defun emacos-assist-web--set-status (status)
+(defun emacsos-assist-web--set-status (status)
   "Store and display STATUS without inventing transcript content."
-  (setq emacos-assist-web--stream-status status)
-  (emacos-assist-web--display-status status))
+  (setq emacsos-assist-web--stream-status status)
+  (emacsos-assist-web--display-status status))
 
-(defun emacos-assist-web--set-unverified-status (status)
+(defun emacsos-assist-web--set-unverified-status (status)
   "Store interruption STATUS while visibly distinguishing provisional text."
-  (setq emacos-assist-web--stream-status status)
-  (emacos-assist-web--display-status
+  (setq emacsos-assist-web--stream-status status)
+  (emacsos-assist-web--display-status
    (format "unverified; refresh; %s" status)))
 
-(defun emacos-assist-web--set-assistant-status (status)
+(defun emacsos-assist-web--set-assistant-status (status)
   "Replace the provisional assistant body with STATUS, keeping it read-only."
-  (when (and (markerp emacos-assist-web--assistant-start)
-             (markerp emacos-assist-web--assistant-end))
-    (set-marker emacos-assist-web--assistant-end
-                (emacos-conversation-replace-marked
-                 emacos-assist-web--assistant-start emacos-assist-web--assistant-end
+  (when (and (markerp emacsos-assist-web--assistant-start)
+             (markerp emacsos-assist-web--assistant-end))
+    (set-marker emacsos-assist-web--assistant-end
+                (emacsos-conversation-replace-marked
+                 emacsos-assist-web--assistant-start emacsos-assist-web--assistant-end
                  (format "[%s]\n" status)))))
 
-(defun emacos-assist-web--replace-empty-assistant-status (status)
+(defun emacsos-assist-web--replace-empty-assistant-status (status)
   "Replace only an empty or queued provisional body with STATUS.
 
 Streamed text is evidence the reader may need while refresh/replay recovers, so
 interruption and truncation leave a nonempty body intact."
-  (when (and (markerp emacos-assist-web--assistant-start)
-             (markerp emacos-assist-web--assistant-end))
+  (when (and (markerp emacsos-assist-web--assistant-start)
+             (markerp emacsos-assist-web--assistant-end))
     (let ((body (buffer-substring-no-properties
-                 emacos-assist-web--assistant-start emacos-assist-web--assistant-end)))
+                 emacsos-assist-web--assistant-start emacsos-assist-web--assistant-end)))
       (when (member body '("" "[queued]\n" "[working; live text unavailable]\n"))
-        (emacos-assist-web--set-assistant-status status)))))
+        (emacsos-assist-web--set-assistant-status status)))))
 
-(defun emacos-assist-web--kill-buffer-later (buffer)
+(defun emacsos-assist-web--kill-buffer-later (buffer)
   "Kill BUFFER after the current URL process filter has returned."
   (run-at-time 0 nil
                (lambda (candidate)
                  (when (buffer-live-p candidate) (kill-buffer candidate)))
                buffer))
 
-(defun emacos-assist-web--stream-cleanup (&optional keep-pending no-render)
+(defun emacsos-assist-web--stream-cleanup (&optional keep-pending no-render)
   "Release this buffer's event stream.
 
 Retain retry identity when KEEP-PENDING is non-nil.  When NO-RENDER is non-nil,
 do not ask the phone shell to redraw a dying buffer."
-  (let ((process emacos-assist-web--stream-process)
-        (response emacos-assist-web--stream-response))
-    (cl-incf emacos-assist-web--stream-generation)
-    (when (timerp emacos-assist-web--stream-header-timer)
-      (cancel-timer emacos-assist-web--stream-header-timer))
-    (setq emacos-assist-web--stream-process nil
-          emacos-assist-web--stream-response nil
-          emacos-assist-web--stream-body-marker nil
-          emacos-assist-web--stream-scan-marker nil
-          emacos-assist-web--stream-unconsumed-bytes nil
-          emacos-assist-web--stream-header-timer nil
-          emacos-assist-web--in-flight nil)
-    (when (eq emacos--assist-active-surface (current-buffer))
-      (setq emacos--assist-active-surface nil))
+  (let ((process emacsos-assist-web--stream-process)
+        (response emacsos-assist-web--stream-response))
+    (cl-incf emacsos-assist-web--stream-generation)
+    (when (timerp emacsos-assist-web--stream-header-timer)
+      (cancel-timer emacsos-assist-web--stream-header-timer))
+    (setq emacsos-assist-web--stream-process nil
+          emacsos-assist-web--stream-response nil
+          emacsos-assist-web--stream-body-marker nil
+          emacsos-assist-web--stream-scan-marker nil
+          emacsos-assist-web--stream-unconsumed-bytes nil
+          emacsos-assist-web--stream-header-timer nil
+          emacsos-assist-web--in-flight nil)
+    (when (eq emacsos--assist-active-surface (current-buffer))
+      (setq emacsos--assist-active-surface nil))
     (when (process-live-p process)
       (set-process-sentinel process nil)
       (delete-process process))
     ;; A terminal event is parsed inside RESPONSE.  Deferring its destruction
     ;; keeps the URL filter's marker update valid, then reclaims it promptly.
-    (when (buffer-live-p response) (emacos-assist-web--kill-buffer-later response))
+    (when (buffer-live-p response) (emacsos-assist-web--kill-buffer-later response))
     (unless keep-pending
-      (setq emacos-assist-web--pending-key nil
-            emacos-assist-web--submitted-text nil
-            emacos-assist-web--pending-accepted-p nil
-            emacos-assist-web--run-id nil
-            emacos-assist-web--stream-status nil))
-    (when (and (not no-render) (fboundp 'emacos--render-page))
-      (emacos--render-page))))
+      (setq emacsos-assist-web--pending-key nil
+            emacsos-assist-web--submitted-text nil
+            emacsos-assist-web--pending-accepted-p nil
+            emacsos-assist-web--run-id nil
+            emacsos-assist-web--stream-status nil))
+    (when (and (not no-render) (fboundp 'emacsos--render-page))
+      (emacsos--render-page))))
 
-(defun emacos-assist-web--buffer-killed ()
+(defun emacsos-assist-web--buffer-killed ()
   "Release local active-stream ownership when this thread buffer is killed.
 
 The canonical server Run continues independently; a later snapshot or reopen
 observes its durable state."
-  (when (timerp emacos-assist-web--draft-save-timer)
-    (cancel-timer emacos-assist-web--draft-save-timer))
+  (when (timerp emacsos-assist-web--draft-save-timer)
+    (cancel-timer emacsos-assist-web--draft-save-timer))
   (unwind-protect
-      (emacos-assist-web--save-draft)
-    (emacos-assist-web--stream-cleanup t t)))
+      (emacsos-assist-web--save-draft)
+    (emacsos-assist-web--stream-cleanup t t)))
 
-(defun emacos-assist-web--stream-finish (buffer)
+(defun emacsos-assist-web--stream-finish (buffer)
   "Finish BUFFER's event observation and request its canonical transcript."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((completed-run-id emacos-assist-web--run-id))
+      (let ((completed-run-id emacsos-assist-web--run-id))
         ;; A terminal SSE is not the answer.  Keep the marker-scoped text raw
         ;; until the canonical snapshot has replaced this provisional region.
-        (emacos-assist-web--stream-cleanup t t)
-        (emacos-assist-web--set-status "reconciling")
-        (emacos-assist-web--save-draft)
-        (emacos-assist-web-refresh-thread buffer completed-run-id)))))
+        (emacsos-assist-web--stream-cleanup t t)
+        (emacsos-assist-web--set-status "reconciling")
+        (emacsos-assist-web--save-draft)
+        (emacsos-assist-web-refresh-thread buffer completed-run-id)))))
 
-(defun emacos-assist-web--stream-interrupted (buffer status)
+(defun emacsos-assist-web--stream-interrupted (buffer status)
   "Keep BUFFER's exact pending submission and visibly mark STATUS unverified."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (emacos-assist-web--stream-cleanup t)
-      (when (and (markerp emacos-assist-web--assistant-start)
-                 (markerp emacos-assist-web--assistant-end))
-        (emacos-assist-web--replace-empty-assistant-status "unverified; refresh"))
-      (emacos-assist-web--set-unverified-status status)
-      (emacos-assist-web--save-draft)
+      (emacsos-assist-web--stream-cleanup t)
+      (when (and (markerp emacsos-assist-web--assistant-start)
+                 (markerp emacsos-assist-web--assistant-end))
+        (emacsos-assist-web--replace-empty-assistant-status "unverified; refresh"))
+      (emacsos-assist-web--set-unverified-status status)
+      (emacsos-assist-web--save-draft)
       (message "%s. C-c C-a g refreshes; Send retries the same message."
                status))))
 
-(defun emacos-assist-web--thread-gone (buffer)
+(defun emacsos-assist-web--thread-gone (buffer)
   "Release BUFFER after Assist confirms the observed thread was deleted."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (emacos-assist-web--stream-cleanup nil)
-      (setq emacos-assist-web--thread-id nil
-            emacos-assist-web--snapshot nil
+      (emacsos-assist-web--stream-cleanup nil)
+      (setq emacsos-assist-web--thread-id nil
+            emacsos-assist-web--snapshot nil
             ;; Keep partial text visible, but make the next Send create its
             ;; own pending region instead of streaming into this dead thread.
-            emacos-assist-web--pending-rendered-p nil
-            emacos-assist-web--assistant-start nil
-            emacos-assist-web--assistant-end nil
-            emacos-assist-web--stream-attempt nil
-            emacos-assist-web--stream-index 0
+            emacsos-assist-web--pending-rendered-p nil
+            emacsos-assist-web--assistant-start nil
+            emacsos-assist-web--assistant-end nil
+            emacsos-assist-web--stream-attempt nil
+            emacsos-assist-web--stream-index 0
             ;; The next editable tail is now a locally recoverable new draft.
-            emacos-assist-web--draft-id "new-thread")
-      (emacos-assist-web--set-status "thread deleted; start a new thread")
-      (emacos-assist-web--save-draft)
+            emacsos-assist-web--draft-id "new-thread")
+      (emacsos-assist-web--set-status "thread deleted; start a new thread")
+      (emacsos-assist-web--save-draft)
       (message "Thread deleted; start a new thread."))))
 
-(defun emacos-assist-web--run-store-unavailable (buffer)
+(defun emacsos-assist-web--run-store-unavailable (buffer)
   "Keep BUFFER's accepted identity while operator repair restores observation."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (emacos-assist-web--stream-cleanup t)
-      (emacos-assist-web--replace-empty-assistant-status
+      (emacsos-assist-web--stream-cleanup t)
+      (emacsos-assist-web--replace-empty-assistant-status
        "observation unavailable; operator repair required")
-      (emacos-assist-web--set-unverified-status
+      (emacsos-assist-web--set-unverified-status
        "observation unavailable; operator repair required")
-      (emacos-assist-web--save-draft)
+      (emacsos-assist-web--save-draft)
       (message "Assist observation unavailable; operator repair is required."))))
 
-(defun emacos-assist-web--finish-observation-response (target generation response)
+(defun emacsos-assist-web--finish-observation-response (target generation response)
   "Settle TARGET after RESPONSE closes without a completed SSE observation."
   (let ((unavailable (and (buffer-live-p response)
-                          (emacos-assist-web--run-store-unavailable-response-p response))))
+                          (emacsos-assist-web--run-store-unavailable-response-p response))))
     ;; url-http may run its final callback inside the last filter invocation.
     ;; Defer cleanup so an error event in that callback remains authoritative.
     (run-at-time
@@ -761,14 +761,14 @@ observes its durable state."
      (lambda (buffer expected-generation store-unavailable)
        (when (and (buffer-live-p buffer)
                   (with-current-buffer buffer
-                    (= expected-generation emacos-assist-web--stream-generation)))
+                    (= expected-generation emacsos-assist-web--stream-generation)))
          (if store-unavailable
-             (emacos-assist-web--run-store-unavailable buffer)
-           (emacos-assist-web--stream-interrupted
+             (emacsos-assist-web--run-store-unavailable buffer)
+           (emacsos-assist-web--stream-interrupted
             buffer "observation disconnected"))))
      target generation unavailable)))
 
-(defun emacos-assist-web--stream-sentinel (url-sentinel target generation)
+(defun emacsos-assist-web--stream-sentinel (url-sentinel target generation)
   "Run URL-SENTINEL; it owns final observation settlement when installed."
   (lambda (ended event)
     (if (functionp url-sentinel)
@@ -778,12 +778,12 @@ observes its durable state."
         (funcall url-sentinel ended event)
       (when (and (not (process-live-p ended)) (buffer-live-p target))
         (with-current-buffer target
-          (when (and (= generation emacos-assist-web--stream-generation)
-                     (eq ended emacos-assist-web--stream-process))
-            (emacos-assist-web--stream-interrupted
+          (when (and (= generation emacsos-assist-web--stream-generation)
+                     (eq ended emacsos-assist-web--stream-process))
+            (emacsos-assist-web--stream-interrupted
              target "observation disconnected")))))))
 
-(defun emacos-assist-web--dispatch-event (target event data)
+(defun emacsos-assist-web--dispatch-event (target event data)
   "Handle one bounded SSE EVENT with JSON DATA for TARGET."
   (when (buffer-live-p target)
     (with-current-buffer target
@@ -791,91 +791,91 @@ observes its durable state."
        ((equal event "status")
         (condition-case nil
             (let ((status (json-parse-string data :object-type 'alist)))
-              (emacos-assist-web--set-status
+              (emacsos-assist-web--set-status
                (or (alist-get 'status status) "working")))
           (error nil)))
        ((equal event "assistant-reset")
         (condition-case nil
             (let ((value (json-parse-string data :object-type 'alist)))
-              (emacos-assist-web--reset-assistant (alist-get 'attempt value)))
-          (error (emacos-assist-web--stream-interrupted target "invalid Assist reset"))))
+              (emacsos-assist-web--reset-assistant (alist-get 'attempt value)))
+          (error (emacsos-assist-web--stream-interrupted target "invalid Assist reset"))))
        ((equal event "assistant-delta")
         (condition-case nil
             (let ((value (json-parse-string data :object-type 'alist)))
-              (emacos-assist-web--append-delta (alist-get 'attempt value)
+              (emacsos-assist-web--append-delta (alist-get 'attempt value)
                                                 (alist-get 'index value)
                                                 (alist-get 'text value)))
-          (error (emacos-assist-web--stream-interrupted target "invalid Assist delta"))))
+          (error (emacsos-assist-web--stream-interrupted target "invalid Assist delta"))))
        ((equal event "assistant-truncated")
-        (emacos-assist-web--replace-empty-assistant-status
+        (emacsos-assist-web--replace-empty-assistant-status
          "live text truncated; waiting for final")
-        (emacos-assist-web--set-status "live text truncated; waiting for final"))
-       ((equal event "terminal") (emacos-assist-web--stream-finish target))
+        (emacsos-assist-web--set-status "live text truncated; waiting for final"))
+       ((equal event "terminal") (emacsos-assist-web--stream-finish target))
        ((equal event "closed-set")
         (condition-case nil
             (when (equal (alist-get 'reason (json-parse-string data :object-type 'alist))
                          "thread-gone")
-              (emacos-assist-web--thread-gone target))
-          (error (emacos-assist-web--stream-interrupted target "invalid Assist closure"))))
+              (emacsos-assist-web--thread-gone target))
+          (error (emacsos-assist-web--stream-interrupted target "invalid Assist closure"))))
        ((equal event "error")
         (condition-case nil
             (if (equal (alist-get 'detail (json-parse-string data :object-type 'alist))
                        "run-store-unavailable")
-                (emacos-assist-web--run-store-unavailable target)
-              (emacos-assist-web--stream-interrupted target "observation interrupted"))
-          (error (emacos-assist-web--stream-interrupted target "invalid Assist error"))))))))
+                (emacsos-assist-web--run-store-unavailable target)
+              (emacsos-assist-web--stream-interrupted target "observation interrupted"))
+          (error (emacsos-assist-web--stream-interrupted target "invalid Assist error"))))))))
 
-(defun emacos-assist-web--reset-assistant (attempt)
+(defun emacsos-assist-web--reset-assistant (attempt)
   "Clear only the provisional assistant body for ATTEMPT."
   (unless (integerp attempt) (error "invalid stream attempt"))
-  (setq emacos-assist-web--stream-attempt attempt
-        emacos-assist-web--stream-index 0)
-  (when (and (markerp emacos-assist-web--assistant-start)
-             (markerp emacos-assist-web--assistant-end))
-    (set-marker emacos-assist-web--assistant-end
-                (emacos-conversation-reset-assistant
-                 emacos-assist-web--assistant-start emacos-assist-web--assistant-end))))
+  (setq emacsos-assist-web--stream-attempt attempt
+        emacsos-assist-web--stream-index 0)
+  (when (and (markerp emacsos-assist-web--assistant-start)
+             (markerp emacsos-assist-web--assistant-end))
+    (set-marker emacsos-assist-web--assistant-end
+                (emacsos-conversation-reset-assistant
+                 emacsos-assist-web--assistant-start emacsos-assist-web--assistant-end))))
 
-(defun emacos-assist-web--append-delta (attempt index text)
+(defun emacsos-assist-web--append-delta (attempt index text)
   "Append the next bounded delta for ATTEMPT/INDEX to this buffer only."
   (unless (and (integerp attempt) (integerp index) (stringp text)
                (<= (string-bytes text) (* 16 1024)))
     (error "invalid Assist delta"))
   (cond
-   ((not (integerp emacos-assist-web--stream-attempt))
-    (emacos-assist-web--stream-interrupted
+   ((not (integerp emacsos-assist-web--stream-attempt))
+    (emacsos-assist-web--stream-interrupted
      (current-buffer) "Assist stream is missing its reset; refresh to reconcile"))
-   ((< attempt emacos-assist-web--stream-attempt) nil)
-   ((or (not (equal attempt emacos-assist-web--stream-attempt))
-        (/= index (1+ emacos-assist-web--stream-index)))
-    (emacos-assist-web--stream-interrupted
+   ((< attempt emacsos-assist-web--stream-attempt) nil)
+   ((or (not (equal attempt emacsos-assist-web--stream-attempt))
+        (/= index (1+ emacsos-assist-web--stream-index)))
+    (emacsos-assist-web--stream-interrupted
      (current-buffer) "Assist stream has a gap; refresh to reconcile"))
-   ((and (markerp emacos-assist-web--assistant-end)
-         (marker-buffer emacos-assist-web--assistant-end))
-    (set-marker emacos-assist-web--assistant-end
-                (emacos-conversation-append-delta
-                 emacos-assist-web--assistant-end text))
-      (setq emacos-assist-web--stream-index index)
-      (emacos-assist-web--set-status "working"))))
+   ((and (markerp emacsos-assist-web--assistant-end)
+         (marker-buffer emacsos-assist-web--assistant-end))
+    (set-marker emacsos-assist-web--assistant-end
+                (emacsos-conversation-append-delta
+                 emacsos-assist-web--assistant-end text))
+      (setq emacsos-assist-web--stream-index index)
+      (emacsos-assist-web--set-status "working"))))
 
-(defun emacos-assist-web--drain-events (target generation &optional received-bytes)
+(defun emacsos-assist-web--drain-events (target generation &optional received-bytes)
   "Consume new complete SSE records for TARGET without rescanning a suffix.
 RECEIVED-BYTES is the raw size newly appended after the first parsed response."
-  (unless (markerp emacos-assist-web--stream-body-marker)
-    (setq-local emacos-assist-web--stream-body-marker
+  (unless (markerp emacsos-assist-web--stream-body-marker)
+    (setq-local emacsos-assist-web--stream-body-marker
                 (copy-marker (marker-position url-http-end-of-headers) nil)
-                emacos-assist-web--stream-scan-marker
+                emacsos-assist-web--stream-scan-marker
                 (copy-marker (marker-position url-http-end-of-headers) nil)))
-  (let* ((marker emacos-assist-web--stream-body-marker)
-         (scan-marker emacos-assist-web--stream-scan-marker)
+  (let* ((marker emacsos-assist-web--stream-body-marker)
+         (scan-marker emacsos-assist-web--stream-scan-marker)
          (start (marker-position marker))
          (too-large nil))
     ;; The first callback includes headers.  Thereafter the process filter's
     ;; byte count lets us enforce the incomplete-record cap without copying or
     ;; rescanning the whole retained suffix for every tiny callback.
-    (if (integerp emacos-assist-web--stream-unconsumed-bytes)
-        (cl-incf emacos-assist-web--stream-unconsumed-bytes (or received-bytes 0))
-      (setq-local emacos-assist-web--stream-unconsumed-bytes
+    (if (integerp emacsos-assist-web--stream-unconsumed-bytes)
+        (cl-incf emacsos-assist-web--stream-unconsumed-bytes (or received-bytes 0))
+      (setq-local emacsos-assist-web--stream-unconsumed-bytes
                   (string-bytes (buffer-substring-no-properties start (point-max)))))
     ;; url-http can split any byte sequence across callbacks.  Resume at the
     ;; final possible delimiter start, so each retained character is scanned
@@ -885,13 +885,13 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
       (let* ((record-end (point))
              (event nil) (data nil)
              (record (buffer-substring-no-properties start (- record-end 2))))
-        (if (> (string-bytes record) emacos-assist-web-max-event-bytes)
+        (if (> (string-bytes record) emacsos-assist-web-max-event-bytes)
             (progn
               (setq too-large t)
               (when (and (buffer-live-p target)
                          (with-current-buffer target
-                           (= generation emacos-assist-web--stream-generation)))
-                (emacos-assist-web--stream-interrupted
+                           (= generation emacsos-assist-web--stream-generation)))
+                (emacsos-assist-web--stream-interrupted
                  target "Assist event is too large")))
           (dolist (line (split-string record "\n" t))
             (cond
@@ -899,9 +899,9 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
              ((string-prefix-p "data: " line) (setq data (substring line 6)))))
           (when (and event (buffer-live-p target)
                      (with-current-buffer target
-                       (= generation emacos-assist-web--stream-generation)))
-            (emacos-assist-web--dispatch-event target event (or data "")))
-          (cl-decf emacos-assist-web--stream-unconsumed-bytes
+                       (= generation emacsos-assist-web--stream-generation)))
+            (emacsos-assist-web--dispatch-event target event (or data "")))
+          (cl-decf emacsos-assist-web--stream-unconsumed-bytes
                    (+ (string-bytes record) 2))
           (delete-region start record-end)
           (set-marker marker start)
@@ -910,22 +910,22 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
     (when too-large
       (delete-region start (point-max))
       (set-marker scan-marker start)
-      (setq-local emacos-assist-web--stream-unconsumed-bytes 0))
+      (setq-local emacsos-assist-web--stream-unconsumed-bytes 0))
     (unless too-large
       ;; Retain only an incomplete final record.  Otherwise a long healthy
       ;; stream would still accumulate every already-consumed event.
       (set-marker scan-marker (max start (1- (point-max)))))
-    (when (> emacos-assist-web--stream-unconsumed-bytes
-             emacos-assist-web-max-event-bytes)
+    (when (> emacsos-assist-web--stream-unconsumed-bytes
+             emacsos-assist-web-max-event-bytes)
       (delete-region start (point-max))
       (set-marker scan-marker start)
-      (setq-local emacos-assist-web--stream-unconsumed-bytes 0)
+      (setq-local emacsos-assist-web--stream-unconsumed-bytes 0)
       (when (and (buffer-live-p target)
                  (with-current-buffer target
-                   (= generation emacos-assist-web--stream-generation)))
-        (emacos-assist-web--stream-interrupted target "Assist event is too large")))))
+                   (= generation emacsos-assist-web--stream-generation)))
+        (emacsos-assist-web--stream-interrupted target "Assist event is too large")))))
 
-(defun emacos-assist-web--event-filter (url-filter target generation)
+(defun emacsos-assist-web--event-filter (url-filter target generation)
   "Wrap URL-FILTER and dispatch SSE records to TARGET for GENERATION."
   (lambda (process bytes)
     ;; The stock filter may detach PROCESS from its buffer on the final chunk.
@@ -942,38 +942,38 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
                                           (downcase url-http-content-type))))
                 (when (and (buffer-live-p target)
                          (with-current-buffer target
-                           (= generation emacos-assist-web--stream-generation)))
+                           (= generation emacsos-assist-web--stream-generation)))
                   ;; A 503 body can distinguish unavailable durable observation
                   ;; only after url-http has received it all.  Its completion
                   ;; callback below preserves the accepted identity and reports
                   ;; operator repair rather than a generic retry.
                   (unless (= url-http-response-status 503)
-                    (emacos-assist-web--stream-interrupted
+                    (emacsos-assist-web--stream-interrupted
                      target "Assist observation was rejected")))
               (when (and (buffer-live-p target)
                          (with-current-buffer target
-                           (= generation emacos-assist-web--stream-generation)))
+                           (= generation emacsos-assist-web--stream-generation)))
                 (with-current-buffer target
-                  (when (timerp emacos-assist-web--stream-header-timer)
-                    (cancel-timer emacos-assist-web--stream-header-timer)
-                    (setq emacos-assist-web--stream-header-timer nil))))
-              (emacos-assist-web--drain-events
+                  (when (timerp emacsos-assist-web--stream-header-timer)
+                    (cancel-timer emacsos-assist-web--stream-header-timer)
+                    (setq emacsos-assist-web--stream-header-timer nil))))
+              (emacsos-assist-web--drain-events
                target generation (string-bytes bytes)))))))))
 
-(defun emacos-assist-web--observe-run (buffer)
+(defun emacsos-assist-web--observe-run (buffer)
   "Open BUFFER's authenticated status stream for its current run.
 
 Response headers and each individual event are bounded; the stream remains
 open until the run reaches a terminal state, awaits approval, or observation is
 interrupted."
-  (let ((token (emacos-assist-web--read-token)))
-    (if (not (emacos-assist-web--safe-token-p token))
-        (emacos-assist-web--stream-interrupted buffer "token missing or invalid")
+  (let ((token (emacsos-assist-web--read-token)))
+    (if (not (emacsos-assist-web--safe-token-p token))
+        (emacsos-assist-web--stream-interrupted buffer "token missing or invalid")
       (with-current-buffer buffer
         (condition-case error
-            (let* ((generation (cl-incf emacos-assist-web--stream-generation))
-                   (thread-id (emacos-assist-web--require-id emacos-assist-web--thread-id))
-                   (run-id (emacos-assist-web--require-id emacos-assist-web--run-id))
+            (let* ((generation (cl-incf emacsos-assist-web--stream-generation))
+                   (thread-id (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
+                   (run-id (emacsos-assist-web--require-id emacsos-assist-web--run-id))
                    (url-request-method "GET")
                    (url-request-extra-headers
                     `(("Authorization" . ,(concat "Bearer " token))
@@ -984,103 +984,103 @@ interrupted."
                           (url-automatic-caching nil)
                           (url-http-attempt-keepalives nil)
                           (gnutls-trustfiles
-                           (emacos-assist-web--trustfiles)))
-                      (emacos-assist-web--close-idle-origin-connections)
+                           (emacsos-assist-web--trustfiles)))
+                      (emacsos-assist-web--close-idle-origin-connections)
                       (url-retrieve
-                       (emacos-assist-web--endpoint
+                       (emacsos-assist-web--endpoint
                         (format "threads/%s/runs/%s/events" thread-id run-id))
                        (lambda (_status)
                          ;; url-http can activate this callback from inside its
                          ;; final filter call.  Let our wrapper drain that same
                          ;; chunk before deciding that no terminal event arrived.
-                         (emacos-assist-web--finish-observation-response
+                         (emacsos-assist-web--finish-observation-response
                           buffer generation (current-buffer)))
                        nil t t)))
                    (process (and (buffer-live-p response) (get-buffer-process response))))
               (if (not process)
-                  (emacos-assist-web--stream-interrupted buffer "observation unavailable")
+                  (emacsos-assist-web--stream-interrupted buffer "observation unavailable")
                 (with-current-buffer response
                   (setq-local url-max-redirections 0
                               url-http-no-retry t
                               url-debug nil
                               url-automatic-caching nil))
-                (setq emacos-assist-web--stream-response response
-                      emacos-assist-web--stream-process process
-                      emacos-assist-web--stream-header-timer
+                (setq emacsos-assist-web--stream-response response
+                      emacsos-assist-web--stream-process process
+                      emacsos-assist-web--stream-header-timer
                       (run-at-time
-                       emacos-assist-web-request-timeout nil
+                       emacsos-assist-web-request-timeout nil
                        (lambda ()
                          (when (and (buffer-live-p buffer)
                                     (with-current-buffer buffer
-                                      (and (= generation emacos-assist-web--stream-generation)
-                                           (buffer-live-p emacos-assist-web--stream-response)
-                                           (with-current-buffer emacos-assist-web--stream-response
+                                      (and (= generation emacsos-assist-web--stream-generation)
+                                           (buffer-live-p emacsos-assist-web--stream-response)
+                                           (with-current-buffer emacsos-assist-web--stream-response
                                              (not (and (boundp 'url-http-end-of-headers)
                                                        url-http-end-of-headers))))))
-                           (emacos-assist-web--stream-interrupted
+                           (emacsos-assist-web--stream-interrupted
                             buffer "Assist observation timed out")))))
                 (let* ((url-filter (process-filter process))
                        (event-filter
-                        (emacos-assist-web--event-filter url-filter buffer generation)))
+                        (emacsos-assist-web--event-filter url-filter buffer generation)))
                   (set-process-filter
                    process
-                   (emacos-assist-web--guarded-filter
+                   (emacsos-assist-web--guarded-filter
                     event-filter
                     (lambda (active problem)
                       (if (and (buffer-live-p buffer)
                                (with-current-buffer buffer
-                                 (and (= generation emacos-assist-web--stream-generation)
-                                      (eq active emacos-assist-web--stream-process))))
-                          (emacos-assist-web--stream-interrupted buffer problem)
+                                 (and (= generation emacsos-assist-web--stream-generation)
+                                      (eq active emacsos-assist-web--stream-process))))
+                          (emacsos-assist-web--stream-interrupted buffer problem)
                         (when (process-live-p active) (delete-process active))))
                     t)))
                 (set-process-sentinel
                  process
-                 (emacos-assist-web--stream-sentinel
+                 (emacsos-assist-web--stream-sentinel
                   (process-sentinel process) buffer generation))))
           (error
-           (emacos-assist-web--stream-interrupted buffer
+           (emacsos-assist-web--stream-interrupted buffer
                                                   (error-message-string error))))))))
 
-(defun emacos-assist-web--thread-label (thread &optional suffix)
+(defun emacsos-assist-web--thread-label (thread &optional suffix)
   "Display THREAD in the requested thread-buffer format with optional SUFFIX."
   (format "*assist %s - %s%s*"
           (alist-get 'description thread)
           (or (alist-get 'repo_label thread) "No repository")
           (or suffix "")))
 
-(defun emacos-assist-web--completion-records ()
+(defun emacsos-assist-web--completion-records ()
   "Return completion records with identity kept separate from display text."
   (let ((counts (make-hash-table :test #'equal)))
-    (dolist (thread emacos-assist-web--catalog)
-      (let ((label (emacos-assist-web--thread-label thread)))
+    (dolist (thread emacsos-assist-web--catalog)
+      (let ((label (emacsos-assist-web--thread-label thread)))
         (puthash label (1+ (gethash label counts 0)) counts)))
     (mapcar
      (lambda (thread)
-       (let* ((label (emacos-assist-web--thread-label thread))
+       (let* ((label (emacsos-assist-web--thread-label thread))
               (identity-label
                (if (> (gethash label counts) 1)
-                   (emacos-assist-web--thread-label
+                   (emacsos-assist-web--thread-label
                     thread
                     (format " [%s]"
-                            (emacos-assist-web--require-id
+                            (emacsos-assist-web--require-id
                              (alist-get 'id thread))))
                  label))
               (state (or (alist-get 'status thread) "unknown"))
               (display (format "%s [%s%s]" identity-label state
-                               (if emacos-assist-web--catalog-stale ", cached" ""))))
+                               (if emacsos-assist-web--catalog-stale ", cached" ""))))
          (list :display display :thread thread
                :search (downcase (concat (or (alist-get 'search_description thread) "")
                                          " " (alist-get 'description thread)
                                          " " (or (alist-get 'repo_label thread) "")
                                          " " state)))))
-     emacos-assist-web--catalog)))
+     emacsos-assist-web--catalog)))
 
-(defun emacos-assist-web--completion-table (records)
+(defun emacsos-assist-web--completion-table (records)
   "Build a completion table from RECORDS with server search-text matching."
   (lambda (string predicate action)
     (if (eq action 'metadata)
-        '(metadata (category . emacos-assist-web-thread))
+        '(metadata (category . emacsos-assist-web-thread))
       (let* ((needle (downcase string))
              (matches
               (seq-filter
@@ -1100,11 +1100,11 @@ interrupted."
          ((= (length displays) 1) (car displays))
          (displays string))))))
 
-(defun emacos-assist-web--record-for-display (display records)
+(defun emacsos-assist-web--record-for-display (display records)
   "Return from RECORDS the completion record selected by DISPLAY."
   (seq-find (lambda (record) (equal display (plist-get record :display))) records))
 
-(defun emacos-assist-web--labeled-records (items identity-key)
+(defun emacsos-assist-web--labeled-records (items identity-key)
   "Return completion records for ITEMS, disambiguated by IDENTITY-KEY.
 
 The human label remains primary.  Only duplicate labels expose their full
@@ -1126,12 +1126,12 @@ opaque identity, so selecting a display string always selects one exact item."
                :item item)))
      items)))
 
-(defun emacos-assist-web--select-labeled-item
+(defun emacsos-assist-web--select-labeled-item
     (prompt items identity-key saved-identity)
   "Select one of ITEMS by PROMPT while retaining its IDENTITY-KEY.
 
 SAVED-IDENTITY reuses a still-present choice without prompting."
-  (let* ((records (emacos-assist-web--labeled-records items identity-key))
+  (let* ((records (emacsos-assist-web--labeled-records items identity-key))
          (saved
           (and saved-identity
                (seq-find
@@ -1146,19 +1146,19 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
                      prompt
                      (mapcar (lambda (record) (plist-get record :display)) records)
                      nil t nil nil (plist-get (car records) :display))))
-               (emacos-assist-web--record-for-display choice records))))))
+               (emacsos-assist-web--record-for-display choice records))))))
 
-(defun emacos-assist-web--thread-buffer (thread-id)
+(defun emacsos-assist-web--thread-buffer (thread-id)
   "Return the live Assist Web buffer whose canonical id is THREAD-ID."
   (seq-find
    (lambda (buffer)
      (and (buffer-live-p buffer)
           (with-current-buffer buffer
-            (and (derived-mode-p 'emacos-assist-web-mode)
-                 (equal emacos-assist-web--thread-id thread-id)))))
+            (and (derived-mode-p 'emacsos-assist-web-mode)
+                 (equal emacsos-assist-web--thread-id thread-id)))))
    (buffer-list)))
 
-(defun emacos-assist-web--show-notice (name text)
+(defun emacsos-assist-web--show-notice (name text)
   "Show a small visible non-blocking notice buffer named NAME with TEXT."
   (let ((buffer (get-buffer-create name)))
     (with-current-buffer buffer
@@ -1169,54 +1169,54 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
     (switch-to-buffer buffer)
     buffer))
 
-(defun emacos-assist-web--prompt-start ()
+(defun emacsos-assist-web--prompt-start ()
   "Return the editable region's start in the current web-thread buffer."
-  (and (markerp emacos-assist-web--input-marker)
-       (marker-buffer emacos-assist-web--input-marker)
-       (marker-position emacos-assist-web--input-marker)))
+  (and (markerp emacsos-assist-web--input-marker)
+       (marker-buffer emacsos-assist-web--input-marker)
+       (marker-position emacsos-assist-web--input-marker)))
 
-(defun emacos-assist-web--input ()
+(defun emacsos-assist-web--input ()
   "Return current user input from the web-thread prompt."
-  (let ((start (emacos-assist-web--prompt-start)))
+  (let ((start (emacsos-assist-web--prompt-start)))
     (and start (buffer-substring-no-properties start (point-max)))))
 
-(defun emacos-assist-web--replace-input (text)
+(defun emacsos-assist-web--replace-input (text)
   "Replace this buffer's editable prompt with TEXT without firing draft hooks."
-  (when-let ((start (emacos-assist-web--prompt-start)))
+  (when-let ((start (emacsos-assist-web--prompt-start)))
     (let ((inhibit-read-only t)
           (inhibit-modification-hooks t))
       (delete-region start (point-max))
       (goto-char start)
       (insert text))))
 
-(defun emacos-assist-web--write-prompt ()
+(defun emacsos-assist-web--write-prompt ()
   "Append the one editable prompt after a rendered transcript."
   (let ((before (point)))
-    (setq emacos-assist-web--prompt-marker (copy-marker before nil))
-    (insert emacos-assist-web--prompt)
+    (setq emacsos-assist-web--prompt-marker (copy-marker before nil))
+    (insert emacsos-assist-web--prompt)
     (add-text-properties before (point)
                          '(read-only t front-sticky t rear-nonsticky t))
-    (setq emacos-assist-web--input-marker (copy-marker (point) nil))))
+    (setq emacsos-assist-web--input-marker (copy-marker (point) nil))))
 
-(defun emacos-assist-web--anchor-at (position)
+(defun emacsos-assist-web--anchor-at (position)
   "Describe POSITION in the current rendered thread using logical content."
-  (let ((input-start (emacos-assist-web--prompt-start))
+  (let ((input-start (emacsos-assist-web--prompt-start))
         (position (max (point-min) (min position (point-max)))))
     (cond
      ((and input-start (>= position input-start))
       (list :kind 'input :offset (- position input-start)))
      ((< position (point-max))
       (let ((identity (get-text-property
-                       position 'emacos-assist-web-message-id)))
+                       position 'emacsos-assist-web-message-id)))
         (if identity
             (let ((start position))
               (while (and (> start (point-min))
                           (equal identity
                                  (get-text-property
                                   (1- start)
-                                  'emacos-assist-web-message-id)))
+                                  'emacsos-assist-web-message-id)))
                 (setq start (previous-single-property-change
-                             start 'emacos-assist-web-message-id nil
+                             start 'emacsos-assist-web-message-id nil
                              (point-min))))
               (list :kind 'message :id identity
                     :offset (- position start)
@@ -1224,11 +1224,11 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
           (list :kind 'absolute :position position))))
      (t (list :kind 'absolute :position position)))))
 
-(defun emacos-assist-web--resolve-anchor (anchor)
+(defun emacsos-assist-web--resolve-anchor (anchor)
   "Resolve logical ANCHOR in the current rendered thread."
   (pcase (plist-get anchor :kind)
     ('input
-     (let ((start (or (emacos-assist-web--prompt-start) (point-max))))
+     (let ((start (or (emacsos-assist-web--prompt-start) (point-max))))
        (min (point-max) (+ start (plist-get anchor :offset)))))
     ('message
      (if-let ((start
@@ -1238,17 +1238,17 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
                  ;; id strings, so walk the bounded property runs explicitly.
                  (while (and (< position (point-max)) (not found))
                    (when (equal (get-text-property
-                                 position 'emacos-assist-web-message-id)
+                                 position 'emacsos-assist-web-message-id)
                                 (plist-get anchor :id))
                      (setq found position))
                    (unless found
                      (setq position
                            (next-single-property-change
-                            position 'emacos-assist-web-message-id nil
+                            position 'emacsos-assist-web-message-id nil
                             (point-max)))))
                  found)))
          (let ((end (or (next-single-property-change
-                         start 'emacos-assist-web-message-id nil (point-max))
+                         start 'emacsos-assist-web-message-id nil (point-max))
                         (point-max))))
            ;; END is exclusive.  Clamping to END can silently move the anchor
            ;; onto the following message when a refreshed record gets shorter.
@@ -1262,21 +1262,21 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
           (min (or (plist-get anchor :position) (point-min))
                (point-max))))))
 
-(defun emacos-assist-web--capture-render-state ()
+(defun emacsos-assist-web--capture-render-state ()
   "Capture point and the one displayed phone window before a redraw."
-  (when (and (markerp emacos-assist-web--input-marker)
-             (marker-buffer emacos-assist-web--input-marker))
+  (when (and (markerp emacsos-assist-web--input-marker)
+             (marker-buffer emacsos-assist-web--input-marker))
     (let ((window (get-buffer-window (current-buffer))))
-      (list :point (emacos-assist-web--anchor-at (point))
+      (list :point (emacsos-assist-web--anchor-at (point))
             :window window
             :window-point (and window
-                               (emacos-assist-web--anchor-at
+                               (emacsos-assist-web--anchor-at
                                 (window-point window)))
             :window-start (and window
-                               (emacos-assist-web--anchor-at
+                               (emacsos-assist-web--anchor-at
                                 (window-start window)))))))
 
-(defun emacos-assist-web--restore-render-state (state)
+(defun emacsos-assist-web--restore-render-state (state)
   "Restore logical point and phone viewport from STATE after a redraw."
   (if (not state)
       (goto-char (point-max))
@@ -1285,16 +1285,16 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
                  (eq (window-buffer window) (current-buffer)))
         (set-window-point
          window
-         (emacos-assist-web--resolve-anchor
+         (emacsos-assist-web--resolve-anchor
           (plist-get state :window-point)))
         (set-window-start
          window
-         (emacos-assist-web--resolve-anchor
+         (emacsos-assist-web--resolve-anchor
           (plist-get state :window-start)) t))
-      (goto-char (emacos-assist-web--resolve-anchor
+      (goto-char (emacsos-assist-web--resolve-anchor
                   (plist-get state :point))))))
 
-(defun emacos-assist-web--retain-loaded-history (fresh previous)
+(defun emacsos-assist-web--retain-loaded-history (fresh previous)
   "Return FRESH with canonical messages already loaded in PREVIOUS retained.
 
 Thread messages are append-only.  A fresh recent page replaces records with
@@ -1321,47 +1321,47 @@ of it, together with the oldest pagination cursor already reached."
               (alist-get 'next_before previous)))
       result)))
 
-(defun emacos-assist-web--render (snapshot &optional stale)
+(defun emacsos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed."
   (let ((inhibit-read-only t)
         (inhibit-modification-hooks t)
-        (draft (emacos-assist-web--input))
-        (render-state (emacos-assist-web--capture-render-state)))
-    (emacos-assist-web--require-snapshot snapshot emacos-assist-web--thread-id)
+        (draft (emacsos-assist-web--input))
+        (render-state (emacsos-assist-web--capture-render-state)))
+    (emacsos-assist-web--require-snapshot snapshot emacsos-assist-web--thread-id)
     (setq snapshot
-          (emacos-assist-web--retain-loaded-history
-           snapshot emacos-assist-web--snapshot))
+          (emacsos-assist-web--retain-loaded-history
+           snapshot emacsos-assist-web--snapshot))
     (let ((thread (alist-get 'thread snapshot))
           (presentation-bytes
            (cl-loop for message in (alist-get 'messages snapshot)
                     sum (string-bytes (alist-get 'text message)))))
       (let ((returned-id
-             (emacos-assist-web--require-id (alist-get 'id thread))))
-        (when (and emacos-assist-web--thread-id
-                   (not (equal returned-id emacos-assist-web--thread-id)))
+             (emacsos-assist-web--require-id (alist-get 'id thread))))
+        (when (and emacsos-assist-web--thread-id
+                   (not (equal returned-id emacsos-assist-web--thread-id)))
           (error "Assist Web snapshot identity does not match this buffer"))
-        (setq emacos-assist-web--thread-id returned-id))
-      (setq emacos-assist-web--snapshot snapshot
-            emacos-assist-web--pending-rendered-p nil)
+        (setq emacsos-assist-web--thread-id returned-id))
+      (setq emacsos-assist-web--snapshot snapshot
+            emacsos-assist-web--pending-rendered-p nil)
       (erase-buffer)
       (let ((transcript-start (point)))
         (insert (format "%s%s\n"
-                        (emacos-assist-web--thread-label
+                        (emacsos-assist-web--thread-label
                          `((description . ,(alist-get 'description thread))
                            (repo_label . ,(alist-get
                                            'repo_label
                                            (alist-get 'workspace thread)))))
                         (if stale " [cached]" "")))
-        (setq emacos-assist-web--status-start (copy-marker (point) nil))
-        (insert (format "[%s%s]" (or emacos-assist-web--stream-status
+        (setq emacsos-assist-web--status-start (copy-marker (point) nil))
+        (insert (format "[%s%s]" (or emacsos-assist-web--stream-status
                                      (alist-get 'status thread))
                         (if-let ((error (alist-get 'error thread)))
                             (concat ": " error) "")))
-        (setq emacos-assist-web--status-end (copy-marker (point) nil))
+        (setq emacsos-assist-web--status-end (copy-marker (point) nil))
         (insert "\n\n")
-        (let ((emacos--chat-presentation-max-bytes
-               (if (<= presentation-bytes emacos--chat-presentation-max-bytes)
-                   emacos--chat-presentation-max-bytes
+        (let ((emacsos--chat-presentation-max-bytes
+               (if (<= presentation-bytes emacsos--chat-presentation-max-bytes)
+                   emacsos--chat-presentation-max-bytes
                  0)))
           (dolist (message (alist-get 'messages snapshot))
             (let* ((message-start (point))
@@ -1370,14 +1370,14 @@ of it, together with the oldest pagination cursor already reached."
               (insert (if (eq role 'user) "you> " "bot> "))
               (let ((body-start (point)))
                 (insert (alist-get 'text message))
-                (emacos--chat-present-message
+                (emacsos--chat-present-message
                  message-start body-start (point) role))
-              (when (and emacos-assist-web--pending-accepted-p
+              (when (and emacsos-assist-web--pending-accepted-p
                          (equal (alist-get 'role message) "user")
                          (equal (alist-get 'state message) "incomplete")
                          (equal (alist-get 'text message)
-                                emacos-assist-web--submitted-text))
-                (setq emacos-assist-web--pending-rendered-p t)
+                                emacsos-assist-web--submitted-text))
+                (setq emacsos-assist-web--pending-rendered-p t)
                 ;; The canonical snapshot has already rendered the user turn,
                 ;; so recreate only the provisional assistant insertion range.
                 ;; A resumed SSE reset/delta must have these markers to render.
@@ -1386,192 +1386,192 @@ of it, together with the oldest pagination cursor already reached."
                   (let ((body-start (point)))
                     (insert "[queued]\n")
                     (pcase-let ((`(,start . ,end)
-                                 (emacos-conversation-begin-assistant
+                                 (emacsos-conversation-begin-assistant
                                   body-start (point))))
-                      (setq emacos-assist-web--assistant-start start
-                            emacos-assist-web--assistant-end end))
-                    (emacos--chat-present-message assistant-start body-start
+                      (setq emacsos-assist-web--assistant-start start
+                            emacsos-assist-web--assistant-end end))
+                    (emacsos--chat-present-message assistant-start body-start
                                                    (point) 'assistant))))
               (insert "\n\n")
               (add-text-properties
                message-start (point)
-               `(emacos-assist-web-message-id ,(alist-get 'id message)
+               `(emacsos-assist-web-message-id ,(alist-get 'id message)
                  rear-nonsticky t)))))
         (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t))
-        (emacos-assist-web--write-prompt)
-        (if draft (insert draft) (emacos-assist-web--restore-draft))
-        (emacos-assist-web--restore-render-state render-state)
+        (emacsos-assist-web--write-prompt)
+        (if draft (insert draft) (emacsos-assist-web--restore-draft))
+        (emacsos-assist-web--restore-render-state render-state)
         (setq buffer-read-only nil)
         (set-buffer-modified-p nil)
-        (emacos-assist-web--save-draft)))))
+        (emacsos-assist-web--save-draft)))))
 
-(defun emacos-assist-web--snapshot-cache-name (tid)
+(defun emacsos-assist-web--snapshot-cache-name (tid)
   "Return the bounded per-thread snapshot cache filename for TID."
-  (concat "threads/" (emacos-assist-web--require-id tid) ".json"))
+  (concat "threads/" (emacsos-assist-web--require-id tid) ".json"))
 
-(defun emacos-assist-web--draft-cache-name ()
+(defun emacsos-assist-web--draft-cache-name ()
   "Return the private cache name for this thread or local draft buffer."
-  (when-let ((identity (or (and emacos-assist-web--thread-id
-                                (emacos-assist-web--require-id
-                                 emacos-assist-web--thread-id))
-                           (and emacos-assist-web--draft-id
-                                (emacos-assist-web--require-id
-                                 emacos-assist-web--draft-id)))))
+  (when-let ((identity (or (and emacsos-assist-web--thread-id
+                                (emacsos-assist-web--require-id
+                                 emacsos-assist-web--thread-id))
+                           (and emacsos-assist-web--draft-id
+                                (emacsos-assist-web--require-id
+                                 emacsos-assist-web--draft-id)))))
     (concat "drafts/" identity ".json")))
 
-(defun emacos-assist-web--save-draft ()
+(defun emacsos-assist-web--save-draft ()
   "Persist the current editable tail and retry identity, if this buffer has one.
 
 Return non-nil on success or when this buffer has no draft identity."
-  (if-let ((name (emacos-assist-web--draft-cache-name)))
-      (emacos-assist-web--try-write-cache
-       name `((text . ,(or (emacos-assist-web--input) ""))
-              (pending_key . ,emacos-assist-web--pending-key)
-              (submitted_text . ,emacos-assist-web--submitted-text)
-              (pending_accepted . ,emacos-assist-web--pending-accepted-p)
-              (run_id . ,emacos-assist-web--run-id)
-              (repo_key . ,emacos-assist-web--draft-repository)
-              (harness . ,emacos-assist-web--draft-harness)))
+  (if-let ((name (emacsos-assist-web--draft-cache-name)))
+      (emacsos-assist-web--try-write-cache
+       name `((text . ,(or (emacsos-assist-web--input) ""))
+              (pending_key . ,emacsos-assist-web--pending-key)
+              (submitted_text . ,emacsos-assist-web--submitted-text)
+              (pending_accepted . ,emacsos-assist-web--pending-accepted-p)
+              (run_id . ,emacsos-assist-web--run-id)
+              (repo_key . ,emacsos-assist-web--draft-repository)
+              (harness . ,emacsos-assist-web--draft-harness)))
     t))
 
-(defun emacos-assist-web--after-change (&rest _)
+(defun emacsos-assist-web--after-change (&rest _)
   "Debounce local draft persistence after a user edit."
-  (when (and (derived-mode-p 'emacos-assist-web-mode)
+  (when (and (derived-mode-p 'emacsos-assist-web-mode)
              (not inhibit-modification-hooks))
-    (when (and (not emacos-assist-web--in-flight)
-               emacos-assist-web--pending-key
-               (not (equal (emacos-assist-web--input)
-                           emacos-assist-web--submitted-text)))
-      (setq emacos-assist-web--pending-key nil
-            emacos-assist-web--submitted-text nil
-            emacos-assist-web--pending-accepted-p nil
-            emacos-assist-web--run-id nil
+    (when (and (not emacsos-assist-web--in-flight)
+               emacsos-assist-web--pending-key
+               (not (equal (emacsos-assist-web--input)
+                           emacsos-assist-web--submitted-text)))
+      (setq emacsos-assist-web--pending-key nil
+            emacsos-assist-web--submitted-text nil
+            emacsos-assist-web--pending-accepted-p nil
+            emacsos-assist-web--run-id nil
             ;; The next distinct Send must create its own provisional region,
             ;; not stream into the failed submission's old markers.
-            emacos-assist-web--pending-rendered-p nil
-            emacos-assist-web--stream-status nil)
-      (when emacos-assist-web--status-start
-        (emacos-assist-web--display-status
-         (if emacos-assist-web--thread-id
-             (or (alist-get 'status (alist-get 'thread emacos-assist-web--snapshot))
+            emacsos-assist-web--pending-rendered-p nil
+            emacsos-assist-web--stream-status nil)
+      (when emacsos-assist-web--status-start
+        (emacsos-assist-web--display-status
+         (if emacsos-assist-web--thread-id
+             (or (alist-get 'status (alist-get 'thread emacsos-assist-web--snapshot))
                  "ready")
            "local draft"))))
-    (when (timerp emacos-assist-web--draft-save-timer)
-      (cancel-timer emacos-assist-web--draft-save-timer))
-    (setq emacos-assist-web--draft-save-timer
+    (when (timerp emacsos-assist-web--draft-save-timer)
+      (cancel-timer emacsos-assist-web--draft-save-timer))
+    (setq emacsos-assist-web--draft-save-timer
           (run-with-idle-timer
            0.5 nil
            (lambda (buffer)
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
-                 (setq emacos-assist-web--draft-save-timer nil)
-                 (emacos-assist-web--save-draft))))
+                 (setq emacsos-assist-web--draft-save-timer nil)
+                 (emacsos-assist-web--save-draft))))
            (current-buffer)))))
 
-(defun emacos-assist-web--resume-accepted-run ()
+(defun emacsos-assist-web--resume-accepted-run ()
   "Resume the exact accepted Run saved in this buffer's draft cache.
 
 The exact Run status tells whether this saved submission is still active.
 That durable identity avoids both a false duplicate after a crash and
 suppressing a genuine repeated submission."
-  (when (and emacos-assist-web--thread-id emacos-assist-web--run-id)
+  (when (and emacsos-assist-web--thread-id emacsos-assist-web--run-id)
     (let ((buffer (current-buffer)))
-      (if (and emacos--assist-active-surface
-               (not (eq emacos--assist-active-surface buffer)))
+      (if (and emacsos--assist-active-surface
+               (not (eq emacsos--assist-active-surface buffer)))
           ;; A recovered durable retry may wait, but it must never steal the
           ;; phone-wide stream owner from an open local or canonical chat.
-          (emacos-assist-web--set-unverified-status
+          (emacsos-assist-web--set-unverified-status
            "another conversation is active; Send re-observes")
-        (let* ((tid (emacos-assist-web--require-id emacos-assist-web--thread-id))
-               (run-id (emacos-assist-web--require-id emacos-assist-web--run-id))
-               (generation (cl-incf emacos-assist-web--send-generation)))
-      (setq emacos-assist-web--in-flight t
-            emacos--assist-active-surface buffer)
-      (emacos-assist-web--request
+        (let* ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
+               (run-id (emacsos-assist-web--require-id emacsos-assist-web--run-id))
+               (generation (cl-incf emacsos-assist-web--send-generation)))
+      (setq emacsos-assist-web--in-flight t
+            emacsos--assist-active-surface buffer)
+      (emacsos-assist-web--request
        "GET" (format "threads/%s/runs/%s" tid run-id) nil
        (lambda (value error)
          (when (and (buffer-live-p buffer)
-                    (= generation emacos-assist-web--send-generation))
+                    (= generation emacsos-assist-web--send-generation))
            (with-current-buffer buffer
              (if error
                  (if (equal error "Assist Web run store is unavailable")
-                     (emacos-assist-web--run-store-unavailable buffer)
-                   (unless emacos-assist-web--pending-rendered-p
-                     (emacos-assist-web--append-pending
-                      emacos-assist-web--submitted-text))
-                   (emacos-assist-web--stream-interrupted
+                     (emacsos-assist-web--run-store-unavailable buffer)
+                   (unless emacsos-assist-web--pending-rendered-p
+                     (emacsos-assist-web--append-pending
+                      emacsos-assist-web--submitted-text))
+                   (emacsos-assist-web--stream-interrupted
                     buffer "observation interrupted"))
                (condition-case problem
                    (let ((status (alist-get 'status value)))
                      (unless (stringp status) (error "invalid Assist run status"))
                      (cond
                       ((member status '("pending" "running" "transitioning"))
-                       (unless emacos-assist-web--pending-rendered-p
-                         (emacos-assist-web--append-pending
-                          emacos-assist-web--submitted-text))
-                       (emacos-assist-web--set-status status)
-                       (emacos-assist-web--save-draft)
-                       (emacos-assist-web--observe-run buffer))
+                       (unless emacsos-assist-web--pending-rendered-p
+                         (emacsos-assist-web--append-pending
+                          emacsos-assist-web--submitted-text))
+                       (emacsos-assist-web--set-status status)
+                       (emacsos-assist-web--save-draft)
+                       (emacsos-assist-web--observe-run buffer))
                       ((equal status "awaiting_approval")
                        ;; It ends this observer but remains a durable Run until
                        ;; the canonical refresh has made its approval state visible.
-                       (emacos-assist-web--stream-finish buffer))
+                       (emacsos-assist-web--stream-finish buffer))
                       ((member status '("success" "error" "timeout" "interrupted"
                                        "cancelled"))
-                       (setq emacos-assist-web--pending-key nil
-                             emacos-assist-web--submitted-text nil
-                             emacos-assist-web--pending-accepted-p nil
-                             emacos-assist-web--run-id nil
-                             emacos-assist-web--stream-status nil
-                             emacos-assist-web--in-flight nil)
-                       (when (eq emacos--assist-active-surface buffer)
-                         (setq emacos--assist-active-surface nil))
-                       (emacos-assist-web--save-draft)
-                       (emacos-assist-web-refresh-thread buffer))
+                       (setq emacsos-assist-web--pending-key nil
+                             emacsos-assist-web--submitted-text nil
+                             emacsos-assist-web--pending-accepted-p nil
+                             emacsos-assist-web--run-id nil
+                             emacsos-assist-web--stream-status nil
+                             emacsos-assist-web--in-flight nil)
+                       (when (eq emacsos--assist-active-surface buffer)
+                         (setq emacsos--assist-active-surface nil))
+                       (emacsos-assist-web--save-draft)
+                       (emacsos-assist-web-refresh-thread buffer))
                       (t
-                       (unless emacos-assist-web--pending-rendered-p
-                         (emacos-assist-web--append-pending
-                          emacos-assist-web--submitted-text))
-                       (emacos-assist-web--stream-interrupted
+                       (unless emacsos-assist-web--pending-rendered-p
+                         (emacsos-assist-web--append-pending
+                          emacsos-assist-web--submitted-text))
+                       (emacsos-assist-web--stream-interrupted
                         buffer "invalid Assist run status"))))
                  (error
-                  (unless emacos-assist-web--pending-rendered-p
-                  (emacos-assist-web--append-pending
-                     emacos-assist-web--submitted-text))
-                  (emacos-assist-web--stream-interrupted
+                  (unless emacsos-assist-web--pending-rendered-p
+                  (emacsos-assist-web--append-pending
+                     emacsos-assist-web--submitted-text))
+                  (emacsos-assist-web--stream-interrupted
                    buffer (error-message-string problem))))))))))))))
 
-(defun emacos-assist-web--restore-draft ()
+(defun emacsos-assist-web--restore-draft ()
   "Restore this thread's local tail and any accepted, unobserved submission."
-  (when-let* ((name (emacos-assist-web--draft-cache-name))
-              (draft (emacos-assist-web--read-cache name)))
+  (when-let* ((name (emacsos-assist-web--draft-cache-name))
+              (draft (emacsos-assist-web--read-cache name)))
     (let ((key (alist-get 'pending_key draft))
           (submitted (alist-get 'submitted_text draft))
           (run-id (alist-get 'run_id draft))
           (text (alist-get 'text draft)))
       (if (and (stringp key)
-               (string-match-p emacos-assist-web--idempotency-regexp key)
+               (string-match-p emacsos-assist-web--idempotency-regexp key)
                (stringp submitted))
-          (setq emacos-assist-web--pending-key key
-                emacos-assist-web--submitted-text submitted
-                emacos-assist-web--pending-accepted-p
+          (setq emacsos-assist-web--pending-key key
+                emacsos-assist-web--submitted-text submitted
+                emacsos-assist-web--pending-accepted-p
                 (and (alist-get 'pending_accepted draft) t)
-                emacos-assist-web--run-id
+                emacsos-assist-web--run-id
                 (and (stringp run-id)
-                     (string-match-p emacos-assist-web--id-regexp run-id)
+                     (string-match-p emacsos-assist-web--id-regexp run-id)
                      run-id))
-        (setq emacos-assist-web--pending-key nil
-              emacos-assist-web--submitted-text nil
-              emacos-assist-web--pending-accepted-p nil
-              emacos-assist-web--run-id nil))
-      (if emacos-assist-web--pending-accepted-p
+        (setq emacsos-assist-web--pending-key nil
+              emacsos-assist-web--submitted-text nil
+              emacsos-assist-web--pending-accepted-p nil
+              emacsos-assist-web--run-id nil))
+      (if emacsos-assist-web--pending-accepted-p
           (progn
-            (if emacos-assist-web--run-id
-                (emacos-assist-web--resume-accepted-run)
-              (unless emacos-assist-web--pending-rendered-p
-                (emacos-assist-web--append-pending submitted))
-              (emacos-assist-web--set-status
+            (if emacsos-assist-web--run-id
+                (emacsos-assist-web--resume-accepted-run)
+              (unless emacsos-assist-web--pending-rendered-p
+                (emacsos-assist-web--append-pending submitted))
+              (emacsos-assist-web--set-status
                "observation interrupted; C-c C-a g refreshes"))
             ;; A crash can leave the accepted submission in the saved editable
             ;; tail even though the provisional rendering is restored above.
@@ -1580,25 +1580,25 @@ suppressing a genuine repeated submission."
               (insert text)))
         (when (stringp text) (insert text))))))
 
-(defun emacos-assist-web--show-thread (thread)
+(defun emacsos-assist-web--show-thread (thread)
   "Select THREAD's dedicated buffer and refresh it unless a send is active."
-  (let* ((name (emacos-assist-web--thread-label thread))
-         (tid (emacos-assist-web--require-id (alist-get 'id thread)))
+  (let* ((name (emacsos-assist-web--thread-label thread))
+         (tid (emacsos-assist-web--require-id (alist-get 'id thread)))
          ;; The human label remains in the rendered header.  The opaque suffix
          ;; makes the Emacs buffer identity one-to-one even for duplicate titles.
-         (existing (emacos-assist-web--thread-buffer tid))
+         (existing (emacsos-assist-web--thread-buffer tid))
          (buffer (or existing (get-buffer-create (format "%s <%s>" name tid)))))
     (with-current-buffer buffer
       (unless existing
-        (emacos-assist-web-mode))
-      (setq emacos-assist-web--thread-id tid)
+        (emacsos-assist-web-mode))
+      (setq emacsos-assist-web--thread-id tid)
       (unless existing
-        (if-let ((cached (emacos-assist-web--read-cache
-                          (emacos-assist-web--snapshot-cache-name tid))))
+        (if-let ((cached (emacsos-assist-web--read-cache
+                          (emacsos-assist-web--snapshot-cache-name tid))))
             (condition-case nil
-                (emacos-assist-web--render cached t)
+                (emacsos-assist-web--render cached t)
               (error nil))
-          (emacos-assist-web--render
+          (emacsos-assist-web--render
            `((thread . ((id . ,tid)
                         (description . ,(alist-get 'description thread))
                         (status . "loading")
@@ -1607,65 +1607,65 @@ suppressing a genuine repeated submission."
            nil)
           ;; The placeholder makes the buffer useful while offline without
           ;; claiming that a canonical transcript was cached.
-          (setq emacos-assist-web--snapshot nil)))
+          (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
-    (unless (with-current-buffer buffer emacos-assist-web--in-flight)
-      (emacos-assist-web-refresh-thread buffer)))))
+    (unless (with-current-buffer buffer emacsos-assist-web--in-flight)
+      (emacsos-assist-web-refresh-thread buffer)))))
 
-(defun emacos-assist-web-open-thread ()
+(defun emacsos-assist-web-open-thread ()
   "Choose and open one cached Assist Web thread without a network wait."
   (interactive)
-  (emacos-assist-web--load-catalog)
-  (if (not emacos-assist-web--catalog-loaded-p)
+  (emacsos-assist-web--load-catalog)
+  (if (not emacsos-assist-web--catalog-loaded-p)
       (progn
-        (emacos-assist-web--show-notice
+        (emacsos-assist-web--show-notice
          "*assist Threads*" "Loading Assist threads…")
-        (emacos-assist-web-refresh-threads))
-    (if (null emacos-assist-web--catalog)
-        (emacos-assist-web--show-notice
+        (emacsos-assist-web-refresh-threads))
+    (if (null emacsos-assist-web--catalog)
+        (emacsos-assist-web--show-notice
          "*assist Threads*"
-         "No Assist threads yet. Use C-c C-a n to create one.")
-      (let* ((records (emacos-assist-web--completion-records))
+         "No Assist threads yet. C-c e n creates one; C-c e t opens one; C-c e r retries.")
+      (let* ((records (emacsos-assist-web--completion-records))
            (choice (completing-read "Assist thread: "
-                                    (emacos-assist-web--completion-table records)
+                                    (emacsos-assist-web--completion-table records)
                                     nil t))
-           (record (emacos-assist-web--record-for-display choice records)))
-        (when record (emacos-assist-web--show-thread (plist-get record :thread)))))))
+           (record (emacsos-assist-web--record-for-display choice records)))
+        (when record (emacsos-assist-web--show-thread (plist-get record :thread)))))))
 
-(defun emacos-assist-web-refresh-threads ()
+(defun emacsos-assist-web-refresh-threads ()
   "Refresh the thread chooser cache asynchronously."
   (interactive)
   (let ((notice (get-buffer "*assist Threads*"))
-        (generation (cl-incf emacos-assist-web--catalog-generation)))
-    (emacos-assist-web--request
+        (generation (cl-incf emacsos-assist-web--catalog-generation)))
+    (emacsos-assist-web--request
      "GET" "threads" nil
      (lambda (value error)
-       (when (= generation emacos-assist-web--catalog-generation)
+       (when (= generation emacsos-assist-web--catalog-generation)
          (if error
            (progn
-             (when emacos-assist-web--catalog-loaded-p
-               (setq emacos-assist-web--catalog-stale t))
+             (when emacsos-assist-web--catalog-loaded-p
+               (setq emacsos-assist-web--catalog-stale t))
              (when (buffer-live-p notice)
                (with-current-buffer notice
                  (let ((inhibit-read-only t))
                    (erase-buffer)
                    (insert "Assist threads could not be loaded.\n"
-                           "Reconnect, then use C-c C-a r to retry.\n"))))
+                           "Reconnect, then use C-c e r to retry.\n"))))
              (message "Thread refresh failed: %s" error))
          (condition-case problem
              (progn
-               (emacos-assist-web--require-catalog value)
-               (setq emacos-assist-web--catalog (alist-get 'threads value)
-                     emacos-assist-web--catalog-loaded-p t
-                     emacos-assist-web--catalog-stale nil)
-               (emacos-assist-web--try-write-cache
-                emacos-assist-web--catalog-file value)
+               (emacsos-assist-web--require-catalog value)
+               (setq emacsos-assist-web--catalog (alist-get 'threads value)
+                     emacsos-assist-web--catalog-loaded-p t
+                     emacsos-assist-web--catalog-stale nil)
+               (emacsos-assist-web--try-write-cache
+                emacsos-assist-web--catalog-file value)
                (when (buffer-live-p notice)
                  (with-current-buffer notice
                    (let ((inhibit-read-only t))
                      (erase-buffer)
                      (insert "Assist threads are ready.\n"
-                             "Use C-c C-a t to choose one.\n"))))
+                             "Use C-c e t to choose one. C-c e r refreshes.\n"))))
                (message "Threads updated. Open Threads to choose one."))
            (error
             (when (buffer-live-p notice)
@@ -1673,27 +1673,27 @@ suppressing a genuine repeated submission."
                 (let ((inhibit-read-only t))
                   (erase-buffer)
                   (insert "Assist threads returned invalid data.\n"
-                          "Use C-c C-a r to retry.\n"))))
+                          "Use C-c e r to retry.\n"))))
             (message "Thread refresh rejected: %s"
                      (error-message-string problem))))))))))
 
-(defun emacos-assist-web--read-catalog-cache ()
+(defun emacsos-assist-web--read-catalog-cache ()
   "Return the validated local catalog cache, or nil when absent or invalid."
   (when-let ((cached
-              (emacos-assist-web--read-cache emacos-assist-web--catalog-file)))
+              (emacsos-assist-web--read-cache emacsos-assist-web--catalog-file)))
     (condition-case nil
-        (emacos-assist-web--require-catalog cached)
+        (emacsos-assist-web--require-catalog cached)
       (error nil))))
 
-(defun emacos-assist-web--load-catalog ()
+(defun emacsos-assist-web--load-catalog ()
   "Load the catalog cache once, at package load or first use."
-  (unless emacos-assist-web--catalog-loaded-p
-    (when-let ((cached (emacos-assist-web--read-catalog-cache)))
-      (setq emacos-assist-web--catalog (alist-get 'threads cached)
-            emacos-assist-web--catalog-loaded-p t
-            emacos-assist-web--catalog-stale t))))
+  (unless emacsos-assist-web--catalog-loaded-p
+    (when-let ((cached (emacsos-assist-web--read-catalog-cache)))
+      (setq emacsos-assist-web--catalog (alist-get 'threads cached)
+            emacsos-assist-web--catalog-loaded-p t
+            emacsos-assist-web--catalog-stale t))))
 
-(defun emacos-assist-web-refresh-thread (&optional buffer completed-run-id)
+(defun emacsos-assist-web-refresh-thread (&optional buffer completed-run-id)
   "Fetch and render BUFFER's canonical thread snapshot asynchronously.
 
 COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
@@ -1701,99 +1701,99 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when emacos-assist-web--thread-id
-          (let ((tid (emacos-assist-web--require-id emacos-assist-web--thread-id))
-                (generation (cl-incf emacos-assist-web--refresh-generation))
-                (send-generation emacos-assist-web--send-generation))
-            (emacos-assist-web--request
+        (when emacsos-assist-web--thread-id
+          (let ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
+                (generation (cl-incf emacsos-assist-web--refresh-generation))
+                (send-generation emacsos-assist-web--send-generation))
+            (emacsos-assist-web--request
              "GET" (concat "threads/" tid) nil
              (lambda (value error)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (when (and (= generation emacos-assist-web--refresh-generation)
-                              (= send-generation emacos-assist-web--send-generation))
+                   (when (and (= generation emacsos-assist-web--refresh-generation)
+                              (= send-generation emacsos-assist-web--send-generation))
                      (if error
                          (progn
                            ;; Preserve the visible pending turn and editable tail.
                            ;; Re-rendering an older snapshot here would erase work
                            ;; that Assist has already accepted.
-                           (if emacos-assist-web--pending-accepted-p
-                               (emacos-assist-web--set-unverified-status
+                           (if emacsos-assist-web--pending-accepted-p
+                               (emacsos-assist-web--set-unverified-status
                                 "refresh failed; C-c C-a g retries")
-                             (emacos-assist-web--set-status
-                              (if emacos-assist-web--snapshot
+                             (emacsos-assist-web--set-status
+                              (if emacsos-assist-web--snapshot
                                   "refresh failed; cached; C-c C-a g retries"
                                 "refresh failed; C-c C-a g retries")))
                            (message "Thread refresh failed: %s" error))
                        (condition-case problem
                            (progn
-                             (emacos-assist-web--require-snapshot value tid)
+                             (emacsos-assist-web--require-snapshot value tid)
                              (let ((busy
                                     (member
                                      (alist-get 'status (alist-get 'thread value))
                                      '("queued" "processing" "paused"
                                        "initializing" "cloning"
                                        "starting_sandbox"))))
-                               (emacos-assist-web--try-write-cache
-                                (emacos-assist-web--snapshot-cache-name tid) value)
+                               (emacsos-assist-web--try-write-cache
+                                (emacsos-assist-web--snapshot-cache-name tid) value)
                                (when (or (and completed-run-id
                                               (equal completed-run-id
-                                                     emacos-assist-web--run-id))
-                                         (and emacos-assist-web--pending-accepted-p
+                                                     emacsos-assist-web--run-id))
+                                         (and emacsos-assist-web--pending-accepted-p
                                               (not busy)))
                                  ;; A manual refresh can discover completion while
                                  ;; the observer is live; a terminal-event refresh
                                  ;; can also see a newer external run.  In either
                                  ;; case, settle the exact locally observed run.
-                                 (when emacos-assist-web--in-flight
-                                   (emacos-assist-web--stream-cleanup nil t))
-                                 (setq emacos-assist-web--stream-status nil
-                                       emacos-assist-web--pending-key nil
-                                       emacos-assist-web--submitted-text nil
-                                       emacos-assist-web--pending-accepted-p nil
-                                       emacos-assist-web--run-id nil))
+                                 (when emacsos-assist-web--in-flight
+                                   (emacsos-assist-web--stream-cleanup nil t))
+                                 (setq emacsos-assist-web--stream-status nil
+                                       emacsos-assist-web--pending-key nil
+                                       emacsos-assist-web--submitted-text nil
+                                       emacsos-assist-web--pending-accepted-p nil
+                                       emacsos-assist-web--run-id nil))
                                (when busy
-                                 (setq emacos-assist-web--stream-status nil))
+                                 (setq emacsos-assist-web--stream-status nil))
                                ;; While this buffer owns a live observer, the
                                ;; existing provisional markers remain the only
                                ;; safe insertion target.  Cache a still-busy
                                ;; snapshot but leave that rendered region intact;
                                ;; a terminal refresh performs the reconciliation.
-                               (unless (and busy emacos-assist-web--in-flight)
-                                 (emacos-assist-web--render value))))
+                               (unless (and busy emacsos-assist-web--in-flight)
+                                 (emacsos-assist-web--render value))))
                          (error
                           (message "Thread refresh rejected: %s"
                                    (error-message-string problem))))))))))))))))
 
-(defun emacos-assist-web-load-older ()
+(defun emacsos-assist-web-load-older ()
   "Load one older bounded page of this thread's canonical visible history."
   (interactive)
-  (if (not emacos-assist-web--thread-id)
+  (if (not emacsos-assist-web--thread-id)
       (message "This draft has no history")
-    (let* ((tid (emacos-assist-web--require-id emacos-assist-web--thread-id))
-           (name (emacos-assist-web--snapshot-cache-name tid))
-           (cached (or emacos-assist-web--snapshot
-                       (emacos-assist-web--read-cache name)))
+    (let* ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
+           (name (emacsos-assist-web--snapshot-cache-name tid))
+           (cached (or emacsos-assist-web--snapshot
+                       (emacsos-assist-web--read-cache name)))
            (before (and cached (alist-get 'next_before cached)))
            (buffer (current-buffer))
-           (generation (cl-incf emacos-assist-web--refresh-generation)))
+           (generation (cl-incf emacsos-assist-web--refresh-generation)))
       (if (not before)
           (message "No older messages are available")
-        (emacos-assist-web--request
+        (emacsos-assist-web--request
          "GET" (format "threads/%s/history?before=%s" tid (url-hexify-string before)) nil
          (lambda (page error)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer
-               (when (and (= generation emacos-assist-web--refresh-generation)
+               (when (and (= generation emacsos-assist-web--refresh-generation)
                           (equal before (alist-get 'next_before
-                                                   (or emacos-assist-web--snapshot cached))))
+                                                   (or emacsos-assist-web--snapshot cached))))
                  (if error
                      (message "Older history failed: %s" error)
                    (condition-case problem
                        (let ((updated
                               (copy-tree
-                               (or emacos-assist-web--snapshot cached))))
-                         (emacos-assist-web--require-history-page
+                               (or emacsos-assist-web--snapshot cached))))
+                         (emacsos-assist-web--require-history-page
                           page tid updated before)
                          (setf (alist-get 'messages updated)
                                (append (alist-get 'messages page)
@@ -1802,100 +1802,100 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                (alist-get 'has_older_messages page)
                                (alist-get 'next_before updated)
                                (alist-get 'next_before page))
-                         (emacos-assist-web--render updated))
+                         (emacsos-assist-web--render updated))
                      (error
                       (message "Older history rejected: %s"
                                (error-message-string problem))))))))))))))
 
-(defun emacos-assist-web--new-idempotency-key ()
+(defun emacsos-assist-web--new-idempotency-key ()
   "Mint one opaque retry key; it is persisted in the buffer while pending."
   (concat "emacsos-" (md5 (format "%s-%s-%s" (float-time) (random) (emacs-pid)))))
 
-(defun emacos-assist-web--release-send (buffer status)
+(defun emacsos-assist-web--release-send (buffer status)
   "Release BUFFER's send reservation, show STATUS, and persist retry state."
-  (setq emacos-assist-web--in-flight nil)
-  (when (eq emacos--assist-active-surface buffer)
-    (setq emacos--assist-active-surface nil))
-  (emacos-assist-web--set-status status)
-  (emacos-assist-web--save-draft))
+  (setq emacsos-assist-web--in-flight nil)
+  (when (eq emacsos--assist-active-surface buffer)
+    (setq emacsos--assist-active-surface nil))
+  (emacsos-assist-web--set-status status)
+  (emacsos-assist-web--save-draft))
 
-(defun emacos-assist-web-send ()
+(defun emacsos-assist-web-send ()
   "Send this buffer's prompt to its canonical web thread exactly once."
   (interactive)
-  (when (and (bufferp emacos--assist-active-surface)
-             (not (buffer-live-p emacos--assist-active-surface)))
-    (setq emacos--assist-active-surface nil))
-  (let ((text (or emacos-assist-web--submitted-text
-                  (emacos-assist-web--input))))
+  (when (and (bufferp emacsos--assist-active-surface)
+             (not (buffer-live-p emacsos--assist-active-surface)))
+    (setq emacsos--assist-active-surface nil))
+  (let ((text (or emacsos-assist-web--submitted-text
+                  (emacsos-assist-web--input))))
     (cond
-     ((not (derived-mode-p 'emacos-assist-web-mode))
+     ((not (derived-mode-p 'emacsos-assist-web-mode))
       (message "Open an Assist Web thread before sending"))
      ((or (not (stringp text)) (string-empty-p (string-trim text)))
       (message "Nothing to send"))
-     (emacos-assist-web--in-flight
+     (emacsos-assist-web--in-flight
       (message "A web-thread request is already running"))
-     ((and emacos--assist-active-surface
-           (not (eq emacos--assist-active-surface (current-buffer))))
+     ((and emacsos--assist-active-surface
+           (not (eq emacsos--assist-active-surface (current-buffer))))
       (message "Another Assist request is still running"))
      (t
-      (let* ((generation (cl-incf emacos-assist-web--send-generation))
+      (let* ((generation (cl-incf emacsos-assist-web--send-generation))
              (buffer (current-buffer))
-             (existing-thread-id emacos-assist-web--thread-id))
+             (existing-thread-id emacsos-assist-web--thread-id))
         ;; Any older snapshot callback describes the transcript before this send.
-        (cl-incf emacos-assist-web--refresh-generation)
-        (setq emacos-assist-web--in-flight t
-              emacos--assist-active-surface buffer
-              emacos-assist-web--pending-key
-              (or emacos-assist-web--pending-key
-                  (emacos-assist-web--new-idempotency-key))
-              emacos-assist-web--submitted-text text
-              emacos-assist-web--pending-accepted-p nil
+        (cl-incf emacsos-assist-web--refresh-generation)
+        (setq emacsos-assist-web--in-flight t
+              emacsos--assist-active-surface buffer
+              emacsos-assist-web--pending-key
+              (or emacsos-assist-web--pending-key
+                  (emacsos-assist-web--new-idempotency-key))
+              emacsos-assist-web--submitted-text text
+              emacsos-assist-web--pending-accepted-p nil
               ;; There is no current run to cancel until POST returns.
-              emacos-assist-web--run-id nil)
+              emacsos-assist-web--run-id nil)
         ;; The phone must see its own turn and a live queued region before an
         ;; asynchronous POST gets a chance to call back.
-        (unless emacos-assist-web--pending-rendered-p
-          (emacos-assist-web--append-pending text))
-        (if (not (emacos-assist-web--save-draft))
-            (emacos-assist-web--release-send
+        (unless emacsos-assist-web--pending-rendered-p
+          (emacsos-assist-web--append-pending text))
+        (if (not (emacsos-assist-web--save-draft))
+            (emacsos-assist-web--release-send
              buffer "not sent; local draft could not be saved")
-          (let ((key (emacos-assist-web--require-idempotency-key
-                      emacos-assist-web--pending-key))
+          (let ((key (emacsos-assist-web--require-idempotency-key
+                      emacsos-assist-web--pending-key))
                 path payload)
             (if existing-thread-id
                 (setq path (concat "threads/"
-                                   (emacos-assist-web--require-id existing-thread-id)
+                                   (emacsos-assist-web--require-id existing-thread-id)
                                    "/messages")
                       payload `((message . ,text)))
               (setq path "threads"
                     payload `((message . ,text)
-                              (repo_key . ,emacos-assist-web--draft-repository)
-                              (harness . ,(or emacos-assist-web--draft-harness
+                              (repo_key . ,emacsos-assist-web--draft-repository)
+                              (harness . ,(or emacsos-assist-web--draft-harness
                                               "deepagents")))))
-            (emacos-assist-web--request
+            (emacsos-assist-web--request
              "POST" path payload
              (lambda (value error)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (when (and (= generation emacos-assist-web--send-generation)
-                              emacos-assist-web--in-flight
-                              (equal key emacos-assist-web--pending-key))
+                   (when (and (= generation emacsos-assist-web--send-generation)
+                              emacsos-assist-web--in-flight
+                              (equal key emacsos-assist-web--pending-key))
                      (if error
                          (progn
-                           (emacos-assist-web--release-send
+                           (emacsos-assist-web--release-send
                             buffer "send failed; Send retries")
                            (message "Send failed. Retry keeps the same message: %s"
                                     error))
                        (condition-case problem
-                           (let* ((thread-id (emacos-assist-web--require-id
+                           (let* ((thread-id (emacsos-assist-web--require-id
                                               (alist-get 'thread_id value)))
-                                  (run-id (emacos-assist-web--require-id
+                                  (run-id (emacsos-assist-web--require-id
                                            (alist-get 'run_id value)))
                                   ;; Resolve another canonical owner before this
                                   ;; draft acquires the returned thread id.
                                   (canonical
                                    (and (not existing-thread-id)
-                                        (emacos-assist-web--thread-buffer
+                                        (emacsos-assist-web--thread-buffer
                                          thread-id))))
                              (when (and existing-thread-id
                                         (not (equal existing-thread-id thread-id)))
@@ -1907,14 +1907,14 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                  ;; that cache record without changing either buffer's
                                  ;; ownership; a failed save leaves the source intact.
                                  (let* ((draft buffer)
-                                        (next-draft (emacos-assist-web--input))
+                                        (next-draft (emacsos-assist-web--input))
                                         (persisted
                                         (with-current-buffer canonical
-                                          (let ((emacos-assist-web--run-id run-id)
-                                                (emacos-assist-web--pending-key key)
-                                                (emacos-assist-web--submitted-text text)
-                                                (emacos-assist-web--pending-accepted-p t)
-                                                (emacos-assist-web--in-flight t))
+                                          (let ((emacsos-assist-web--run-id run-id)
+                                                (emacsos-assist-web--pending-key key)
+                                                (emacsos-assist-web--submitted-text text)
+                                                (emacsos-assist-web--pending-accepted-p t)
+                                                (emacsos-assist-web--in-flight t))
                                             ;; The active source can receive the
                                             ;; user's next draft while POST waits.
                                             ;; Its accepted canonical owner must
@@ -1922,92 +1922,92 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                             ;; ownership is released.
                                             (when (and (stringp next-draft)
                                                        (not (string-empty-p next-draft)))
-                                              (emacos-assist-web--replace-input next-draft))
-                                            (emacos-assist-web--save-draft)))))
+                                              (emacsos-assist-web--replace-input next-draft))
+                                            (emacsos-assist-web--save-draft)))))
                                    (if (not (and persisted
-                                                 (emacos-assist-web--delete-cache
+                                                 (emacsos-assist-web--delete-cache
                                                   "drafts/new-thread.json")))
-                                       (emacos-assist-web--stream-interrupted
+                                       (emacsos-assist-web--stream-interrupted
                                         draft "accepted; local recovery could not be saved")
                                      (with-current-buffer canonical
                                        ;; Retire the canonical buffer's old observer
                                        ;; before assigning it this accepted Run.  Merely
                                        ;; invalidating its generation would orphan that
                                        ;; process and consume a server observer slot.
-                                       (emacos-assist-web--stream-cleanup t t)
+                                       (emacsos-assist-web--stream-cleanup t t)
                                        ;; Invalidate callbacks started before this
                                        ;; buffer became the accepted run's owner.
-                                       (cl-incf emacos-assist-web--refresh-generation)
-                                       (cl-incf emacos-assist-web--send-generation)
-                                       (setq emacos-assist-web--run-id run-id
-                                             emacos-assist-web--pending-key key
-                                             emacos-assist-web--submitted-text text
-                                             emacos-assist-web--pending-accepted-p t
-                                             emacos-assist-web--in-flight t)
-                                       (unless emacos-assist-web--pending-rendered-p
-                                         (emacos-assist-web--append-pending text)))
-                                     (setq emacos--assist-active-surface canonical)
+                                       (cl-incf emacsos-assist-web--refresh-generation)
+                                       (cl-incf emacsos-assist-web--send-generation)
+                                       (setq emacsos-assist-web--run-id run-id
+                                             emacsos-assist-web--pending-key key
+                                             emacsos-assist-web--submitted-text text
+                                             emacsos-assist-web--pending-accepted-p t
+                                             emacsos-assist-web--in-flight t)
+                                       (unless emacsos-assist-web--pending-rendered-p
+                                         (emacsos-assist-web--append-pending text)))
+                                     (setq emacsos--assist-active-surface canonical)
                                      (with-current-buffer draft
-                                       (setq emacos-assist-web--thread-id nil
-                                             emacos-assist-web--draft-id nil
-                                             emacos-assist-web--pending-key nil
-                                             emacos-assist-web--pending-accepted-p nil
-                                             emacos-assist-web--run-id nil
-                                             emacos-assist-web--in-flight nil))
+                                       (setq emacsos-assist-web--thread-id nil
+                                             emacsos-assist-web--draft-id nil
+                                             emacsos-assist-web--pending-key nil
+                                             emacsos-assist-web--pending-accepted-p nil
+                                             emacsos-assist-web--run-id nil
+                                             emacsos-assist-web--in-flight nil))
                                      (kill-buffer draft)
                                      (setq buffer canonical)
                                      (switch-to-buffer canonical)
                                      (with-current-buffer buffer
                                        (unless (alist-get 'live_text value)
-                                         (emacos-assist-web--set-assistant-status
+                                         (emacsos-assist-web--set-assistant-status
                                           "working; live text unavailable")
-                                         (emacos-assist-web--set-status
+                                         (emacsos-assist-web--set-status
                                           "working; live text unavailable"))
-                                       (emacos-assist-web--observe-run buffer))))
+                                       (emacsos-assist-web--observe-run buffer))))
                                ;; Keep the ordinary path in one explicit branch: a
                                ;; canonical adoption starts its observer above, and
                                ;; every other acceptance starts exactly this one.
                                (progn
-                                 (setq emacos-assist-web--thread-id thread-id
-                                       emacos-assist-web--run-id run-id
-                                       emacos-assist-web--pending-accepted-p t)
+                                 (setq emacsos-assist-web--thread-id thread-id
+                                       emacsos-assist-web--run-id run-id
+                                       emacsos-assist-web--pending-accepted-p t)
                                  (unless existing-thread-id
                                    (rename-buffer (format "*assist Thread <%s>*" thread-id) t)
-                                   (setq emacos-assist-web--draft-id nil))
+                                   (setq emacsos-assist-web--draft-id nil))
                                  (with-current-buffer buffer
                                    (unless (alist-get 'live_text value)
-                                     (emacos-assist-web--set-assistant-status
+                                     (emacsos-assist-web--set-assistant-status
                                       "working; live text unavailable")
-                                     (emacos-assist-web--set-status
+                                     (emacsos-assist-web--set-status
                                       "working; live text unavailable"))
-                                   (unless emacos-assist-web--pending-rendered-p
-                                     (emacos-assist-web--append-pending text))
+                                   (unless emacsos-assist-web--pending-rendered-p
+                                     (emacsos-assist-web--append-pending text))
                                    ;; POST acceptance is not recoverable until this exact
                                    ;; canonical Run and its idempotency tuple reach disk.
                                    ;; Do not start a stream that could outlive that record.
-                                   (if (emacos-assist-web--save-draft)
+                                   (if (emacsos-assist-web--save-draft)
                                        (progn
                                          (unless existing-thread-id
-                                           (emacos-assist-web--delete-cache
+                                           (emacsos-assist-web--delete-cache
                                             "drafts/new-thread.json"))
-                                         (emacos-assist-web--observe-run buffer))
-                                     (emacos-assist-web--stream-interrupted
+                                         (emacsos-assist-web--observe-run buffer))
+                                     (emacsos-assist-web--stream-interrupted
                                       buffer "accepted; local recovery could not be saved"))))))
                          (error
-                          (emacos-assist-web--release-send
+                          (emacsos-assist-web--release-send
                            buffer "send response rejected; Send retries")
                           (message "Send response rejected. Retry is safe: %s"
                                    (error-message-string problem)))))))))
              `(("Idempotency-Key" . ,key))))))))))
 
-(defun emacos-assist-web--append-pending (text)
+(defun emacsos-assist-web--append-pending (text)
   "Commit sent TEXT to this transcript while preserving a newly typed draft."
-  (let* ((input-start (emacos-assist-web--prompt-start))
-         (draft (emacos-assist-web--input))
+  (let* ((input-start (emacsos-assist-web--prompt-start))
+         (draft (emacsos-assist-web--input))
          (input-offset (and input-start (>= (point) input-start)
                             (- (point) input-start)))
-         (prompt-start (and (markerp emacos-assist-web--prompt-marker)
-                            (marker-position emacos-assist-web--prompt-marker)))
+         (prompt-start (and (markerp emacsos-assist-web--prompt-marker)
+                            (marker-position emacsos-assist-web--prompt-marker)))
          (inhibit-read-only t))
     (when prompt-start
       (delete-region prompt-start (point-max))
@@ -2016,108 +2016,108 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
         (insert "you> ")
         (setq body-start (point))
         (insert text)
-        (emacos-conversation-commit-user start body-start (point))
+        (emacsos-conversation-commit-user start body-start (point))
         (insert "\n\n")
         (setq start (point))
         (insert "bot> ")
         (setq body-start (point))
         (insert "[queued]\n")
         (pcase-let ((`(,assistant-start . ,assistant-end)
-                     (emacos-conversation-begin-assistant body-start (point))))
-          (setq emacos-assist-web--assistant-start assistant-start
+                     (emacsos-conversation-begin-assistant body-start (point))))
+          (setq emacsos-assist-web--assistant-start assistant-start
                 ;; This marks the body boundary, not the following prompt.
-                emacos-assist-web--assistant-end assistant-end))
-        (emacos--chat-present-message start body-start (point) 'assistant)
+                emacsos-assist-web--assistant-end assistant-end))
+        (emacsos--chat-present-message start body-start (point) 'assistant)
         (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t)))
-      (emacos-assist-web--write-prompt)
+      (emacsos-assist-web--write-prompt)
       (when (and draft (not (equal draft text))) (insert draft))
-      (setq emacos-assist-web--pending-rendered-p t)
+      (setq emacsos-assist-web--pending-rendered-p t)
       (if input-offset
           (goto-char (min (point-max)
-                          (+ (emacos-assist-web--prompt-start) input-offset)))
+                          (+ (emacsos-assist-web--prompt-start) input-offset)))
         (goto-char (point-max))))))
 
-(defun emacos-assist-web-abort ()
+(defun emacsos-assist-web-abort ()
   "Abort an unclaimed run, or honestly detach if Assist has already started it."
   (interactive)
-  (if (and emacos-assist-web--in-flight (not emacos-assist-web--run-id))
+  (if (and emacsos-assist-web--in-flight (not emacsos-assist-web--run-id))
       (progn
         ;; There is no durable Run identity yet.  Forget this callback, retain
         ;; the key/text tuple, and let the next Send discover any late acceptance.
-        (cl-incf emacos-assist-web--send-generation)
-        (emacos-assist-web--stream-cleanup t)
-        (emacos-assist-web--set-assistant-status
+        (cl-incf emacsos-assist-web--send-generation)
+        (emacsos-assist-web--stream-cleanup t)
+        (emacsos-assist-web--set-assistant-status
          "stopped watching; acceptance unknown; Send re-observes")
-        (emacos-assist-web--set-status "acceptance unknown; Send retries safely")
-        (emacos-assist-web--save-draft)
+        (emacsos-assist-web--set-status "acceptance unknown; Send retries safely")
+        (emacsos-assist-web--save-draft)
         (message "Stopped waiting for acceptance; Send reuses this exact message"))
-    (if (not (and emacos-assist-web--thread-id emacos-assist-web--run-id
-                  (or emacos-assist-web--in-flight
-                      emacos-assist-web--pending-accepted-p)))
+    (if (not (and emacsos-assist-web--thread-id emacsos-assist-web--run-id
+                  (or emacsos-assist-web--in-flight
+                      emacsos-assist-web--pending-accepted-p)))
         (message "No Assist run is being observed")
       (let ((buffer (current-buffer))
-            (send-generation emacos-assist-web--send-generation)
+            (send-generation emacsos-assist-web--send-generation)
             (path (format "threads/%s/runs/%s"
-                          (emacos-assist-web--require-id emacos-assist-web--thread-id)
-                          (emacos-assist-web--require-id emacos-assist-web--run-id))))
+                          (emacsos-assist-web--require-id emacsos-assist-web--thread-id)
+                          (emacsos-assist-web--require-id emacsos-assist-web--run-id))))
         ;; Detach before the cancellation request: a network outage must not hold
         ;; the one active-run slot hostage.  Assist remains canonical either way.
-        (emacos-assist-web--stream-cleanup t)
-        (emacos-assist-web--set-status "stopped watching; cancellation unconfirmed")
-        (emacos-assist-web--save-draft)
+        (emacsos-assist-web--stream-cleanup t)
+        (emacsos-assist-web--set-status "stopped watching; cancellation unconfirmed")
+        (emacsos-assist-web--save-draft)
         (message "Stopped watching; cancellation is not yet confirmed")
-        (emacos-assist-web--request
+        (emacsos-assist-web--request
          "DELETE" path nil
          (lambda (value error)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer
-               (when (= send-generation emacos-assist-web--send-generation)
+               (when (= send-generation emacsos-assist-web--send-generation)
                  (if error
                      (if (equal error "Assist Web run store is unavailable")
-                         (emacos-assist-web--run-store-unavailable buffer)
-                       (emacos-assist-web--set-status
+                         (emacsos-assist-web--run-store-unavailable buffer)
+                       (emacsos-assist-web--set-status
                         "stopped watching; cancellation unconfirmed")
                        (message "Cancellation unconfirmed: %s" error))
                    (pcase (cons (alist-get 'http_status value) (alist-get 'outcome value))
                      (`(200 . "cancelled")
-                      (emacos-assist-web--set-status "cancelled; reconciling")
+                      (emacsos-assist-web--set-status "cancelled; reconciling")
                       (message "Queued Assist run cancelled")
-                      (emacos-assist-web-refresh-thread buffer emacos-assist-web--run-id))
+                      (emacsos-assist-web-refresh-thread buffer emacsos-assist-web--run-id))
                      (`(409 . "running")
-                      (emacos-assist-web--set-status "stopped watching; Assist is running"))
+                      (emacsos-assist-web--set-status "stopped watching; Assist is running"))
                      (`(409 . "transitioning")
-                      (emacos-assist-web--set-status "stopped watching; Assist is transitioning"))
+                      (emacsos-assist-web--set-status "stopped watching; Assist is transitioning"))
                      (`(409 . ,outcome)
                       (if (member outcome '("success" "error" "timeout" "cancelled"
                                            "interrupted" "awaiting_approval"))
                           (progn
-                            (emacos-assist-web--set-status
+                            (emacsos-assist-web--set-status
                              (format "%s; reconciling" outcome))
-                            (emacos-assist-web-refresh-thread
-                             buffer emacos-assist-web--run-id))
-                        (emacos-assist-web--set-status
+                            (emacsos-assist-web-refresh-thread
+                             buffer emacsos-assist-web--run-id))
+                        (emacsos-assist-web--set-status
                          "stopped watching; cancellation unconfirmed")))
                      (_
-                      (emacos-assist-web--set-status
+                      (emacsos-assist-web--set-status
                        "stopped watching; cancellation unconfirmed"))))
-                 (emacos-assist-web--save-draft)))))
+                 (emacsos-assist-web--save-draft)))))
          nil t)))))
 
-(defun emacos-assist-web--new-thread-from-catalog (cache)
+(defun emacsos-assist-web--new-thread-from-catalog (cache)
   "Open the existing new-thread draft, or choose its workspace from CACHE."
   (if-let ((existing (get-buffer "*assist New thread*")))
       (switch-to-buffer existing)
     (let* ((repositories (alist-get 'repositories cache))
-         (saved (emacos-assist-web--read-cache "drafts/new-thread.json"))
+         (saved (emacsos-assist-web--read-cache "drafts/new-thread.json"))
          (saved-repo-key (alist-get 'repo_key saved))
          (saved-harness-key (alist-get 'harness saved))
-         (repo-record (emacos-assist-web--select-labeled-item
+         (repo-record (emacsos-assist-web--select-labeled-item
                        "Repository: " repositories 'repo_key saved-repo-key))
          (repo (and repo-record (plist-get repo-record :item)))
          (selected (and repo-record (plist-get repo-record :display)))
          (harnesses (alist-get 'harnesses cache))
-         (harness-record (emacos-assist-web--select-labeled-item
+         (harness-record (emacsos-assist-web--select-labeled-item
                           "Harness: " harnesses 'key saved-harness-key))
          (harness (and harness-record (plist-get harness-record :item)))
          (selected-harness (and harness-record
@@ -2127,65 +2127,65 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
         (progn (kill-buffer buffer)
                (message "Refresh thread catalog before creating a thread"))
       (with-current-buffer buffer
-        (emacos-assist-web-mode)
-        (setq emacos-assist-web--draft-id "new-thread"
-              emacos-assist-web--draft-repository (alist-get 'repo_key repo)
-              emacos-assist-web--draft-harness (alist-get 'key harness))
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--draft-id "new-thread"
+              emacsos-assist-web--draft-repository (alist-get 'repo_key repo)
+              emacsos-assist-web--draft-harness (alist-get 'key harness))
         (let ((inhibit-read-only t) (inhibit-modification-hooks t))
           (insert (format "*assist New thread - %s*\n" selected))
-          (setq emacos-assist-web--status-start (copy-marker (point) nil))
+          (setq emacsos-assist-web--status-start (copy-marker (point) nil))
           (insert (format "[%s local draft]" selected-harness))
-          (setq emacos-assist-web--status-end (copy-marker (point) nil))
+          (setq emacsos-assist-web--status-end (copy-marker (point) nil))
           (insert "\n\n")
-          (emacos-assist-web--write-prompt)
-          (emacos-assist-web--restore-draft)))
+          (emacsos-assist-web--write-prompt)
+          (emacsos-assist-web--restore-draft)))
       (switch-to-buffer buffer)))))
 
-(defun emacos-assist-web-new-thread ()
+(defun emacsos-assist-web-new-thread ()
   "Create a local draft, fetching repository choices on first use if needed."
   (interactive)
-  (let ((cache (emacos-assist-web--read-catalog-cache)))
+  (let ((cache (emacsos-assist-web--read-catalog-cache)))
     (if (and (alist-get 'repositories cache) (alist-get 'harnesses cache))
-        (emacos-assist-web--new-thread-from-catalog cache)
+        (emacsos-assist-web--new-thread-from-catalog cache)
       (message "Fetching repositories for a new Assist thread…")
-      (let ((generation (cl-incf emacos-assist-web--catalog-generation)))
-        (emacos-assist-web--request
+      (let ((generation (cl-incf emacsos-assist-web--catalog-generation)))
+        (emacsos-assist-web--request
          "GET" "threads" nil
          (lambda (value error)
-           (when (= generation emacos-assist-web--catalog-generation)
+           (when (= generation emacsos-assist-web--catalog-generation)
              (if error
                  (message "Cannot create a thread until repository choices load: %s"
                           error)
                (condition-case problem
                    (progn
-                     (emacos-assist-web--require-catalog value)
-                     (setq emacos-assist-web--catalog (alist-get 'threads value)
-                           emacos-assist-web--catalog-loaded-p t
-                           emacos-assist-web--catalog-stale nil)
-                     (emacos-assist-web--try-write-cache
-                      emacos-assist-web--catalog-file value)
-                     (emacos-assist-web--new-thread-from-catalog value))
+                     (emacsos-assist-web--require-catalog value)
+                     (setq emacsos-assist-web--catalog (alist-get 'threads value)
+                           emacsos-assist-web--catalog-loaded-p t
+                           emacsos-assist-web--catalog-stale nil)
+                     (emacsos-assist-web--try-write-cache
+                      emacsos-assist-web--catalog-file value)
+                     (emacsos-assist-web--new-thread-from-catalog value))
                  (error
                   (message "Cannot create a thread from invalid catalog data: %s"
                            (error-message-string problem))))))))))))
 
-(define-derived-mode emacos-assist-web-mode text-mode "Assist Web"
+(define-derived-mode emacsos-assist-web-mode text-mode "Assist Web"
   "Major mode for a canonical Assist Web thread or unsent local draft."
   (variable-pitch-mode 1)
-  (emacos--chat-enable-presentation)
-  (emacos-conversation-install-actions
-   '((send . emacos-assist-web-send)
-     (abort . emacos-assist-web-abort)
-     (refresh . emacos-assist-web-refresh-thread)
-     (older . emacos-assist-web-load-older)
-     (catalog . emacos-assist-web-refresh-threads)))
-  (add-hook 'after-change-functions #'emacos-assist-web--after-change nil t)
-  (add-hook 'kill-buffer-hook #'emacos-assist-web--buffer-killed nil t))
+  (emacsos--chat-enable-presentation)
+  (emacsos-conversation-install-actions
+   '((send . emacsos-assist-web-send)
+     (abort . emacsos-assist-web-abort)
+     (refresh . emacsos-assist-web-refresh-thread)
+     (older . emacsos-assist-web-load-older)
+     (catalog . emacsos-assist-web-refresh-threads)))
+  (add-hook 'after-change-functions #'emacsos-assist-web--after-change nil t)
+  (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
 
-(define-key emacos-assist-web-mode-map (kbd "RET")
-            #'emacos-conversation-activate-or-newline)
+(define-key emacsos-assist-web-mode-map (kbd "RET")
+            #'emacsos-conversation-activate-or-newline)
 
-(emacos-assist-web--load-catalog)
+(emacsos-assist-web--load-catalog)
 
 (provide 'assist-web)
 ;;; assist-web.el ends here

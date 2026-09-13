@@ -39,7 +39,7 @@ On the dev box:
    make local-deploy
    #+end_src
    Only needed for *reboot-persistence* (§5, Test D): if the phone has
-   never had the =emacos-agent-file= boot snippet, also
+   never had the =emacsos-agent-file= boot snippet, also
    =make phone-install DEV_BOX_URL=<...>= once.  (apply works without it
    — it falls back to the default agent.el path — but the boot-time
    re-load needs the snippet.)

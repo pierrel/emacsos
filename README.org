@@ -15,7 +15,7 @@ This launches Emacs in a 320x240 pixel window with no user configuration loaded 
 
 It runs as a *separate Emacs process* (=emacs -Q= skips your =init.el=, site-lisp, and startup screen), so it is a self-contained simulator you can run on your dev machine — including as a window alongside another Emacs session, e.g. under an EXWM desktop — without touching your own configuration. Do *not* =load-file os.el= into your everyday Emacs as a shortcut: =os.el= rebinds keys, registers hooks, and resizes the frame, so it must run in its own =emacs -Q= process to stay isolated.
 
-The chat panel POSTs to =emacos-chat-server-url= (default =http://localhost:8765/chat=). For pure UI/layout work no server is needed; to make the simulator actually reach an agent, run a [[*Chat Server][Chat Server]] and point that variable at it.
+The chat panel POSTs to =emacsos-chat-server-url= (default =http://localhost:8765/chat=). For pure UI/layout work no server is needed; to make the simulator actually reach an agent, run a [[*Chat Server][Chat Server]] and point that variable at it.
 
 * Features
 
@@ -80,28 +80,28 @@ This gives you a full Emacs frame in your terminal, sharing all buffers and stat
 
 *** Typing via the virtual keyboard
 
-The =emacos--tap-key= function handles multi-tap and inserts into the correct buffer:
+The =emacsos--tap-key= function handles multi-tap and inserts into the correct buffer:
 
 #+begin_src sh
-emacsclient -f ./server-file -e '(emacos--tap-key "qw")'    # types "q"
-emacsclient -f ./server-file -e '(emacos--tap-key "qw")'    # cycles to "w"
-emacsclient -f ./server-file -e '(emacos--tap-space)'        # space
-emacsclient -f ./server-file -e '(emacos--tap-return)'       # exit minibuffer; otherwise open safe object, or newline
-emacsclient -f ./server-file -e '(emacos--tap-backspace)'    # delete backward
+emacsclient -f ./server-file -e '(emacsos--tap-key "qw")'    # types "q"
+emacsclient -f ./server-file -e '(emacsos--tap-key "qw")'    # cycles to "w"
+emacsclient -f ./server-file -e '(emacsos--tap-space)'        # space
+emacsclient -f ./server-file -e '(emacsos--tap-return)'       # exit minibuffer; otherwise open safe object, or newline
+emacsclient -f ./server-file -e '(emacsos--tap-backspace)'    # delete backward
 #+end_src
 
 *** Direct buffer manipulation
 
 #+begin_src sh
-emacsclient -f ./server-file -e '(with-selected-window (emacos--target) (insert "Hello from remote!"))'
-emacsclient -f ./server-file -e '(with-selected-window (emacos--target) (erase-buffer))'
+emacsclient -f ./server-file -e '(with-selected-window (emacsos--target) (insert "Hello from remote!"))'
+emacsclient -f ./server-file -e '(with-selected-window (emacsos--target) (erase-buffer))'
 #+end_src
 
 *** Running commands
 
 #+begin_src sh
-emacsclient -f ./server-file -e '(emacos--run-command #'\''find-file)'   # run a command in the editor
-emacsclient -f ./server-file -e '(emacos--chat-show-top-buffer)'          # switch the editor to the chat app
+emacsclient -f ./server-file -e '(emacsos--run-command #'\''find-file)'   # run a command in the editor
+emacsclient -f ./server-file -e '(emacsos--chat-show-top-buffer)'          # switch the editor to the chat app
 #+end_src
 
 *** Driving the =*chat*= buffer
@@ -110,7 +110,7 @@ The chat transcript lives in the =*chat*= buffer (the [[*Layers][universal launc
 
 #+begin_src sh
 emacsclient -f ./server-file -e '(with-current-buffer "*chat*" (buffer-string))'   # read the transcript
-emacsclient -f ./server-file -e '(emacos--chat-show-top-buffer)'                    # bring chat to the editor window
+emacsclient -f ./server-file -e '(emacsos--chat-show-top-buffer)'                    # bring chat to the editor window
 #+end_src
 
 For an *interactive* session in =*chat*= — scrolling, typing, watching a stream — open a terminal frame over SSH (above) and =C-x b *chat*=. The buffer stays in the phone's (or simulator's) Emacs; you are driving the real session remotely, not a copy. A live buffer can't be moved into a *different* Emacs process; the =-e= calls above are snapshots/commands, and the SSH frame is the way to operate it by hand.
@@ -174,10 +174,10 @@ now run as long as the user lets them — they show status updates
 then the bot reply streams into =*chat*= word by word.
 
 User-tunable from =chat.el=:
-- =emacos-chat-first-token-timeout= (default 30s) — declares
+- =emacsos-chat-first-token-timeout= (default 30s) — declares
   "no response from server" if no event lands within this window.
   Replaces the old sync total-call timeout.
-- =emacos-chat-server-url= — usually baked in by =make phone-install=.
+- =emacsos-chat-server-url= — usually baked in by =make phone-install=.
 
 ** Bumping assist
 
@@ -268,7 +268,7 @@ actors is *determinism*:
 
 - *Emacs interactive commands are deterministic primitives.* A concrete
   argument in, the same action out — every time, with no language model in the
-  loop and no callback into the agent. =(emacos-call "+14155550123")= stages
+  loop and no callback into the agent. =(emacsos-call "+14155550123")= stages
   that exact number in the local call UI. It does not ask "who is that?" or
   think. These primitives are the reliable floor that the user (by tapping)
   and the agent (by evaluating elisp) share.
@@ -282,13 +282,13 @@ actors is *determinism*:
 
 - *Skills are elisp recipes.* A skill does not add a bespoke tool; it tells the
   agent which elisp to evaluate — to either *initiate* a deterministic command
-  (=(emacos-call "+1…")= stages a proposal) or *change/extend* functionality (define a command,
+  (=(emacsos-call "+1…")= stages a proposal) or *change/extend* functionality (define a command,
   then persist it via the config layer). The agent's one universal lever is
   evaluating elisp.
 
 So a feature is built as: a deterministic emacs command (shared by user and
 agent) + a skill that teaches the agent how to resolve intent down to that
-command's concrete arguments. "call Ana" is agent work; =(emacos-call
+command's concrete arguments. "call Ana" is agent work; =(emacsos-call
 "+1…")= is a proposal primitive; two local confirmations own the modem effect.
 They must not blur together.
 
@@ -306,6 +306,6 @@ here — the open-ended one (evaluate elisp) and the deterministic primitives
 (commands) — so a skill's job is to *direct the model on which to use*: search
 and inspect by *evaluating elisp*; act by *invoking a command*. (The call skill
 is the worked example: it greps the user's files for a number via elisp, then
-stages it via =emacos-call=; two local phone actions perform the dial.) New
+stages it via =emacsos-call=; two local phone actions perform the dial.) New
 capabilities slot in the same way — a deterministic command plus a skill that
 routes to it — not as bespoke tools.

@@ -33,8 +33,10 @@ case $assist_web_server_ip in
     ''|*[!0-9.]*) printf '%s\n' 'ASSIST_WEB_SERVER_IP must be an IPv4 address' >&2; exit 1 ;;
 esac
 
+keyboard_build=$(mktemp -d)
 cleanup() {
     [ -z "$bootstrap_local" ] || rm -f -- "$bootstrap_local"
+    rm -rf -- "$keyboard_build"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -46,6 +48,19 @@ set -- -o User=user -o BatchMode=yes -o PreferredAuthentications=publickey \
     -o ServerAliveInterval=5 -o ServerAliveCountMax=3
 
 "$repo_dir/tests/test-pinephone-openrc-deploy.sh"
+WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd} \
+    WVKBD_BUILD_DIR=$keyboard_build "$deploy_dir/build-wvkbd-emacsos.sh"
+[ -f "$keyboard_build/wvkbd-emacsos" ] &&
+    [ ! -L "$keyboard_build/wvkbd-emacsos" ] &&
+    [ -f "$keyboard_build/wordninja.txt" ] &&
+    [ ! -L "$keyboard_build/wordninja.txt" ] || {
+    printf '%s\n' 'wvkbd build did not produce the reviewed payload' >&2
+    exit 1
+}
+keyboard_hash=$(sha256sum "$keyboard_build/wvkbd-emacsos")
+keyboard_hash=${keyboard_hash%% *}
+keyboard_notice_hash=$(sha256sum "$keyboard_build/wordninja.txt")
+keyboard_notice_hash=${keyboard_notice_hash%% *}
 
 ssh -T "$@" "$phone_host" \
     "rm -rf -- '$stage' '$bootstrap' && install -d -m 0700 '$stage' '$bootstrap'"
@@ -76,7 +91,7 @@ scp -q "$@" \
     "$repo_dir/os.el" \
     "$repo_dir/chat.el" \
     "$repo_dir/assist-web.el" \
-    "$repo_dir/emacos-assist.el" \
+    "$repo_dir/emacsos-assist.el" \
     "$repo_dir/network.el" \
     "$repo_dir/phone-call.el" \
     "$repo_dir/phone-sms.el" \
@@ -84,6 +99,8 @@ scp -q "$@" \
     "$phone_host:$stage/"
 scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"
 scp -q "$@" "$ca_file" "$phone_host:$stage/assist-web-ca.pem"
+scp -q "$@" "$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"
+scp -q "$@" "$keyboard_build/wordninja.txt" "$phone_host:$stage/wvkbd-notice"
 scp -q "$@" "$deploy_dir/openrc-install-root" "$phone_host:$bootstrap/"
 ssh -T "$@" "$phone_host" \
     "chmod 0600 '$bootstrap/openrc-install-root' && chmod 0600 '$stage'/*"
@@ -98,7 +115,7 @@ if grep -F '@@ADMIN_SHA256@@' "$bootstrap_local" >/dev/null; then
     exit 1
 fi
 ssh -T "$@" "$phone_host" \
-    "deploy_client_ip=\${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP=\"\$deploy_client_ip\" ASSIST_WEB_SERVER_IP='$assist_web_server_ip' /bin/sh" \
+    "deploy_client_ip=\${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP=\"\$deploy_client_ip\" ASSIST_WEB_SERVER_IP='$assist_web_server_ip' EMACSOS_WVKBD_SHA256='$keyboard_hash' EMACSOS_WVKBD_NOTICE_SHA256='$keyboard_notice_hash' /bin/sh" \
     <"$bootstrap_local"
 rm -f -- "$bootstrap_local"
 bootstrap_local=

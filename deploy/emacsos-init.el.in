@@ -82,18 +82,18 @@
 ;; the server constant and this path can't silently diverge (which
 ;; would make applies work live but vanish on reboot).  Keep in sync
 ;; with apply.DEFAULT_PHONE_AGENT_FILE.
-(defvar emacos-agent-file "~/.emacs.d/emacsos/agent.el"
+(defvar emacsos-agent-file "~/.emacs.d/emacsos/agent.el"
   "File the agent's applied config is written to and loaded from.")
 
 ;; Chat server URL.  Baked in at install time from DEV_BOX_URL.
 ;; Re-run `make phone-install DEV_BOX_URL=...` to change.
-(setq emacos-chat-server-url "@@CHAT_URL@@")
+(setq emacsos-chat-server-url "@@CHAT_URL@@")
 
 ;; Canonical Assist Web API.  This uses HTTPS and a separate bearer token in
-;; `emacos-assist-web-token-file'; the token is deliberately not generated into
+;; `emacsos-assist-web-token-file'; the token is deliberately not generated into
 ;; this public configuration snippet.
-(setq emacos-assist-web-api-url "@@ASSIST_WEB_API_URL@@")
-(setq emacos-assist-web-ca-file
+(setq emacsos-assist-web-api-url "@@ASSIST_WEB_API_URL@@")
+(setq emacsos-assist-web-ca-file
       (expand-file-name "~/.config/emacsos/assist-web-ca.pem"))
 
 ;; TCP server so emacsclient from the dev box can reach this daemon.
@@ -111,7 +111,7 @@
 ;; `apply_config` reports a load error live, and the user rolls back;
 ;; here we make sure a bad config that slipped through can't wedge the
 ;; device on the next restart.
-(let ((f (expand-file-name emacos-agent-file)))
+(let ((f (expand-file-name emacsos-agent-file)))
   (condition-case err
       (when (file-exists-p f)
         (load-file f))

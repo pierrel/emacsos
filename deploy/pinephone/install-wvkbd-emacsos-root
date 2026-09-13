@@ -3,7 +3,7 @@
 set -eu
 PATH=/usr/bin:/usr/sbin:/bin:/sbin; export PATH
 umask 077
-lock=/run/wvkbd-emacos-install.lock
+lock=/run/wvkbd-emacsos-install.lock
 helper=/usr/local/sbin/emacsos-wvkbd-transaction
 initd=/etc/init.d/emacsos-ui
 

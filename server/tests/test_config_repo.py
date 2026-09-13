@@ -1,7 +1,9 @@
 """Unit tests for the git-backed ConfigRepo — pure git+fs, tmp repo, no mocks."""
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 from unittest.mock import patch
 
@@ -11,8 +13,191 @@ from emacsos_server.config_repo import (
     ConfigRepo,
     ConfigRepoError,
     _extract_body,
+    migrate_emacos_symbols,
+    migrate_historical_emacos_symbols,
     render,
 )
+
+
+_EMACS_CHARACTER_LITERALS = (
+    "?;", '?"', r"?\;", r'?\"', r"?\\",
+    r"?\^?", r"?\^x", r"?\^;", r'?\^"', r"?\^\\",
+    r"?\123", r"?\777", r"?\x41", r"?\u0041", r"?\U00000041",
+    r"?\N{LATIN CAPITAL LETTER A}", r"?\C-a", r"?\M-a", r"?\S-a",
+    r"?\H-a", r"?\A-a", r"?\s-a", r"?\C-\M-\S-\H-\A-\s-a",
+    r"?\C-", r"?\^", r"?\s",
+)
+
+
+def test_namespace_migration_changes_only_lisp_symbols():
+    body = ('(emacos-call "+1")\n'
+            "#'emacos--chat-show-top-buffer\n"
+            "; keep emacos-call as the historical spelling\n"
+            "#| keep emacos-call in a block comment |#\n"
+            '(message "emacos-call is old")\n'
+            '(not-emacos-call)\n')
+    assert migrate_emacos_symbols(body) == (
+        '(emacsos-call "+1")\n'
+        "#'emacsos--chat-show-top-buffer\n"
+        "; keep emacos-call as the historical spelling\n"
+        "#| keep emacos-call in a block comment |#\n"
+        '(message "emacos-call is old")\n'
+        '(not-emacos-call)\n'
+    )
+
+
+def test_namespace_migration_skips_characters_before_later_symbols():
+    body = (
+        '(list ?; (emacos-call "+1"))\n'
+        '(list ?" (emacos--chat-show-top-buffer))\n'
+        r'(list ?\; ?\" ?\\ ?\C-a emacos\-call)' "\n"
+    )
+    assert migrate_emacos_symbols(body) == (
+        '(list ?; (emacsos-call "+1"))\n'
+        '(list ?" (emacsos--chat-show-top-buffer))\n'
+        r'(list ?\; ?\" ?\\ ?\C-a emacsos\-call)' "\n"
+    )
+
+
+@pytest.mark.parametrize("literal", _EMACS_CHARACTER_LITERALS)
+def test_namespace_migration_skips_complete_emacs_character_literals(literal):
+    body = f"(list {literal} (emacos-call \"+1\"))"
+    assert migrate_emacos_symbols(body) == (
+        f"(list {literal} (emacsos-call \"+1\"))")
+
+
+@pytest.mark.skipif(shutil.which("emacs") is None,
+                    reason="requires the installed Emacs reader")
+def test_namespace_migration_character_corpus_is_accepted_by_emacs(tmp_path):
+    source = tmp_path / "characters.el"
+    source.write_text("(list " + " ".join(_EMACS_CHARACTER_LITERALS) + ")")
+    form = (
+        "(with-temp-buffer "
+        f"(insert-file-contents {json.dumps(str(source))}) "
+        "(goto-char (point-min)) (read (current-buffer)) "
+        "(skip-chars-forward \" \\t\\r\\n\") "
+        "(unless (eobp) (error \"trailing reader input\")))"
+    )
+    result = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_namespace_migration_changes_only_complete_symbol_atoms():
+    body = '(list `emacos-call ,emacos-call ,@emacos-calls :emacos-call foo/emacos-call)'
+    assert migrate_emacos_symbols(body) == (
+        '(list `emacsos-call ,emacsos-call ,@emacsos-calls :emacsos-call '
+        'foo/emacos-call)'
+    )
+
+
+def test_namespace_migration_keeps_question_mark_in_symbol_atom():
+    body = "(list emacos-call? :emacos-ready? not-emacos-call?)"
+    assert migrate_emacos_symbols(body) == (
+        "(list emacsos-call? :emacsos-ready? not-emacos-call?)")
+
+
+def test_namespace_migration_preserves_noncode_and_canonical_body():
+    body = (
+        '(message "emacos-call string")\n'
+        '; emacos-call line comment\n'
+        '#| emacos-call block comment #| nested emacos-call |# |#\n'
+        '(emacsos-call "+1")\n'
+    )
+    assert migrate_emacos_symbols(body) == body
+
+
+def test_namespace_migration_preserves_byte_skipping_comment_payload():
+    payload = '(emacos-call "inert")'
+    body = f"#@{len(payload.encode())}{payload}\n(emacos-call \"+1\")"
+    assert migrate_emacos_symbols(body) == (
+        f"#@{len(payload.encode())}{payload}\n(emacsos-call \"+1\")")
+
+
+def test_namespace_migration_counts_byte_comment_payload_as_utf8_bytes():
+    payload = ' é(emacos-call "inert")'
+    body = f"#@{len(payload.encode())}{payload}\n(emacos-call \"+1\")"
+    assert migrate_emacos_symbols(body) == (
+        f"#@{len(payload.encode())}{payload}\n(emacsos-call \"+1\")")
+
+
+def test_namespace_migration_preserves_byte_comment_end_marker():
+    body = '#@00(emacos-call "+1"'
+    assert migrate_emacos_symbols(body) == body
+
+
+@pytest.mark.skipif(shutil.which("emacs") is None,
+                    reason="requires the installed Emacs reader")
+def test_namespace_migration_byte_comment_matches_emacs_reader(tmp_path):
+    payload = '(emacos-call "inert")'
+    body = (
+        f"#@{len(payload.encode())}{payload}"
+        "(progn (setq emacsos-reader-parity 'ok) "
+        "(princ (format \"%S:%S\" (boundp 'emacsos-skipped) "
+        "emacsos-reader-parity)))")
+    migrated = migrate_emacos_symbols(body)
+    assert migrated == body
+    source = tmp_path / "byte-comment.elc"
+    version = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", "(princ emacs-version)"],
+        capture_output=True, text=True, check=True).stdout
+    compiled_header = (b";ELC\x1e\0\0\0\n"
+                       b";;; Compiled\n" +
+                       f";;; in Emacs version {version}\n".encode() +
+                       b";;; with all optimizations.\n\n\n")
+    source.write_bytes(compiled_header + body.encode())
+    form = (
+        f"(load {json.dumps(str(source))} nil t)"
+    )
+    original = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    source.write_bytes(compiled_header + migrated.encode())
+    transformed = subprocess.run(
+        ["emacs", "-Q", "--batch", "--eval", form],
+        capture_output=True, text=True, check=False)
+    assert original.returncode == transformed.returncode == 0
+    assert original.stdout == transformed.stdout == "nil:ok"
+    assert original.stderr == transformed.stderr == ""
+
+
+def test_namespace_migration_noops_exact_canonical_body():
+    body = '(emacsos-call "+1")'
+    assert migrate_emacos_symbols(body) == body
+
+
+@pytest.mark.parametrize("body", [
+    '"emacos-call',
+    '#| emacos-call',
+    '?',
+    r'?\C',
+    '(emacos-call "+1"',
+    ']',
+    '#@',
+    '#@x',
+    '#@١',
+    '#@5abc',
+    '#@1é',
+])
+def test_namespace_migration_rejects_incomplete_lisp_before_apply(body):
+    with pytest.raises(ConfigRepoError, match="incomplete Lisp config"):
+        migrate_emacos_symbols(body)
+
+
+def test_historical_migration_preserves_incomplete_body_without_legacy_symbol():
+    body = "(setq foo 1"
+    assert migrate_historical_emacos_symbols(body) == body
+
+
+def test_historical_migration_preserves_emacos_text_in_incomplete_string():
+    body = '"emacos-call'
+    assert migrate_historical_emacos_symbols(body) == body
+
+
+def test_historical_migration_rejects_incomplete_potential_legacy_symbol():
+    with pytest.raises(ConfigRepoError, match="incomplete Lisp config"):
+        migrate_historical_emacos_symbols("(emacos-call")
 
 
 def _repo(tmp_path):
@@ -29,6 +214,18 @@ def test_ensure_idempotent_and_scaffolds(tmp_path):
     cur = r.current()
     assert "scaffold" in cur.summary
     assert cur.body == ""  # scaffold body is empty
+
+
+def test_namespace_migration_reconciliation_state_survives_reset(tmp_path):
+    r = _repo(tmp_path)
+    r.ensure()
+    assert not r.namespace_migration_reconciliation_pending()
+    r.mark_namespace_migration_reconciliation()
+    assert r.namespace_migration_reconciliation_pending()
+    r.ensure()
+    assert r.namespace_migration_reconciliation_pending()
+    r.clear_namespace_migration_reconciliation()
+    assert not r.namespace_migration_reconciliation_pending()
 
 
 def test_write_and_commit_round_trips_body(tmp_path):
@@ -60,9 +257,10 @@ def test_rollback_reverts_to_prior_body(tmp_path):
     r.write_and_commit("(setq foo 1)", "set foo")
     r.write_and_commit("(setq foo 2)", "set foo to 2")
     assert r.current().body == "(setq foo 2)"
-    res = r.rollback()
-    assert res.ok
-    # Reverting the "set foo to 2" commit restores foo 1.
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
+    # Recording the prior snapshot restores foo 1.
     assert r.current().body == "(setq foo 1)"
 
 
@@ -70,20 +268,20 @@ def test_rollback_preserves_history_for_roll_forward(tmp_path):
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")
     r.write_and_commit("(setq foo 2)", "v2")
-    r.rollback()
-    # The reverted-from commit must still be in history (roll-forward).
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
+    # The prior current commit must stay in history (roll-forward).
     log = subprocess.run(
         ["git", "-C", r.repo_dir, "log", "--format=%s"],
         capture_output=True, text=True).stdout
     assert "v2" in log
-    assert "Revert" in log or "revert" in log
+    assert "rollback last config" in log
 
 
 def test_rollback_on_empty_repo_reports_nothing(tmp_path):
     r = _repo(tmp_path)
-    res = r.rollback()  # only scaffold (or nothing) exists
-    assert not res.ok
-    assert "nothing to roll back" in res.detail
+    assert r.rollback_body() is None  # only scaffold (or nothing) exists
 
 
 def test_rollback_body_previews_without_changing_history(tmp_path):
@@ -97,6 +295,13 @@ def test_rollback_body_previews_without_changing_history(tmp_path):
 def test_rollback_body_is_none_for_scaffold_only(tmp_path):
     r = _repo(tmp_path)
     assert r.rollback_body() is None
+
+
+def test_rollback_body_can_escape_incomplete_current_config(tmp_path):
+    r = _repo(tmp_path)
+    r.write_and_commit("(setq foo 1)", "working config")
+    r.write_and_commit("(setq foo 2", "broken config")
+    assert r.rollback_body() == "(setq foo 1)"
 
 
 def test_ensure_recovers_from_interrupted_staging(tmp_path):
@@ -117,7 +322,7 @@ def test_ensure_recovers_from_interrupted_staging(tmp_path):
 
 def test_ensure_scaffolds_committless_repo(tmp_path):
     """`.git` exists but no commits (manual init / partial) → ensure()
-    scaffolds a first commit so current()/rollback() have a HEAD."""
+    scaffolds a first commit so history readers have a HEAD."""
     repo_dir = str(tmp_path / "config-repo")
     os.makedirs(repo_dir)
     subprocess.run(["git", "-C", repo_dir, "init", "-q"], check=True)
@@ -129,9 +334,8 @@ def test_ensure_scaffolds_committless_repo(tmp_path):
 
 
 def test_ensure_restores_dirty_working_tree(tmp_path):
-    """A prior interrupted write leaves agent.el dirty; without a hard
-    reset, `git revert` would fail with 'local changes would be
-    overwritten'.  ensure() restores the tree to HEAD so rollback works."""
+    """A prior interrupted write leaves agent.el dirty.  ensure() restores
+    the tree to HEAD so rollback starts from recorded state."""
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")
     r.write_and_commit("(setq foo 2)", "v2")
@@ -139,9 +343,11 @@ def test_ensure_restores_dirty_working_tree(tmp_path):
     with open(r.agent_path, "w") as f:
         f.write(render("(setq garbage 99)"))
     r.ensure()
-    # Tree restored to HEAD (v2), and rollback (a revert) succeeds.
+    # Tree restored to HEAD (v2), and snapshot rollback succeeds.
     assert r.current().body == "(setq foo 2)"
-    assert r.rollback().ok
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
     assert r.current().body == "(setq foo 1)"
 
 
@@ -165,7 +371,7 @@ def test_reapplying_identical_config_creates_no_empty_commit(tmp_path):
     count2 = int(subprocess.run(
         ["git", "-C", r.repo_dir, "rev-list", "--count", "HEAD"],
         capture_output=True, text=True).stdout.strip())
-    # No new commit, same HEAD — no empty commit to break a later revert.
+    # No new commit, same HEAD: identical snapshots are not history.
     assert sha2 == sha1
     assert count2 == count1
 
@@ -185,14 +391,13 @@ def test_post_commit_sha_read_failure_stays_recorded(tmp_path):
 
 
 def test_rollback_after_identical_reapply_does_not_error(tmp_path):
-    """Regression: an empty commit would make `git revert` abort. With
-    the no-diff guard, a second identical apply makes no commit, so
-    rollback still cleanly reverts the one real change."""
+    """An identical reapply adds no snapshot, so undo reaches the prior body."""
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")
     r.write_and_commit("(setq foo 1)", "v1 again")  # no-op, no commit
-    res = r.rollback()
-    assert res.ok
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
     assert r.current().body == ""  # reverted the only real apply → scaffold
 
 
@@ -227,3 +432,15 @@ def test_body_at_unknown_ref_raises(tmp_path):
     repo.ensure()
     with pytest.raises(ConfigRepoError):
         repo.body_at("deadbeef")
+
+
+@pytest.mark.parametrize("ref", [
+    "abcdef", "ABCDEF0", "abcdefg ", "--help", "a" * 41,
+])
+def test_body_at_rejects_malformed_sha_before_git(tmp_path, ref):
+    repo = _repo(tmp_path)
+    with patch.object(repo, "ensure") as ensure, patch.object(repo, "_git") as git:
+        with pytest.raises(ConfigRepoError, match="invalid history SHA"):
+            repo.body_at(ref)
+    ensure.assert_not_called()
+    git.assert_not_called()
