@@ -26,7 +26,7 @@ import sqlite3
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, NoReturn, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
@@ -115,16 +115,10 @@ def _phone_ctx(phone_auth: Optional[str], request: Request) -> Optional[PhoneCon
 # still gets immediate ack of receipt even when queued.
 #
 # The lock is also load-bearing for conversation persistence: /chat,
-# /rollback, AND /clear all acquire it, so on the NORMAL path the shared
-# checkpointer (below) is only ever touched by one operation at a time —
-# /clear can't delete the thread out from under a turn that's
-# mid-checkpoint.  Caveat: an ABORT/runaway during agent execution
-# leaves the worker thread running after the lock is released (see the
-# `_stream_turn` finally), so a /clear queued right then CAN overlap that
-# orphaned worker's last checkpoint write.  That overlap is bounded by
-# SqliteSaver's own per-connection lock — worst case a torn/partial
-# conversation, never DB corruption — and matches the design's existing
-# acceptance of orphaned workers on the abort path.
+# /rollback, AND /clear all acquire it, so the shared checkpointer and phone
+# are touched by one operation at a time.  On abort/runaway, the stream keeps
+# the lock until its worker and generator close finish, or exits the process
+# for a supervised restart if they cannot quiesce within the bounded grace.
 #
 # Each /chat rebuilds a fresh `assist.Thread` (in `_start_stream_iter`)
 # but now binds it to the persistent checkpointer + a FIXED thread id
@@ -144,16 +138,15 @@ _STREAM_LOCK = asyncio.Lock()
 HEARTBEAT_SECONDS = 10.0
 
 # How often the inner loop wakes to check `request.is_disconnected()`.
-# Decoupled from HEARTBEAT_SECONDS so an ABORT (client disconnect)
-# frees the executor thread/queue within ~1s rather than waiting up
-# to a full heartbeat cycle.
+# Decoupled from HEARTBEAT_SECONDS so an ABORT is detected within ~1s;
+# safe teardown still waits for the current worker call to quiesce.
 DISCONNECT_POLL_SECONDS = 1.0
 
-# Runaway backstop: abort a stream after this many seconds so a
-# truly-stuck agent doesn't pin the server until process restart.
-# Far longer than any legitimate research prompt; the user can always
-# ABORT sooner.
+# Runaway backstop: setup and iteration share this worker budget.  A wedged
+# setup exits at the deadline; iterator teardown gets the short grace below
+# before exiting so the supervisor can restart without admitting overlap.
 RUNAWAY_SECONDS = 30 * 60.0
+TEARDOWN_GRACE_SECONDS = 5.0
 
 # --- Persistent conversation ------------------------------------------------
 # One rolling conversation for the single phone this server serves.  A
@@ -340,10 +333,10 @@ def _close_iter(it) -> None:
     generator's `with` __exit__.  Run on the SAME pump thread that entered it
     (see `_stream_turn`).
 
-    MUST NOT let an exception escape: this is submitted fire-and-forget, and
-    an un-retrieved executor-future exception emits a noisy "Future exception
-    was never retrieved" warning.  The `hasattr` guard tolerates the test
-    stub's plain list-iterator (no `.close()`)."""
+    MUST NOT let an exception escape: teardown awaits this helper only to
+    establish quiescence, not to turn close failures into response errors.
+    The `hasattr` guard tolerates the test stub's plain list-iterator (no
+    `.close()`)."""
     if not hasattr(it, "close"):
         return
     try:
@@ -365,18 +358,33 @@ def _defuse_future(fut) -> None:
         fut.exception()
 
 
-async def _finish_before_cancelling(future):
-    """Delay task cancellation until FUTURE's side effects have finished.
+class _WorkerDeadlineExceeded(Exception):
+    """A serialized executor future did not finish before its deadline."""
+
+
+async def _finish_before_cancelling(future, deadline=None):
+    """Delay cancellation until FUTURE finishes or its deadline expires.
 
     ``run_in_executor`` cannot stop a running worker when its awaiting
     coroutine is cancelled.  Callers use this while holding their
     single-flight lock, so the worker must finish before cancellation can
-    release that lock and admit an overlapping transaction.
+    release that lock and admit an overlapping transaction.  DEADLINE is an
+    optional monotonic timestamp; expiry raises ``_WorkerDeadlineExceeded``
+    without cancelling the executor future.  The private exception keeps a
+    worker's own ``TimeoutError`` distinguishable from deadline expiry.
     """
     cancelled = None
     while not future.done():
         try:
-            await asyncio.shield(future)
+            if deadline is None:
+                await asyncio.shield(future)
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _WorkerDeadlineExceeded
+                done, _ = await asyncio.wait([future], timeout=remaining)
+                if not done:
+                    raise _WorkerDeadlineExceeded
         except asyncio.CancelledError as error:
             cancelled = error
     if cancelled is not None:
@@ -384,13 +392,19 @@ async def _finish_before_cancelling(future):
     return future.result()
 
 
+def _exit_for_wedged_stream() -> NoReturn:
+    """Exit immediately so the service supervisor replaces a wedged worker."""
+    log.critical("stream worker failed to quiesce; exiting for supervised restart")
+    os._exit(1)
+
+
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request,
                        thread_id: Optional[str] = None,
                        workdir: Optional[str] = None) -> AsyncIterator[bytes]:
     """The async generator that drives one chat turn.  Bridges
     assist's sync iterator via run_in_executor and polls
-    is_disconnected() between yields so client ABORT fires the
-    finally cleanly.  See design doc §4 for the cancellation chain."""
+    is_disconnected() while each next() is in flight so client ABORT enters
+    the bounded quiescence path in the finally below."""
     loop = asyncio.get_running_loop()
     SENTINEL = object()
     stream_id = uuid.uuid4().hex
@@ -411,9 +425,8 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     # "cannot release un-acquired lock".  Initialized to None so the finally
     # can guard cleanly if we fail before constructing it.
     pump: Optional[ThreadPoolExecutor] = None
-    # NOTE: `runaway_at` is set AFTER acquiring `_STREAM_LOCK` below;
-    # otherwise a long wait behind the lock would burn the budget
-    # before we'd even started this stream's actual work.
+    # Set after acquiring `_STREAM_LOCK` below so a long wait behind another
+    # turn does not burn this stream's worker budget.
     runaway_at = float("inf")
 
     yield ndjson.event("start", stream_id=stream_id, ts=time.time())
@@ -464,6 +477,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
     # an immediate ack of receipt.
     await _STREAM_LOCK.acquire()
     try:
+        runaway_at = time.monotonic() + RUNAWAY_SECONDS
         # Namespace aliases are deliberately absent from the released Lisp.
         # Before this turn can run against a freshly restarted phone, migrate
         # the complete recorded config through the normal confirmed apply
@@ -471,24 +485,28 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # something the agent may paper over with another write.
         migration_future = loop.run_in_executor(
             None, migrate_legacy_config, phone_ctx)
-        migration = await _finish_before_cancelling(migration_future)
+        try:
+            migration = await _finish_before_cancelling(
+                migration_future, deadline=runaway_at)
+        except _WorkerDeadlineExceeded:
+            _exit_for_wedged_stream()
         if migration.startswith("error:"):
             yield ndjson.event("error", reason=migration)
             return
         if not migration.startswith("unchanged:"):
             log.info("completed namespace config migration for %s", phone_ctx.phone_host)
-        # `runaway_at` is set HERE (not before the lock acquire) so a
-        # long wait behind the lock doesn't burn the budget before
-        # we've even started.  Inside the try so the finally is the
-        # exclusive release path.
-        runaway_at = time.monotonic() + RUNAWAY_SECONDS
         pump = ThreadPoolExecutor(max_workers=1)
         # Move Thread construction onto the pump so the async handler isn't
         # blocked by it AND so __enter__ of THREAD_QUEUE.acquire (which the
         # generator runs on its first next()) lands on the pump thread.  This
         # is also the only place an ASSIST_MODEL_URL misconfig can raise.
-        it = await loop.run_in_executor(
+        start_future = loop.run_in_executor(
             pump, _start_stream_iter, message, phone_ctx, thread_id, workdir)
+        try:
+            it = await _finish_before_cancelling(
+                start_future, deadline=runaway_at)
+        except _WorkerDeadlineExceeded:
+            _exit_for_wedged_stream()
         last_heartbeat = time.monotonic()
         while True:
             if await request.is_disconnected():
@@ -582,12 +600,9 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # the generator already exited its `with` block during the final
         # next() (so this close is a no-op); on abort, an in-flight next()
         # may still hold the worker, and the queued close runs once it
-        # returns.  Fire-and-forget — we do NOT await it, so a wedged model
-        # call can't block the lock release below (a truly stuck next()
-        # orphans the worker AND leaks that thread-id's THREAD_QUEUE slot
-        # until the call returns; this is the accepted fail-fast behavior).
-        # `_close_iter` swallows its own exceptions so the un-awaited future
-        # is clean.
+        # returns.  Keep `_STREAM_LOCK` until that close completes: the
+        # abandoned worker may still access the phone, so admitting rollback
+        # or another stream before it exits would violate single-flight.
         #
         # If we aborted (disconnect/runaway) with a next() abandoned, retrieve
         # its eventual exception so a failing next() doesn't log "Future
@@ -597,14 +612,25 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # if it's already done, retrieving the exception either way.
         if pending is not None:
             pending.add_done_callback(_defuse_future)
-        # Submit BEFORE shutdown: scheduling on a shut-down pool raises.
-        if pump is not None:
-            if it is not None:
-                loop.run_in_executor(pump, _close_iter, it)
-            pump.shutdown(wait=False)
-        # Release the single-flight lock so the next queued /chat can
-        # proceed.  Always paired with the acquire above this try block.
-        _STREAM_LOCK.release()
+        # Submit BEFORE shutdown: scheduling on a shut-down pool raises.  A
+        # second cancellation must not release single-flight early, so use the
+        # same finish-before-cancelling contract as the migration worker.
+        close_future = None
+        if pump is not None and it is not None:
+            close_future = loop.run_in_executor(pump, _close_iter, it)
+        try:
+            if close_future is not None:
+                close_deadline = time.monotonic() + TEARDOWN_GRACE_SECONDS
+                try:
+                    await _finish_before_cancelling(
+                        close_future, deadline=close_deadline)
+                except _WorkerDeadlineExceeded:
+                    _exit_for_wedged_stream()
+        finally:
+            if pump is not None:
+                pump.shutdown(wait=False)
+            # Always paired with the acquire above this try block.
+            _STREAM_LOCK.release()
 
 
 @app.post("/chat")
@@ -655,7 +681,8 @@ async def rollback(req: RollbackRequest, request: Request):
     loop = asyncio.get_running_loop()
     await _STREAM_LOCK.acquire()
     try:
-        return await loop.run_in_executor(None, _do_rollback, phone_ctx)
+        rollback_future = loop.run_in_executor(None, _do_rollback, phone_ctx)
+        return await _finish_before_cancelling(rollback_future)
     finally:
         _STREAM_LOCK.release()
 
@@ -678,17 +705,13 @@ def _clear_conversation(thread_id: str = CONVERSATION_THREAD_ID) -> dict:
        and recreate it.  Safe: it holds only agent scratch/memory; the
        persistent config lives in the SEPARATE git config repo.
 
-    On the normal path `_STREAM_LOCK` keeps this quiescent — no in-flight
-    turn is using the dir.  We do NOT pass `ignore_errors=True`: a genuine
+    `_STREAM_LOCK` keeps this quiescent, including through an aborted stream's
+    in-flight worker and pump-thread close.  We do NOT pass
+    `ignore_errors=True`: a genuine
     wipe failure (permission/IO) must surface as a structured error, not a
     false "cleared" that silently leaves `AGENTS.md` behind.  The
     missing-dir case (clear before any /chat) is handled by the `isdir`
-    guard, not by swallowing.  Caveat (same as the lock comment above): an
-    ABORT/runaway can leave an orphaned worker briefly running after the
-    lock releases; on Linux `rmtree` still unlinks its open files, and a
-    file the worker re-creates AFTER the wipe is stale scratch the next New
-    chat re-wipes — worst case that rare race surfaces as a retry-able
-    error.
+    guard, not by swallowing.
 
     Any failure comes back as a structured error, never a bare 500."""
     try:
@@ -718,7 +741,8 @@ async def clear(request: Request):
     loop = asyncio.get_running_loop()
     await _STREAM_LOCK.acquire()
     try:
-        return await loop.run_in_executor(None, _clear_conversation)
+        clear_future = loop.run_in_executor(None, _clear_conversation)
+        return await _finish_before_cancelling(clear_future)
     finally:
         _STREAM_LOCK.release()
 
@@ -736,7 +760,9 @@ async def forget(req: ForgetRequest):
     loop = asyncio.get_running_loop()
     await _STREAM_LOCK.acquire()
     try:
-        return await loop.run_in_executor(None, _clear_conversation, req.thread_id)
+        forget_future = loop.run_in_executor(
+            None, _clear_conversation, req.thread_id)
+        return await _finish_before_cancelling(forget_future)
     finally:
         _STREAM_LOCK.release()
 
