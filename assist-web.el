@@ -2453,31 +2453,57 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
              (saved-harness-key (alist-get 'harness saved))
              (repo-record (emacsos-assist-web--select-labeled-item
                            "Repository: " repositories 'repo_key saved-repo-key))
-             (repo (and repo-record (plist-get repo-record :item)))
-             (selected (and repo-record (plist-get repo-record :display)))
              (harness-record (emacsos-assist-web--select-labeled-item
                               "Harness: " harnesses 'key saved-harness-key))
-             (harness (and harness-record (plist-get harness-record :item)))
-             (selected-harness (and harness-record
-                                    (plist-get harness-record :display)))
-             (buffer (get-buffer-create "*assist New thread*")))
-        (if (not (and repo harness))
-            (progn (kill-buffer buffer)
-                   (message "Refresh thread catalog before creating a thread"))
-          (with-current-buffer buffer
-            (emacsos-assist-web-mode)
-            (setq emacsos-assist-web--draft-id "new-thread"
-                  emacsos-assist-web--draft-repository (alist-get 'repo_key repo)
-                  emacsos-assist-web--draft-harness (alist-get 'key harness))
-            (let ((inhibit-read-only t) (inhibit-modification-hooks t))
-              (insert (format "*assist New thread - %s*\n" selected))
-              (setq emacsos-assist-web--status-start (copy-marker (point) nil))
-              (insert (format "[%s local draft]" selected-harness))
-              (setq emacsos-assist-web--status-end (copy-marker (point) nil))
-              (insert "\n\n")
-              (emacsos-assist-web--write-prompt)
-              (emacsos-assist-web--restore-draft)))
-          (switch-to-buffer buffer))))))
+             (repo-key (and repo-record
+                            (alist-get 'repo_key (plist-get repo-record :item))))
+             (harness-key (and harness-record
+                               (alist-get 'key (plist-get harness-record :item))))
+             (current-repositories
+              (alist-get 'repositories emacsos-assist-web--catalog))
+             (current-harnesses (alist-get 'harnesses emacsos-assist-web--catalog))
+             (current-repo-record
+              (and repo-key
+                   (seq-find
+                    (lambda (record)
+                      (equal repo-key
+                             (alist-get 'repo_key (plist-get record :item))))
+                    (emacsos-assist-web--labeled-records
+                     current-repositories 'repo_key))))
+             (current-harness-record
+              (and harness-key
+                   (seq-find
+                    (lambda (record)
+                      (equal harness-key
+                             (alist-get 'key (plist-get record :item))))
+                    (emacsos-assist-web--labeled-records current-harnesses 'key)))))
+        (cond
+         ((null current-repositories)
+          (message "No Assist repositories are available"))
+         ((null current-harnesses)
+          (message "No Assist harnesses are available"))
+         ((not (and current-repo-record current-harness-record))
+          (message "Selected Assist workspace is no longer available"))
+         (t
+          (let* ((repo (plist-get current-repo-record :item))
+                 (harness (plist-get current-harness-record :item))
+                 (selected (plist-get current-repo-record :display))
+                 (selected-harness (plist-get current-harness-record :display))
+                 (buffer (get-buffer-create "*assist New thread*")))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--draft-id "new-thread"
+                    emacsos-assist-web--draft-repository (alist-get 'repo_key repo)
+                    emacsos-assist-web--draft-harness (alist-get 'key harness))
+              (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+                (insert (format "*assist New thread - %s*\n" selected))
+                (setq emacsos-assist-web--status-start (copy-marker (point) nil))
+                (insert (format "[%s local draft]" selected-harness))
+                (setq emacsos-assist-web--status-end (copy-marker (point) nil))
+                (insert "\n\n")
+                (emacsos-assist-web--write-prompt)
+                (emacsos-assist-web--restore-draft)))
+            (switch-to-buffer buffer))))))))
 
 (defun emacsos-assist-web-new-thread ()
   "Create a local draft, fetching repository choices on first use if needed."

@@ -1237,10 +1237,11 @@
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest test-assist-web-duplicate-repository-label-selects-exact-identity ()
-  (let ((cache '((repositories . (((repo_key . "repo-a") (label . "Same"))
-                                   ((repo_key . "repo-b") (label . "Same"))))
-                 (harnesses . (((key . "deepagents")
-                                (label . "Deep Agents")))))))
+  (let* ((cache '((repositories . (((repo_key . "repo-a") (label . "Same"))
+                                    ((repo_key . "repo-b") (label . "Same"))))
+                  (harnesses . (((key . "deepagents")
+                                 (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog cache))
     (when (get-buffer "*assist New thread*") (kill-buffer "*assist New thread*"))
     (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
               ((symbol-function 'completing-read)
@@ -1280,9 +1281,10 @@
              "victim"))))
 
 (ert-deftest test-assist-web-new-draft-reopens-without-reselecting-workspace ()
-  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-draft-" t))
-        (cache '((repositories . (((repo_key . "repo-key") (label . "Assist"))))
-                 (harnesses . (((key . "deepagents") (label . "Deep Agents")))))))
+  (let* ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-draft-" t))
+         (cache '((repositories . (((repo_key . "repo-key") (label . "Assist"))))
+                  (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog cache))
     (unwind-protect
         (progn
           (with-temp-buffer
@@ -1303,6 +1305,30 @@
             (should (equal (emacsos-assist-web--input) "saved locally"))))
       (when (get-buffer "*assist New thread*") (kill-buffer "*assist New thread*"))
       (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-new-draft-rejects-choices-removed-during-selection ()
+  (let* ((catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog catalog)
+         notice)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) #'ignore)
+              ((symbol-function 'completing-read)
+               (lambda (_prompt choices &rest _)
+                 (prog1 (car choices)
+                   (setq emacsos-assist-web--catalog
+                         '((threads . nil)
+                           (repositories . nil)
+                           (harnesses . nil))))))
+              ((symbol-function 'switch-to-buffer)
+               (lambda (&rest _) (ert-fail "stale workspace must not open")))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (emacsos-assist-web--new-thread-from-catalog catalog))
+    (should-not (get-buffer "*assist New thread*"))
+    (should (string-match-p "No Assist repositories are available" notice))))
 
 (ert-deftest test-assist-web-new-thread-fetches-catalog-with-no-existing-thread ()
   (let ((catalog (test-assist-web--wire-catalog
