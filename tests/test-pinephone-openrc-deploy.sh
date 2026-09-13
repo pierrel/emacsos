@@ -16,9 +16,12 @@ if printf '%s\n' "$local_deploy" | grep -E 'emacsclient|^[[:space:]]*scp ' >/dev
     exit 1
 fi
 
-dry_run=$(make -s -n -f "$repo_dir/Makefile" phone-install \
-    ASSIST_WEB_API_URL=https://203.0.113.8:5050/api/v1/phone \
-    ASSIST_WEB_TOKEN_FILE=/tmp/token ASSIST_WEB_CA_FILE=/tmp/ca 2>&1)
+dry_run=$(
+    export PINEPHONE_HOST=phone-wg-test
+    env -u PINEPHONE_HOST make -s -n -f "$repo_dir/Makefile" phone-install \
+        ASSIST_WEB_API_URL=https://203.0.113.8:5050/api/v1/phone \
+        ASSIST_WEB_TOKEN_FILE=/tmp/token ASSIST_WEB_CA_FILE=/tmp/ca 2>&1
+)
 case $dry_run in
     *'overriding recipe for target'*)
         printf '%s\n' 'phone deployment Makefile has a malformed recipe' >&2
