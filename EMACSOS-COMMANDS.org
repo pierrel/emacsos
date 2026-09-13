@@ -103,8 +103,9 @@ opens the exact row at point.
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
 
-The modeline Threads, network, call, SMS, and keyboard labels are touch controls
-for their current status or action.
+The modeline Threads, network, call, and SMS labels are touch controls for their
+current status or action.  The PinePhone/OpenRC deployment also adds the
+keyboard label.
 
 An SMS conversation uses the compositor text keyboard with QUIT, Refresh, and
 Send or ACK in its Emacs utility row.  Send still opens the separate two-tap
