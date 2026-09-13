@@ -1036,7 +1036,7 @@ Preserve records newer than CUTOFF when it is non-nil."
         (setf (emacsos-sms-chat-job-process job) process)))))
 
 (defun emacsos-sms-chat--scheduler-pump ()
-  "Start bounded queued jobs, reserving the next slot for a list refresh."
+  "Start bounded jobs: refresh list, its snapshots, live work, then FIFO."
   (while (and (< emacsos-sms-chat--running emacsos-sms-chat--max-processes)
               emacsos-sms-chat--queue)
     (let ((job (or (seq-find (lambda (candidate)

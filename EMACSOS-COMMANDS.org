@@ -103,10 +103,10 @@ The modeline network, call, and SMS labels are touch controls for their current
 status or action.  The PinePhone/OpenRC deployment also adds the keyboard
 label.
 
-An SMS conversation uses the ordinary text keyboard with QUIT, Refresh, and
-Send in its utility row.  Send still opens the separate two-tap confirmation
-screen.  Other ordinary chat, editing, and Assist buffers have no separate
-Emacs control pane.
+An SMS conversation uses the compositor text keyboard with QUIT, Refresh, and
+Send or ACK in its Emacs utility row.  Send still opens the separate two-tap
+confirmation screen; ACK clears an indeterminate local send status.  Other
+ordinary chat, editing, and Assist buffers have no separate Emacs control pane.
 
 * Files and terminals
 

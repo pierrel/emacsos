@@ -149,7 +149,8 @@ recorded in [[file:docs/2026-05-21-keyboard-ergonomics.org][the historical keybo
 modifier-swipe keyboard, so ordinary chat, editing, and Assist buffers give the
 whole Emacs area to content.  =Meta+x= reaches every interactive command; no
 per-buffer command list or persistent utility pane remains.  A temporary
-control window appears only for call and SMS confirmations, then is deleted.
+control window appears for call and SMS confirmations and for an SMS
+conversation's QUIT/Refresh/Send-or-ACK row, then is deleted.
 See [[file:docs/2026-09-08-remove-control-pane.org][the corrective design]].
 
 ** TODO Glide decoder improvements
