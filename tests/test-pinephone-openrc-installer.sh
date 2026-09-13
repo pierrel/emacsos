@@ -673,6 +673,7 @@ fi
 assert_preflight_rejection() {
     label=$1
     helper_before=$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)
+    apk_lines_before=$(wc -l </tmp/apk-log)
     : >/tmp/rc-service-log
     if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
         /bin/sh /tmp/openrc-update-root >/tmp/update-preflight.out 2>&1; then
@@ -680,11 +681,32 @@ assert_preflight_rejection() {
         exit 1
     fi
     [ "$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)" = "$helper_before" ]
+    case $label in
+        *directory*)
+            [ "$(wc -l </tmp/apk-log)" -eq "$apk_lines_before" ] || {
+                printf '%s\n' "unsafe $label reached package installation" >&2
+                exit 1
+            }
+            ;;
+    esac
     if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
         printf '%s\n' "unsafe $label stopped the UI before rejection" >&2
         exit 1
     fi
 }
+
+awk '
+    /^preflight_destination_directories$/ { destination = NR }
+    /^preflight_backup_sources$/ { backup = NR }
+    /^current_keyboard_paths \|\| true$/ && !current { current = NR }
+    /^legacy_keyboard_paths \|\| true$/ && !legacy { legacy = NR }
+    /^snapshot=\$\(mktemp -d \/var\/tmp\/emacsos-openrc-update\./ { snapshot = NR }
+    END {
+        exit !(destination && backup && current && legacy && snapshot &&
+               destination < snapshot && backup < snapshot &&
+               current < snapshot && legacy < snapshot)
+    }
+' /tmp/openrc-update-root
 
 # The update-only keyboard inputs retain the installer helper's strict staged
 # file contract before this transaction stops the UI or changes any payload.
@@ -724,6 +746,40 @@ for unsafe_mode in 0664 0646; do
     assert_preflight_rejection "backup-source-mode-$unsafe_mode"
 done
 chmod 0644 /usr/local/share/emacsos-openrc/os.el
+
+# Every direct destination exercised below keeps the updater's fixed ownership
+# and mode policy.
+chmod 0775 /usr/local/share/emacsos-openrc
+assert_preflight_rejection installed-directory-mode
+chmod 0755 /usr/local/share/emacsos-openrc
+chmod 0775 /etc/init.d
+assert_preflight_rejection init-directory-mode
+chmod 0755 /etc/init.d
+chmod 0755 /etc/doas.d
+assert_preflight_rejection doas-directory-mode
+chmod 0750 /etc/doas.d
+install -d -o root -g root -m 0775 /etc/emacsos-openrc
+assert_preflight_rejection config-directory-mode
+rm -rf /etc/emacsos-openrc
+for directory in /var/lib/emacsos-lab /var/lib/emacsos-lab/.config \
+    /var/lib/emacsos-lab/.config/emacsos; do
+    chmod 0770 "$directory"
+    assert_preflight_rejection "Assist-Web-directory-mode-$directory"
+    chmod 0700 "$directory"
+done
+chmod 0775 /usr/local/share/licenses/wvkbd-emacsos
+assert_preflight_rejection keyboard-notice-directory-mode
+chmod 0755 /usr/local/share/licenses/wvkbd-emacsos
+
+mv /usr/local/bin/wvkbd-emacsos /tmp/wvkbd-emacsos-empty-directory-test
+mv /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
+    /tmp/wvkbd-emacsos-notice-empty-directory-test
+chmod 0775 /usr/local/share/licenses/wvkbd-emacsos
+assert_preflight_rejection empty-keyboard-notice-directory-mode
+chmod 0755 /usr/local/share/licenses/wvkbd-emacsos
+mv /tmp/wvkbd-emacsos-empty-directory-test /usr/local/bin/wvkbd-emacsos
+mv /tmp/wvkbd-emacsos-notice-empty-directory-test \
+    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
 
 mv /usr/local/share/licenses/wvkbd-emacsos \
     /tmp/wvkbd-emacsos-notice-directory

@@ -67,6 +67,7 @@ legacy_wvkbd=/usr/local/bin/wvkbd-emacos
 legacy_notice_dir=/usr/local/share/licenses/wvkbd-emacos
 legacy_notice=/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 current_wvkbd=/usr/local/bin/wvkbd-emacsos
+current_notice_dir=/usr/local/share/licenses/wvkbd-emacsos
 current_notice=/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
 legacy_assist=/usr/local/share/emacsos-openrc/emacos-assist.el
 
@@ -96,6 +97,9 @@ current_keyboard_paths() {
     [ -f "$current_wvkbd" ] && [ ! -L "$current_wvkbd" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$current_wvkbd")" = \
             'root:root:755:1:regular file' ] &&
+        [ -d "$current_notice_dir" ] && [ ! -L "$current_notice_dir" ] &&
+        [ "$(stat -c '%U:%G:%a:%F' "$current_notice_dir")" = \
+            'root:root:755:directory' ] &&
         [ -f "$current_notice" ] && [ ! -L "$current_notice" ] &&
         [ "$(stat -c '%U:%G:%a:%h:%F' "$current_notice")" = \
             'root:root:644:1:regular file' ] ||
@@ -212,8 +216,8 @@ preflight_backup_sources() {
         /var/lib/emacsos-lab/.config/emacsos; do
         if [ -e "$directory" ] || [ -L "$directory" ]; then
             [ -d "$directory" ] && [ ! -L "$directory" ] &&
-                [ "$(stat -c '%U:%G:%F' "$directory")" = \
-                    'emacsos-lab:emacsos-lab:directory' ] ||
+                [ "$(stat -c '%U:%G:%a:%F' "$directory")" = \
+                    'emacsos-lab:emacsos-lab:700:directory' ] ||
                 fail "unsafe Assist Web configuration directory: $directory"
         fi
     done
@@ -249,6 +253,39 @@ preflight_backup_sources() {
             *[2367]?|*[2367]) fail "unsafe installed backup source: $target" ;;
         esac
     done
+}
+
+preflight_destination_directories() {
+    for directory in /usr/local/bin /usr/local/share \
+        /usr/local/share/emacsos-openrc /usr/local/sbin /etc/init.d \
+        /etc/nftables.d; do
+        [ -d "$directory" ] && [ ! -L "$directory" ] &&
+            [ "$(stat -c '%U:%G:%a:%F' "$directory")" = \
+                'root:root:755:directory' ] ||
+            fail "unsafe installed directory policy: $directory"
+    done
+    if [ -e /usr/local/share/licenses ] || [ -L /usr/local/share/licenses ]; then
+        [ -d /usr/local/share/licenses ] &&
+            [ ! -L /usr/local/share/licenses ] &&
+            [ "$(stat -c '%U:%G:%a:%F' /usr/local/share/licenses)" = \
+                'root:root:755:directory' ] ||
+            fail 'unsafe installed directory policy: /usr/local/share/licenses'
+    fi
+    if [ -e "$current_notice_dir" ] || [ -L "$current_notice_dir" ]; then
+        [ -d "$current_notice_dir" ] && [ ! -L "$current_notice_dir" ] &&
+            [ "$(stat -c '%U:%G:%a:%F' "$current_notice_dir")" = \
+                'root:root:755:directory' ] ||
+            fail 'unsafe current keyboard notice directory policy'
+    fi
+    [ -d /etc/doas.d ] && [ ! -L /etc/doas.d ] &&
+        [ "$(stat -c '%U:%G:%a:%F' /etc/doas.d)" = \
+            'root:root:750:directory' ] || fail 'unsafe doas directory policy'
+    if [ -e /etc/emacsos-openrc ] || [ -L /etc/emacsos-openrc ]; then
+        [ -d /etc/emacsos-openrc ] && [ ! -L /etc/emacsos-openrc ] &&
+            [ "$(stat -c '%U:%G:%a:%F' /etc/emacsos-openrc)" = \
+                'root:root:755:directory' ] ||
+            fail 'unsafe installed directory policy: /etc/emacsos-openrc'
+    fi
 }
 
 valid_ipv4() (
@@ -605,6 +642,12 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
 done
 [ "$count" -eq 33 ] || fail 'staging directory is incomplete'
 
+preflight_destination_directories
+preflight_backup_sources
+current_keyboard_paths || true
+legacy_keyboard_paths || true
+legacy_assist_module || true
+
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
@@ -645,22 +688,6 @@ render_ipv4_template "$snapshot/openrc-assist-web-url" '@ASSIST_WEB_SERVER_IP@' 
 render_ipv4_template "$snapshot/openrc-emacs-server.nft" '@DEPLOY_CLIENT_IP@' \
     "$deploy_client_ip"
 
-for directory in /usr/local/bin /usr/local/share/emacsos-openrc /usr/local/sbin \
-    /usr/local/share/licenses /etc/nftables.d /etc/doas.d; do
-    [ -d "$directory" ] && [ ! -L "$directory" ] ||
-        fail "unsafe installed directory: $directory"
-done
-if [ -e /usr/local/share/licenses/wvkbd-emacsos ] ||
-   [ -L /usr/local/share/licenses/wvkbd-emacsos ]; then
-    [ -d /usr/local/share/licenses/wvkbd-emacsos ] &&
-        [ ! -L /usr/local/share/licenses/wvkbd-emacsos ] &&
-        [ "$(stat -c '%U:%G:%a:%F' /usr/local/share/licenses/wvkbd-emacsos)" = \
-            'root:root:755:directory' ] || fail 'unsafe keyboard notice directory'
-fi
-if [ -e /etc/emacsos-openrc ] || [ -L /etc/emacsos-openrc ]; then
-    [ -d /etc/emacsos-openrc ] && [ ! -L /etc/emacsos-openrc ] ||
-        fail 'unsafe installed directory: /etc/emacsos-openrc'
-fi
 for target in /usr/local/share/emacsos-openrc/init.el \
     /usr/local/share/emacsos-openrc/sway.config \
     /usr/local/share/emacsos-openrc/session \
@@ -691,10 +718,8 @@ timeout -s TERM -k 5 30 apk add --simulate py3-dbus >/dev/null
 timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null
 [ -x /usr/bin/python3 ] && apk info -e py3-dbus >/dev/null && \
     /usr/bin/python3 -I -c 'import dbus' || fail 'SMS dependencies are absent'
-preflight_backup_sources
 current_keyboard_paths || true
 legacy_keyboard_paths || true
-legacy_assist_module || true
 snapshot_keyboard_stage "$stage/wvkbd-emacsos" "$snapshot/wvkbd-emacsos" 16777216
 snapshot_keyboard_stage "$stage/wvkbd-notice" "$snapshot/wvkbd-notice" 1048576
 [ "$(sha256sum "$snapshot/wvkbd-emacsos")" = \

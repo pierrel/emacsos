@@ -124,6 +124,8 @@ install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null' \
 dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus'" \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
+snapshot_line=$(grep -nF 'snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.' \
+    "$deploy_dir/openrc-update-root" | cut -d: -f1)
 keyboard_snapshot_line=$(grep -nF 'snapshot_keyboard_stage "$stage/wvkbd-emacsos"' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 helper_backup_line=$(grep -nF \
@@ -131,8 +133,9 @@ helper_backup_line=$(grep -nF \
 bootstrap_line=$(grep -nF 'bootstrap_compat_helper || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 stop_line=$(grep -nF 'stop_ui || fail' "$deploy_dir/openrc-update-root" | cut -d: -f1)
 mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
-[ "$simulate_line" -lt "$install_line" ] && [ "$install_line" -lt "$dbus_check_line" ] &&
-    [ "$dbus_check_line" -lt "$preflight_line" ] && [ "$preflight_line" -lt "$bootstrap_line" ] &&
+[ "$preflight_line" -lt "$snapshot_line" ] && [ "$snapshot_line" -lt "$simulate_line" ] &&
+    [ "$simulate_line" -lt "$install_line" ] && [ "$install_line" -lt "$dbus_check_line" ] &&
+    [ "$dbus_check_line" -lt "$bootstrap_line" ] &&
     [ "$bootstrap_line" -lt "$stop_line" ] && [ "$bootstrap_line" -lt "$mutating_line" ] &&
     [ "$stop_line" -lt "$mutating_line" ]
 [ "$preflight_line" -lt "$keyboard_snapshot_line" ] &&
