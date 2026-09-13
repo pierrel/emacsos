@@ -1462,6 +1462,35 @@
         (when (get-buffer "*assist New thread*")
           (kill-buffer "*assist New thread*"))))))
 
+(ert-deftest test-assist-web-synchronous-refresh-failure-cancels-deferred-cached-chooser ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-sync-failed-minibuffer*"))
+         (emacsos-assist-web--catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog-state 'cached)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p nil))
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () window))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback nil "missing token")))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _) (ert-fail "failed refresh must not defer"))))
+            (emacsos-assist-web-new-thread)
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (with-current-buffer minibuffer
+              (should-not (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                                minibuffer-exit-hook)))))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
 (ert-deftest test-assist-web-catalog-consumers-coalesce-one-refresh ()
   (let ((emacsos-assist-web--catalog nil)
         (emacsos-assist-web--catalog-state nil)

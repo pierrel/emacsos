@@ -2506,7 +2506,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
             (switch-to-buffer buffer))))))))
 
 (defun emacsos-assist-web-new-thread ()
-  "Create a local draft, fetching repository choices on first use if needed."
+  "Refresh the catalog and open a draft now or when usable choices arrive."
   (interactive)
   (setq emacsos-assist-web--new-thread-pending-p t)
   (cond
@@ -2514,9 +2514,10 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
          (alist-get 'harnesses emacsos-assist-web--catalog))
     (emacsos-assist-web-refresh-threads)
     ;; A request setup error can fail synchronously and clear the intent before
-    ;; the still-usable cached chooser opens.  A synchronous success either
-    ;; opened it already or confirmed that no current choices remain.
+    ;; the still-usable cached chooser opens.  A synchronous success already
+    ;; opened or deferred it, or confirmed that no current choices remain.
     (when (and (not emacsos-assist-web--new-thread-pending-p)
+               (not (active-minibuffer-window))
                (eq emacsos-assist-web--catalog-state 'refresh-failed))
       (setq emacsos-assist-web--new-thread-pending-p t))
     (emacsos-assist-web--open-pending-new-thread))
