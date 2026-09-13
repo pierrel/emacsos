@@ -17,7 +17,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=77f2e22ab7486d3fdc4ae9167cc001ac78706522762eada52a2bf2f584dd7bcf
+manifest_hash=b62c1a6d8dc96631dc39ee7f3fd3fc3d40c5efa5a6b602d3aea1584f0838da7d
 mutating=0
 committed=0
 restart_only=0
@@ -645,7 +645,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 34 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 35 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
