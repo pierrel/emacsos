@@ -38,6 +38,7 @@ test-pinephone-scripts:
 	tests/test-pinephone-openrc-call.sh
 	tests/test-pinephone-openrc-network.sh
 	tests/test-pinephone-openrc-wifi-connect.sh
+	tests/test-pinephone-openrc-device.sh
 	tests/test-pinephone-openrc-power.sh
 	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
 

@@ -77,6 +77,7 @@
 
 (ert-deftest test-net-parse-wifi-active ()
   (let ((st (emacsos-net--parse test-net--blob-wifi)))
+    (should (emacsos-net-state-valid st))
     (should (eq (emacsos-net-state-active-iface st) 'wifi))
     (should (eq (emacsos-net-state-wifi-on st) t))
     (should (equal (emacsos-net-state-ssid st) "HomeNet"))
@@ -195,6 +196,22 @@
     (should (emacsos-net-state-cell-provisioned st))
     (should (emacsos-net-state-cell-on st))))
 
+(ert-deftest test-net-parse-rejects-malformed-cell-signal ()
+  (dolist (signal '("bogus" "-1" "101"))
+    (should-error
+     (emacsos-net--parse
+      (concat "@@RADIO\ndisabled\n@@ROUTE\ndefault via 10.0.0.1 dev wwan0\n"
+              "@@CONS\ngsm:wwan0\n@@WIFI\n@@CELL\n"
+              "modem.generic.signal-quality.value : " signal "\n@@END\n"))))
+  (dolist (case '(("" nil) ("0" 0) ("100" 100)))
+    (let ((state
+           (emacsos-net--parse
+            (concat "@@RADIO\ndisabled\n@@ROUTE\ndefault via 10.0.0.1 dev wwan0\n"
+                    "@@CONS\ngsm:wwan0\n@@WIFI\n@@CELL\n"
+                    "modem.generic.signal-quality.value : " (car case)
+                    "\n@@END\n"))))
+      (should (equal (emacsos-net-state-signal state) (cadr case))))))
+
 (ert-deftest test-net-parse-no-net-unprovisioned ()
   (let ((st (emacsos-net--parse test-net--blob-none)))
     (should (eq (emacsos-net-state-active-iface st) 'none))
@@ -283,17 +300,261 @@
 (ert-deftest test-net-cell-toggle-follows-profile-activity-not-default-route ()
   (let ((seen nil))
     (cl-letf (((symbol-function 'emacsos-net--action)
-               (lambda (args) (setq seen args))))
+               (lambda (args &optional _completion) (setq seen args))))
       (let ((emacsos-net--state
              (make-emacsos-net-state :active-iface 'wifi
-                                    :cell-provisioned t :cell-on t)))
+                                    :cell-provisioned t :cell-on t :valid t))
+            (emacsos-net--cell-operation nil))
         (emacsos-net-toggle-cell)
         (should (equal seen '("con" "down" "emacsos-cellular"))))
       (let ((emacsos-net--state
              (make-emacsos-net-state :active-iface 'wifi
-                                    :cell-provisioned t :cell-on nil)))
+                                    :cell-provisioned t :cell-on nil :valid t))
+            (emacsos-net--cell-operation nil))
         (emacsos-net-toggle-cell)
         (should (equal seen '("con" "up" "emacsos-cellular")))))))
+
+(ert-deftest test-net-explicit-cell-setter-rejects-invalid-snapshot ()
+  (let ((emacsos-net--state (make-emacsos-net-state :valid nil))
+        delivered)
+    (should (equal (emacsos-net-set-cell t
+                                       (lambda (ok detail)
+                                         (setq delivered (list ok detail))))
+                   "error: cellular status is unavailable"))
+    (should (equal delivered '(nil "cellular status is unavailable")))))
+
+(ert-deftest test-net-explicit-cell-setter-rejects-non-boolean-state ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-provisioned t)))
+    (should-error (emacsos-net-set-cell 'toggle) :type 'user-error)))
+
+(ert-deftest test-net-cell-setter-does-not-report-pending-after-launch-failure ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-provisioned t))
+        (emacsos-net--cell-operation nil)
+        (emacsos-net-command-function (lambda (_) (error "rejected")))
+        delivered)
+    (should (equal (emacsos-net-set-cell
+                    t (lambda (ok detail) (setq delivered (list ok detail))))
+                   "error: network action could not start"))
+    (should (equal delivered '(nil "rejected")))
+    (should-not (emacsos-net-state-cell-pending emacsos-net--state))
+    (should (equal (emacsos-net-state-cell-error emacsos-net--state) "rejected"))))
+
+(ert-deftest test-net-cell-setter-records-terminal-state-without-caller-callback ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-provisioned t :cell-on nil))
+        (emacsos-net--cell-operation nil)
+        action-completion)
+    (cl-letf (((symbol-function 'emacsos-net--action)
+               (lambda (_args completion)
+                 (setq action-completion completion)
+                 'process))
+              ((symbol-function 'emacsos-net--notify-state-change) #'ignore))
+      (should (equal (emacsos-net-set-cell t)
+                     "pending: cellular data turning on"))
+      (should (eq (emacsos-net-state-cell-pending emacsos-net--state) 'on))
+      (funcall action-completion t "ok")
+      (should-not (emacsos-net-state-cell-pending emacsos-net--state))
+      (should (emacsos-net-state-cell-on emacsos-net--state))
+      (should-not (emacsos-net-state-cell-error emacsos-net--state))
+      (funcall action-completion nil "modem rejected")
+      (should (emacsos-net-state-cell-on emacsos-net--state))
+      (should-not (emacsos-net-state-cell-error emacsos-net--state)))))
+
+(ert-deftest test-net-cell-setter-failure-restores-pre-action-state ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-provisioned t :cell-on nil))
+        (emacsos-net--cell-operation nil)
+        action-completion)
+    (cl-letf (((symbol-function 'emacsos-net--action)
+               (lambda (_args completion)
+                 (setq action-completion completion)
+                 'process))
+              ((symbol-function 'emacsos-net--notify-state-change) #'ignore))
+      (emacsos-net-set-cell t)
+      (setf (emacsos-net-state-cell-on emacsos-net--state) t)
+      (funcall action-completion nil "modem rejected")
+      (should-not (emacsos-net-state-cell-pending emacsos-net--state))
+      (should-not (emacsos-net-state-cell-on emacsos-net--state))
+      (should (equal (emacsos-net-state-cell-error emacsos-net--state)
+                     "modem rejected")))))
+
+(ert-deftest test-net-cell-setter-rejects-overlapping-operation ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-provisioned t :cell-on nil))
+        (emacsos-net--cell-operation nil)
+        first-completion second-result)
+    (cl-letf (((symbol-function 'emacsos-net--action)
+               (lambda (_args completion)
+                 (setq first-completion completion)
+                 'process))
+              ((symbol-function 'emacsos-net--notify-state-change) #'ignore))
+      (should (equal (emacsos-net-set-cell t)
+                     "pending: cellular data turning on"))
+      (should (equal
+               (emacsos-net-set-cell
+                nil (lambda (success detail)
+                      (setq second-result (list success detail))))
+               "error: cellular operation is already running"))
+      (should (equal second-result
+                     '(nil "cellular operation is already running")))
+      (should (eq (emacsos-net-state-cell-pending emacsos-net--state) 'on))
+      (funcall first-completion t "ok")
+      (should-not emacsos-net--cell-operation)
+      (should-not (emacsos-net-state-cell-pending emacsos-net--state))
+      (should (emacsos-net-state-cell-on emacsos-net--state)))))
+
+(ert-deftest test-net-cell-setter-interactively-reads-explicit-state ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-provisioned t :cell-on t))
+        (emacsos-net--cell-operation nil)
+        seen)
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off"))
+              ((symbol-function 'emacsos-net--action)
+               (lambda (args _completion) (setq seen args) 'process))
+              ((symbol-function 'emacsos-net--notify-state-change) #'ignore))
+      (call-interactively #'emacsos-net-set-cell))
+    (should (equal seen '("con" "down" "emacsos-cellular")))))
+
+(ert-deftest test-net-state-change-notifies-platform-consumers ()
+  (let ((emacsos-net-state-change-functions nil)
+        notified)
+    (add-hook 'emacsos-net-state-change-functions
+              (lambda () (setq notified t)))
+    (cl-letf (((symbol-function 'force-mode-line-update) #'ignore)
+              ((symbol-function 'emacsos-net--render-if-shown) #'ignore))
+      (emacsos-net--notify-state-change))
+    (should notified)))
+
+(ert-deftest test-net-parse-rejects-unrecognized-radio-output ()
+  (should-error
+   (emacsos-net--parse
+    "@@RADIO\nmaybe\n@@ROUTE\n@@CONS\n@@WIFI\n@@CELL\n@@END\n")))
+
+(ert-deftest test-net-parse-rejects-malformed-networkmanager-records ()
+  (should-error
+   (emacsos-net--parse
+    "@@RADIO\nenabled\n@@ROUTE\n@@CONS\nmissing-fields\n@@WIFI\n@@CELL\n@@END\n"))
+  (should-error
+   (emacsos-net--parse
+    "@@RADIO\nenabled\n@@ROUTE\n@@CONS\n@@WIFI\nyes:OnlyTwoFields\n@@CELL\n@@END\n")))
+
+(ert-deftest test-net-malformed-terminal-snapshot-becomes-unavailable ()
+  (let ((buffer (generate-new-buffer " *test-malformed-net*"))
+        (emacsos-net--state (make-emacsos-net-state :valid t :cell-on t))
+        (emacsos-net--proc 'reader))
+    (with-current-buffer buffer
+      (insert "@@RADIO\nmaybe\n@@ROUTE\n@@CONS\n@@WIFI\n@@CELL\n@@END\n"))
+    (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_) 0))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'force-mode-line-update) #'ignore)
+              ((symbol-function 'emacsos-net--render-if-shown) #'ignore))
+      (emacsos-net--reader-sentinel 'reader "finished"))
+    (should-not (emacsos-net-state-valid emacsos-net--state))
+    (should (emacsos-net-state-cell-on emacsos-net--state))
+    (should (string-match-p "invalid Wi-Fi" (emacsos-net-state-error emacsos-net--state)))
+    (should-not emacsos-net--proc)
+    (should-not (buffer-live-p buffer))))
+
+(ert-deftest test-net-refresh-preserves-cell-action-state ()
+  (let ((buffer (generate-new-buffer " *test-net-cell-error*"))
+        (emacsos-net--state
+         (make-emacsos-net-state :valid t :cell-error "modem rejected"
+                                :cell-pending 'off))
+        (emacsos-net--proc 'reader))
+    (with-current-buffer buffer
+      (insert "@@RADIO\ndisabled\n@@ROUTE\n@@CONS\n@@WIFI\n@@CELL\n@@END\n"))
+    (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_) 0))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'force-mode-line-update) #'ignore)
+              ((symbol-function 'emacsos-net--render-if-shown) #'ignore))
+      (emacsos-net--reader-sentinel 'reader "finished"))
+    (should (emacsos-net-state-valid emacsos-net--state))
+    (should (equal (emacsos-net-state-cell-error emacsos-net--state)
+                   "modem rejected"))
+    (should (eq (emacsos-net-state-cell-pending emacsos-net--state) 'off))
+    (should-not emacsos-net--proc)
+    (should-not (buffer-live-p buffer))))
+
+(ert-deftest test-net-action-destroys-buffer-and-old-reader-before-completion ()
+  (let ((emacsos-net--proc 'old-reader)
+        (emacsos-net--settle-generation 0)
+        (emacsos-net--settle-pending nil)
+        sentinel delivered action-buffer deleted scheduled)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq sentinel (plist-get args :sentinel)
+                       action-buffer (plist-get args :buffer))
+                 'action-process))
+              ((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-id) (lambda (_) 123))
+              ((symbol-function 'signal-process) #'ignore)
+              ((symbol-function 'process-exit-status) (lambda (_) 0))
+              ((symbol-function 'process-buffer)
+               (lambda (process)
+                 (and (eq process 'action-process) action-buffer)))
+              ((symbol-function 'set-process-sentinel) #'ignore)
+              ((symbol-function 'delete-process)
+               (lambda (process) (setq deleted process)))
+              ((symbol-function 'run-with-timer)
+               (lambda (_seconds _repeat function &rest args)
+                 (setq scheduled (cons function args)))))
+      (emacsos-net--action '("radio" "wifi" "on")
+                          (lambda (ok detail)
+                            (setq delivered
+                                  (list ok detail
+                                        (buffer-live-p action-buffer)
+                                        emacsos-net--proc))))
+      (with-current-buffer action-buffer (insert "enabled\n"))
+      (funcall sentinel 'action-process "finished")
+      (funcall sentinel 'action-process "finished again"))
+    (should (equal delivered '(t "enabled" nil nil)))
+    (should (eq deleted 'old-reader))
+    (should (equal scheduled '(emacsos-net--refresh-after-action 1)))
+    (should (= emacsos-net--settle-pending 1))))
+
+(ert-deftest test-net-post-action-refresh-replaces-settle-window-reader ()
+  (let ((emacsos-net--proc 'intervening-reader)
+        (emacsos-net--settle-pending 2)
+        deleted refreshed)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-id) (lambda (_) 123))
+              ((symbol-function 'signal-process) #'ignore)
+              ((symbol-function 'set-process-sentinel) #'ignore)
+              ((symbol-function 'delete-process)
+               (lambda (process) (setq deleted process)))
+              ((symbol-function 'process-buffer) (lambda (_) nil))
+              ((symbol-function 'emacsos-net--refresh)
+               (lambda () (setq refreshed t))))
+      (emacsos-net--refresh-after-action 2))
+    (should (eq deleted 'intervening-reader))
+    (should refreshed)
+    (should-not emacsos-net--settle-pending)
+    (should-not emacsos-net--proc)))
+
+(ert-deftest test-net-refresh-noop-during-action-settle ()
+  (let ((emacsos-net--proc nil)
+        (emacsos-net--settle-pending 3)
+        spawned)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _) (setq spawned t))))
+      (emacsos-net--refresh))
+    (should-not spawned)
+    (should (= emacsos-net--settle-pending 3))))
+
+(ert-deftest test-net-stale-action-refresh-keeps-current-settle-guard ()
+  (let ((emacsos-net--proc nil)
+        (emacsos-net--settle-pending 4)
+        refreshed)
+    (cl-letf (((symbol-function 'emacsos-net--refresh)
+               (lambda () (setq refreshed t))))
+      (emacsos-net--refresh-after-action 3))
+    (should-not refreshed)
+    (should (= emacsos-net--settle-pending 4))))
 
 ;;; Page render
 
@@ -332,6 +593,7 @@
 
 (ert-deftest test-net-reader-has-whole-process-timeout ()
   (let ((emacsos-net--proc nil)
+        (emacsos-net--settle-pending nil)
         command buffer reader-directory)
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
@@ -352,23 +614,6 @@
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when (and reader-directory (file-exists-p reader-directory))
           (delete-directory reader-directory t))))))
-
-(ert-deftest test-net-post-action-refresh-discards-pre-action-reader ()
-  (let ((emacsos-net--proc 'old-reader)
-        (deleted nil)
-        (refreshed nil))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-id) (lambda (_) 123))
-              ((symbol-function 'signal-process) #'ignore)
-              ((symbol-function 'set-process-sentinel) (lambda (&rest _)))
-              ((symbol-function 'delete-process) (lambda (p) (setq deleted p)))
-              ((symbol-function 'process-buffer) (lambda (_) nil))
-              ((symbol-function 'emacsos-net--refresh)
-               (lambda () (setq refreshed t))))
-      (emacsos-net--refresh-after-action)
-      (should (eq deleted 'old-reader))
-      (should refreshed)
-      (should-not emacsos-net--proc))))
 
 ;;; Connection attempts
 
@@ -594,7 +839,12 @@
                (lambda () (cl-incf renders))))
       (emacsos-net--reader-sentinel 'reader "finished")
       (should-not emacsos-net--proc)
-      (should (eq emacsos-net--state old-state))
+      (should-not (eq emacsos-net--state old-state))
+      (should (eq (emacsos-net-state-active-iface emacsos-net--state) 'wifi))
+      (should (equal (emacsos-net-state-ssid emacsos-net--state) "Old"))
+      (should-not (emacsos-net-state-valid emacsos-net--state))
+      (should (equal (emacsos-net-state-error emacsos-net--state)
+                     "network reader exited 124"))
       (should (= renders 1))
       (should-not (buffer-live-p buffer)))))
 

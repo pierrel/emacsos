@@ -2,6 +2,7 @@
 
 ;; Assist-first PinePhone session with application lifecycle commands.
 
+(require 'cl-lib)
 (require 'json)
 
 (setq inhibit-startup-screen t
@@ -584,23 +585,388 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
         (setq emacsos-pinephone-keyboard-hidden nil))
     (emacsos-pinephone-signal-keyboard 'SIGUSR1)
     (setq emacsos-pinephone-keyboard-hidden t))
-  (force-mode-line-update t))
+  (force-mode-line-update t)
+  (when (fboundp 'emacsos-pinephone-controls--render-if-shown)
+    (emacsos-pinephone-controls--render-if-shown)))
 
-(defconst emacsos-pinephone-keyboard-mode-line-map
+(defconst emacsos-pinephone-controls-buffer-name "*controls*"
+  "PinePhone device-controls buffer.")
+
+(defvar emacsos-pinephone-controls-parent-buffer nil
+  "Content buffer restored by the Controls Done action.")
+
+(defvar emacsos-pinephone-controls-active nil
+  "Non-nil after Controls opens and until its Done action runs.")
+
+(defvar emacsos-pinephone-controls-brightness nil
+  "Last verified brightness percentage, or nil before a valid snapshot.")
+
+(defvar emacsos-pinephone-controls-flashlight nil
+  "Last verified flashlight state, `on', `off', or nil.")
+
+(defvar emacsos-pinephone-controls-device-error nil
+  "Bounded aggregate device-helper failure detail, or nil.")
+
+(defvar emacsos-pinephone-controls-device-operation nil
+  "Current device operation plist, or nil.")
+
+(defun emacsos-pinephone-controls--bounded (text &optional width)
+  "Return TEXT as one line clipped to WIDTH display columns."
+  (let ((width (or width 48)))
+    (if (zerop width)
+        ""
+      (truncate-string-to-width
+       (replace-regexp-in-string "[\n\r\t]+" " " (or text ""))
+       width nil nil "…"))))
+
+(defun emacsos-pinephone-controls--unavailable (detail)
+  "Return the explicit unavailable status for DETAIL."
+  (concat "Unavailable: " detail))
+
+(defun emacsos-pinephone-controls--shown-p ()
+  "Return non-nil when the controls buffer is the top content buffer."
+  (let* ((window (and (fboundp 'emacsos--target) (emacsos--target)))
+         (buffer (and window (window-buffer window))))
+    (and buffer (eq buffer (get-buffer emacsos-pinephone-controls-buffer-name)))))
+
+(defun emacsos-pinephone-controls--render-if-shown ()
+  "Repaint Controls when it is the visible content buffer."
+  (when (emacsos-pinephone-controls--shown-p)
+    (emacsos-pinephone-controls--render)))
+
+(add-hook 'emacsos-net-state-change-functions
+          #'emacsos-pinephone-controls--render-if-shown)
+
+(defun emacsos-pinephone-controls--parse-snapshot (text)
+  "Parse strict device-helper snapshot TEXT, returning (BRIGHTNESS . TORCH)."
+  (when (string-match
+         "\\`brightness:\\(25\\|50\\|75\\|100\\)\nflashlight:\\(on\\|off\\)\n?\\'"
+         text)
+    (cons (string-to-number (match-string 1 text))
+          (intern (match-string 2 text)))))
+
+(defun emacsos-pinephone-controls--device-command (arguments)
+  "Return the fixed privileged helper command for ARGUMENTS."
+  (append '("/usr/bin/doas" "-n"
+            "/usr/local/sbin/emacsos-openrc-device")
+          arguments))
+
+(defun emacsos-pinephone-controls--set-device-error (detail)
+  "Invalidate both device rows and record bounded failure DETAIL."
+  (setq emacsos-pinephone-controls-brightness nil
+        emacsos-pinephone-controls-flashlight nil
+        emacsos-pinephone-controls-device-error
+        (emacsos-pinephone-controls--bounded detail)))
+
+(defun emacsos-pinephone-controls--device-finished (process)
+  "Consume terminal PROCESS, ignoring stale completion."
+  (when (memq (process-status process) '(exit signal))
+    (let ((buffer (process-buffer process)))
+      (unwind-protect
+          (let ((operation emacsos-pinephone-controls-device-operation))
+            (when (and operation
+                       (eq process (plist-get operation :process)))
+              (when (timerp (plist-get operation :timer))
+                (cancel-timer (plist-get operation :timer)))
+              (let* ((timed-out-detail
+                      (and (plist-get operation :timed-out)
+                           "device control timed out"))
+                     (output (if (buffer-live-p buffer)
+                                 (with-current-buffer buffer (buffer-string))
+                               ""))
+                     (snapshot (and (eq (process-status process) 'exit)
+                                    (zerop (process-exit-status process))
+                                    (emacsos-pinephone-controls--parse-snapshot
+                                     output))))
+                (setq emacsos-pinephone-controls-device-operation nil)
+                (if snapshot
+                    (setq emacsos-pinephone-controls-brightness (car snapshot)
+                          emacsos-pinephone-controls-flashlight (cdr snapshot)
+                          emacsos-pinephone-controls-device-error nil)
+                  (emacsos-pinephone-controls--set-device-error
+                   (or timed-out-detail
+                       (and (not (string-empty-p output)) output)
+                       (format "device helper exited %s"
+                               (process-exit-status process)))))
+                (emacsos-pinephone-controls--render-if-shown))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(defun emacsos-pinephone-controls--device-timeout (process)
+  "Make a still-live PROCESS visibly non-retryable."
+  (let ((operation emacsos-pinephone-controls-device-operation))
+    (when (and operation
+               (eq process (plist-get operation :process))
+               (process-live-p process))
+      (when (buffer-live-p (process-buffer process))
+        (let ((buffer (process-buffer process)))
+          (set-process-buffer process nil)
+          (kill-buffer buffer)))
+      (setq emacsos-pinephone-controls-device-operation
+            (plist-put operation :timed-out t))
+      (emacsos-pinephone-controls--set-device-error
+       "device control timed out")
+      (emacsos-pinephone-controls--render-if-shown))))
+
+(defun emacsos-pinephone-controls--start-device (row arguments)
+  "Start one fixed device helper operation for ROW with ARGUMENTS."
+  (if (and emacsos-pinephone-controls-device-operation
+           (process-live-p
+            (plist-get emacsos-pinephone-controls-device-operation :process)))
+      "error: another device operation is still running"
+    (let ((buffer (generate-new-buffer " *emacsos-device-control*"))
+          process timer)
+      (setq emacsos-pinephone-controls-device-error nil)
+      (condition-case err
+          (progn
+            (setq process
+                  (make-process
+                   :name "emacsos-device-control"
+                   :buffer buffer
+                   :command (emacsos-pinephone-controls--device-command arguments)
+                   :noquery t
+                   :sentinel
+                   (lambda (finished _event)
+                     (emacsos-pinephone-controls--device-finished finished))))
+            (setq timer
+                  (run-with-timer
+                   7 nil #'emacsos-pinephone-controls--device-timeout
+                   process)
+                  emacsos-pinephone-controls-device-operation
+                  (list :process process :timer timer :row row
+                        :arguments arguments))
+            (emacsos-pinephone-controls--render-if-shown)
+            (format "pending: %s" (string-join arguments " ")))
+        (error
+         (when (buffer-live-p buffer) (kill-buffer buffer))
+         (let ((detail (error-message-string err)))
+           (setq emacsos-pinephone-controls-device-operation nil)
+           (emacsos-pinephone-controls--set-device-error detail)
+           (emacsos-pinephone-controls--render-if-shown)
+           (concat "error: " detail)))))))
+
+(defun emacsos-pinephone-controls--refresh-device ()
+  "Refresh brightness and flashlight from one asynchronous snapshot."
+  (interactive)
+  (emacsos-pinephone-controls--start-device 'status '("status")))
+
+(defun emacsos-controls-set-brightness (percent)
+  "Set PinePhone display brightness to fixed PERCENT asynchronously."
+  (interactive
+   (list (string-to-number
+          (completing-read "Brightness: " '("25" "50" "75" "100") nil t))))
+  (unless (memq percent '(25 50 75 100))
+    (user-error "Brightness must be 25, 50, 75, or 100"))
+  (emacsos-pinephone-controls--start-device
+   'brightness (list "brightness" (number-to-string percent))))
+
+(defun emacsos-controls-set-flashlight (state)
+  "Set PinePhone flashlight to explicit STATE, `on' or `off'."
+  (interactive
+   (list (intern (completing-read "Flashlight: " '("on" "off") nil t))))
+  (unless (memq state '(on off))
+    (user-error "Flashlight state must be on or off"))
+  (emacsos-pinephone-controls--start-device
+   'flashlight (list "flashlight" (symbol-name state))))
+
+(defun emacsos-pinephone-controls--cell-off ()
+  "Turn cellular data off from the Controls row."
+  (emacsos-net-set-cell nil))
+
+(defun emacsos-pinephone-controls--status (row)
+  "Return display status for Controls ROW."
+  (let ((operation emacsos-pinephone-controls-device-operation))
+    (pcase row
+      ('wifi
+       (cond
+        ((not (emacsos-net-state-valid emacsos-net--state))
+         (if (emacsos-net-state-error emacsos-net--state)
+             (emacsos-pinephone-controls--unavailable
+              (emacsos-net-state-error emacsos-net--state))
+           "Checking..."))
+        ((not (eq (emacsos-net-state-wifi-on emacsos-net--state) t)) "off")
+        (t (or (emacsos-net-state-ssid emacsos-net--state) "on"))))
+      ('cell
+       (cond
+        ((eq (emacsos-net-state-cell-pending emacsos-net--state) 'on)
+         "Turning on...")
+        ((eq (emacsos-net-state-cell-pending emacsos-net--state) 'off)
+         "Turning off...")
+        ((not (emacsos-net-state-valid emacsos-net--state))
+         (if (emacsos-net-state-error emacsos-net--state)
+             (emacsos-pinephone-controls--unavailable
+              (emacsos-net-state-error emacsos-net--state))
+           "Checking..."))
+        ((not (emacsos-net-state-cell-provisioned emacsos-net--state)) "Not set up")
+        ((emacsos-net-state-cell-error emacsos-net--state)
+         (emacsos-net-state-cell-error emacsos-net--state))
+        (t (concat (if (emacsos-net-state-cell-on emacsos-net--state) "on" "off")
+                   (let ((detail (emacsos-net-state-cell-state emacsos-net--state)))
+                     (if (string-empty-p detail) "" (format " %s" detail)))))))
+      ('brightness
+       (cond
+        ((and operation
+              (memq (plist-get operation :row) (list row 'status))
+              (plist-get operation :timed-out)) "Still stopping...")
+        ((and operation (memq (plist-get operation :row) (list row 'status)))
+         (if (eq (plist-get operation :row) 'status) "Checking..." "Changing..."))
+        (emacsos-pinephone-controls-device-error
+         (emacsos-pinephone-controls--unavailable
+          emacsos-pinephone-controls-device-error))
+        (emacsos-pinephone-controls-brightness
+         (format "%s%%" emacsos-pinephone-controls-brightness))
+        (t "Checking...")))
+      ('flashlight
+       (cond
+        ((and operation
+              (memq (plist-get operation :row) (list row 'status))
+              (plist-get operation :timed-out)) "Still stopping...")
+        ((and operation (memq (plist-get operation :row) (list row 'status)))
+         (cond
+          ((eq (plist-get operation :row) 'status) "Checking...")
+          ((equal (plist-get operation :arguments) '("flashlight" "on"))
+           "Turning on...")
+          (t "Turning off...")))
+        (emacsos-pinephone-controls-device-error
+         (emacsos-pinephone-controls--unavailable
+          emacsos-pinephone-controls-device-error))
+        (emacsos-pinephone-controls-flashlight
+         (symbol-name emacsos-pinephone-controls-flashlight))
+        (t "Checking...")))
+      ('keyboard (if emacsos-pinephone-keyboard-hidden "hidden" "shown")))))
+
+(defun emacsos-pinephone-controls--insert-row
+    (label status actions &optional reserved-actions)
+  "Insert one fixed-height Controls row with LABEL, STATUS, and ACTIONS.
+Each ACTION is (TEXT FUNCTION ARG); an omitted ARG calls FUNCTION without one.
+RESERVED-ACTIONS keeps the status width stable when some actions are absent."
+  (let* ((window (get-buffer-window (current-buffer)))
+         (width (if window (window-body-width window) 40))
+         (action-width 7)
+         (action-space (* (max (length actions) (or reserved-actions 0))
+                          (1+ action-width)))
+         (status-width (max 0 (- width (string-width label) action-space 1)))
+         (row-height (+ (frame-char-height) (* 2 emacsos--btn-vpad))))
+    (insert (propertize label 'line-height row-height)
+            " " (emacsos-pinephone-controls--bounded status status-width))
+    (dolist (action actions)
+      (insert " ")
+      (emacsos--btn (emacsos--center (nth 0 action) action-width)
+                   (nth 1 action) (nth 2 action) emacsos--btn-label-scale))
+    (insert "\n")))
+
+(defun emacsos-pinephone-controls--device-actions (row)
+  "Return actions for device ROW in the current verified state."
+  (let ((operation emacsos-pinephone-controls-device-operation))
+    (cond
+     (operation nil)
+     (emacsos-pinephone-controls-device-error
+      '(("Retry" emacsos-pinephone-controls--refresh-device nil)))
+     ((eq row 'brightness)
+      (when emacsos-pinephone-controls-brightness
+        (let* ((levels '(25 50 75 100))
+               (position (cl-position emacsos-pinephone-controls-brightness levels))
+               (lower (and position (> position 0) (nth (1- position) levels)))
+               (higher (and position (< position 3) (nth (1+ position) levels))))
+          (append (and lower `(("Dim" emacsos-controls-set-brightness ,lower)))
+                  (and higher `(("Bright" emacsos-controls-set-brightness ,higher)))))))
+     ((eq row 'flashlight)
+      (and emacsos-pinephone-controls-flashlight
+           (if (eq emacsos-pinephone-controls-flashlight 'on)
+               '(("Off" emacsos-controls-set-flashlight off))
+             '(("On" emacsos-controls-set-flashlight on))))))))
+
+(defun emacsos-pinephone-controls--render ()
+  "Render the fixed seven-line PinePhone Controls surface."
+  (let ((buffer (get-buffer-create emacsos-pinephone-controls-buffer-name)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "Controls\n")
+        (emacsos-pinephone-controls--insert-row
+         "WiFi" (emacsos-pinephone-controls--status 'wifi) nil 2)
+        (let ((cell-actions
+               (cond
+                ((emacsos-net-state-cell-pending emacsos-net--state) nil)
+                ((and (not (emacsos-net-state-valid emacsos-net--state))
+                      (emacsos-net-state-error emacsos-net--state))
+                 '(("Retry" emacsos-net--retry nil)))
+                ((not (emacsos-net-state-cell-provisioned emacsos-net--state)) nil)
+                ((emacsos-net-state-cell-on emacsos-net--state)
+                 '(("Off" emacsos-pinephone-controls--cell-off nil)))
+                (t '(("On" emacsos-net-set-cell t))))))
+          (emacsos-pinephone-controls--insert-row
+           "Modem" (emacsos-pinephone-controls--status 'cell) cell-actions))
+        (emacsos-pinephone-controls--insert-row
+         "Light" (emacsos-pinephone-controls--status 'brightness)
+         (emacsos-pinephone-controls--device-actions 'brightness) 2)
+        (emacsos-pinephone-controls--insert-row
+         "Torch" (emacsos-pinephone-controls--status 'flashlight)
+         (emacsos-pinephone-controls--device-actions 'flashlight))
+        (emacsos-pinephone-controls--insert-row
+         "Keys" (emacsos-pinephone-controls--status 'keyboard)
+         (list (list (if emacsos-pinephone-keyboard-hidden "Show" "Hide")
+                     #'emacsos-pinephone-toggle-keyboard nil)))
+        (emacsos--btn (emacsos--center "Done" 12)
+                     #'emacsos-pinephone-controls-done nil
+                     emacsos--btn-label-scale)
+        (insert "\n"))
+      (setq buffer-read-only t)
+      (setq-local cursor-type nil)
+      (setq-local truncate-lines t)
+      (setq-local mode-line-format nil)
+      (goto-char (point-min)))
+    buffer))
+
+(defun emacsos-pinephone-controls-done ()
+  "Restore the content buffer saved when Controls first opened."
+  (interactive)
+  (let ((window (and (fboundp 'emacsos--target) (emacsos--target))))
+    (setq emacsos-pinephone-controls-active nil)
+    (when window
+      (set-window-buffer
+       window
+       (if (buffer-live-p emacsos-pinephone-controls-parent-buffer)
+           emacsos-pinephone-controls-parent-buffer
+         (funcall emacsos-initial-buffer-function))))))
+
+(defun emacsos-controls-show ()
+  "Show the PinePhone Controls buffer and refresh available state."
+  (interactive)
+  (let* ((window (and (fboundp 'emacsos--target) (emacsos--target)))
+         (controls (get-buffer-create emacsos-pinephone-controls-buffer-name))
+         (current (and window (window-buffer window))))
+    (when (and current
+               (not emacsos-pinephone-controls-active)
+               (not (eq current controls)))
+      (setq emacsos-pinephone-controls-parent-buffer current))
+    (setq emacsos-pinephone-controls-active t)
+    (when window (set-window-buffer window controls))
+    (emacsos-pinephone-controls--render)
+    (emacsos-net--ensure-timer)
+    (unless (emacsos-net-state-error emacsos-net--state) (emacsos-net--refresh))
+    (unless (or emacsos-pinephone-controls-device-operation
+                emacsos-pinephone-controls-device-error)
+      (emacsos-pinephone-controls--refresh-device))
+    "shown: controls"))
+
+(defconst emacsos-pinephone-controls-mode-line-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [mode-line mouse-1] #'emacsos-pinephone-toggle-keyboard)
+    (define-key map [mode-line mouse-1] #'emacsos-controls-show)
     map)
-  "Keymap for the visible PinePhone keyboard control.")
+  "Keymap for the PinePhone Controls entry.")
 
-(defun emacsos-pinephone-keyboard-mode-line-string ()
-  "Return the touch control for the compositor keyboard in the modeline."
-  (propertize (if emacsos-pinephone-keyboard-hidden "  kbd show" "  kbd hide")
-              'local-map emacsos-pinephone-keyboard-mode-line-map
+(defun emacsos-pinephone-controls-mode-line-string ()
+  "Return the enlarged PinePhone Controls modeline entry."
+  (propertize " Controls "
+              'local-map emacsos-pinephone-controls-mode-line-map
               'mouse-face 'mode-line-highlight
-              'help-echo "Tap to hide or show the keyboard"))
+              'face `(:box (:line-width (3 . ,emacsos--btn-vpad)
+                            :style released-button))
+              'help-echo "Open phone controls"))
 
-(setq emacsos-platform-mode-line-segments
-      '((:eval (emacsos-pinephone-keyboard-mode-line-string))))
+(setq emacsos-platform-primary-mode-line-segment
+      '(:eval (emacsos-pinephone-controls-mode-line-string))
+      emacsos-platform-mode-line-segments nil)
 
 (when (display-graphic-p)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")

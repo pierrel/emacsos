@@ -716,6 +716,20 @@ def test_skill_sources_has_sms_skill_with_phone_local_confirmation():
     assert "Never synthesize confirmation actions." in " ".join(text.split())
 
 
+def test_skill_sources_has_controls_skill_with_public_setters_only():
+    """Device intent reaches public deterministic elisp, never root directly."""
+    import emacsos_server.app as app_mod
+    path = os.path.join(app_mod._SKILLS_DIR, "controls", "SKILL.md")
+    assert os.path.exists(path)
+    text = open(path).read()
+    assert "emacsos-net-set-cell" in text
+    assert "emacsos-controls-set-brightness" in text
+    assert "emacsos-controls-set-flashlight" in text
+    assert "eval_elisp" in text
+    assert "Never call a private function" in text
+    assert "/usr/local/sbin" not in text
+
+
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):
     """The checkpointer is built once and reused — two turns share it, so
     the conversation accumulates in one threads.db."""

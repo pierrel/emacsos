@@ -1,0 +1,160 @@
+#!/bin/sh
+# Fixed PinePhone brightness and flashlight helper.
+
+set -eu
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+umask 077
+export PATH
+
+helper=/usr/local/sbin/emacsos-openrc-device
+lock=/run/emacsos-openrc-device.lock
+expected_uid=0
+root_owner=root
+root_group=root
+torch_brightness_group=feedbackd
+device_dir_mode=755
+device_dir_links=3
+backlight_dir=/sys/devices/platform/backlight/backlight/backlight
+backlight_brightness=$backlight_dir/brightness
+backlight_max_brightness=$backlight_dir/max_brightness
+backlight_brightness_mode=644
+backlight_max_mode=444
+backlight_max=3124
+backlight_25=781
+backlight_50=1562
+backlight_75=2343
+backlight_100=3124
+torch_dir=/sys/devices/platform/led-controller/leds/white:flash
+torch_brightness=$torch_dir/brightness
+torch_max_brightness=$torch_dir/max_brightness
+torch_brightness_mode=664
+torch_max_mode=444
+torch_max=1
+torch_on=1
+torch_driver=/sys/bus/platform/drivers/sgm3140
+
+fail() {
+    printf 'emacsos-openrc-device: %s\n' "$1" >&2
+    exit 1
+}
+
+read_number() {
+    value=$(cat -- "$1") || fail 'device state is unreadable'
+    case $value in ''|*[!0-9]*) fail 'device state is invalid' ;; esac
+    [ "${#value}" -le 10 ] || fail 'device state is invalid'
+    printf '%s\n' "$value"
+}
+
+check_directory() {
+    path=$1
+    [ "$(readlink -f -- "$path")" = "$path" ] || fail 'device path is unsafe'
+    [ -d "$path" ] && [ ! -L "$path" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$path")" = \
+            "$root_owner:$root_group:$device_dir_mode:$device_dir_links:directory" ] ||
+        fail 'device directory metadata is unsafe'
+}
+
+check_file() {
+    path=$1
+    group=$2
+    mode=$3
+    [ "$(readlink -f -- "$path")" = "$path" ] || fail 'device path is unsafe'
+    [ -f "$path" ] && [ ! -L "$path" ] &&
+        [ "$(stat -c '%U:%G:%a:%h' "$path")" = \
+            "$root_owner:$group:$mode:1" ] ||
+        fail 'device metadata is unsafe'
+}
+
+check_devices() {
+    check_directory "$backlight_dir"
+    check_directory "$torch_dir"
+    [ "$(readlink -f -- "$torch_dir/device/driver")" = "$torch_driver" ] ||
+        fail 'flashlight driver changed'
+    check_file "$backlight_brightness" "$root_group" "$backlight_brightness_mode"
+    check_file "$backlight_max_brightness" "$root_group" "$backlight_max_mode"
+    check_file "$torch_brightness" "$torch_brightness_group" "$torch_brightness_mode"
+    check_file "$torch_max_brightness" "$root_group" "$torch_max_mode"
+    [ "$(read_number "$backlight_max_brightness")" = "$backlight_max" ] ||
+        fail 'backlight maximum changed'
+    [ "$(read_number "$torch_max_brightness")" = "$torch_max" ] ||
+        fail 'flashlight maximum changed'
+}
+
+snapshot() {
+    backlight=$(read_number "$backlight_brightness")
+    case $backlight in
+        "$backlight_25") percent=25 ;;
+        "$backlight_50") percent=50 ;;
+        "$backlight_75") percent=75 ;;
+        "$backlight_100") percent=100 ;;
+        *) fail 'backlight value is outside the fixed levels' ;;
+    esac
+    torch=$(read_number "$torch_brightness")
+    case $torch in
+        0) torch_state=off ;;
+        "$torch_on") torch_state=on ;;
+        *) fail 'flashlight value is outside the fixed levels' ;;
+    esac
+    printf 'brightness:%s\nflashlight:%s\n' "$percent" "$torch_state"
+}
+
+worker() {
+    [ "$(id -u)" -eq "$expected_uid" ] || fail 'must run as root'
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+        [ -f "$lock" ] && [ ! -L "$lock" ] &&
+            [ "$(stat -c '%U:%G:%a:%h' "$lock")" = \
+                "$root_owner:$root_group:600:1" ] ||
+            fail 'device lock is unsafe'
+    else
+        install -o "$root_owner" -g "$root_group" -m 0600 /dev/null "$lock"
+    fi
+    exec 9>"$lock"
+    flock -n -x 9 || fail 'device control is busy'
+    check_devices
+
+    case ${1-}:$# in
+        status:1)
+            snapshot
+            ;;
+        brightness:2)
+            case $2 in
+                25) raw=$backlight_25 ;;
+                50) raw=$backlight_50 ;;
+                75) raw=$backlight_75 ;;
+                100) raw=$backlight_100 ;;
+                *) fail 'brightness must be 25, 50, 75, or 100' ;;
+            esac
+            snapshot >/dev/null
+            printf '%s\n' "$raw" >"$backlight_brightness" ||
+                fail 'brightness write failed'
+            [ "$(read_number "$backlight_brightness")" = "$raw" ] ||
+                fail 'brightness write was not applied'
+            snapshot
+            ;;
+        flashlight:2)
+            case $2 in
+                off) raw=0 ;;
+                on) raw=$torch_on ;;
+                *) fail 'flashlight must be on or off' ;;
+            esac
+            snapshot >/dev/null
+            printf '%s\n' "$raw" >"$torch_brightness" ||
+                fail 'flashlight write failed'
+            [ "$(read_number "$torch_brightness")" = "$raw" ] ||
+                fail 'flashlight write was not applied'
+            snapshot
+            ;;
+        *) fail 'unsupported operation' ;;
+    esac
+}
+
+case ${1-} in
+    --worker)
+        shift
+        worker "$@"
+        ;;
+    *)
+        [ "$(id -u)" -eq "$expected_uid" ] || fail 'must run as root'
+        exec /usr/bin/timeout -s TERM -k 1 5 "$helper" --worker "$@"
+        ;;
+esac

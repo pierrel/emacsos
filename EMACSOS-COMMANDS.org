@@ -93,19 +93,28 @@ opens the exact row at point.
 
 * Phone and network
 
-| Action | M-x command |
-|--------+-------------|
+| Action | M-x command or =eval_elisp= form |
+|--------+-----------------------------------|
 | Stage a call for confirmation | =emacsos-call= |
 | Answer the ringing call | =emacsos-answer= |
 | Hang up | =emacsos-hang-up= |
+| Open phone controls | =emacsos-controls-show= |
+| Set cellular data explicitly | =(emacsos-net-set-cell t)= or =(emacsos-net-set-cell nil)= |
+| Set brightness to 25, 50, 75, or 100 | =(emacsos-controls-set-brightness 50)= |
+| Set flashlight on or off | =(emacsos-controls-set-flashlight 'on)= or =(emacsos-controls-set-flashlight 'off)= |
 | Open network controls | =emacsos-net-show= |
 | Connect to a visible Wi-Fi network | =emacsos-net-connect= |
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
+| Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
 
-The modeline Threads, network, call, and SMS labels are touch controls for their
-current status or action.  The PinePhone/OpenRC deployment also adds the
-keyboard label.
+Parenthesized entries are =eval_elisp= forms.  Bare command names run through
+=M-x=.
+
+The modeline Threads, call, and SMS labels are touch controls for their current
+status or action.  Its primary platform label opens Network controls on generic
+systems and the combined Controls buffer on PinePhone/OpenRC.  Keyboard
+hide/show and device state live in that Controls buffer.
 
 An SMS conversation uses the compositor text keyboard with QUIT, Refresh, and
 Send or ACK in its Emacs utility row.  Send still opens the separate two-tap

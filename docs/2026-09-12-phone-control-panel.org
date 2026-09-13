@@ -1,0 +1,298 @@
+#+title: PinePhone control panel
+#+date: 2026-09-12
+
+* Historical supersessions
+
+This design replaces the network-status modeline entry described in
+=2026-05-26-cellular-data-connectivity.org=, section 6, and the visible
+keyboard hide/show entry described in =2026-09-07-wvkbd-persistent-activation.org=,
+section "User flow".
+
+* Goal
+
+Replace the PinePhone's adjacent keyboard and network modeline entries with one
+large enough =Controls= entry.  It opens one phone-sized buffer for Wi-Fi,
+cellular data, display brightness, and the flashlight.  Cellular, brightness,
+and flashlight changes are explicit deterministic setters that start
+asynchronously and show pending and error state in place.  Keyboard recovery
+uses the existing synchronous toggle, and Wi-Fi receives explicit setters when
+its owning effort is integrated.  No panel tap uses a modal prompt.  Controls is
+one ordinary full-size buffer, not a second window or generic command pane.
+
+The implementation is staged inside this feature branch.  Brightness,
+flashlight, cellular data, the panel shell, and deployment plumbing proceed
+first.  Wi-Fi selection and credentials remain owned by
+=wifi-network-access= and are integrated only after that effort lands on
+=main=.  The final sealed candidate includes the landed public Wi-Fi surface;
+the intermediate branch is not a complete candidate.
+
+* User flow
+
+The ordinary bottom bar reads =EmacsOS  Controls=, followed only by transient
+call or SMS badges.  It no longer shows =kbd hide= or a signal percentage.
+=Controls= is not plain modeline text: its boxed face has the same eight-pixel
+top and bottom padding as an =emacsos--btn= target and a ten-display-column
+label, replacing the combined width of the old keyboard and network entries.
+ERT pins that minimum geometry.  Tapping it remembers the current content
+buffer and opens =*controls*=.
+
+The panel is a compact, nonwrapping vertical surface with no blank lines
+between rows.  The title uses one ordinary text line.  Each of the five device
+rows uses one fixed-height line with a short fixed label, a status clipped to
+the space left by its actions with =truncate-string-to-width=, and its inline
+actions.  Every actionable label is centered in at least seven display columns
+and is laid out before the dynamic status budget is calculated, so neither a
+long SSID nor an error can clip a tap target.  The brightness row reserves two
+such targets for =Dim= and =Bright=.  In this intermediate branch, Wi-Fi
+reserves the future action width but is display-only; its setter and =Networks=
+handoff arrive with =wifi-network-access=.  The other rows need only the one
+action valid for their current state.  A row too
+narrow for those fixed targets shows its action targets and drops status
+detail rather than shrinking or truncating an action.
+=Done= uses the seventh and final line.  ERT pins those seven nonwrapping lines,
+shared row-height/button-padding use, and the current padding constant yields
+16 vertical pixels; the 320 by 240 fit
+remains a live-phone acceptance check because batch Emacs has no phone font or
+frame geometry.  The buffer sets =truncate-lines= so SSIDs, registration detail,
+and errors cannot add a wrapped line.
+
+The rows are:
+
+1. Wi-Fi shows off, on, or the current SSID.  Its radio setters and =Networks=
+   handoff are added only from the landed Wi-Fi effort.
+2. Modem data shows the named cellular NetworkManager profile as off or on and
+   includes the cached registration detail when available.  Its explicit
+   setters bring that profile down or up.  They do not power down the modem,
+   stop ModemManager, or disrupt call and SMS registration.
+3. Brightness shows one of 25, 50, 75, or 100 percent.  =Dim= and =Bright=
+   move one step through that fixed set, so zero brightness is unrepresentable.
+4. Flashlight shows off or on and supplies explicit =Off= and =On= actions.
+5. Keyboard shows hidden or shown and supplies the existing state-derived
+   toggle action, labelled =Hide= or =Show=.  This is the touchscreen recovery path after hiding the
+   keyboard; removing it would make =M-x= unable to show the keyboard again.
+6. =Done= restores the content buffer that was visible before the panel.
+
+Opening Controls is idempotent.  It records the first live buffer that is not
+=*controls*= and retains that parent until =Done=; tapping the modeline entry
+again while Controls is current cannot replace the parent with itself.  Opening
+a known device state starts a fresh aggregate status snapshot, while a prior
+failure remains visible until its explicit =Retry= action.  Opening
+a subordinate network chooser does not replace the saved return buffer.  The
+landed Wi-Fi surface must accept an explicit return command or callback that
+returns to the already-open Controls buffer and render that return as a
+full-size =Done= row in =*network*=, while remaining the sole owner of SSID and
+credential selection.  That row returns without selecting or mutating a
+network.  The chooser also has a fixed phone viewport: one title line, =Done=
+as the first full-size row, at most four network rows per page, and one
+full-size =Previous=/=Next= navigation row.  Every SSID is clipped to its
+assigned width before button insertion, so it cannot wrap or move navigation
+off-screen.  If the landed surface exposes neither this bounded chooser nor an
+equivalent public navigation seam and always-visible touch target, Wi-Fi
+integration stops for a design amendment.  The intended round trip is chat to
+Controls to Networks to Controls to Done to the same chat.
+
+Brightness and flashlight start at =Checking...= while one asynchronous
+=status= snapshot runs.  A failed or malformed snapshot shows =Unavailable=
+plus a clipped inline reason and a =Retry= action; their setters are not shown
+until a valid snapshot establishes the current device state.  If the timeout
+fires but its process is still alive, the row instead shows the non-actionable
+=Still stopping...= state with no Retry; terminal process delivery changes it
+to =Unavailable= with Retry.  Wi-Fi and cellular likewise begin at
+=Checking...= and distinguish a valid snapshot from a reader launch, exit, or
+parse failure.  A failed snapshot makes Wi-Fi unavailable without panel
+actions until its integration; Modem exposes =network.el='s Retry.  Cellular
+shows =Not set up= only after a valid
+snapshot proves that the named profile is absent.  These unknown states never
+masquerade as off or absent.
+
+Each asynchronous setter tap immediately replaces that row's actions with =Turning on...=,
+=Turning off...=, or =Changing...=.  A second tap on the pending device is
+ignored.  Terminal success updates the cached value and repaints; terminal
+cellular failure retains the prior value and prints one clipped inline error.
+Because the device helper validates brightness and flashlight as one aggregate
+snapshot, any device launch, timeout, or terminal failure invalidates both
+cached device values and exposes Retry on both rows.  The
+shared network state owns cellular single-flight pending state, so panel taps
+and direct agent or =M-x= calls produce the same visible transition.  Brightness and flashlight
+share one serialized device-helper process, so only one sysfs operation can
+exist at a time.  A completion may update state only when its process is still
+the current operation, so an old sentinel cannot clear newer pending state.
+
+* Interfaces
+
+Generic =os.el= defines one optional
+=emacsos-platform-primary-mode-line-segment=.  When it is nil, the primary
+segment is =(:eval (emacsos-net-mode-line-string))=.  When the PinePhone sets it
+to =(:eval (emacsos-pinephone-controls-mode-line-string))=, that value replaces the
+network segment.  The separate platform-extra list is not overloaded with
+replacement semantics.  In both cases, existing call and SMS badges remain
+after the primary segment.
+
+The PinePhone buffer lives directly in =deploy/pinephone/openrc-init.el=.  This
+keeps device-only state and sysfs behavior out of generic EmacsOS.  It uses the
+existing =emacsos--btn= button primitive and cached =emacsos-net-state=; no
+generic control framework is introduced.
+
+The current public deterministic commands are =emacsos-controls-show=,
+=emacsos-net-set-cell=,
+=emacsos-controls-set-brightness=, and
+=emacsos-controls-set-flashlight=.  Cellular row adapters supply fixed booleans
+to =emacsos-net-set-cell=; the device rows invoke their public setters directly.
+All are available to =M-x= and agent =eval_elisp=.  =M-x= setters use a required fixed-choice
+minibuffer argument rather than deriving a toggle from cached state.  A
+=controls= skill resolves phrases such as
+"dim the screen" or "turn cellular data off" to a concrete enum argument and
+invokes only those public commands.  It never invokes a private function,
+platform operation, root helper, or bespoke server tool.
+
+Network mutation remains behind =emacsos-net-command-function=.
+=emacsos-net--action= accepts an optional terminal
+callback =(SUCCESS DETAIL)=.  =SUCCESS= is non-nil only for exit status zero;
+=DETAIL= is either the bounded helper output or the bounded launch/termination
+error.  The default path still executes =nmcli= directly.  The action sentinel
+destroys its buffer, calls the captured completion once, then schedules the
+ordinary delayed refresh.  While that refresh is settling, periodic readers
+are suppressed so they cannot overwrite a just-confirmed action result.
+The explicit cellular setter constructs the fixed argv and passes the callback;
+the old cellular toggle is its compatibility wrapper.  Wi-Fi still uses its
+existing toggle directly; the final Wi-Fi integration adds its public explicit
+setter and converts that toggle to a wrapper.
+The public setter records its requested state in the shared network snapshot,
+and the Controls row remains pending until that exactly-once callback arrives;
+a second cellular tap cannot start another operation.  Background status reads
+preserve that pending value and the latest cellular action error.  The PinePhone translator accepts only the
+existing closed NetworkManager action shapes.  SSIDs and credentials never
+enter the device helper described below.
+
+* Privileged device boundary
+
+=/usr/local/sbin/emacsos-openrc-device= is installed root-owned and is callable
+by =emacsos-lab= only through seven exact-argument =doas= rules.  Its complete
+public command grammar is:
+
+#+begin_example
+status
+brightness 25|50|75|100
+flashlight on|off
+#+end_example
+
+The helper accepts no path, arbitrary number, environment-selected production
+device, shell fragment, or stdin payload.  It uses fixed sysfs nodes and one
+nonblocking root-owned lock under =/run= to serialize a status snapshot or
+mutation.  It validates exact arity and enums before any write.  Results use
+the strict two-line snapshot grammar =brightness:<level>= and
+=flashlight:on|off=.  Diagnostics shown in Emacs are bounded, and every process
+buffer is destroyed on launch failure or terminal sentinel delivery.  At
+network action completion, any pre-action status reader is invalidated before
+the row callback runs; only the replacement snapshot waits for the settle
+delay, so stale cached state cannot overwrite a confirmed result.
+
+The fixed production paths and values come from the workspace orchestrator's
+read-only live-phone probe on 2026-09-13.  The helper compiles in the exact
+physical, non-symlink =brightness= paths, the observed =max_brightness= values,
+the four backlight mappings, and the continuous torch value described in
+[[Live hardware evidence]].  Before every mutation it first validates a complete
+aggregate snapshot, so an invalid companion device cannot cause a partial
+write.  Before every read or write it requires both device directories and all
+four nodes to retain their live-recorded owner, group, mode, link count, and
+file type, requires the two maximum files to retain their expected values, and
+separately requires the torch to retain its driver identity.  A =status= snapshot succeeds only
+when the current backlight raw value is exactly one of the four compiled
+mappings and the torch raw value is exactly zero or one.  Any other metadata or
+raw state makes that device =Unavailable=; it is never rendered as ordinary
+off/on and its setters remain hidden until an operator restores a known-safe
+value.  After a write the helper reads back the exact raw value before reporting
+success.  Production accepts no path or test root through argv or environment,
+and performs no glob or runtime sysfs discovery.
+
+** Live hardware evidence
+
+The orchestrator resolved =/sys/class/backlight/backlight= to
+=/sys/devices/platform/backlight/backlight/backlight=.  The physical device
+directory was =root:root= mode 0755, link count 3, directory.  Its =brightness=
+node was =root:root= mode 0644, link count 1, regular; =max_brightness= was
+=root:root= mode 0444, link count 1, regular.  The observed state was raw 1562
+of 3124, and the exact 25/50/75/100 mappings are 781, 1562, 2343, and 3124.
+
+The orchestrator resolved =/sys/class/leds/white:flash= to
+=/sys/devices/platform/led-controller/leds/white:flash= under platform driver
+=/sys/bus/platform/drivers/sgm3140=.  The physical device directory was
+=root:root= mode 0755, link count 3, directory.  Its =brightness= node was
+=root:feedbackd= mode 0664, link count 1, regular; =max_brightness= was
+=root:root= mode 0444, link count 1, regular.  Current brightness was 0 and the
+maximum was 1.  Continuous torch control therefore uses only that class
+=brightness= node with values 0 and 1.  The device-tree
+=flash-max-timeout-us= value 250000 is the separate flash/strobe ceiling, and
+the compatible is =sgmicro,sgm3140=.  This feature never addresses a flash
+GPIO or strobe interface.  The probe changed no phone state.
+
+The direct process vector is =/usr/bin/doas -n= plus the fixed helper and one
+of those exact argv shapes.  Inside the root helper, each public operation is
+re-executed through a root-owned five-second =timeout= worker mode, so TERM and
+KILL retain permission across the privilege boundary.  The seven =doas= rules
+do not authorize that private worker argv.  A separate seven-second Emacs timer
+detaches the output buffer and shows the owning row as non-retryable
+=Still stopping...= while the process remains alive.  Its eventual terminal
+delivery changes the row to =Unavailable= with Retry.  Thus an
+unkillable kernel D-state operation remains one contained stuck process rather
+than a retry-created process pile.  Normal terminal delivery cancels the timer.
+
+* Deployment and rollback
+
+The device helper joins the existing exact-manifest OpenRC transaction.  Fresh
+install and update stage it with the other reviewed payloads, verify its digest,
+publish it root-owned mode 0755, install the exact =doas= authorization, and
+include it in metadata and content verification.  Update snapshot and rollback
+restore the previous helper and rule, or remove newly introduced files when the
+transaction began without them.  A failure cannot leave only the new root
+surface installed.  =openrc-boot-mode= and its tests also gain the helper's
+existence, metadata, and exact seven-rule device authorization set in their UI-authority readiness
+contract; an installed but unverified rule cannot pass boot-mode validation.
+
+Before publication, install and update require =/usr=, =/usr/local=,
+=/usr/local/sbin=, =/etc=, and =/etc/doas.d= to be physical root-owned
+directories that are not group- or world-writable.  The UI is quiescent before
+either privileged file changes.  The manifest-verified helper is published
+first and verified as a single-link =root:root= 0755 regular file with the
+expected digest; only then is the prevalidated doas file atomically replaced.
+The final doas file is reverified as a single-link =root:root= 0600 regular
+file with exact contents.  Update rollback treats the helper and rule as one
+pair and re-verifies both before restarting the UI.
+
+* Threat surface
+
+The new authority is a local graphical user asking root to write two fixed
+kernel device files.  Containment is structural: an enum-only argv grammar,
+fixed executable and paths, exact-argument =doas= rules, no shell evaluation, no secret,
+one nonblocking lock, and bounded output.  Brightness zero and values outside
+the safe set are rejected before writes.  Flashlight values outside the live
+validated continuous ceiling are never representable.
+
+The network portion does not broaden root authority.  Cellular control maps to
+the already installed named profile, while Wi-Fi SSIDs and credentials stay in
+the separate Wi-Fi effort's reviewed boundary.  All subprocesses are
+asynchronous so sysfs or NetworkManager latency cannot stop Emacs input or
+redisplay.
+
+* Verification
+
+ERT covers the single modeline entry, unchanged call/SMS badges, buffer return
+flow and idempotent re-entry, seven nonwrapping lines, reserved brightness
+action width, unavailable state, cellular pending state, rejected setter
+values, exact helper argv, strict result parsing, stale sentinels, timeout
+behavior, and buffer cleanup.  The controls skill is covered by skill discovery tests and
+its exact public-command boundary.  Shell tests substitute temporary physical
+sysfs fixtures while retaining the live maxima and raw mappings.  They prove
+exact production constants, directory and file metadata, driver identity,
+brightness levels, flashlight state, missing devices, wrong UID, rejected
+operation/arity/value with no mutation, and lock contention.  OpenRC deployment
+tests cover manifest count, ownership/mode, exact authorization, update,
+snapshot, and rollback.
+
+Before sealing, run =make test-elisp=, =make test-server=,
+=make test-pinephone-scripts=, and =make smoke=, then the full local review loop
+with heavy adversarial-security and comment/docstring-alignment passes.  The
+workspace orchestrator owns deployment and live checks: fit without scrolling,
+return-buffer behavior, Wi-Fi handoff, cellular data without lost call/SMS
+registration, brightness across blank/wake, flashlight on/off, visible failure,
+and responsive input throughout.

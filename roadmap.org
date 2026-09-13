@@ -418,38 +418,26 @@ section of each landed experiment's design doc:
 
 * Usability
 
-These add EmacsOS's first device-side system-integration layer.  The EmacsOS
-way is elisp wrapping system CLIs (=call-process= / =start-process=), surfaced
-as dedicated buffers and ordinary interactive commands.  Dependency order
-isn't the list order below:
-*Numbers* unblocks Wifi (passwords) and Phone calling (dialing), and the three
-cellular items block on the "Actual phone build" hardware.  Text messaging is the
-cheapest cellular win (no audio), so it's the natural first proof the modem works.
+These add EmacsOS's device-side system-integration layer.  The EmacsOS way is
+Elisp wrapping system CLIs asynchronously, surfaced as dedicated buffers and
+ordinary interactive commands.  Numbers and symbols are shipped.  The current
+network page reads WiFi and modem state through NetworkManager and ModemManager;
+the remaining WiFi work is protected credential entry and its public control
+interface.
 
-** TODO Wifi connection flow
-I need a mode for seeing and connecting to wifi.
+** PARTIAL Wifi connection flow
+The =*network*= buffer lists SSIDs with signal and security, shows the active
+connection, and can connect saved or open networks asynchronously through
+=nmcli=.  A new secured network reports that credential entry is not yet
+available instead of exposing a password in process arguments.  The
+=wifi-network-access= effort owns protected credential entry, explicit public
+WiFi setters, and the bounded Controls chooser/result flow.  Done when you can
+join a secured network from cold, entirely on-device.
 
-A =emacsos-wifi-mode= buffer (=tabulated-list-mode=) that scans and lists SSIDs with
-signal + security, shows the current connection, and offers Connect / Disconnect /
-Forget as interactive commands; passphrase entry runs through the existing
-keyboard into a masked minibuffer prompt.  Back it with the image's network stack —
-confirm whether that's =nmcli= (NetworkManager) or =wpa_cli= (=wpa_supplicant=);
-prefer =nmcli= (far easier to script, and saved-network + auto-reconnect come free),
-installing it if absent.  This is the first =call-process=-to-system-tool binding,
-so it sets the pattern for the cellular work.  Depends on *Numbers* (passwords).
-Done when you can join a WPA2 network from cold, entirely on-device.
-
-** TODO Numbers + symbols on the keyboard
-I need to be able to input numbers.
-
-The T9 grid is letters-only, so there's no way to type a digit — which blocks wifi
-passwords, URLs, and phone numbers.  Add a =123/ABC= toggle on the utility row that
-swaps the 3x3 letter grid for a digit + common-punctuation layer (phone-keyboard
-style), keeping multi-tap so one key still reaches the rarer symbols.  Lives in
-=os.el= next to =emacsos--tap-key= and the layout table.  Decide on the phone which
-symbols earn a slot (=. : / @ - _= are the high-frequency ones for passwords/URLs).
-Prerequisite for Wifi and Phone calling.  Done when you can type a WPA password and
-a phone number without leaving the keyboard.
+** DONE Numbers + symbols on the keyboard
+The CAPS button now cycles through =abc=, =ABC=, =123=, and =#+== layers.  Digits,
+common punctuation, URLs, WiFi passwords, and phone numbers can all be entered
+without leaving the keyboard.
 
 *Design (chosen):* the CAPS button becomes a 4-state CYCLE — abc (lower) → ABC
 (caps lock) → 123 (numbers, 9+0 share the last key) → #+= (symbols, packed since
@@ -508,12 +496,17 @@ deliberately absent, and raw AT/PDU work is not required for this path.
 Display things like the date, time and battery percentage. Consider removing most of
 everything else from the modeline.
 
-*PARTIAL* — the *network (wifi/cell) segment* shipped with the cellular branch
+*PARTIAL* — the original *network (wifi/cell) segment* shipped with the cellular branch
 ([[file:docs/2026-05-26-cellular-data-connectivity.org][docs/2026-05-26-cellular-data-connectivity.org]]):
 =mode-line-format= is now a minimal global default (=setq-default= at the top of
 =os.el=) carrying the =" EmacsOS"= label + a tappable =:eval= segment from
 =emacsos-net-mode-line-string= (=network.el=), with the stock clutter (buffer
-position, minor modes, encoding) stripped.  *REMAINING:* time + date
+position, minor modes, encoding) stripped.  On the PinePhone, that network
+entry and the adjacent keyboard entry are now replaced by one enlarged
+=Controls= entry.  It opens the phone-sized surface for modem data, brightness,
+flashlight, and keyboard recovery; Wi-Fi chooser integration is pending the
+separate =wifi-network-access= effort;
+call and SMS badges remain independent.  *REMAINING:* time + date
 (=display-time-mode=), battery % (=display-battery-mode= reads
 =/sys/class/power_supply/=), and any residual clutter — append into the same list.
 

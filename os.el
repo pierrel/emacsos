@@ -83,8 +83,9 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
 ;; Global, minimal modeline: the EmacsOS label, native thread-list entry,
-;; transient call and SMS-chat-aware badges, then lower-priority device and
-;; network segments.
+;; transient call and SMS-chat-aware badges, then the platform's primary
+;; device segment and optional extras.  The primary segment falls back to
+;; network status when a platform does not replace it.
 ;; This order keeps navigation and urgent status visible if the 320px line
 ;; truncates.  Replaces the stock clutter (buffer position, minor modes,
 ;; encoding); the *keyboard* buffer overrides this to nil on each render
@@ -98,13 +99,23 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
 Each entry must be valid `mode-line-format' data.  The platform sets this
 before loading EmacsOS so the segment also survives a live reload of os.el.")
 
+(defvar emacsos-platform-primary-mode-line-segment nil
+  "Primary mode-line segment supplied by the device bootstrap.
+nil uses the generic tappable network-status segment.  A platform sets this
+before loading EmacsOS when its primary entry replaces network status.")
+
+(defun emacsos--mode-line-format ()
+  "Return the global minimal mode-line format for this platform."
+  (append '(" EmacsOS  "
+            (:eval (emacsos-assist-web-mode-line-string))
+            (:eval (emacsos-call-mode-line-string))
+            (:eval (emacsos-sms-mode-line-string)))
+          (list (or emacsos-platform-primary-mode-line-segment
+                    '(:eval (emacsos-net-mode-line-string))))
+          emacsos-platform-mode-line-segments))
+
 (setq-default mode-line-format
-              (append '(" EmacsOS  "
-                        (:eval (emacsos-assist-web-mode-line-string))
-                        (:eval (emacsos-call-mode-line-string))
-                        (:eval (emacsos-sms-mode-line-string)))
-                      emacsos-platform-mode-line-segments
-                      '((:eval (emacsos-net-mode-line-string)))))
+              (emacsos--mode-line-format))
 
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;
@@ -1025,8 +1036,8 @@ Bind `emacsos--in-render' so window changes caused here cannot recurse."
   ;; keyboards leave ordinary content unsplit; call/SMS planes create a
   ;; temporary control window on demand.
   (emacsos--render-page)
-  ;; Prime the network poller so the modeline status segment is live from
-  ;; boot, not only after the first *network* visit.
+  ;; Prime the network poller so cached network state is available from boot,
+  ;; including Controls, not only after the first *network* visit.
   (emacsos-net--ensure-timer)
   (emacsos-net--refresh)
   ;; Listen for incoming calls from boot (D-Bus CallAdded -> incoming screen).
