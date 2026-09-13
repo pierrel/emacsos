@@ -254,9 +254,10 @@ modes fail closed as unsupported unless a saved UUID supplies the target."
 
 (defun emacsos-net--parse (blob)
   "Parse the reader's delimited BLOB into a fresh `emacsos-net-state'.
-Robust to missing/empty sections (no modem, no service, wifi off).  Duplicate
-scan records collapse by SSID; conflicting security modes fail closed unless a
-saved UUID supplies the connection target."
+The radio and NetworkManager records must use the complete finite grammar;
+optional modem status may be absent.  Duplicate scan records collapse by SSID;
+conflicting security modes fail closed unless a saved UUID supplies the
+connection target."
   (let* ((radio (car (emacsos-net--section blob "RADIO")))
          (rfields (and radio (emacsos-net--split-terse radio)))
          (wifi-on (cond ((equal rfields '("enabled")) t)
@@ -314,21 +315,21 @@ saved UUID supplies the connection target."
                 (sig (string-to-number signal-text))
                 (sec (or (nth 3 f) "")))
             (when ssid
-            (when in-use (setq cur-ssid ssid cur-signal sig))
-            (let* ((candidate
-                    (list :ssid ssid :signal sig :security sec
-                          :in-use in-use
-                          :saved-uuid
-                          (emacsos-net--unique-saved-uuid ssid saved)))
-                   (current
-                    (seq-find (lambda (item)
-                                (string= (plist-get item :ssid) ssid))
-                              wifi-list)))
-              (if current
-                  (setcar (memq current wifi-list)
-                          (emacsos-net--coalesce-visible-network
-                           current candidate))
-                (push candidate wifi-list)))))))
+              (when in-use (setq cur-ssid ssid cur-signal sig))
+              (let* ((candidate
+                      (list :ssid ssid :signal sig :security sec
+                            :in-use in-use
+                            :saved-uuid
+                            (emacsos-net--unique-saved-uuid ssid saved)))
+                     (current
+                      (seq-find (lambda (item)
+                                  (string= (plist-get item :ssid) ssid))
+                                wifi-list)))
+                (if current
+                    (setcar (memq current wifi-list)
+                            (emacsos-net--coalesce-visible-network
+                             current candidate))
+                  (push candidate wifi-list)))))))
       ;; cell registration/signal from mmcli key=value
       (let (cell-state cell-signal)
         (dolist (l (emacsos-net--section blob "CELL"))
