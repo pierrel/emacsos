@@ -34,8 +34,6 @@ opens the new-thread chooser: confirmed-empty choices clear the pending intent
 and report the empty result without a chooser.
 
 The one-level lineage also includes
-=2026-09-09-conversation-interface-amendment.org= and
-=2026-09-09-global-assist-thread-navigation.org=.  The former's global binding
-ownership remains in force and is not otherwise amended.  The latter record's
-description of the =t= command invoking the canonical chooser is superseded by
-the catalog-dependent completion-or-native-list behavior above.
+=2026-09-09-global-assist-thread-navigation.org=.  That record's description of
+the =t= command invoking the canonical chooser is superseded by the
+catalog-dependent completion-or-native-list behavior above.

@@ -84,6 +84,26 @@
     (should (equal (try-completion "release" table) "release"))
     (should (test-completion (car (all-completions "release" table)) table))))
 
+(ert-deftest test-assist-web-completion-rejects-thread-removed-during-selection ()
+  (let* ((thread '((id . "thread-1") (description . "Release")
+                   (search_description . "release")
+                   (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog (test-assist-web--catalog thread))
+         notice)
+    (cl-letf (((symbol-function 'emacsos-assist-web-refresh-threads) #'ignore)
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (prog1 (car (all-completions "" table))
+                   (setq emacsos-assist-web--catalog
+                         (test-assist-web--catalog)))))
+              ((symbol-function 'emacsos-assist-web--show-thread)
+               (lambda (&rest _) (ert-fail "removed thread must not open")))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (emacsos-assist-web-open-thread))
+    (should (string-match-p "no longer available" notice))))
+
 (ert-deftest test-assist-web-endpoint-requires-https ()
   (let ((emacsos-assist-web-api-url "http://10.0.0.1:5050/api/v1/phone"))
     (should-error (emacsos-assist-web--endpoint "threads")))
@@ -1377,6 +1397,19 @@
     (should (string-match-p "No Assist repositories are available" notice))
     (should-not emacsos-assist-web--new-thread-pending-p)))
 
+(ert-deftest test-assist-web-new-thread-starts-refresh-before-cached-chooser ()
+  (let ((emacsos-assist-web--catalog
+         '((threads . nil)
+           (repositories . (((repo_key . "repo") (label . "Assist"))))
+           (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+        calls)
+    (cl-letf (((symbol-function 'emacsos-assist-web-refresh-threads)
+               (lambda () (push 'refresh calls)))
+              ((symbol-function 'emacsos-assist-web--open-pending-new-thread)
+               (lambda () (push 'chooser calls))))
+      (emacsos-assist-web-new-thread))
+    (should (equal (nreverse calls) '(refresh chooser)))))
+
 (ert-deftest test-assist-web-catalog-consumers-coalesce-one-refresh ()
   (let ((emacsos-assist-web--catalog nil)
         (emacsos-assist-web--catalog-state nil)
@@ -1457,7 +1490,11 @@
                     ((symbol-function 'emacsos-assist-web--request)
                      (lambda (_method _path _payload callback &rest _)
                        (funcall callback
-                                (test-assist-web--wire-catalog nil nil nil)
+                                (test-assist-web--wire-catalog
+                                 nil
+                                 '(((repo_key . "repo") (label . "Assist")))
+                                 '(((key . "deepagents")
+                                    (label . "Deep Agents"))))
                                 nil)))
                     ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
                     ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
@@ -1470,6 +1507,40 @@
               (run-hooks 'minibuffer-exit-hook))
             (should (= opened 1))
             (should-not emacsos-assist-web--new-thread-pending-p)))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
+(ert-deftest test-assist-web-confirmed-empty-refresh-cancels-deferred-new-thread ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-empty-minibuffer*"))
+         (emacsos-assist-web--catalog nil)
+         (emacsos-assist-web--catalog-state nil)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p t)
+         notice)
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () window))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback
+                                (test-assist-web--wire-catalog nil nil nil)
+                                nil)))
+                    ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
+                     (lambda (&rest _) (ert-fail "empty choices must not open")))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (setq notice (apply #'format format-string args)))))
+            (emacsos-assist-web-refresh-threads)
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (should (string-match-p "No Assist repositories are available" notice))
+            (with-current-buffer minibuffer
+              (should-not (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                                minibuffer-exit-hook)))))
       (set-window-buffer window original-buffer)
       (kill-buffer minibuffer))))
 

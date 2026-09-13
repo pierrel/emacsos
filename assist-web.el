@@ -1915,9 +1915,14 @@ suppressing a genuine repeated submission."
       (let* ((choice (completing-read
                       "Assist thread: "
                       (emacsos-assist-web--completion-table records) nil t))
-             (record (emacsos-assist-web--record-for-display choice records)))
+             (record (emacsos-assist-web--record-for-display choice records))
+             (id (and record
+                      (alist-get 'id (plist-get record :thread))))
+             (thread (and id (emacsos-assist-web--thread-for-id id))))
         (when record
-          (emacsos-assist-web--show-thread (plist-get record :thread)))))))
+          (if thread
+              (emacsos-assist-web--show-thread thread)
+            (message "That Assist thread is no longer available")))))))
 
 (defun emacsos-assist-web--catalog-refresh-failed (problem rejected)
   "Finish a failed catalog refresh with PROBLEM.
@@ -1941,18 +1946,29 @@ REJECTED is non-nil when a response failed validation."
   "Open the coalesced new-thread chooser when no minibuffer is active."
   (when (and emacsos-assist-web--new-thread-pending-p
              emacsos-assist-web--catalog)
-    (if-let ((window (active-minibuffer-window)))
-        (with-current-buffer (window-buffer window)
-          (add-hook 'minibuffer-exit-hook
-                    #'emacsos-assist-web--resume-new-thread-after-minibuffer
-                    nil t))
-      (setq emacsos-assist-web--new-thread-pending-p nil)
-      (condition-case problem
-          (emacsos-assist-web--new-thread-from-catalog
-           emacsos-assist-web--catalog)
-        (error
-         (message "Cannot create a thread from the catalog: %s"
-                  (error-message-string problem)))))))
+    (let ((repositories (alist-get 'repositories emacsos-assist-web--catalog))
+          (harnesses (alist-get 'harnesses emacsos-assist-web--catalog)))
+      (cond
+       ((null repositories)
+        (setq emacsos-assist-web--new-thread-pending-p nil)
+        (message "No Assist repositories are available"))
+       ((null harnesses)
+        (setq emacsos-assist-web--new-thread-pending-p nil)
+        (message "No Assist harnesses are available"))
+       ((active-minibuffer-window)
+        (let ((window (active-minibuffer-window)))
+          (with-current-buffer (window-buffer window)
+            (add-hook 'minibuffer-exit-hook
+                      #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                      nil t))))
+       (t
+        (setq emacsos-assist-web--new-thread-pending-p nil)
+        (condition-case problem
+            (emacsos-assist-web--new-thread-from-catalog
+             emacsos-assist-web--catalog)
+          (error
+           (message "Cannot create a thread from the catalog: %s"
+                    (error-message-string problem)))))))))
 
 (defun emacsos-assist-web-refresh-threads ()
   "Refresh the one shared Assist catalog asynchronously."
@@ -2470,13 +2486,13 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (cond
    ((and (alist-get 'repositories emacsos-assist-web--catalog)
          (alist-get 'harnesses emacsos-assist-web--catalog))
-    (emacsos-assist-web--open-pending-new-thread)
-    (emacsos-assist-web-refresh-threads))
+    (emacsos-assist-web-refresh-threads)
+    (emacsos-assist-web--open-pending-new-thread))
    ((and emacsos-assist-web--catalog
          (not (memq emacsos-assist-web--catalog-state
                     '(cached refresh-failed))))
-    (emacsos-assist-web--open-pending-new-thread)
-    (emacsos-assist-web-refresh-threads))
+    (emacsos-assist-web-refresh-threads)
+    (emacsos-assist-web--open-pending-new-thread))
    (t
     (message "Fetching repositories for a new Assist thread…")
     (emacsos-assist-web-refresh-threads))))
