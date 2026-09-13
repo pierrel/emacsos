@@ -92,6 +92,7 @@ printf '%s\n' '#!/bin/sh' \
     '  [ -e /tmp/emacsos-ui-running ]; exit $?' \
     'elif [ "$1 $2" = "emacsos-ui start" ]; then' \
     '  for fd in 6 7 8 9; do case $(readlink "/proc/$$/fd/$fd" 2>/dev/null || true) in /run/wvkbd-emacos-install.lock|/run/wvkbd-emacsos-install.lock|/run/emacsos-openrc-install.lock|/run/emacsos-openrc-boot-mode.lock) exit 1 ;; esac; done' \
+    '  if [ -e /tmp/create-wvkbd-state ]; then install -d -o root -g root -m 0700 /var/lib/emacsos-wvkbd-transaction; fi' \
     '  [ ! -e /tmp/fail-ui ] || exit 1' \
     '  if [ "$(cat /usr/local/share/emacsos-openrc/session)" = legacy-session ]; then' \
     '    /usr/local/sbin/emacsos-wvkbd-transaction verify-current || exit 1' \
@@ -294,7 +295,7 @@ fi
 install -o user -g user -m 0600 /tmp/wvkbd-original \
     /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
 
-touch /tmp/fail-ui
+touch /tmp/fail-ui /tmp/create-wvkbd-state
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
     printf '%s\n' 'injected UI failure was accepted' >&2
@@ -307,6 +308,8 @@ fi
 [ ! -e /usr/local/sbin/emacsos-openrc-call ]
 [ ! -e /usr/local/sbin/emacsos-openrc-sms ]
 [ ! -e /usr/local/sbin/emacsos-openrc-network ]
+[ ! -e /usr/local/sbin/emacsos-wvkbd-transaction ]
+[ ! -e /var/lib/emacsos-wvkbd-transaction ]
 [ ! -e /etc/emacsos-openrc ]
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ]
 [ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
@@ -325,7 +328,7 @@ if getent group emacsos-lab >/dev/null; then
 fi
 [ ! -e /var/lib/emacsos-lab ]
 [ "$(grep -Fxc 'tty1::respawn:/sbin/getty 38400 tty1' /etc/inittab)" -eq 1 ]
-rm -f /tmp/fail-ui
+rm -f /tmp/fail-ui /tmp/create-wvkbd-state
 
 touch /tmp/fail-ui-stuck
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
@@ -341,6 +344,7 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -x /usr/local/sbin/emacsos-openrc-call ]
 [ -x /usr/local/sbin/emacsos-openrc-sms ]
 [ -x /usr/local/sbin/emacsos-openrc-network ]
+[ -x /usr/local/sbin/emacsos-wvkbd-transaction ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
 [ -f /usr/local/share/emacsos-openrc/os.el ]
@@ -365,10 +369,12 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/sbin/emacsos-openrc-boot-mode \
+    /usr/local/sbin/emacsos-wvkbd-transaction \
     /usr/local/bin/wvkbd-emacsos \
     /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
     /etc/nftables.d/49-emacsos-callback.nft \
     /etc/doas.d/95-emacsos-ui.conf
+rmdir /var/lib/emacsos-wvkbd-transaction 2>/dev/null || true
 rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
 deluser emacsos-lab
 delgroup emacsos-lab 2>/dev/null || true

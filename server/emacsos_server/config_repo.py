@@ -45,6 +45,7 @@ _GIT_IDENTITY = [
 
 _LEGACY_SYMBOL = re.compile(
     r"^(?P<keyword>:?)emacos(?P<hyphen>-|\\-)(?=[A-Za-z0-9_\\-])")
+_HISTORY_SHA = re.compile(r"\A[0-9a-f]{7,40}\Z")
 
 
 def _incomplete_config(detail: str) -> ConfigRepoError:
@@ -476,7 +477,10 @@ class ConfigRepo:
     def body_at(self, ref: str) -> str:
         """The agent body committed at REF (e.g. a sha from `history()`), with
         the header/footer stripped — ready to re-apply for a restore-to-version.
-        Raises ConfigRepoError if REF is unknown or has no agent file there."""
+        Raises ConfigRepoError unless REF is a lowercase 7--40 digit hexadecimal
+        SHA, or if it is unknown or has no agent file there."""
+        if not _HISTORY_SHA.fullmatch(ref):
+            raise ConfigRepoError("invalid history SHA")
         self.ensure()
         full = self._git("show", f"{ref}:{AGENT_FILE}").stdout
         return _extract_body(full)

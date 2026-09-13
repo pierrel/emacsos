@@ -10,7 +10,7 @@ stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 reference_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=6a251082895da04919d84636aa4638a0297ae101be24deb9b2b9a680e84cd2e7
+manifest_hash=36553c14c3c5b1c0dc6b06b1f52904c83da98d73af3431d88011b2ca88ca4965
 committed=0
 mutating=0
 lab_group_created=0
@@ -137,8 +137,15 @@ cleanup() {
                     /usr/local/sbin/emacsos-openrc-sms \
                     /usr/local/sbin/emacsos-openrc-network \
                     /usr/local/sbin/emacsos-openrc-boot-mode \
+                    /usr/local/sbin/emacsos-wvkbd-transaction \
                     /usr/local/bin/wvkbd-emacsos \
                     /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+                if [ -d /var/lib/emacsos-wvkbd-transaction ] &&
+                   [ ! -L /var/lib/emacsos-wvkbd-transaction ] &&
+                   [ "$(stat -c '%U:%G:%a:%F' /var/lib/emacsos-wvkbd-transaction)" = \
+                       'root:root:700:directory' ]; then
+                    rmdir /var/lib/emacsos-wvkbd-transaction 2>/dev/null || true
+                fi
                 [ "$keyboard_notice_dir_created" -eq 0 ] ||
                     rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
                 [ "$licenses_dir_created" -eq 0 ] ||
@@ -277,6 +284,12 @@ render_ipv4_template "$snapshot/openrc-emacs-server.nft" '@DEPLOY_CLIENT_IP@' \
 [ ! -e /usr/local/sbin/emacsos-openrc-network ] &&
     [ ! -L /usr/local/sbin/emacsos-openrc-network ] ||
     fail 'network helper already exists'
+[ ! -e /usr/local/sbin/emacsos-wvkbd-transaction ] &&
+    [ ! -L /usr/local/sbin/emacsos-wvkbd-transaction ] ||
+    fail 'keyboard transaction helper already exists'
+[ ! -e /var/lib/emacsos-wvkbd-transaction ] &&
+    [ ! -L /var/lib/emacsos-wvkbd-transaction ] ||
+    fail 'keyboard transaction state already exists'
 for directory in /usr/local/bin /usr/local/share; do
     [ -d "$directory" ] && [ ! -L "$directory" ] &&
         [ "$(stat -c '%U:%G:%a:%F' "$directory")" = 'root:root:755:directory' ] ||

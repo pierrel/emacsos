@@ -432,3 +432,15 @@ def test_body_at_unknown_ref_raises(tmp_path):
     repo.ensure()
     with pytest.raises(ConfigRepoError):
         repo.body_at("deadbeef")
+
+
+@pytest.mark.parametrize("ref", [
+    "abcdef", "ABCDEF0", "abcdefg ", "--help", "a" * 41,
+])
+def test_body_at_rejects_malformed_sha_before_git(tmp_path, ref):
+    repo = _repo(tmp_path)
+    with patch.object(repo, "ensure") as ensure, patch.object(repo, "_git") as git:
+        with pytest.raises(ConfigRepoError, match="invalid history SHA"):
+            repo.body_at(ref)
+    ensure.assert_not_called()
+    git.assert_not_called()

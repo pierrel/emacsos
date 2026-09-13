@@ -269,7 +269,7 @@ def test_runaway_wedged_setup_exits_for_supervised_restart(phase):
                    side_effect=migration), \
              patch("emacsos_server.app._start_stream_iter",
                    side_effect=start_stream), \
-             patch("emacsos_server.app._exit_for_wedged_stream",
+             patch("emacsos_server.app._exit_for_wedged_worker",
                    side_effect=restart_required):
             asyncio.run(scenario())
     finally:
@@ -1002,6 +1002,41 @@ def test_cancelled_clear_holds_single_flight_until_worker_finishes():
         finish.set()
 
 
+def test_serialized_worker_deadline_exits_before_releasing_single_flight():
+    """Finite executor operations fail closed when their worker wedges."""
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    class RestartRequired(BaseException):
+        pass
+
+    def worker():
+        started.set()
+        finish.wait()
+
+    def restart_required():
+        assert app_mod._STREAM_LOCK.locked()
+        finish.set()
+        raise RestartRequired
+
+    async def scenario():
+        with pytest.raises(RestartRequired):
+            await app_mod._run_serialized_worker(worker)
+        assert not app_mod._STREAM_LOCK.locked()
+
+    try:
+        with patch.object(app_mod, "_STREAM_LOCK", asyncio.Lock()), \
+             patch.object(app_mod, "RUNAWAY_SECONDS", 0.01), \
+             patch.object(app_mod, "_exit_for_wedged_worker",
+                          side_effect=restart_required):
+            asyncio.run(scenario())
+    finally:
+        finish.set()
+    assert started.is_set()
+
+
 # --- Bug B regression: thread-affinity of the stream generator -------------
 # assist's stream generator holds a thread-affine lock + ContextVar
 # (THREAD_QUEUE.acquire), so it MUST be built, advanced, and closed on one OS
@@ -1208,7 +1243,7 @@ def test_runaway_wedged_worker_exits_instead_of_releasing_single_flight():
              patch.object(app_mod, "HEARTBEAT_SECONDS", 1000.0), \
              patch.object(app_mod, "RUNAWAY_SECONDS", 60.0), \
              patch.object(app_mod, "TEARDOWN_GRACE_SECONDS", 0.1), \
-             patch("emacsos_server.app._exit_for_wedged_stream",
+             patch("emacsos_server.app._exit_for_wedged_worker",
                    side_effect=restart_required), \
              patch("emacsos_server.app.migrate_legacy_config",
                    return_value="unchanged: no legacy EmacsOS config symbols"):
@@ -1259,7 +1294,7 @@ def test_disconnect_wedged_worker_uses_short_teardown_grace():
              patch.object(app_mod, "DISCONNECT_POLL_SECONDS", 0.005), \
              patch.object(app_mod, "RUNAWAY_SECONDS", 60.0), \
              patch.object(app_mod, "TEARDOWN_GRACE_SECONDS", 0.1), \
-             patch("emacsos_server.app._exit_for_wedged_stream",
+             patch("emacsos_server.app._exit_for_wedged_worker",
                    side_effect=restart_required), \
              patch("emacsos_server.app.migrate_legacy_config",
                    return_value="unchanged: no legacy EmacsOS config symbols"):

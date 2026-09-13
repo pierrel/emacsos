@@ -219,13 +219,26 @@ rather than pushing it forward.")
 (defvar-local emacsos-conversation-actions nil
   "Alist of capabilities installed by this conversation backend.")
 
+(defun emacsos-conversation--command-mode-map ()
+  "Build the conversation override after the optional OS map is loaded."
+  (let ((map (make-sparse-keymap)))
+    (when (boundp 'emacsos-command-mode-map)
+      (set-keymap-parent map emacsos-command-mode-map))
+    (define-key map (kbd "C-c C-a") emacsos-conversation-command-map)
+    map))
+
 (defun emacsos-conversation-install-actions (actions)
   "Install backend-owned ACTIONS in the current conversation buffer.
 
 Each entry is (CAPABILITY . COMMAND).  Transport, persistence, and lifecycle
 remain owned by the backend; this small kernel owns only discovery and binding."
   (setq-local emacsos-conversation-actions actions)
-  (local-set-key (kbd "C-c C-a") emacsos-conversation-command-map))
+  (local-set-key (kbd "C-c C-a") emacsos-conversation-command-map)
+  (setq-local minor-mode-overriding-map-alist
+              (cons (cons 'emacsos-command-mode
+                          (emacsos-conversation--command-mode-map))
+                    (assq-delete-all 'emacsos-command-mode
+                                     minor-mode-overriding-map-alist))))
 
 (defun emacsos-conversation--run (capability)
   "Invoke CAPABILITY in this buffer, or give one compact unavailable message."

@@ -115,10 +115,11 @@ def _phone_ctx(phone_auth: Optional[str], request: Request) -> Optional[PhoneCon
 # still gets immediate ack of receipt even when queued.
 #
 # The lock is also load-bearing for conversation persistence: /chat,
-# /rollback, AND /clear all acquire it, so the shared checkpointer and phone
-# are touched by one operation at a time.  On abort/runaway, the stream keeps
-# the lock until its worker and generator close finish, or exits the process
-# for a supervised restart if they cannot quiesce within the bounded grace.
+# /rollback, /clear, AND /forget all acquire it, so the shared checkpointer
+# and phone are touched by one operation at a time.  Every operation keeps the
+# lock until its worker finishes.  Chat also keeps it through generator close.
+# A worker deadline or chat-close grace expiry exits the process for supervised
+# restart before the lock can admit overlapping work.
 #
 # Each /chat rebuilds a fresh `assist.Thread` (in `_start_stream_iter`)
 # but now binds it to the persistent checkpointer + a FIXED thread id
@@ -142,9 +143,10 @@ HEARTBEAT_SECONDS = 10.0
 # safe teardown still waits for the current worker call to quiesce.
 DISCONNECT_POLL_SECONDS = 1.0
 
-# Runaway backstop: setup and iteration share this worker budget.  A wedged
-# setup exits at the deadline; iterator teardown gets the short grace below
-# before exiting so the supervisor can restart without admitting overlap.
+# Runaway backstop: chat setup/iteration and serialized maintenance operations
+# share this worker budget.  A wedged worker exits at the deadline; iterator
+# teardown gets the short grace below before exiting so the supervisor can
+# restart without admitting overlap.
 RUNAWAY_SECONDS = 30 * 60.0
 TEARDOWN_GRACE_SECONDS = 5.0
 
@@ -392,10 +394,31 @@ async def _finish_before_cancelling(future, deadline=None):
     return future.result()
 
 
-def _exit_for_wedged_stream() -> NoReturn:
+def _exit_for_wedged_worker() -> NoReturn:
     """Exit immediately so the service supervisor replaces a wedged worker."""
-    log.critical("stream worker failed to quiesce; exiting for supervised restart")
+    log.critical("worker failed to quiesce; exiting for supervised restart")
     os._exit(1)
+
+
+async def _run_serialized_worker(worker, *args):
+    """Run one finite executor operation under the shared single-flight lock.
+
+    Cancellation cannot stop a running executor thread, so the lock remains held
+    until the worker quiesces.  A worker that exceeds the same finite budget as a
+    chat turn terminates the process for a clean supervisor restart rather than
+    releasing the lock around live mutable work.
+    """
+    loop = asyncio.get_running_loop()
+    await _STREAM_LOCK.acquire()
+    try:
+        deadline = time.monotonic() + RUNAWAY_SECONDS
+        future = loop.run_in_executor(None, worker, *args)
+        try:
+            return await _finish_before_cancelling(future, deadline=deadline)
+        except _WorkerDeadlineExceeded:
+            _exit_for_wedged_worker()
+    finally:
+        _STREAM_LOCK.release()
 
 
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request,
@@ -489,7 +512,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             migration = await _finish_before_cancelling(
                 migration_future, deadline=runaway_at)
         except _WorkerDeadlineExceeded:
-            _exit_for_wedged_stream()
+            _exit_for_wedged_worker()
         if migration.startswith("error:"):
             yield ndjson.event("error", reason=migration)
             return
@@ -506,7 +529,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
             it = await _finish_before_cancelling(
                 start_future, deadline=runaway_at)
         except _WorkerDeadlineExceeded:
-            _exit_for_wedged_stream()
+            _exit_for_wedged_worker()
         last_heartbeat = time.monotonic()
         while True:
             if await request.is_disconnected():
@@ -625,7 +648,7 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
                     await _finish_before_cancelling(
                         close_future, deadline=close_deadline)
                 except _WorkerDeadlineExceeded:
-                    _exit_for_wedged_stream()
+                    _exit_for_wedged_worker()
         finally:
             if pump is not None:
                 pump.shutdown(wait=False)
@@ -667,8 +690,7 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
 @app.post("/rollback")
 async def rollback(req: RollbackRequest, request: Request):
     """Roll the phone config back one version: load the prior config on the
-    phone, then record that body as a new snapshot.  Not a stream — it's a
-    fast git operation + one emacsclient apply — so it returns plain JSON.
+    phone, then record that body as a new snapshot.  It returns plain JSON.
     Serialized behind the same `_STREAM_LOCK` as /chat so it can't race
     a stream's phone access."""
     log.info("POST /rollback")
@@ -678,13 +700,7 @@ async def rollback(req: RollbackRequest, request: Request):
         return {"status": "error",
                 "detail": "missing phone context: request lacks "
                           "phone.auth_file or client host"}
-    loop = asyncio.get_running_loop()
-    await _STREAM_LOCK.acquire()
-    try:
-        rollback_future = loop.run_in_executor(None, _do_rollback, phone_ctx)
-        return await _finish_before_cancelling(rollback_future)
-    finally:
-        _STREAM_LOCK.release()
+    return await _run_serialized_worker(_do_rollback, phone_ctx)
 
 
 def _clear_conversation(thread_id: str = CONVERSATION_THREAD_ID) -> dict:
@@ -738,13 +754,7 @@ async def clear(request: Request):
     context or body.  Serialized behind the same `_STREAM_LOCK` as /chat so
     it can't wipe state out from under an in-flight turn."""
     log.info("POST /clear")
-    loop = asyncio.get_running_loop()
-    await _STREAM_LOCK.acquire()
-    try:
-        clear_future = loop.run_in_executor(None, _clear_conversation)
-        return await _finish_before_cancelling(clear_future)
-    finally:
-        _STREAM_LOCK.release()
+    return await _run_serialized_worker(_clear_conversation)
 
 
 @app.post("/forget")
@@ -757,14 +767,7 @@ async def forget(req: ForgetRequest):
     file-backed thread's AGENTS.md lives on the phone, so this wipes the
     conversation memory (the checkpoint) but not phone-side files."""
     log.info("POST /forget thread_id=%s", req.thread_id)
-    loop = asyncio.get_running_loop()
-    await _STREAM_LOCK.acquire()
-    try:
-        forget_future = loop.run_in_executor(
-            None, _clear_conversation, req.thread_id)
-        return await _finish_before_cancelling(forget_future)
-    finally:
-        _STREAM_LOCK.release()
+    return await _run_serialized_worker(_clear_conversation, req.thread_id)
 
 
 def main() -> None:
