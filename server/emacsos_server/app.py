@@ -365,6 +365,25 @@ def _defuse_future(fut) -> None:
         fut.exception()
 
 
+async def _finish_before_cancelling(future):
+    """Delay task cancellation until FUTURE's side effects have finished.
+
+    ``run_in_executor`` cannot stop a running worker when its awaiting
+    coroutine is cancelled.  Callers use this while holding their
+    single-flight lock, so the worker must finish before cancellation can
+    release that lock and admit an overlapping transaction.
+    """
+    cancelled = None
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError as error:
+            cancelled = error
+    if cancelled is not None:
+        raise cancelled
+    return future.result()
+
+
 async def _stream_turn(message: str, phone_auth: Optional[str], request: Request,
                        thread_id: Optional[str] = None,
                        workdir: Optional[str] = None) -> AsyncIterator[bytes]:
@@ -450,7 +469,9 @@ async def _stream_turn(message: str, phone_auth: Optional[str], request: Request
         # the complete recorded config through the normal confirmed apply
         # transaction.  A non-clean result is a reconciliation boundary, not
         # something the agent may paper over with another write.
-        migration = await loop.run_in_executor(None, migrate_legacy_config, phone_ctx)
+        migration_future = loop.run_in_executor(
+            None, migrate_legacy_config, phone_ctx)
+        migration = await _finish_before_cancelling(migration_future)
         if migration.startswith("error:"):
             yield ndjson.event("error", reason=migration)
             return

@@ -91,6 +91,12 @@ def test_namespace_migration_changes_only_complete_symbol_atoms():
     )
 
 
+def test_namespace_migration_keeps_question_mark_in_symbol_atom():
+    body = "(list emacos-call? :emacos-ready? not-emacos-call?)"
+    assert migrate_emacos_symbols(body) == (
+        "(list emacsos-call? :emacsos-ready? not-emacos-call?)")
+
+
 def test_namespace_migration_preserves_noncode_and_canonical_body():
     body = (
         '(message "emacos-call string")\n'

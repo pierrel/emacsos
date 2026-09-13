@@ -89,8 +89,8 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
 (emacsos-net--discard-reader)
 
 (defvar emacsos-net--timer nil
-  "Repeat timer driving background refresh.  Guarded so a hot-reload of
-this file (the agent-customization workflow) doesn't stack timers.")
+  "Repeat timer driving background refresh.
+Guarded so manually re-evaluating this file doesn't stack timers.")
 
 ;;; Terse-output parsing (pure)
 

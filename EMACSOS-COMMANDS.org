@@ -52,6 +52,9 @@ for canonical thread navigation.
 | =C-c e m= | Stage SMS |
 | =C-c e w= | Network controls |
 | =C-c e h= | This command reference |
+| =C-c e k= | Hide or show the PinePhone keyboard |
+| =C-c e b= | Start or switch to Firefox on PinePhone |
+| =C-c e a= | Start or switch to Android on PinePhone |
 
 | Key | Action |
 |-----+--------|

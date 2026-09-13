@@ -99,11 +99,17 @@ session_install_line=$(grep -nF \
     "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 [ "$keyboard_install_line" -lt "$session_install_line" ]
 grep -F 'WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd}' \
-    "$deploy_dir/update-openrc-session.sh" >/dev/null
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F 'WVKBD_BUILD_DIR=$keyboard_build "$deploy_dir/build-wvkbd-emacsos.sh"' \
-    "$deploy_dir/update-openrc-session.sh" >/dev/null
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
 grep -F '"$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"' \
-    "$deploy_dir/update-openrc-session.sh" >/dev/null
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F "EMACSOS_WVKBD_SHA256='\$keyboard_hash'" \
+    "$deploy_dir/install-openrc-session.sh" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'valid_sha256 "$wvkbd_sha256"' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '"$wvkbd_sha256  $snapshot/wvkbd-emacsos"' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
 simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
@@ -309,6 +315,9 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 33 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
+    "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'mutating=1' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-install-root" >/dev/null

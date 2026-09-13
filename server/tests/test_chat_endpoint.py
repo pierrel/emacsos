@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import asyncio
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -110,6 +111,43 @@ def test_release_migration_retry_allows_chat_after_clean_result(client):
             events = _collect_events(r)
     assert [event["type"] for event in events] == ["start", "token", "end"]
     start.assert_called_once()
+
+
+def test_cancelled_chat_holds_single_flight_until_migration_finishes():
+    from emacsos_server import app as app_mod
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    def migration(_phone_ctx):
+        started.set()
+        finish.wait(timeout=5)
+        return "unchanged: no legacy EmacsOS config symbols"
+
+    class Request:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+        async def is_disconnected(self):
+            return False
+
+    async def scenario():
+        stream = app_mod._stream_turn("hi", _FAKE_AUTH, Request())
+        await anext(stream)  # immediate start event precedes the lock
+        turn = asyncio.create_task(anext(stream))
+        await asyncio.to_thread(started.wait, 2)
+        assert app_mod._STREAM_LOCK.locked()
+        turn.cancel()
+        await asyncio.sleep(0)
+        assert app_mod._STREAM_LOCK.locked()
+        assert not turn.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        assert not app_mod._STREAM_LOCK.locked()
+        await stream.aclose()
+
+    with patch("emacsos_server.app.migrate_legacy_config", side_effect=migration):
+        asyncio.run(scenario())
 
 
 def test_chat_log_omits_message(client, caplog):

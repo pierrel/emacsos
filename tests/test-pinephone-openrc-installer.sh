@@ -10,6 +10,16 @@ docker run --rm --network none -i \
     alpine:3.22 /bin/sh -s <<'CONTAINER'
 set -eu
 
+refresh_keyboard_digests() {
+    EMACSOS_WVKBD_SHA256=$(sha256sum \
+        /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos)
+    EMACSOS_WVKBD_SHA256=${EMACSOS_WVKBD_SHA256%% *}
+    EMACSOS_WVKBD_NOTICE_SHA256=$(sha256sum \
+        /home/user/.cache/emacsos-openrc-stage/wvkbd-notice)
+    EMACSOS_WVKBD_NOTICE_SHA256=${EMACSOS_WVKBD_NOTICE_SHA256%% *}
+    export EMACSOS_WVKBD_SHA256 EMACSOS_WVKBD_NOTICE_SHA256
+}
+
 addgroup -S user
 adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
@@ -39,6 +49,15 @@ printf '%s\n' '-----BEGIN CERTIFICATE-----' dGVzdA== \
     >/home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
 chmod 0600 /home/user/.cache/emacsos-openrc-stage/assist-web-ca.pem
+printf '%s\n' '#!/bin/sh' 'exit 0' \
+    >/home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+printf '%s\n' new-notice \
+    >/home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+chown user:user /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+refresh_keyboard_digests
 
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
@@ -260,6 +279,21 @@ printf '%s\n' \
 chown root:root /etc/inittab
 chmod 0644 /etc/inittab
 
+# Caller-supplied reviewed digests bind the root snapshot to the build that
+# was verified before transfer, not merely to the user-writable stage.
+cp /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos /tmp/wvkbd-original
+printf '%s\n' tampered >/home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+chown user:user /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+chmod 0600 /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
+    printf '%s\n' 'fresh installer accepted a keyboard digest mismatch' >&2
+    exit 1
+fi
+[ ! -e /usr/local/bin/wvkbd-emacsos ]
+install -o user -g user -m 0600 /tmp/wvkbd-original \
+    /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos
+
 touch /tmp/fail-ui
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /source/openrc-install-root >/dev/null 2>&1; then
@@ -331,8 +365,11 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/sbin/emacsos-openrc-boot-mode \
+    /usr/local/bin/wvkbd-emacsos \
+    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
     /etc/nftables.d/49-emacsos-callback.nft \
     /etc/doas.d/95-emacsos-ui.conf
+rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
 deluser emacsos-lab
 delgroup emacsos-lab 2>/dev/null || true
 
@@ -380,6 +417,8 @@ DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/share/emacsos-openrc/process-group ]
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
+[ -x /usr/local/bin/wvkbd-emacsos ]
+[ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
 grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
@@ -455,6 +494,7 @@ chown user:user /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
     /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
 chmod 0600 /home/user/.cache/emacsos-openrc-stage/wvkbd-emacsos \
     /home/user/.cache/emacsos-openrc-stage/wvkbd-notice
+refresh_keyboard_digests
 cp -a /home/user/.cache/emacsos-openrc-stage \
     /home/user/.cache/emacsos-openrc-update
 touch /tmp/require-new-keyboard
@@ -480,7 +520,10 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/phone-sms.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
-    /usr/local/sbin/emacsos-openrc-network
+    /usr/local/sbin/emacsos-openrc-network \
+    /usr/local/bin/wvkbd-emacsos \
+    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
 install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
 printf '%s\n' legacy-keyboard >/usr/local/bin/wvkbd-emacos
 chown root:root /usr/local/bin/wvkbd-emacos

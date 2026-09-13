@@ -51,6 +51,10 @@ WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd} \
     printf '%s\n' 'wvkbd build did not produce the reviewed payload' >&2
     exit 1
 }
+keyboard_hash=$(sha256sum "$keyboard_build/wvkbd-emacsos")
+keyboard_hash=${keyboard_hash%% *}
+keyboard_notice_hash=$(sha256sum "$keyboard_build/wordninja.txt")
+keyboard_notice_hash=${keyboard_notice_hash%% *}
 ssh -T "$@" "$phone_host" "rm -rf -- '$stage' && install -d -m 0700 '$stage'"
 scp -q "$@" \
     "$deploy_dir/openrc-manifest.sha256" \
@@ -86,7 +90,7 @@ scp -q "$@" "$keyboard_build/wvkbd-emacsos" "$phone_host:$stage/wvkbd-emacsos"
 scp -q "$@" "$keyboard_build/wordninja.txt" "$phone_host:$stage/wvkbd-notice"
 ssh -T "$@" "$phone_host" "chmod 0600 '$stage'/*"
 ssh -T "$@" "$phone_host" \
-    "deploy_client_ip=\${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP=\"\$deploy_client_ip\" ASSIST_WEB_SERVER_IP='$assist_web_server_ip' /bin/sh" \
+    "deploy_client_ip=\${SSH_CONNECTION%% *}; exec sudo -n /usr/bin/env SUDO_USER=user DEPLOY_CLIENT_IP=\"\$deploy_client_ip\" ASSIST_WEB_SERVER_IP='$assist_web_server_ip' EMACSOS_WVKBD_SHA256='$keyboard_hash' EMACSOS_WVKBD_NOTICE_SHA256='$keyboard_notice_hash' /bin/sh" \
     <"$deploy_dir/openrc-update-root"
 ssh -T "$@" "$phone_host" "rm -rf -- '$stage'"
 printf '%s\n' 'Update passed; the EmacsOS UI is ready.'

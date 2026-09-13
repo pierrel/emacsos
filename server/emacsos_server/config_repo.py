@@ -238,8 +238,11 @@ def migrate_emacos_symbols(body: str) -> str:
             index += 1
             pieces.append(body[start:index])
             continue
+        # A question mark begins a character literal only at the start of an
+        # atom (handled above).  Inside an atom it is ordinary symbol syntax,
+        # as in `emacos-call?`.
         while (index < length and not body[index].isspace() and
-               body[index] not in "()[]\";'?"):
+               body[index] not in "()[]\";'"):
             index += 1
         if start == index:
             index += 1

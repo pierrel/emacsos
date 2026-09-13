@@ -17,7 +17,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=80818a6c62ed868d39f1824df16afef20031c0572c646441677d3f1c52fb87fd
+manifest_hash=88b88605daaa8ce9c4cd9cbabd3416061318a64a679c6259719c40c0df7dc2c6
 mutating=0
 committed=0
 restart_only=0
@@ -112,6 +112,11 @@ legacy_assist_module() {
 fail() {
     printf 'emacsos-openrc-update: %s\n' "$1" >&2
     exit 1
+}
+
+valid_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case $1 in *[!0-9a-f]*) return 1 ;; esac
 }
 
 rc_service() {
@@ -538,6 +543,10 @@ trap 'exit 1' HUP INT TERM
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
 [ "$#" -eq 0 ] || fail 'arguments are not accepted'
 [ "${SUDO_USER-}" = user ] || fail 'must be authorized by the recovery user'
+wvkbd_sha256=${EMACSOS_WVKBD_SHA256-}
+wvkbd_notice_sha256=${EMACSOS_WVKBD_NOTICE_SHA256-}
+valid_sha256 "$wvkbd_sha256" || fail 'invalid expected keyboard digest'
+valid_sha256 "$wvkbd_notice_sha256" || fail 'invalid expected keyboard notice digest'
 deploy_client_ip=${DEPLOY_CLIENT_IP-}
 valid_ipv4 "$deploy_client_ip" || fail 'invalid deployment client address'
 assist_web_server_ip=${ASSIST_WEB_SERVER_IP-}
@@ -672,6 +681,11 @@ legacy_keyboard_paths || true
 legacy_assist_module || true
 snapshot_keyboard_stage "$stage/wvkbd-emacsos" "$snapshot/wvkbd-emacsos" 16777216
 snapshot_keyboard_stage "$stage/wvkbd-notice" "$snapshot/wvkbd-notice" 1048576
+[ "$(sha256sum "$snapshot/wvkbd-emacsos")" = \
+    "$wvkbd_sha256  $snapshot/wvkbd-emacsos" ] || fail 'keyboard digest mismatch'
+[ "$(sha256sum "$snapshot/wvkbd-notice")" = \
+    "$wvkbd_notice_sha256  $snapshot/wvkbd-notice" ] ||
+    fail 'keyboard notice digest mismatch'
 
 backup=$(mktemp -d /var/tmp/emacsos-openrc-backup.XXXXXX)
 chown root:root "$backup"

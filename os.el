@@ -983,9 +983,8 @@ Bind `emacsos--in-render' so window changes caused here cannot recurse."
 (add-hook 'window-setup-hook #'emacsos--init)
 
 ;; Register the auto-follow hook at load time (not inside `emacsos--init')
-;; so a hot-reload of os.el — the agent-driven-customization workflow —
-;; keeps the follower active without a full restart.  `add-hook'
-;; de-dupes, so re-loading doesn't double-register.
+;; so manually re-evaluating os.el keeps the follower active.  `add-hook'
+;; de-dupes, so re-evaluation doesn't double-register.
 (add-hook 'window-buffer-change-functions #'emacsos--on-window-buffer-change)
 
 ;; Companion modules live alongside os.el; add this file's dir to
