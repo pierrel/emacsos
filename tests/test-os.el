@@ -226,9 +226,11 @@ cancels the confirm."
 (ert-deftest test-os-follower-noop-when-plane-unchanged ()
   (let ((rendered nil)
         (emacsos--in-render nil)
-        (emacsos--last-plane nil))
+        (emacsos--last-plane nil)
+        (emacsos--last-utility-row nil))
     (cl-letf (((symbol-function 'emacsos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+              ((symbol-function 'emacsos--top-keyboard-utility-row) (lambda () nil)))
       (emacsos--on-window-buffer-change nil)
       (should-not rendered))))
 
@@ -239,6 +241,20 @@ cancels the confirm."
         (emacsos--last-plane nil))
     (cl-letf (((symbol-function 'emacsos--render-page) (lambda () (setq rendered t)))
               ((symbol-function 'emacsos--top-keyboard-plane) (lambda () #'ignore)))
+      (emacsos--on-window-buffer-change nil)
+      (should rendered))))
+
+(ert-deftest test-os-follower-rerenders-on-utility-row-change ()
+  "A utility-row change refreshes the persistent control window."
+  (let ((rendered nil)
+        (emacsos--in-render nil)
+        (emacsos--last-plane nil)
+        (emacsos--last-utility-row nil))
+    (cl-letf (((symbol-function 'emacsos--render-page)
+               (lambda () (setq rendered t)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+              ((symbol-function 'emacsos--top-keyboard-utility-row)
+               (lambda () #'ignore)))
       (emacsos--on-window-buffer-change nil)
       (should rendered))))
 
@@ -278,6 +294,20 @@ is already in progress, even if the plane differs."
             (should-not (string-match-p "PLANE-SENTINEL" s)))))
     (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
+(ert-deftest test-os-render-page-uses-custom-utility-row ()
+  "A custom utility replaces only the final row under the T9 bands."
+  (unwind-protect
+      (cl-letf (((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+                ((symbol-function 'emacsos--top-keyboard-utility-row)
+                 (lambda () (lambda () (insert "CUSTOM-UTILITY\n")))))
+        (emacsos--render-page)
+        (with-current-buffer "*keyboard*"
+          (let ((text (buffer-string)))
+            (should (string-match-p "CUSTOM-UTILITY" text))
+            (should-not (string-match-p "M-x" text))
+            (should (string-match-p "DEL" text)))))
+    (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
+
 (ert-deftest test-os-render-page-external-keyboard-removes-control-window ()
   "An external keyboard leaves ordinary Emacs content unsplit."
   (let ((emacsos-use-internal-keyboard nil)
@@ -303,6 +333,27 @@ is already in progress, even if the plane differs."
           (should (get-buffer-window "*keyboard*"))
           (with-current-buffer "*keyboard*"
             (should (equal (buffer-string) "SAFETY"))))
+      (when (get-buffer-window "*keyboard*")
+        (delete-window (get-buffer-window "*keyboard*")))
+      (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
+
+(ert-deftest test-os-render-page-external-keyboard-keeps-only-custom-utility ()
+  "The deployed external keyboard retains buffer-owned touch controls only."
+  (let ((emacsos-use-internal-keyboard nil)
+        (text-rows 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+                  ((symbol-function 'emacsos--top-keyboard-utility-row)
+                   (lambda () (lambda () (insert "SMS-CONTROLS\n"))))
+                  ((symbol-function 'emacsos--render-keyboard)
+                   (lambda () (cl-incf text-rows)))
+                  ((symbol-function 'emacsos--render-action-row)
+                   (lambda () (cl-incf text-rows))))
+          (emacsos--render-page)
+          (should (= text-rows 0))
+          (should (get-buffer-window "*keyboard*"))
+          (with-current-buffer "*keyboard*"
+            (should (equal (buffer-string) "SMS-CONTROLS\n"))))
       (when (get-buffer-window "*keyboard*")
         (delete-window (get-buffer-window "*keyboard*")))
       (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))

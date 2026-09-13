@@ -53,7 +53,7 @@ for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
@@ -161,6 +161,7 @@ openrc-sway.config
 openrc-wifi-connect-root
 os.el
 phone-call.el
+phone-sms-chat.el
 phone-sms.el
 waydroid-container-wrapper
 waydroid-container.conf

@@ -17,7 +17,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=5733869db3e5a9c25801ab5d5252d7343124c84c2bcc991fc9268eb580c53b4e
+manifest_hash=c5e3442c9f73a7f3de3e5cfbe9a3beb19ba144cab7f25c7a1cb517c647430a23
 mutating=0
 committed=0
 restart_only=0
@@ -48,6 +48,7 @@ current-wvkbd:/usr/local/bin/wvkbd-emacsos
 current-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
 legacy-wvkbd:/usr/local/bin/wvkbd-emacos
 legacy-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+phone-sms-chat.el:/usr/local/share/emacsos-openrc/phone-sms-chat.el
 openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend
 wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction
 emacsos-ui.initd:/etc/init.d/emacsos-ui
@@ -506,6 +507,7 @@ cleanup() {
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
             restore_file phone-call.el /usr/local/share/emacsos-openrc/phone-call.el 0644
             restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
+            restore_file phone-sms-chat.el /usr/local/share/emacsos-openrc/phone-sms-chat.el 0644
             restore_file legacy-emacos-assist.el \
                 /usr/local/share/emacsos-openrc/emacos-assist.el 0644
             restore_file current-wvkbd /usr/local/bin/wvkbd-emacsos 0755
@@ -629,7 +631,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -659,7 +661,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
-    emacsos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
+    emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
     openrc-network-root openrc-wifi-connect-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
@@ -820,7 +822,7 @@ doas_tmp=
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -913,7 +915,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done

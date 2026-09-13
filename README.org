@@ -235,6 +235,7 @@ and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the strea
 
 - =os.el= — main init file (keyboard, frame setup)
 - =chat.el= — CHAT page, =*chat*= transcript, SEND wiring to =/chat=
+- =phone-sms.el= / =phone-sms-chat.el= — confirmed SMS transport and bounded native conversations
 - =server/= — emacsos-server (FastAPI + phone driver)
 - =docs/= — design docs for in-progress and planned features
 - =deploy/= — install artifacts (init snippet template)

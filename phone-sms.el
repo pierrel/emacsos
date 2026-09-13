@@ -45,10 +45,38 @@ failure to start may instead return one of those terminal results directly."
 (defvar emacsos-sms--previous-buffer nil)
 (defvar emacsos-sms--next-proposal-id 0)
 (defvar emacsos-sms--proposal-id nil)
+(defvar emacsos-sms--context nil)
 (defvar emacsos-sms--confirm-id nil)
 (defvar emacsos-sms--confirm-timer nil)
 (defvar emacsos-sms--skip-next-post-command-disarm nil)
 (defvar emacsos-sms--dismissing nil)
+
+(defvar emacsos-sms-lifecycle-functions nil
+  "Functions notified of immutable SMS proposal lifecycle snapshots.
+Each function receives a fresh plist containing :event, :proposal-id,
+:number, :body, :context, :state, and :detail.  Observer errors are isolated
+from proposal authorization and transport.")
+
+(defun emacsos-sms--copy-field (value)
+  "Copy VALUE when it is a string, otherwise return the scalar unchanged."
+  (if (stringp value) (copy-sequence value) value))
+
+(defun emacsos-sms--notify (event)
+  "Notify lifecycle observers of EVENT without exposing authoritative state."
+  (dolist (observer (copy-sequence emacsos-sms-lifecycle-functions))
+    (when (functionp observer)
+      (condition-case err
+          (funcall observer
+                   (list :event event
+                         :proposal-id emacsos-sms--proposal-id
+                         :number (emacsos-sms--copy-field emacsos-sms--number)
+                         :body (emacsos-sms--copy-field emacsos-sms--body)
+                         :context (emacsos-sms--copy-field emacsos-sms--context)
+                         :state emacsos-sms--state
+                         :detail (emacsos-sms--copy-field emacsos-sms--detail)))
+        (error
+         (message "emacsos-sms: lifecycle observer failed: %s"
+                  (error-message-string err)))))))
 
 (defun emacsos-sms--body-bytes (body)
   "Return BODY's exact UTF-8 byte length."
@@ -104,9 +132,11 @@ failure to start may instead return one of those terminal results directly."
   (insert "\n\n  Sending…\n"))
 
 (defun emacsos-sms--plane-terminal ()
-  "Render the sole terminal-state control."
+  "Render the terminal-state control."
   (insert "\n")
-  (emacsos-sms--plane-button "Done" #'emacsos-sms--dismiss))
+  (if (eq emacsos-sms--state 'unknown)
+      (emacsos-sms--plane-button "Acknowledge" #'emacsos-sms-acknowledge)
+    (emacsos-sms--plane-button "Done" #'emacsos-sms--dismiss)))
 
 (defun emacsos-sms--render ()
   "Render the current phone-global SMS proposal or result."
@@ -173,15 +203,20 @@ failure to start may instead return one of those terminal results directly."
   "Keymap for the phone-global SMS status badge.")
 
 (defun emacsos-sms-mode-line-string ()
-  "Return a tappable SMS badge while an active SMS screen is hidden."
+  "Return independently tappable inbound and hidden outbound SMS badges."
   (condition-case nil
-      (if (and emacsos-sms--state
-               (not (emacsos-sms--visible-p)))
-          (concat " " (propertize "● SMS"
-                                  'local-map emacsos-sms--mode-line-keymap
-                                  'mouse-face 'mode-line-highlight
-                                  'help-echo "Tap to view message status"))
-        "")
+      (let ((inbound (and (fboundp 'emacsos-sms-chat-mode-line-string)
+                          (emacsos-sms-chat-mode-line-string)))
+            (outbound
+             (and emacsos-sms--state
+                  (not (emacsos-sms--visible-p))
+                  (concat
+                   " "
+                   (propertize "● SMS status"
+                               'local-map emacsos-sms--mode-line-keymap
+                               'mouse-face 'mode-line-highlight
+                               'help-echo "Tap to view message status")))))
+        (concat (if (stringp inbound) inbound "") (or outbound "")))
     (error "")))
 
 (defun emacsos-sms--visible-p ()
@@ -248,7 +283,20 @@ failure to start may instead return one of those terminal results directly."
       (if visible
           (emacsos-sms--show)
         (emacsos-sms--render)
-        (message "SMS status updated; tap the SMS badge to view")))))
+        (message "SMS status updated; tap the SMS badge to view"))
+      (emacsos-sms--notify 'terminal))))
+
+(defun emacsos-sms--on-owner-changed (old-owner _new-owner _generation)
+  "Make an in-flight send indeterminate when OLD-OWNER disappears."
+  (when (and old-owner (eq emacsos-sms--state 'sending))
+    (let ((visible (emacsos-sms--visible-p)))
+      (setq emacsos-sms--state 'unknown
+            emacsos-sms--detail "Modem restarted during send.")
+      (if visible
+          (emacsos-sms--show)
+        (emacsos-sms--render)
+        (message "SMS status unknown; do not resend"))
+      (emacsos-sms--notify 'terminal))))
 
 (defun emacsos-sms--start-send ()
   "Consume confirmation and start the exact current proposal once."
@@ -259,6 +307,7 @@ failure to start may instead return one of those terminal results directly."
     (setq emacsos-sms--state 'sending
           emacsos-sms--detail nil)
     (emacsos-sms--show)
+    (emacsos-sms--notify 'sending)
     (let* ((finish (lambda (status)
                      (emacsos-sms--finished proposal-id status)))
            (status
@@ -291,9 +340,11 @@ failure to start may instead return one of those terminal results directly."
   (unless emacsos-sms--dismissing
     (when (eq emacsos-sms--state 'proposed)
       (emacsos-sms--clear-confirm)
+      (emacsos-sms--notify 'discarded)
       (setq emacsos-sms--state nil
             emacsos-sms--number nil
             emacsos-sms--body nil
+            emacsos-sms--context nil
             emacsos-sms--proposal-id nil
             emacsos-sms--previous-buffer nil))))
 
@@ -302,6 +353,8 @@ failure to start may instead return one of those terminal results directly."
   (interactive)
   (unless (eq emacsos-sms--state 'sending)
     (emacsos-sms--clear-confirm)
+    (when (eq emacsos-sms--state 'proposed)
+      (emacsos-sms--notify 'discarded))
     (let ((window (and (fboundp 'emacsos--target) (emacsos--target)))
           (previous (if (buffer-live-p emacsos-sms--previous-buffer)
                         emacsos-sms--previous-buffer
@@ -309,6 +362,7 @@ failure to start may instead return one of those terminal results directly."
       (setq emacsos-sms--state nil
             emacsos-sms--number nil
             emacsos-sms--body nil
+            emacsos-sms--context nil
             emacsos-sms--detail nil
             emacsos-sms--proposal-id nil
             emacsos-sms--previous-buffer nil)
@@ -320,10 +374,20 @@ failure to start may instead return one of those terminal results directly."
           (kill-buffer emacsos-sms--buffer-name)))
       (emacsos-sms--rerender))))
 
+(defun emacsos-sms-acknowledge ()
+  "Acknowledge the current unknown result without touching the modem."
+  (interactive)
+  (if (not (eq emacsos-sms--state 'unknown))
+      (message "No unknown SMS result to acknowledge")
+    (emacsos-sms--notify 'acknowledged)
+    (emacsos-sms--dismiss)))
+
 ;;;###autoload
-(defun emacsos-send-message (number body)
+(defun emacsos-send-message (number body &optional context)
   "Stage an exact outbound SMS to NUMBER containing BODY; never send it.
-Interactively prompt for both values, then show the immutable local proposal."
+Interactively prompt for both values, then show the immutable local proposal.
+CONTEXT may be a string, symbol, integer, or nil used only to correlate
+lifecycle events; the ordinary two-argument API and result are unchanged."
   (interactive (list (read-string "SMS number (+E164): ")
                      (read-string "Message: ")))
   ;; Any restage attempt invalidates an existing arm before validation.
@@ -335,17 +399,24 @@ Interactively prompt for both values, then show the immutable local proposal."
            "error: invalid number")
           ((not (emacsos-sms--valid-body-p body))
            "error: invalid message body")
+          ((not (or (null context) (stringp context) (symbolp context)
+                    (integerp context)))
+           "error: invalid message context")
           ((eq emacsos-sms--state 'sending)
            "error: message send already in progress")
           ((eq emacsos-sms--state 'unknown)
            "error: dismiss unknown message status before staging another message")
           (t
+           (when (eq emacsos-sms--state 'proposed)
+             (emacsos-sms--notify 'discarded))
            (setq emacsos-sms--next-proposal-id (1+ emacsos-sms--next-proposal-id)
                  emacsos-sms--proposal-id emacsos-sms--next-proposal-id
                  emacsos-sms--state 'proposed
                  emacsos-sms--number number
                  emacsos-sms--body body
+                 emacsos-sms--context (emacsos-sms--copy-field context)
                  emacsos-sms--detail nil)
+           (emacsos-sms--notify 'staged)
            (if (emacsos-sms--show)
                "confirmation-required: confirm on phone"
              (emacsos-sms--dismiss)
@@ -374,6 +445,7 @@ Interactively prompt for both values, then show the immutable local proposal."
 (add-hook 'post-command-hook #'emacsos-sms--post-command-disarm)
 (add-hook 'window-buffer-change-functions #'emacsos-sms--window-buffer-changed)
 (add-hook 'emacsos--confirm-disarm-functions #'emacsos-sms--maybe-disarm)
+(add-hook 'emacsos-call-owner-changed-functions #'emacsos-sms--on-owner-changed)
 
 (provide 'phone-sms)
 ;;; phone-sms.el ends here

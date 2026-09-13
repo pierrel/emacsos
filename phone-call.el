@@ -20,11 +20,20 @@ reach a modem-control backend.")
   "\\`/org/freedesktop/ModemManager1/Call/[0-9]+\\'"
   "Exact ModemManager call-object path accepted from helpers and D-Bus.")
 
+(defconst emacsos-call--sms-path-re
+  "\\`/org/freedesktop/ModemManager1/SMS/[0-9]\\{1,20\\}\\'"
+  "Exact bounded ModemManager SMS-object path accepted from D-Bus.")
+
+(defconst emacsos-call--unique-owner-re
+  "\\`:[A-Za-z0-9_-]+\\(?:\\.[A-Za-z0-9_-]+\\)+\\'"
+  "Finite grammar accepted for a D-Bus unique connection name.")
+
 ;; Defined with their full documentation in the UI-state section below; these
 ;; declarations keep the transport primitives above it byte-compile clean.
 (defvar emacsos-call--state)
 (defvar emacsos-call--call-number)
 (defvar emacsos-call--call-path)
+(defvar emacsos-call--call-owner)
 (defvar emacsos-call--pending-operation)
 (defvar emacsos-call--operation-identity :unbound
   "Internal authorization for the exact already-created UI operation.")
@@ -290,7 +299,7 @@ keyboard plane, and call badge.")
   "Persistent received-SMS registration with callback-side owner checks.")
 (defvar emacsos-call--owner-watch-handle nil
   "Exact bus-daemon NameOwnerChanged registration for ModemManager.")
-(defconst emacsos-call--watcher-topology-version 3
+(defconst emacsos-call--watcher-topology-version 4
   "Persistent wildcard signal topology with callback-side owner/path checks.")
 (defvar emacsos-call--installed-watcher-topology nil
   "Watcher topology currently installed in this Emacs process.")
@@ -298,6 +307,10 @@ keyboard plane, and call badge.")
   "Cached unique ModemManager owner maintained by the owner watch.")
 (defvar emacsos-call--owner-generation 0
   "Monotonic identity invalidating work captured before an owner change.")
+(defvar emacsos-call-sms-added-functions nil
+  "Isolated observers called as (FUNCTION OWNER GENERATION PATH).")
+(defvar emacsos-call-owner-changed-functions nil
+  "Isolated observers called as (FUNCTION OLD-OWNER NEW-OWNER GENERATION).")
 (defvar emacsos-call--state-handle nil
   "Persistent wildcard Call.StateChanged registration.
 The callback accepts only the exact current ModemManager owner and tracked
@@ -1442,6 +1455,31 @@ No D-Bus match is added or removed on this live path."
   (when (and (fboundp 'dbus-event-path-name) last-input-event)
     (ignore-errors (dbus-event-path-name last-input-event))))
 
+(defun emacsos-call--valid-owner-p (owner)
+  "Return non-nil when OWNER is a bounded D-Bus unique name."
+  (and (stringp owner)
+       (<= (string-bytes owner) 255)
+       (string-match-p emacsos-call--unique-owner-re owner)))
+
+(defun emacsos-call--valid-sms-path-p (path)
+  "Return non-nil when PATH is one bounded ModemManager SMS object path."
+  (and (stringp path)
+       (<= (string-bytes path) 128)
+       (string-match-p emacsos-call--sms-path-re path)))
+
+(defun emacsos-call--notify-observers (observers &rest args)
+  "Call each function in OBSERVERS with copied string ARGS, isolating errors."
+  (dolist (observer (copy-sequence observers))
+    (when (functionp observer)
+      (condition-case err
+          (apply observer
+                 (mapcar (lambda (arg)
+                           (if (stringp arg) (copy-sequence arg) arg))
+                         args))
+        (error
+         (message "emacsos-call: watcher observer failed: %s"
+                  (error-message-string err)))))))
+
 (defun emacsos-call--on-call-state-event (old new reason)
   "Apply a wildcard StateChanged event only to the exact tracked call."
   (let ((owner (emacsos-call--event-owner))
@@ -1451,15 +1489,23 @@ No D-Bus match is added or removed on this live path."
                (equal emacsos-call--call-path path))
       (emacsos-call--on-call-state old new reason))))
 
-(defun emacsos-call--on-sms-added (_path received)
-  "Wake the handset for a received SMS from the current ModemManager owner."
-  (when (and received emacsos-call-wake-function
-             (equal (emacsos-call--event-owner) emacsos-call--current-owner))
-    (ignore-errors (funcall emacsos-call-wake-function))))
+(defun emacsos-call--on-sms-added (path received)
+  "Publish trusted received SMS PATH and independently wake the handset."
+  (let ((owner (emacsos-call--event-owner)))
+    (when (and received
+               (emacsos-call--valid-sms-path-p path)
+               (emacsos-call--valid-owner-p owner)
+               emacsos-call--current-owner
+               (equal owner emacsos-call--current-owner))
+      (when emacsos-call-wake-function
+        (ignore-errors (funcall emacsos-call-wake-function)))
+      (emacsos-call--notify-observers
+       emacsos-call-sms-added-functions owner emacsos-call--owner-generation path))))
 
-(defun emacsos-call--register-call-added (owner)
-  "Register persistent call signals and accept only current unique OWNER."
-  (setq emacsos-call--current-owner owner)
+(defun emacsos-call--register-call-added (&optional _owner)
+  "Register persistent call and SMS signals.
+The optional argument is retained for hot-loaded callers; owner publication is
+performed only by `emacsos-call--publish-owner'."
   (setq emacsos-call--sms-added-handle
         (or emacsos-call--sms-added-handle
             (emacsos-call--register-signal-bounded
@@ -1486,45 +1532,65 @@ No D-Bus match is added or removed on this live path."
                         emacsos-call--state-handle
                         emacsos-call--sms-added-handle))))
 
-(defun emacsos-call--on-owner-changed (name old-owner new-owner)
-  "Update accepted call identity when ModemManager NAME changes owner."
-  (when (equal name "org.freedesktop.ModemManager1")
-    (setq emacsos-call--current-owner
-          (unless (string-empty-p new-owner) new-owner)
+(defun emacsos-call--publish-owner (new-owner &optional old-owner)
+  "Publish one validated NEW-OWNER transition and invalidate old work.
+OLD-OWNER is the bus-daemon transition source used only before the initial
+owner cache has been established."
+  (let ((new (and (emacsos-call--valid-owner-p new-owner) new-owner))
+        (old (or emacsos-call--current-owner
+                 (and (emacsos-call--valid-owner-p old-owner) old-owner))))
+    (unless (equal old new)
+      (setq emacsos-call--current-owner new
           emacsos-call--owner-generation
           (1+ emacsos-call--owner-generation)
           emacsos-call--requested-call-events nil)
-    (when (equal emacsos-call--ignored-call-owner old-owner)
-      (setq emacsos-call--ignored-call-path nil
-            emacsos-call--ignored-call-owner nil))
-    (when (equal (car-safe emacsos-call--deferred-call-event) old-owner)
-      (setq emacsos-call--deferred-call-event nil))
-    (when (and old-owner
-               (equal emacsos-call--call-owner old-owner)
-               (memq emacsos-call--state '(incoming active)))
-      (setq emacsos-call--watched-call nil
-            emacsos-call--call-path nil
-            emacsos-call--call-owner old-owner
-            emacsos-call--state 'active)
-      ;; The helper may still own the root flock.  Preserve its exclusion
-      ;; identity but move it to the conservative pathless state so its
-      ;; completion can release the UI without trusting the dead owner.
-      (when emacsos-call--pending-operation
-        (setcar (nthcdr 2 emacsos-call--pending-operation) nil)
-        (setcar (nthcdr 3 emacsos-call--pending-operation) 'active))
-      (emacsos-call--show-active "Status unknown"))))
+      (when (equal emacsos-call--ignored-call-owner old)
+        (setq emacsos-call--ignored-call-path nil
+              emacsos-call--ignored-call-owner nil))
+      (when (equal (car-safe emacsos-call--deferred-call-event) old)
+        (setq emacsos-call--deferred-call-event nil))
+      (when (and old
+                 (equal emacsos-call--call-owner old)
+                 (memq emacsos-call--state '(incoming active)))
+        (setq emacsos-call--watched-call nil
+              emacsos-call--call-path nil
+              emacsos-call--call-owner old
+              emacsos-call--state 'active)
+        ;; The helper may still own the root flock.  Preserve its exclusion
+        ;; identity but move it to the conservative pathless state so its
+        ;; completion can release the UI without trusting the dead owner.
+        (when emacsos-call--pending-operation
+          (setcar (nthcdr 2 emacsos-call--pending-operation) nil)
+          (setcar (nthcdr 3 emacsos-call--pending-operation) 'active))
+        (emacsos-call--show-active "Status unknown"))
+      (emacsos-call--notify-observers
+       emacsos-call-owner-changed-functions old new
+       emacsos-call--owner-generation))))
+
+(defun emacsos-call--on-owner-changed (name old-owner new-owner)
+  "Publish a ModemManager NAME transition to validated NEW-OWNER."
+  (when (and emacsos-call--owner-watch-handle
+             (equal name "org.freedesktop.ModemManager1")
+             (or (null emacsos-call--current-owner)
+                 (equal old-owner emacsos-call--current-owner))
+             (or (string-empty-p new-owner)
+                 (emacsos-call--valid-owner-p new-owner)))
+    (emacsos-call--publish-owner
+     (unless (string-empty-p new-owner) new-owner)
+     old-owner)))
 
 (defun emacsos-call--watcher-ensure ()
   "Subscribe to trusted call, SMS, and ModemManager owner signals.
-CallAdded, Added, and StateChanged use persistent sender-wildcard bus matches, then
-validate immutable event metadata against the cached unique owner and tracked
-path.  Only boot, hot migration, or explicit stop changes bus matches; live
-call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
+CallAdded, Added, and StateChanged use persistent sender-wildcard bus matches,
+then validate immutable event metadata against the cached unique owner and
+tracked path.  Only boot, hot migration, or explicit stop changes bus matches;
+live call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
   ;; Hot reload may preserve the older per-owner/per-call match topology.
   ;; Replace it once, invalidating any queued callback identities.
   (when (and emacsos-call--watcher-handles
              (not (equal emacsos-call--installed-watcher-topology
                          emacsos-call--watcher-topology-version)))
+    (emacsos-call--publish-owner nil)
     (dolist (handle emacsos-call--watcher-handles)
       (emacsos-call--unregister-signal-bounded handle))
     (setq emacsos-call--watcher-handles nil
@@ -1533,8 +1599,7 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
           emacsos-call--state-handle nil
           emacsos-call--sms-added-handle nil
           emacsos-call--installed-watcher-topology nil
-          emacsos-call--watched-call nil
-          emacsos-call--owner-generation (1+ emacsos-call--owner-generation)))
+          emacsos-call--watched-call nil))
   (when (and (not emacsos-call--watcher-handles)
              (fboundp 'dbus-register-signal))
     ;; condition-case: os.el calls this at boot, so a system-bus/service that
@@ -1548,8 +1613,12 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
                  "org.freedesktop.DBus" "NameOwnerChanged"
                  #'emacsos-call--on-owner-changed
                  :arg0 "org.freedesktop.ModemManager1"))
-          (emacsos-call--register-call-added
-           (emacsos-call--modem-manager-owner))
+          (emacsos-call--register-call-added)
+          (let ((bootstrap-generation emacsos-call--owner-generation)
+                (bootstrap-owner (emacsos-call--modem-manager-owner)))
+            (when (and (= bootstrap-generation emacsos-call--owner-generation)
+                       (emacsos-call--valid-owner-p bootstrap-owner))
+              (emacsos-call--publish-owner bootstrap-owner)))
           (setq emacsos-call--installed-watcher-topology
                 emacsos-call--watcher-topology-version)
           (when (memq emacsos-call--state '(incoming active))
@@ -1559,6 +1628,7 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
               (emacsos-call--show-unverified-call
                nil emacsos-call--current-owner))))
       (error
+       (emacsos-call--publish-owner nil)
        (dolist (handle (delq nil (list emacsos-call--owner-watch-handle
                                       emacsos-call--call-added-handle
                                       emacsos-call--state-handle
@@ -1577,6 +1647,7 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
 (defun emacsos-call--watcher-stop ()
   "Unsubscribe all call, SMS, and owner signals (dev/debug affordance)."
   (interactive)
+  (emacsos-call--publish-owner nil)
   (dolist (handle emacsos-call--watcher-handles)
     (emacsos-call--unregister-signal-bounded handle))
   (setq emacsos-call--watcher-handles nil
@@ -1587,7 +1658,6 @@ call and owner callbacks never do.  Idempotent and a no-op without D-Bus."
         emacsos-call--sms-added-handle nil
         emacsos-call--installed-watcher-topology nil
         emacsos-call--watched-call nil
-        emacsos-call--owner-generation (1+ emacsos-call--owner-generation)
         emacsos-call--ignored-call-path nil
         emacsos-call--ignored-call-owner nil
         emacsos-call--requested-call-events nil

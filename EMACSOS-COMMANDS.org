@@ -39,6 +39,9 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Reload an unchanged file-backed chat from disk without prompting | =emacsos-assist-refresh= |
 | Forget a file-backed chat checkpoint | =emacsos-assist-forget= |
 | Compose an SMS | =emacsos-send-message= |
+| Open SMS conversations | =emacsos-sms-chat-catalog= |
+| Open one SMS conversation | =emacsos-sms-chat-open= |
+| Refresh SMS history | =emacsos-sms-chat-refresh= |
 
 The global =C-c e= prefix works in every buffer.  On the touchscreen, swipe up
 from =c= on the keyboard, then tap =e=, to type it.  =C-c C-a= remains the
@@ -100,9 +103,10 @@ The modeline network, call, and SMS labels are touch controls for their current
 status or action.  The PinePhone/OpenRC deployment also adds the keyboard
 label.
 
-Ordinary chat, editing, and Assist buffers have no separate Emacs control
-pane.  Call and SMS confirmation controls appear temporarily only while those
-safety-critical flows are active.
+An SMS conversation uses the ordinary text keyboard with QUIT, Refresh, and
+Send in its utility row.  Send still opens the separate two-tap confirmation
+screen.  Other ordinary chat, editing, and Assist buffers have no separate
+Emacs control pane.
 
 * Files and terminals
 
