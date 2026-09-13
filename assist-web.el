@@ -1928,13 +1928,21 @@ suppressing a genuine repeated submission."
   "Finish a failed catalog refresh with PROBLEM.
 REJECTED is non-nil when a response failed validation."
   (setq emacsos-assist-web--catalog-refreshing-p nil
-        emacsos-assist-web--catalog-state 'refresh-failed
-        emacsos-assist-web--new-thread-pending-p nil)
+        emacsos-assist-web--catalog-state 'refresh-failed)
+  (emacsos-assist-web--cancel-pending-new-thread)
   (emacsos-assist-web--render-thread-list)
   (force-mode-line-update t)
   (message (if rejected "Thread refresh rejected: %s"
              "Thread refresh failed: %s")
            problem))
+
+(defun emacsos-assist-web--cancel-pending-new-thread ()
+  "Clear pending new-thread intent and its active minibuffer exit hook."
+  (setq emacsos-assist-web--new-thread-pending-p nil)
+  (when-let ((window (active-minibuffer-window)))
+    (with-current-buffer (window-buffer window)
+      (remove-hook 'minibuffer-exit-hook
+                   #'emacsos-assist-web--resume-new-thread-after-minibuffer t))))
 
 (defun emacsos-assist-web--resume-new-thread-after-minibuffer ()
   "Resume one pending new-thread chooser after the minibuffer exits."
@@ -1950,10 +1958,10 @@ REJECTED is non-nil when a response failed validation."
           (harnesses (alist-get 'harnesses emacsos-assist-web--catalog)))
       (cond
        ((null repositories)
-        (setq emacsos-assist-web--new-thread-pending-p nil)
+        (emacsos-assist-web--cancel-pending-new-thread)
         (message "No Assist repositories are available"))
        ((null harnesses)
-        (setq emacsos-assist-web--new-thread-pending-p nil)
+        (emacsos-assist-web--cancel-pending-new-thread)
         (message "No Assist harnesses are available"))
        ((active-minibuffer-window)
         (let ((window (active-minibuffer-window)))
@@ -2550,7 +2558,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 ;; definitions.  An in-flight callback retains the process-wide refresh claim
 ;; until it observes the generation change and releases it.
 (cl-incf emacsos-assist-web--catalog-generation)
-(setq emacsos-assist-web--new-thread-pending-p nil)
+(emacsos-assist-web--cancel-pending-new-thread)
 (emacsos-assist-web--load-catalog)
 
 (provide 'assist-web)

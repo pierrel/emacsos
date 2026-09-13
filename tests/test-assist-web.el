@@ -1690,6 +1690,38 @@
       (set-window-buffer window original-buffer)
       (kill-buffer minibuffer))))
 
+(ert-deftest test-assist-web-async-refresh-failure-removes-armed-minibuffer-hook ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-async-failed-minibuffer*"))
+         (emacsos-assist-web--catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog-state 'cached)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p nil)
+         callback)
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () window))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload cb &rest _)
+                       (setq callback cb))))
+            (emacsos-assist-web-new-thread)
+            (with-current-buffer minibuffer
+              (should (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                            minibuffer-exit-hook)))
+            (funcall callback nil "offline")
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (with-current-buffer minibuffer
+              (should-not (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                                minibuffer-exit-hook)))))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
 (ert-deftest test-assist-web-cache-write-failure-remains-visible-after-live-refresh ()
   (let ((emacsos-assist-web--catalog nil)
         (emacsos-assist-web--catalog-refreshing-p nil)
