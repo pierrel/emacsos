@@ -115,6 +115,7 @@ ui_enabled() {
 check_service() {
     check_root_file /etc/init.d/emacsos-ui 755
     check_root_file /usr/local/sbin/emacsos-openrc-suspend 755
+    check_root_file /usr/local/sbin/emacsos-openrc-wifi-connect 755
     check_root_file /etc/doas.d/95-emacsos-ui.conf 600
     [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
         [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ] ||
@@ -126,7 +127,8 @@ check_service() {
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
             'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
             'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ] ||
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
+            'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args')" ] ||
         fail 'UI authority is invalid'
     [ -x /usr/local/share/emacsos-openrc/session ] ||
         fail 'session payload is absent'

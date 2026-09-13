@@ -92,6 +92,7 @@ otherwise they insert a newline.  RET accepts an active minibuffer first.
 | Answer the ringing call | =emacsos-answer= |
 | Hang up | =emacsos-hang-up= |
 | Open network controls | =emacsos-net-show= |
+| Connect to a visible Wi-Fi network | =emacsos-net-connect= |
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
 

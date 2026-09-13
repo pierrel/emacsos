@@ -6,18 +6,19 @@
 ;;
 ;; Reads run through ModemManager/NetworkManager CLIs (`nmcli'/`mmcli'),
 ;; ALWAYS asynchronously: one `make-process' gathers every read in a
-;; single shell pipeline, a sentinel parses the blob into `emacsos-net--state',
+;; single shell script, a sentinel parses the blob into `emacsos-net--state',
 ;; and the `:eval' modeline segment + the page repaint from that cached
 ;; state.  Nothing on the redisplay/tap path blocks the main loop (the
 ;; project's prime directive — see docs/2026-05-17-streaming-responses.org).
 ;;
-;; Connecting to a NEW *secured* wifi network needs a protected credential
-;; entry flow, which is not implemented yet.  Saved/open networks connect now;
-;; a new secured network degrades to a clear note rather than a leaky prompt.
-;; `emacsos-net--connect-kind' is the single seam where that lands later.
+;; Connection attempts share one finite result contract.  New secured wifi
+;; credentials stay in a masked minibuffer and a transient platform call;
+;; cached state and rendered buffers never retain them.
 
 (require 'cl-lib)
+(require 'hex-util)
 (require 'seq)
+(require 'subr-x)
 
 ;; Defined in os.el (which `require's this file).  Resolved at call time.
 (declare-function emacsos--btn "os")
@@ -45,6 +46,28 @@ command while keeping network actions asynchronous."
   :type '(choice (const nil) function)
   :group 'emacsos)
 
+(defcustom emacsos-net-connection-function nil
+  "Optional asynchronous wifi connection function.
+It receives KIND, TARGET, PASSWORD, and COMPLETION.  Returning the exact
+pending token requires one later terminal COMPLETION; returning a terminal
+token requires no completion.  PASSWORD is non-nil only for secured networks."
+  :type '(choice (const nil) function)
+  :group 'emacsos)
+
+(defconst emacsos-net--connection-pending-result
+  "pending: Wi-Fi connection requested")
+
+(defconst emacsos-net--connection-terminal-results
+  '("connected"
+    "not-connected:invalid-input"
+    "not-connected:busy"
+    "not-connected:failed"
+    "not-connected:unavailable"
+    "unknown:time-limit"
+    "not-connected:unsupported-security"
+    "not-connected:network-not-found")
+  "Complete finite grammar for terminal wifi connection results.")
+
 ;;; State
 
 (cl-defstruct emacsos-net-state
@@ -53,7 +76,8 @@ command while keeping network actions asynchronous."
   (active-iface 'none)      ; 'wifi | 'cell | 'none — what carries the default route
   ssid                      ; current wifi SSID string, or nil
   signal                    ; 0-100 signal of the active iface, or nil
-  (wifi-list nil)           ; list of plists (:ssid :signal :security :in-use :saved)
+  (wifi-list nil)           ; plists (:ssid :signal :security :in-use :saved-uuid)
+  (saved-known nil)         ; t only after a complete saved-profile enumeration
   (cell-provisioned nil)    ; t once the named GSM connection exists
   (cell-on nil)             ; t while that NetworkManager profile is active
   (cell-state "")           ; mmcli modem state: "registered" / "searching" / "" ...
@@ -80,7 +104,11 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
       (setq emacsos-net--proc nil)
       (set-process-sentinel proc #'ignore)
       (when (process-live-p proc)
-        (delete-process proc))
+        (let ((pid (process-id proc)))
+          (when (integerp pid)
+            (ignore-errors (signal-process (- pid) 'SIGKILL))))
+        (when (process-live-p proc)
+          (delete-process proc)))
       (when (buffer-live-p (process-buffer proc))
         (kill-buffer (process-buffer proc))))))
 
@@ -91,6 +119,18 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
 (defvar emacsos-net--timer nil
   "Repeat timer driving background refresh.
 Guarded so manually re-evaluating this file doesn't stack timers.")
+
+(defvar emacsos-net--connection-attempt-id 0
+  "Monotonic owner ID for wifi connection presentation state.")
+
+(defvar emacsos-net--connection-pending nil
+  "Current connection owner plist (:id :ssid :kind), or nil.")
+
+(defvar emacsos-net--connection-result nil
+  "Visible terminal result plist (:id :text), or nil.")
+
+(defvar emacsos-net--connection-result-timer nil
+  "Timer which expires `emacsos-net--connection-result'.")
 
 ;;; Terse-output parsing (pure)
 
@@ -127,6 +167,31 @@ with \"@@<NAME>\" marker lines between each command's output."
        ((and in (not (string-empty-p l))) (push l out))))
     (nreverse out)))
 
+(defun emacsos-net--decode-ssid-hex (value)
+  "Decode a bounded hexadecimal SSID VALUE, or return nil when unsafe."
+  (when (and (stringp value)
+             (string-match-p
+              "\\`\\(?:[0-9A-Fa-f][0-9A-Fa-f]\\)\\{1,32\\}\\'" value))
+    (let ((ssid (decode-coding-string (decode-hex-string value) 'utf-8)))
+      (and (not (seq-some (lambda (char)
+                            (eq (char-charset char) 'eight-bit))
+                          ssid))
+           (emacsos-net--valid-ssid-p ssid)
+           ssid))))
+
+(defun emacsos-net--valid-uuid-p (value)
+  "Non-nil when VALUE is a canonical hexadecimal UUID string."
+  (and (stringp value)
+       (string-match-p
+        "\\`[0-9A-Fa-f]\\{8\\}-[0-9A-Fa-f]\\{4\\}-[0-9A-Fa-f]\\{4\\}-[0-9A-Fa-f]\\{4\\}-[0-9A-Fa-f]\\{12\\}\\'"
+        value)))
+
+(defun emacsos-net--unique-saved-uuid (ssid records)
+  "Return SSID's UUID only when RECORDS contains exactly one match."
+  (let ((matches (seq-filter (lambda (record) (equal (car record) ssid))
+                             records)))
+    (and (= (length matches) 1) (cdar matches))))
+
 (defun emacsos-net--parse (blob)
   "Parse the reader's delimited BLOB into a fresh `emacsos-net-state'.
 Robust to missing/empty sections (no modem, no service, wifi off)."
@@ -141,33 +206,46 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
                              ((string-match-p "\\bdev wl" route) 'wifi)
                              ((string-match-p "\\bdev ww" route) 'cell)
                              (t 'none)))
-         ;; saved profiles + cellular profile activity, from `con show'
-         (saved nil) (cell-provisioned nil) (cell-on nil))
+         ;; saved wifi UUIDs and actual SSIDs come from the dedicated section.
+         (saved-records
+          (mapcar
+           (lambda (line)
+             (let* ((fields (emacsos-net--split-terse line))
+                    (uuid (and (= (length fields) 2) (nth 0 fields)))
+                    (ssid (and uuid (emacsos-net--decode-ssid-hex
+                                     (nth 1 fields)))))
+               (and (emacsos-net--valid-uuid-p uuid)
+                    ssid
+                    (cons ssid uuid))))
+           (emacsos-net--section blob "SAVED")))
+         (saved (delq nil (copy-sequence saved-records)))
+         (saved-known
+          (and (equal (emacsos-net--section blob "SAVED-OK") '("yes"))
+               (null (emacsos-net--section blob "SAVED-FAILED"))
+               (cl-every #'identity saved-records)))
+         (cell-provisioned nil) (cell-on nil))
     (dolist (l (emacsos-net--section blob "CONS"))
       (let* ((f (emacsos-net--split-terse l))
-             (name (nth 0 f))
-             (type (nth 1 f))
-             (device (nth 2 f)))
-        (when (and (string= name emacsos-net-cell-connection)
-                   (string= type "gsm"))
+             (type (nth 0 f))
+             (device (nth 1 f)))
+        (when (string= type "gsm")
           (setq cell-provisioned t
                 cell-on (and device
                              (not (string-empty-p device))
-                             (not (string= device "--")))))
-        (when (string= type "802-11-wireless") (push name saved))))
+                             (not (string= device "--")))))))
     ;; wifi networks from `dev wifi'
     (let (wifi-list cur-ssid cur-signal)
       (dolist (l (emacsos-net--section blob "WIFI"))
         (let* ((f (emacsos-net--split-terse l))
                (in-use (string= (nth 0 f) "yes"))
-               (ssid (nth 1 f))
+               (ssid (emacsos-net--decode-ssid-hex (nth 1 f)))
                (sig (and (nth 2 f) (string-to-number (nth 2 f))))
                (sec (or (nth 3 f) "")))
-          (when (and ssid (not (string-empty-p ssid)))
+          (when (and (= (length f) 4) ssid)
             (when in-use (setq cur-ssid ssid cur-signal sig))
             (push (list :ssid ssid :signal sig :security sec
                         :in-use in-use
-                        :saved (and (member ssid saved) t))
+                        :saved-uuid (emacsos-net--unique-saved-uuid ssid saved))
                   wifi-list))))
       ;; cell registration/signal from mmcli key=value
       (let (cell-state cell-signal)
@@ -187,6 +265,7 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
                        ((eq active-iface 'cell) cell-signal)
                        (t nil))
          :wifi-list (nreverse wifi-list)
+         :saved-known saved-known
          :cell-provisioned cell-provisioned
          :cell-on cell-on
          :cell-state (or cell-state "")
@@ -222,25 +301,52 @@ Wrapped so a redisplay-time error can never brick the modeline."
 
 (defun emacsos-net--connect-kind (net)
   "Classify wifi NET (a `wifi-list' plist) for connecting:
-`saved' (NM has a profile — no password), `open' (no security — no
-password), or `needs-password' (new secured network — blocked until the
-network page gains password entry; see the file header)."
-  (cond ((plist-get net :saved) 'saved)
-        ((let ((s (plist-get net :security))) (or (null s) (string-empty-p s))) 'open)
-        (t 'needs-password)))
+`saved' (NM has a profile UUID), `open', `needs-password' (visible WEP or
+WPA-Personal), or `unsupported-security' (for example 802.1X)."
+  (cond ((plist-get net :saved-uuid) 'saved)
+        ((member (plist-get net :security) '(nil "" "--")) 'open)
+        ((let ((case-fold-search t)
+               (security (or (plist-get net :security) "")))
+           (and (not (string-match-p "802[.-]1x" security))
+                (string-match-p
+                 "\\(?:\\`\\|[[:space:]]\\)\\(?:wep\\|wpa\\)" security)))
+         'needs-password)
+        (t 'unsupported-security)))
 
 ;;; Async refresh
 
 (defun emacsos-net--reader-script ()
   "Shell script gathering every read into one delimited blob.
-One process, one sentinel — simpler and lighter than chaining readers.
-The asynchronous mmcli attempt suppresses errors when no modem is present."
+One Emacs process and sentinel own the reader.  Its TERM trap kills and reaps
+the active system tool, so the outer deadline cannot leave a child behind.
+SSID bytes are hex-encoded before entering the line protocol."
   (concat
-   "echo @@RADIO; nmcli -t -f WIFI radio 2>/dev/null; "
-   "echo @@ROUTE; ip -4 route show default 2>/dev/null; "
-   "echo @@CONS;  nmcli -t -f NAME,TYPE,DEVICE con show 2>/dev/null; "
-   "echo @@WIFI;  nmcli -t -f ACTIVE,SSID,SIGNAL,SECURITY dev wifi 2>/dev/null; "
-   "echo @@CELL;  mmcli -m any --output-keyvalue 2>/dev/null; "
+   "child=; reader_file=; saved_ssid_file=; "
+   "stop_child() { if [ -n \"$child\" ]; then kill -KILL \"$child\" 2>/dev/null || :; wait \"$child\" 2>/dev/null || :; child=; fi; }; "
+   "cleanup() { stop_child; [ -z \"$reader_file\" ] || rm -f -- \"$reader_file\"; [ -z \"$saved_ssid_file\" ] || rm -f -- \"$saved_ssid_file\"; }; "
+   "trap 'cleanup; exit 1' HUP INT TERM; trap cleanup EXIT; "
+   "read_command() { \"$@\" & child=$!; if wait \"$child\"; then status=0; else status=$?; fi; child=; return \"$status\"; }; "
+   "reader_file=$(mktemp) || exit 1; saved_ssid_file=$(mktemp) || exit 1; "
+   "echo @@RADIO; read_command nmcli -t -f WIFI radio 2>/dev/null || :; "
+   "echo @@ROUTE; read_command ip -4 route show default 2>/dev/null || :; "
+   "echo @@CONS; "
+   "cell_type=; if read_command nmcli -e no -t -g connection.type con show id \"$1\" >\"$reader_file\" 2>/dev/null; then IFS= read -r cell_type <\"$reader_file\" || :; fi; "
+   "cell_device=; if read_command nmcli -e no -t -g GENERAL.DEVICES con show id \"$1\" >\"$reader_file\" 2>/dev/null; then IFS= read -r cell_device <\"$reader_file\" || :; fi; "
+   "printf '%s:%s\\n' \"$cell_type\" \"$cell_device\"; "
+   "echo @@SAVED; "
+   "if read_command nmcli -t -f UUID,TYPE con show >\"$reader_file\" 2>/dev/null; then "
+   "while IFS=: read -r uuid type || [ -n \"$uuid$type\" ]; do "
+   "[ \"$type\" = 802-11-wireless ] || continue; "
+   "if read_command nmcli -e no -t -g 802-11-wireless.ssid con show uuid \"$uuid\" >\"$saved_ssid_file\" 2>/dev/null; then "
+   "ssid_hex=$(od -An -v -tx1 \"$saved_ssid_file\" | tr -d '[:space:]'); "
+   "case $ssid_hex in *0a) ssid_hex=${ssid_hex%0a} ;; *) ssid_hex= ;; esac; "
+   "if [ -n \"$ssid_hex\" ]; then printf '%s:%s\\n' \"$uuid\" \"$ssid_hex\"; "
+   "else echo @@SAVED-FAILED; echo yes; fi; "
+   "else echo @@SAVED-FAILED; echo yes; fi; done <\"$reader_file\"; "
+   "else echo @@SAVED-FAILED; echo yes; fi; "
+   "echo @@SAVED-OK; echo yes; "
+   "echo @@WIFI;  read_command nmcli -t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY dev wifi 2>/dev/null || :; "
+   "echo @@CELL;  read_command mmcli -m any --output-keyvalue 2>/dev/null || :; "
    "echo @@END"))
 
 (defun emacsos-net--refresh ()
@@ -249,33 +355,38 @@ The asynchronous mmcli attempt suppresses errors when no modem is present."
   (when (or (null emacsos-net--proc) (not (process-live-p emacsos-net--proc)))
     (let ((buf (generate-new-buffer " *emacsos-net-read*")))
       (condition-case err
-          (setq emacsos-net--proc
-                (make-process
-                 :name "emacsos-net-read"
-                 :buffer buf
-                 :command (list "sh" "-c" (emacsos-net--reader-script))
-                 :noquery t
-                 :sentinel #'emacsos-net--reader-sentinel))
+          (progn
+            (setq emacsos-net--proc
+                  (make-process
+                   :name "emacsos-net-read"
+                   :buffer buf
+                   :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "8"
+                                  "sh" "-c" (emacsos-net--reader-script)
+                                  "emacsos-net-read" emacsos-net-cell-connection)
+                   :noquery t
+                   :sentinel #'emacsos-net--reader-sentinel))
+            (emacsos-net--render-if-shown))
         (error
          (kill-buffer buf)
          (message "emacsos-net: cannot read network status: %s"
                   (error-message-string err)))))))
 
 (defun emacsos-net--reader-sentinel (proc _event)
-  "On reader exit (ANY terminal state), parse and refresh the UI.
-Clears the single-flight guard unconditionally so a dead reader can't
-wedge all future refreshes."
+  "On a complete successful reader exit, parse and refresh the UI.
+Clear the single-flight guard after every terminal state while retaining the
+last valid snapshot after failure or timeout."
   (when (memq (process-status proc) '(exit signal))
     (let ((buf (process-buffer proc)))
       (unwind-protect
-          (when (and (eq proc emacsos-net--proc)
-                     (buffer-live-p buf))
-            (let ((blob (with-current-buffer buf (buffer-string))))
-              (setq emacsos-net--state (emacsos-net--parse blob))
-              (force-mode-line-update t)
-              (emacsos-net--render-if-shown)))
-        (when (eq proc emacsos-net--proc)
-          (setq emacsos-net--proc nil))
+          (when (eq proc emacsos-net--proc)
+            (setq emacsos-net--proc nil)
+            (when (and (zerop (process-exit-status proc))
+                       (buffer-live-p buf))
+              (let ((blob (with-current-buffer buf (buffer-string))))
+                (when (string-suffix-p "@@END\n" blob)
+                  (setq emacsos-net--state (emacsos-net--parse blob))
+                  (force-mode-line-update t)
+                  (emacsos-net--render-if-shown)))))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 ;;; Control actions
@@ -327,17 +438,159 @@ Only meaningful once `make cellular-bringup' has created the connection."
              emacsos-net-cell-connection))
     (message "Cellular not set up yet — run `make cellular-bringup APN=...'")))
 
+(defun emacsos-net--display-ssid (ssid)
+  "Return SSID as one safe display line with controls visibly escaped."
+  (let* ((print-escape-newlines t)
+         (print-escape-control-characters t)
+         (printed (prin1-to-string (substring-no-properties ssid))))
+    (substring printed 1 -1)))
+
+(defun emacsos-net--terminal-result-p (result)
+  "Non-nil when RESULT is in the declared terminal connection grammar."
+  (and (stringp result)
+       (member result emacsos-net--connection-terminal-results)))
+
+(defun emacsos-net--result-text (ssid result)
+  "Map terminal RESULT for SSID to bounded user-facing prose."
+  (pcase result
+    ("connected"
+     (format "Connected to %s. If pages don’t load, open Firefox to sign in."
+             (emacsos-net--display-ssid ssid)))
+    ((or "not-connected:failed" "not-connected:invalid-input"
+         "not-connected:busy")
+     "Couldn’t connect. Try again.")
+    ("not-connected:unavailable" "Wi-Fi controls unavailable.")
+    ("unknown:time-limit"
+     "Connection timed out. Check Wi-Fi status before trying again.")
+    ("not-connected:unsupported-security"
+     "Enterprise Wi-Fi isn’t supported yet.")
+    ("not-connected:network-not-found"
+     "Hidden networks aren’t supported yet.")
+    (_ "Couldn’t connect. Try again.")))
+
+(defun emacsos-net--expire-result (attempt-id)
+  "Clear the visible result only when it still belongs to ATTEMPT-ID."
+  (when (eq attempt-id (plist-get emacsos-net--connection-result :id))
+    (setq emacsos-net--connection-result nil
+          emacsos-net--connection-result-timer nil)
+    (emacsos-net--render-if-shown)))
+
+(defun emacsos-net--begin-connection (ssid kind)
+  "Create and display one connection owner for SSID and KIND."
+  (when (timerp emacsos-net--connection-result-timer)
+    (cancel-timer emacsos-net--connection-result-timer))
+  (setq emacsos-net--connection-result-timer nil
+        emacsos-net--connection-result nil)
+  (cl-incf emacsos-net--connection-attempt-id)
+  (setq emacsos-net--connection-pending
+        (list :id emacsos-net--connection-attempt-id :ssid ssid :kind kind))
+  (emacsos-net--render-if-shown)
+  emacsos-net--connection-attempt-id)
+
+(defun emacsos-net--finish-connection (attempt-id result)
+  "Finish ATTEMPT-ID once with normalized terminal RESULT."
+  (when (eq attempt-id (plist-get emacsos-net--connection-pending :id))
+    (let ((ssid (plist-get emacsos-net--connection-pending :ssid)))
+      (setq emacsos-net--connection-pending nil
+            emacsos-net--connection-result
+            (list :id attempt-id :text (emacsos-net--result-text ssid result))
+            emacsos-net--connection-result-timer
+            (run-with-timer 8 nil #'emacsos-net--expire-result attempt-id))
+      (emacsos-net--render-if-shown)
+      (run-with-timer 1.5 nil #'emacsos-net--refresh-after-action))))
+
+(defun emacsos-net--release-connection (attempt-id)
+  "Release ATTEMPT-ID without publishing a result."
+  (when (eq attempt-id (plist-get emacsos-net--connection-pending :id))
+    (setq emacsos-net--connection-pending nil)
+    (emacsos-net--render-if-shown)))
+
+(defun emacsos-net--valid-secret-p (value)
+  "Non-nil when VALUE is a bounded one-line password for the helper."
+  (and (stringp value)
+       (> (string-bytes value) 0)
+       (<= (string-bytes value) 256)
+       (not (string-match-p "[\0\r\n]" value))))
+
+(defun emacsos-net--valid-ssid-p (value)
+  "Non-nil when VALUE is a bounded one-line visible-network identifier."
+  (and (stringp value)
+       (> (string-bytes value) 0)
+       (<= (string-bytes value) 32)
+       (not (seq-some (lambda (char)
+                        (or (< char 32)
+                            (<= 127 char 159)
+                            (memq char '(#x061c #x200e #x200f))
+                            (<= #x202a char #x202e)
+                            (<= #x2066 char #x2069)))
+                      value))))
+
+(defun emacsos-net--start-connection (kind target password completion)
+  "Invoke the platform connection hook with normalized failure behavior."
+  (if (not emacsos-net-connection-function)
+      "not-connected:unavailable"
+    (condition-case nil
+        (let ((result (funcall emacsos-net-connection-function
+                               kind target password completion)))
+          (if (or (equal result emacsos-net--connection-pending-result)
+                  (emacsos-net--terminal-result-p result))
+              result
+            "not-connected:failed"))
+      (error "not-connected:unavailable"))))
+
 (defun emacsos-net-connect (ssid)
-  "Connect to wifi network SSID, honouring the connect-kind seam."
-  (let ((net (seq-find (lambda (n) (string= (plist-get n :ssid) ssid))
-                       (emacsos-net-state-wifi-list emacsos-net--state))))
-    (pcase (and net (emacsos-net--connect-kind net))
-      ('saved (emacsos-net--action (list "con" "up" ssid)))
-      ('open  (emacsos-net--action (list "dev" "wifi" "connect" ssid)))
-      ('needs-password
-       ;; Deferred: this page has no credential-entry flow yet.
-       (message "%s needs a password — number keys coming soon" ssid))
-      (_ (message "Unknown network: %s" ssid)))))
+  "Connect to visible wifi network SSID through the finite platform contract."
+  (interactive "sWi-Fi network: ")
+  (if emacsos-net--connection-pending
+      "not-connected:busy"
+    (let* ((valid-ssid (emacsos-net--valid-ssid-p ssid))
+           (net (and valid-ssid
+                     (seq-find (lambda (item)
+                                 (string= (plist-get item :ssid) ssid))
+                               (emacsos-net-state-wifi-list
+                                emacsos-net--state))))
+           (kind (and net (emacsos-net--connect-kind net)))
+           (operation-kind (pcase kind
+                             ('saved 'saved)
+                             ('open 'open)
+                             ('needs-password 'secured)))
+           (target (if (eq kind 'saved)
+                       (plist-get net :saved-uuid)
+                     ssid))
+           (attempt-id (emacsos-net--begin-connection
+                        (if (stringp ssid) ssid "") kind))
+           (completion (lambda (result)
+                         (when (emacsos-net--terminal-result-p result)
+                           (emacsos-net--finish-connection attempt-id result))))
+           password result completed)
+      (unwind-protect
+          (progn
+            (when (and (emacsos-net-state-saved-known emacsos-net--state)
+                       (eq kind 'needs-password))
+              (setq password (read-passwd
+                              (format "Password for %s: "
+                                      (emacsos-net--display-ssid ssid)))))
+            (setq result
+                  (cond
+                   ((not valid-ssid) "not-connected:invalid-input")
+                   ((null net) "not-connected:network-not-found")
+                   ((not (emacsos-net-state-saved-known emacsos-net--state))
+                    "not-connected:unavailable")
+                   ((eq kind 'unsupported-security)
+                    "not-connected:unsupported-security")
+                   ((and (eq kind 'needs-password)
+                         (not (emacsos-net--valid-secret-p password)))
+                    "not-connected:invalid-input")
+                   (t (emacsos-net--start-connection
+                       operation-kind target password completion))))
+            (unless (equal result emacsos-net--connection-pending-result)
+              (emacsos-net--finish-connection attempt-id result))
+            (setq completed t)
+            result)
+        (when (stringp password)
+          (clear-string password))
+        (unless completed
+          (emacsos-net--release-connection attempt-id))))))
 
 ;;; The *network* control page
 
@@ -353,7 +606,9 @@ Only meaningful once `make cellular-bringup' has created the connection."
         (insert (format "Wifi: %s\n"
                         (pcase (emacsos-net-state-wifi-on st)
                           ('t (if (emacsos-net-state-ssid st)
-                                  (format "on — %s" (emacsos-net-state-ssid st))
+                                  (format "on — %s"
+                                          (emacsos-net--display-ssid
+                                           (emacsos-net-state-ssid st)))
                                 "on"))
                           ('nil "off")
                           (_ "?"))))
@@ -374,21 +629,37 @@ Only meaningful once `make cellular-bringup' has created the connection."
         (insert "\n\n")
         ;; Wifi networks
         (insert "Networks:\n")
+        (emacsos--btn (if (and emacsos-net--proc
+                              (process-live-p emacsos-net--proc))
+                         " Refreshing… "
+                       " Refresh ")
+                     #'emacsos-net--refresh nil emacsos--btn-label-scale)
+        (insert "\n")
+        (when emacsos-net--connection-pending
+          (insert (format "Connecting to %s…\n"
+                          (emacsos-net--display-ssid
+                           (plist-get emacsos-net--connection-pending :ssid)))))
+        (when emacsos-net--connection-result
+          (insert (plist-get emacsos-net--connection-result :text) "\n"))
+        (unless (emacsos-net-state-saved-known st)
+          (insert "  Saved network status unavailable. Refresh.\n"))
         (if (null (emacsos-net-state-wifi-list st))
-            (insert "  (none found — Refresh)\n")
+            (insert "  (none found)\n")
           (dolist (net (emacsos-net-state-wifi-list st))
             (let* ((ssid (plist-get net :ssid))
                    (sig (plist-get net :signal))
                    (kind (emacsos-net--connect-kind net))
                    (mark (cond ((plist-get net :in-use) "* ")
-                               ((eq kind 'needs-password) "[lock] ")
+                               ((memq kind '(needs-password unsupported-security)) "[lock] ")
                                (t "")))
-                   (label (format " %s%s  %s%% " mark ssid (or sig "?"))))
-              (emacsos--btn label #'emacsos-net-connect ssid emacsos--btn-label-scale)
-              (insert "\n"))))
-        (when (seq-some (lambda (n) (eq (emacsos-net--connect-kind n) 'needs-password))
-                        (emacsos-net-state-wifi-list st))
-          (insert "\nNew secured networks need credential entry — coming soon.\n")))
+                   (label (format " %s%s  %s%% " mark
+                                  (emacsos-net--display-ssid ssid)
+                                  (or sig "?"))))
+              (if (or emacsos-net--connection-pending
+                      (not (emacsos-net-state-saved-known st)))
+                  (insert label)
+                (emacsos--btn label #'emacsos-net-connect ssid emacsos--btn-label-scale))
+              (insert "\n")))))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (goto-char (point-min)))
