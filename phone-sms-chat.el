@@ -65,10 +65,6 @@
   "Return STRING encoded as raw unibyte data."
   (encode-coding-string string 'raw-text t))
 
-(defun emacsos-sms-chat--body-bytes (body)
-  "Return exact UTF-8 bytes in BODY."
-  (string-bytes (encode-coding-string body 'utf-8 t)))
-
 (defconst emacsos-sms-chat--snapshot-keys
   '("sms.dbus-path" "sms.content.number" "sms.content.text"
     "sms.properties.pdu-type" "sms.properties.state"))
@@ -195,7 +191,7 @@
                    (emacsos-call--valid-sms-path-p path)
                    (emacsos-sms-chat--valid-number-p number)
                    (stringp body) (not (string-match-p "\0" body))
-                   (<= (emacsos-sms-chat--body-bytes body)
+                   (<= (emacsos-sms--body-bytes body)
                        emacsos-sms--max-body-bytes)
                    direction
                    (member state (if (eq direction 'incoming)
@@ -338,7 +334,7 @@
 (defun emacsos-sms-chat--total-body-bytes ()
   "Return exact body bytes retained by the global model."
   (cl-loop for record in emacsos-sms-chat--records
-           sum (emacsos-sms-chat--body-bytes
+           sum (emacsos-sms--body-bytes
                 (emacsos-sms-chat-record-body record))))
 
 (defun emacsos-sms-chat--over-budget-p ()
@@ -414,10 +410,10 @@ When QUIET is non-nil, leave rerendering to the caller."
       (let* ((record (pop records))
              (size
               (+ 5
-                 (emacsos-sms-chat--body-bytes
+                 (emacsos-sms--body-bytes
                   (emacsos-sms-chat--display-body
                    (emacsos-sms-chat-record-body record)))
-                 (emacsos-sms-chat--body-bytes
+                 (emacsos-sms--body-bytes
                   (emacsos-sms-chat--status-suffix record))
                  2)))
         (if (> (+ bytes size) emacsos-sms-chat--conversation-body-bytes)
@@ -1046,6 +1042,12 @@ Preserve records newer than CUTOFF when it is non-nil."
     (let ((job (or (seq-find (lambda (candidate)
                                (eq (emacsos-sms-chat-job-kind candidate) 'list))
                              emacsos-sms-chat--queue)
+                   (seq-find
+                    (lambda (candidate)
+                      (and emacsos-sms-chat--refresh
+                           (memq emacsos-sms-chat--refresh
+                                 (emacsos-sms-chat-job-refreshes candidate))))
+                    emacsos-sms-chat--queue)
                    (seq-find #'emacsos-sms-chat-job-live
                              emacsos-sms-chat--queue)
                    (car emacsos-sms-chat--queue))))

@@ -404,6 +404,25 @@
       (should (= (length emacsos-sms-chat--queue) 2))
       (should (= (hash-table-count emacsos-sms-chat--jobs) 6)))))
 
+(ert-deftest emacsos-sms-chat-scheduler-prioritizes-active-refresh-snapshots ()
+  "An explicit refresh gets the next free slot ahead of queued live traffic."
+  (test-sms-chat--with-state
+    (let* ((refresh (make-emacsos-sms-chat-refresh :id 1))
+           (live (make-emacsos-sms-chat-job :kind 'snapshot :live t))
+           (snapshot (make-emacsos-sms-chat-job
+                      :kind 'snapshot :refreshes (list refresh)))
+           (emacsos-sms-chat--refresh refresh)
+           (emacsos-sms-chat--max-processes 1)
+           (emacsos-sms-chat--queue (list live snapshot))
+           started)
+      (cl-letf (((symbol-function 'emacsos-sms-chat--start-job)
+                 (lambda (job)
+                   (setq started job
+                         emacsos-sms-chat--running 1))))
+        (emacsos-sms-chat--scheduler-pump)
+        (should (eq started snapshot))
+        (should (equal emacsos-sms-chat--queue (list live)))))))
+
 (ert-deftest emacsos-sms-chat-receiving-snapshot-retries-with-a-bound ()
   (test-sms-chat--with-state
     (let (scheduled)

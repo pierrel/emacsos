@@ -10,8 +10,8 @@
 (defcustom emacsos-use-internal-keyboard t
   "Whether EmacsOS renders its built-in text keyboard and utility row.
 Set this to nil on devices that provide a compositor-level keyboard.  Such
-devices have no ordinary control window; one appears temporarily only when a
-buffer supplies a safety-critical `emacsos--keyboard-plane'."
+devices have no ordinary control window; one appears temporarily when a buffer
+supplies a safety-critical `emacsos--keyboard-plane' or utility row."
   :type 'boolean
   :group 'emacsos)
 
@@ -196,7 +196,8 @@ guard is kept even though nothing can trip it now.")
 When the top buffer sets this to a function, `emacsos--render-page' paints a
 temporary `*keyboard*' control window with that function.  nil means the
 built-in keyboard and utility row when `emacsos-use-internal-keyboard' is
-non-nil, or no control window when an external keyboard supplies text entry.
+non-nil, or only a buffer-owned utility row when an external keyboard supplies
+text entry (with no control window when neither override is present).
 Call and outbound SMS confirmation buffers use temporary planes for local
 authorization controls; SMS conversations use a buffer-owned utility row.")
 
@@ -215,6 +216,9 @@ on every buffer change while a modifier is active because keymaps are local.")
 
 (defvar emacsos--last-utility-row 'unset
   "The top buffer utility-row renderer used by the last keyboard render.")
+
+(defvar emacsos--last-utility-row-buffer 'unset
+  "The top buffer whose utility row was used by the last keyboard render.")
 
 (defun emacsos--target ()
   "Return the editing window (not the keyboard).
@@ -357,9 +361,7 @@ whole point of capturing :window at arm time; honor it at fire time."
                     (call-interactively binding))
                 ;; Mirror emacsos--run-command's post-action refresh when an
                 ;; in-place command changes the buffer's special plane.
-                (unless (and (eq (emacsos--top-keyboard-plane) emacsos--last-plane)
-                             (eq (emacsos--top-keyboard-utility-row)
-                                 emacsos--last-utility-row))
+                (unless (emacsos--keyboard-render-current-p)
                   (emacsos--render-page))
                 (emacsos--refocus)))))))))
 
@@ -702,9 +704,7 @@ a no-op commit at its own top."
       (unwind-protect
           (with-selected-window w
             (call-interactively cmd))
-        (unless (and (eq (emacsos--top-keyboard-plane) emacsos--last-plane)
-                     (eq (emacsos--top-keyboard-utility-row)
-                         emacsos--last-utility-row))
+        (unless (emacsos--keyboard-render-current-p)
           (emacsos--render-page))
         (emacsos--refocus)))))
 
@@ -726,24 +726,35 @@ a no-op commit at its own top."
 (declare-function emacsos-sms-mode-line-string "phone-sms")
 (declare-function emacsos-sms-show-status "phone-sms")
 
+(defun emacsos--top-buffer ()
+  "Return the top editing buffer, or nil while the minibuffer is active."
+  (unless (active-minibuffer-window)
+    (let ((target (emacsos--target)))
+      (and target (window-buffer target)))))
+
 (defun emacsos--top-keyboard-plane ()
   "Return the TOP buffer's `emacsos--keyboard-plane' (a render fn), or nil.
 nil while the minibuffer is active — a prompt needs the real keyboard, not a
 buffer's control plane.  Otherwise reads the editing window's buffer."
-  (unless (active-minibuffer-window)
-    (let* ((target (emacsos--target))
-           (buf (and target (window-buffer target))))
-      (and (buffer-live-p buf)
-           (buffer-local-value 'emacsos--keyboard-plane buf)))))
+  (let ((buffer (emacsos--top-buffer)))
+    (and (buffer-live-p buffer)
+         (buffer-local-value 'emacsos--keyboard-plane buffer))))
 
 (defun emacsos--top-keyboard-utility-row ()
   "Return the top buffer's utility-row renderer, or nil.
 The minibuffer and a full keyboard plane always use their existing controls."
   (unless (or (active-minibuffer-window) (emacsos--top-keyboard-plane))
-    (let* ((target (emacsos--target))
-           (buf (and target (window-buffer target))))
-      (and (buffer-live-p buf)
-           (buffer-local-value 'emacsos--keyboard-utility-row buf)))))
+    (let ((buffer (emacsos--top-buffer)))
+      (and (buffer-live-p buffer)
+           (buffer-local-value 'emacsos--keyboard-utility-row buffer)))))
+
+(defun emacsos--keyboard-render-current-p ()
+  "Return non-nil when the rendered keyboard state matches the top buffer."
+  (let ((utility-row (emacsos--top-keyboard-utility-row)))
+    (and (eq (emacsos--top-keyboard-plane) emacsos--last-plane)
+         (eq utility-row emacsos--last-utility-row)
+         (or (null utility-row)
+             (eq (emacsos--top-buffer) emacsos--last-utility-row-buffer)))))
 
 (defun emacsos--on-window-buffer-change (_frame)
   "Re-render when the top buffer changes its keyboard plane or utility row.
@@ -752,9 +763,7 @@ buffer change because the filtered bindings depend on buffer-local keymaps.
 No-op while a render is in progress."
   (unless (or emacsos--in-render
               (and (null emacsos--modifier)
-                   (eq (emacsos--top-keyboard-plane) emacsos--last-plane)
-                   (eq (emacsos--top-keyboard-utility-row)
-                       emacsos--last-utility-row)))
+                   (emacsos--keyboard-render-current-p)))
     (emacsos--render-page)))
 
 ;;; Surface renderers
@@ -961,13 +970,15 @@ row; without either, delete the control window so content owns the whole area.
 Bind `emacsos--in-render' so window changes caused here cannot recurse."
   (let ((emacsos--in-render t)
         (plane (emacsos--top-keyboard-plane))
-        (utility-row (emacsos--top-keyboard-utility-row)))
+        (utility-row (emacsos--top-keyboard-utility-row))
+        (top-buffer (emacsos--top-buffer)))
     (if (and (not emacsos-use-internal-keyboard)
              (null plane) (null utility-row))
         (progn
           (emacsos--remove-control-window)
           (setq emacsos--last-plane nil
-                emacsos--last-utility-row nil))
+                emacsos--last-utility-row nil
+                emacsos--last-utility-row-buffer nil))
       (let* ((window (emacsos--ensure-control-window))
              (buffer (window-buffer window)))
         (with-current-buffer buffer
@@ -985,7 +996,9 @@ Bind `emacsos--in-render' so window changes caused here cannot recurse."
             ;; Record only after a successful render so a failed plane remains
             ;; eligible for the next explicit refresh.
             (setq emacsos--last-plane plane
-                  emacsos--last-utility-row utility-row))
+                  emacsos--last-utility-row utility-row
+                  emacsos--last-utility-row-buffer
+                  (and utility-row top-buffer)))
           (setq buffer-read-only t)
           (setq-local cursor-type nil)
           (setq-local mode-line-format nil)

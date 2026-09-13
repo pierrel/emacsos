@@ -258,6 +258,30 @@ cancels the confirm."
       (emacsos--on-window-buffer-change nil)
       (should rendered))))
 
+(ert-deftest test-os-follower-rerenders-utility-row-for-new-buffer ()
+  "The same renderer is repainted when its buffer-owned state changes source."
+  (let ((first (generate-new-buffer " *utility-first*"))
+        (second (generate-new-buffer " *utility-second*"))
+        (renderer #'ignore)
+        rendered)
+    (unwind-protect
+        (let ((emacsos--in-render nil)
+              (emacsos--last-plane nil)
+              (emacsos--last-utility-row renderer)
+              (emacsos--last-utility-row-buffer first))
+          (cl-letf (((symbol-function 'emacsos--render-page)
+                     (lambda () (setq rendered t)))
+                    ((symbol-function 'emacsos--top-keyboard-plane)
+                     (lambda () nil))
+                    ((symbol-function 'emacsos--top-keyboard-utility-row)
+                     (lambda () renderer))
+                    ((symbol-function 'emacsos--top-buffer)
+                     (lambda () second)))
+            (emacsos--on-window-buffer-change nil)
+            (should rendered)))
+      (kill-buffer first)
+      (kill-buffer second))))
+
 (ert-deftest test-os-follower-noop-during-render ()
   "Re-entry guard (the brick-insurance): the follower bails when a render
 is already in progress, even if the plane differs."
