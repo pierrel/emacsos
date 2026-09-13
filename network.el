@@ -25,6 +25,7 @@
 (declare-function emacsos--center "os")
 (declare-function emacsos--target "os")
 (defvar emacsos--btn-label-scale)  ; label font :height; owned by os.el (vpad gives the button its tap-target height separately)
+(defvar emacsos--btn-vpad)         ; vertical button padding; owned by os.el
 
 (defcustom emacsos-net-refresh-interval 30
   "Seconds between background network-status refreshes.
@@ -967,6 +968,8 @@ COMPLETION, when non-nil, receives (SUCCESS DETAIL) exactly once."
               (insert "\n")))))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
+      (kill-local-variable 'truncate-lines)
+      (kill-local-variable 'mode-line-format)
       (goto-char (point-min)))
     buf))
 
@@ -982,6 +985,13 @@ WIDTH defaults to the full bounded chooser row."
          (clipped (truncate-string-to-width label button-width nil nil "…")))
     (emacsos--btn (emacsos--center clipped button-width)
                   action argument emacsos--btn-label-scale)))
+
+(defun emacsos-net--phone-empty-line (&optional text)
+  "Insert a reserved phone chooser row containing optional TEXT."
+  (insert (propertize (or text " ")
+                      'line-height
+                      (+ (frame-char-height) (* 2 emacsos--btn-vpad)))
+          "\n"))
 
 (defun emacsos-net--page-count ()
   "Return the bounded chooser's nonzero page count."
@@ -1038,7 +1048,8 @@ WIDTH defaults to the full bounded chooser row."
         (dotimes (index emacsos-net--page-size)
           (let ((network (nth index visible)))
             (if (not network)
-                (insert (if (and (= index 0) (null networks)) "(none found)" ""))
+                (emacsos-net--phone-empty-line
+                 (and (= index 0) (null networks) "(none found)"))
               (let* ((ssid (plist-get network :ssid))
                      (signal (or (plist-get network :signal) "?"))
                      (kind (emacsos-net--connect-kind network))
@@ -1051,21 +1062,22 @@ WIDTH defaults to the full bounded chooser row."
                         (not (emacsos-net-state-saved-known state)))
                     (insert (truncate-string-to-width
                              label (emacsos-net--phone-line-width) nil nil "…"))
-                  (emacsos-net--phone-button label #'emacsos-net-connect ssid))))
-            (insert "\n")))
-        (when (> pages 1)
-          (let* ((previous (> emacsos-net--page 0))
-                 (next (< emacsos-net--page (1- pages)))
-                 (width (if (and previous next)
-                            (/ (1- (emacsos-net--phone-line-width)) 2)
-                          (emacsos-net--phone-line-width))))
-            (when previous
-              (emacsos-net--phone-button "Previous" #'emacsos-net--change-page -1 width))
-            (when (and previous next)
-              (insert " "))
-            (when next
-              (emacsos-net--phone-button "Next" #'emacsos-net--change-page 1 width))))
-        (insert "\n"))
+                  (emacsos-net--phone-button label #'emacsos-net-connect ssid)))
+              (insert "\n"))))
+        (if (> pages 1)
+            (let* ((previous (> emacsos-net--page 0))
+                   (next (< emacsos-net--page (1- pages)))
+                   (width (if (and previous next)
+                              (/ (1- (emacsos-net--phone-line-width)) 2)
+                            (emacsos-net--phone-line-width))))
+              (when previous
+                (emacsos-net--phone-button "Previous" #'emacsos-net--change-page -1 width))
+              (when (and previous next)
+                (insert " "))
+              (when next
+                (emacsos-net--phone-button "Next" #'emacsos-net--change-page 1 width))
+              (insert "\n"))
+          (emacsos-net--phone-empty-line)))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
       (setq-local truncate-lines t)

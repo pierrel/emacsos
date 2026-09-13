@@ -634,6 +634,35 @@
       (when (get-buffer emacsos-net--buffer-name)
         (kill-buffer emacsos-net--buffer-name)))))
 
+(ert-deftest test-net-phone-empty-rows-reserve-button-height ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :saved-known t :wifi-list nil))
+        (emacsos-net-return-function #'ignore)
+        (expected (+ (frame-char-height) (* 2 emacsos--btn-vpad))))
+    (unwind-protect
+        (with-current-buffer (emacsos-net--render)
+          (goto-char (point-min))
+          (forward-line 2)
+          (should (= (get-text-property (point) 'line-height) expected))
+          (forward-line 4)
+          (should (= (get-text-property (point) 'line-height) expected)))
+      (when (get-buffer emacsos-net--buffer-name)
+        (kill-buffer emacsos-net--buffer-name)))))
+
+(ert-deftest test-net-full-render-clears-phone-buffer-locals ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :saved-known t :wifi-list nil))
+        (emacsos-net-return-function #'ignore))
+    (unwind-protect
+        (progn
+          (emacsos-net--render)
+          (setq emacsos-net-return-function nil)
+          (with-current-buffer (emacsos-net--render)
+            (should-not (local-variable-p 'truncate-lines))
+            (should-not (local-variable-p 'mode-line-format))))
+      (when (get-buffer emacsos-net--buffer-name)
+        (kill-buffer emacsos-net--buffer-name)))))
+
 (ert-deftest test-net-explicit-wifi-setter-owns-pending-state ()
   (let ((emacsos-net--state (make-emacsos-net-state :valid t :wifi-on nil))
         (emacsos-net--wifi-operation nil)
