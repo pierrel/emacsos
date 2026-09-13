@@ -739,6 +739,17 @@ install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
 install -o root -g root -m 0755 /bin/true /usr/local/bin/wvkbd-emacos
 install -o root -g root -m 0644 /dev/null \
     /usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+mv /usr/local/share/licenses/wvkbd-emacos \
+    /tmp/wvkbd-emacos-notice-directory
+ln -s /usr/local/share/licenses/wvkbd-emacsos \
+    /usr/local/share/licenses/wvkbd-emacos
+apk_lines_before=$(wc -l </tmp/apk-log)
+assert_preflight_rejection legacy-notice-directory-symlink
+[ "$(wc -l </tmp/apk-log)" -eq "$apk_lines_before" ]
+[ -f /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ]
+rm -f /usr/local/share/licenses/wvkbd-emacos
+mv /tmp/wvkbd-emacos-notice-directory \
+    /usr/local/share/licenses/wvkbd-emacos
 rm -f /usr/local/bin/wvkbd-emacos
 ln -s /bin/true /usr/local/bin/wvkbd-emacos
 assert_preflight_rejection legacy-keyboard-symlink
