@@ -580,6 +580,78 @@
       (when (get-buffer emacsos-net--buffer-name)
         (kill-buffer emacsos-net--buffer-name)))))
 
+(ert-deftest test-net-phone-render-is-bounded-and-paginated ()
+  (let* ((networks
+          (cl-loop for index from 1 to 6
+                   collect (list :ssid (format "Network-%s-with-a-long-name" index)
+                                 :signal 50 :security "" :saved-uuid nil)))
+         (emacsos-net--state
+          (make-emacsos-net-state :valid t :wifi-on t :saved-known t
+                                  :wifi-list networks))
+         (emacsos-net-return-function #'ignore)
+         (emacsos-net--page 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer (emacsos-net--render)
+            (let ((text (buffer-string)))
+              (should (= (line-number-at-pos (point-max)) 8))
+              (should truncate-lines)
+              (should-not mode-line-format)
+              (should (string-match-p "Done" text))
+              (should (string-match-p "Network-4" text))
+              (should-not (string-match-p "Network-5" text))
+              (should (string-match-p "Next" text))))
+          (emacsos-net--change-page 1)
+          (with-current-buffer emacsos-net--buffer-name
+            (let ((text (buffer-string)))
+              (should (string-match-p "Network-5" text))
+              (should (string-match-p "Previous" text))
+              (should-not (string-match-p "Next" text)))))
+      (when (get-buffer emacsos-net--buffer-name)
+        (kill-buffer emacsos-net--buffer-name)))))
+
+(ert-deftest test-net-phone-done-returns-once ()
+  (let ((emacsos-net-return-function nil)
+        (emacsos-net--page 1)
+        (returns 0))
+    (setq emacsos-net-return-function (lambda () (cl-incf returns)))
+    (emacsos-net-done)
+    (emacsos-net-done)
+    (should (= returns 1))
+    (should-not emacsos-net-return-function)
+    (should (= emacsos-net--page 0))))
+
+(ert-deftest test-net-phone-render-hides-stale-networks-when-invalid ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state
+          :valid nil :error "reader failed" :saved-known t
+          :wifi-list '((:ssid "StaleNet" :signal 50 :security ""))))
+        (emacsos-net-return-function #'ignore))
+    (unwind-protect
+        (with-current-buffer (emacsos-net--render)
+          (should (string-match-p "Networks unavailable" (buffer-string)))
+          (should-not (string-match-p "StaleNet" (buffer-string))))
+      (when (get-buffer emacsos-net--buffer-name)
+        (kill-buffer emacsos-net--buffer-name)))))
+
+(ert-deftest test-net-explicit-wifi-setter-owns-pending-state ()
+  (let ((emacsos-net--state (make-emacsos-net-state :valid t :wifi-on nil))
+        (emacsos-net--wifi-operation nil)
+        action-args action-completion)
+    (cl-letf (((symbol-function 'emacsos-net--action)
+               (lambda (args completion)
+                 (setq action-args args action-completion completion)
+                 t))
+              ((symbol-function 'emacsos-net--notify-state-change) #'ignore))
+      (should (equal (emacsos-net-set-wifi t) "pending: Wi-Fi turning on"))
+      (should (equal action-args '("radio" "wifi" "on")))
+      (should (eq (emacsos-net-state-wifi-pending emacsos-net--state) 'on))
+      (should (string-prefix-p "error:" (emacsos-net-set-wifi nil)))
+      (funcall action-completion t "enabled")
+      (should (eq (emacsos-net-state-wifi-on emacsos-net--state) t))
+      (should-not (emacsos-net-state-wifi-pending emacsos-net--state))
+      (should-not emacsos-net--wifi-operation))))
+
 ;;; Single-flight refresh guard
 
 (ert-deftest test-net-refresh-noop-when-reader-live ()

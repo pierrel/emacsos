@@ -1,0 +1,37 @@
+#+title: Phone control panel and Wi-Fi integration amendment
+#+date: 2026-09-13
+
+* Lineage
+
+This amendment affects [[file:2026-09-12-phone-control-panel.org][the control-panel design]] and
+[[file:2026-09-12-wifi-network-access.org][the Wi-Fi network-access design]].  Their accepted implementations overlapped
+in the network modeline entry, network state, and PinePhone deployment payload.
+This generation composes those exact candidates rather than changing either
+historical record.
+
+* Integrated behavior
+
+The cumulative phone generation retains its established modeline priority:
+=EmacsOS=, Threads, transient call, transient SMS, then the primary platform
+entry.  On PinePhone/OpenRC that final entry is =Controls=; on a generic system
+it remains the network status entry.  This intentionally supersedes the earlier
+control-only example that placed Controls immediately after =EmacsOS=.
+
+The Controls Wi-Fi row now owns explicit on and off setters and a =Networks=
+action.  Networks opens the Wi-Fi owner's chooser with Controls as an explicit
+return command.  The chooser renders one title line, one full-width =Done= row,
+at most four clipped SSID rows, and one full-width or split Previous/Next row.
+Done returns to the already-active Controls buffer without replacing Controls'
+saved parent.  Controls Done then restores that original content buffer.
+
+The Wi-Fi setter and cellular setter retain independent operation identities in
+the shared cached network state.  Reader refreshes preserve both pending/error
+pairs, so an unrelated status snapshot cannot erase an in-flight control.
+
+* Acceptance
+
+ERT pins the explicit Wi-Fi setter ownership, bounded pagination, one-shot
+return callback, seven-line chooser geometry, Controls action wiring, and the
+unchanged Controls parent.  The existing Wi-Fi credential, network parser,
+control-panel, SMS, thread navigation, keyboard, and OpenRC transaction suites
+remain the regression boundary for the combined generation.

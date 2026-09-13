@@ -772,17 +772,32 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
   "Turn cellular data off from the Controls row."
   (emacsos-net-set-cell nil))
 
+(defun emacsos-pinephone-controls--wifi-off ()
+  "Turn Wi-Fi off from the Controls row."
+  (emacsos-net-set-wifi nil))
+
+(defun emacsos-pinephone-controls-networks ()
+  "Open the bounded network chooser and return its Done action to Controls."
+  (interactive)
+  (emacsos-net-show #'emacsos-controls-show))
+
 (defun emacsos-pinephone-controls--status (row)
   "Return display status for Controls ROW."
   (let ((operation emacsos-pinephone-controls-device-operation))
     (pcase row
       ('wifi
        (cond
+        ((eq (emacsos-net-state-wifi-pending emacsos-net--state) 'on)
+         "Turning on...")
+        ((eq (emacsos-net-state-wifi-pending emacsos-net--state) 'off)
+         "Turning off...")
         ((not (emacsos-net-state-valid emacsos-net--state))
          (if (emacsos-net-state-error emacsos-net--state)
              (emacsos-pinephone-controls--unavailable
               (emacsos-net-state-error emacsos-net--state))
            "Checking..."))
+        ((emacsos-net-state-wifi-error emacsos-net--state)
+         (emacsos-net-state-wifi-error emacsos-net--state))
         ((not (eq (emacsos-net-state-wifi-on emacsos-net--state) t)) "off")
         (t (or (emacsos-net-state-ssid emacsos-net--state) "on"))))
       ('cell
@@ -882,8 +897,19 @@ RESERVED-ACTIONS keeps the status width stable when some actions are absent."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert "Controls\n")
-        (emacsos-pinephone-controls--insert-row
-         "WiFi" (emacsos-pinephone-controls--status 'wifi) nil 2)
+        (let ((wifi-actions
+               (cond
+                ((emacsos-net-state-wifi-pending emacsos-net--state) nil)
+                ((and (not (emacsos-net-state-valid emacsos-net--state))
+                      (emacsos-net-state-error emacsos-net--state))
+                 '(("Retry" emacsos-net--retry nil)))
+                ((not (emacsos-net-state-valid emacsos-net--state)) nil)
+                ((eq (emacsos-net-state-wifi-on emacsos-net--state) t)
+                 '(("Off" emacsos-pinephone-controls--wifi-off nil)
+                   ("Networks" emacsos-pinephone-controls-networks nil)))
+                (t '(("On" emacsos-net-set-wifi t))))))
+          (emacsos-pinephone-controls--insert-row
+           "WiFi" (emacsos-pinephone-controls--status 'wifi) wifi-actions 2))
         (let ((cell-actions
                (cond
                 ((emacsos-net-state-cell-pending emacsos-net--state) nil)

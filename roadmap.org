@@ -422,17 +422,14 @@ These add EmacsOS's device-side system-integration layer.  The EmacsOS way is
 Elisp wrapping system CLIs asynchronously, surfaced as dedicated buffers and
 ordinary interactive commands.  Numbers and symbols are shipped.  The current
 network page reads WiFi and modem state through NetworkManager and ModemManager;
-the remaining WiFi work is protected credential entry and its public control
-interface.
+protected credential entry and the bounded Controls handoff are shipped.
 
-** PARTIAL Wifi connection flow
+** DONE Wifi connection flow
 The =*network*= buffer lists SSIDs with signal and security, shows the active
-connection, and can connect saved or open networks asynchronously through
-=nmcli=.  A new secured network reports that credential entry is not yet
-available instead of exposing a password in process arguments.  The
-=wifi-network-access= effort owns protected credential entry, explicit public
-WiFi setters, and the bounded Controls chooser/result flow.  Done when you can
-join a secured network from cold, entirely on-device.
+connection, and connects saved, open, or newly secured networks asynchronously.
+Credentials stay out of argv and cross the privilege boundary through bounded
+stdin.  The PinePhone Controls row supplies explicit radio setters and opens a
+fixed four-network chooser whose Done action returns to Controls.
 
 ** DONE Numbers + symbols on the keyboard
 The CAPS button now cycles through =abc=, =ABC=, =123=, and =#+== layers.  Digits,
@@ -504,9 +501,8 @@ everything else from the modeline.
 position, minor modes, encoding) stripped.  On the PinePhone, that network
 entry and the adjacent keyboard entry are now replaced by one enlarged
 =Controls= entry.  It opens the phone-sized surface for modem data, brightness,
-flashlight, and keyboard recovery; Wi-Fi chooser integration is pending the
-separate =wifi-network-access= effort;
-call and SMS badges remain independent.  *REMAINING:* time + date
+flashlight, keyboard recovery, and the bounded Wi-Fi chooser; call and SMS
+badges remain independent.  *REMAINING:* time + date
 (=display-time-mode=), battery % (=display-battery-mode= reads
 =/sys/class/power_supply/=), and any residual clutter — append into the same list.
 

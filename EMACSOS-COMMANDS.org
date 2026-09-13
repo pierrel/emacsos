@@ -104,6 +104,7 @@ opens the exact row at point.
 | Set flashlight on or off | =(emacsos-controls-set-flashlight 'on)= or =(emacsos-controls-set-flashlight 'off)= |
 | Open network controls | =emacsos-net-show= |
 | Connect to a visible Wi-Fi network | =emacsos-net-connect= |
+| Set Wi-Fi explicitly | =(emacsos-net-set-wifi t)= or =(emacsos-net-set-wifi nil)= |
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
 | Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |

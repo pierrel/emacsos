@@ -293,6 +293,28 @@
       (when (get-buffer emacsos-pinephone-controls-buffer-name)
         (kill-buffer emacsos-pinephone-controls-buffer-name)))))
 
+(ert-deftest emacsos-openrc-controls-wifi-actions-compose-with-chooser ()
+  (let ((emacsos-net--state
+         (make-emacsos-net-state :valid t :wifi-on t :ssid "HomeNet"))
+        (emacsos-pinephone-controls-brightness 50)
+        (emacsos-pinephone-controls-flashlight 'off)
+        (emacsos-pinephone-controls-device-operation nil)
+        (emacsos-pinephone-controls-device-error nil)
+        return-function)
+    (unwind-protect
+        (progn
+          (with-current-buffer (emacsos-pinephone-controls--render)
+            (let ((text (buffer-string)))
+              (should (string-match-p "Off" text))
+              (should (string-match-p "Networks" text))))
+          (cl-letf (((symbol-function 'emacsos-net-show)
+                     (lambda (&optional return)
+                       (setq return-function return))))
+            (emacsos-pinephone-controls-networks))
+          (should (eq return-function #'emacsos-controls-show)))
+      (when (get-buffer emacsos-pinephone-controls-buffer-name)
+        (kill-buffer emacsos-pinephone-controls-buffer-name)))))
+
 (ert-deftest emacsos-openrc-controls-statuses-distinguish-unavailable ()
   (let ((emacsos-net--state
          (make-emacsos-net-state :valid nil :error "reader failed"))
