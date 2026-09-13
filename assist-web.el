@@ -2440,7 +2440,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
          nil t)))))
 
 (defun emacsos-assist-web--new-thread-from-catalog (catalog)
-  "Open the existing new-thread draft, or choose its workspace from CATALOG."
+  "Open the existing draft, or choose from CATALOG and revalidate current IDs."
   (if-let ((existing (get-buffer "*assist New thread*")))
       (switch-to-buffer existing)
     (let ((repositories (alist-get 'repositories catalog))
@@ -2513,6 +2513,12 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
    ((and (alist-get 'repositories emacsos-assist-web--catalog)
          (alist-get 'harnesses emacsos-assist-web--catalog))
     (emacsos-assist-web-refresh-threads)
+    ;; A request setup error can fail synchronously and clear the intent before
+    ;; the still-usable cached chooser opens.  A synchronous success either
+    ;; opened it already or confirmed that no current choices remain.
+    (when (and (not emacsos-assist-web--new-thread-pending-p)
+               (eq emacsos-assist-web--catalog-state 'refresh-failed))
+      (setq emacsos-assist-web--new-thread-pending-p t))
     (emacsos-assist-web--open-pending-new-thread))
    ((and emacsos-assist-web--catalog
          (not (memq emacsos-assist-web--catalog-state

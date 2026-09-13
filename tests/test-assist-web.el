@@ -1436,6 +1436,32 @@
       (emacsos-assist-web-new-thread))
     (should (equal (nreverse calls) '(refresh chooser)))))
 
+(ert-deftest test-assist-web-synchronous-refresh-failure-still-opens-cached-chooser ()
+  (let* ((catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog catalog)
+         (emacsos-assist-web--catalog-state 'cached)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p nil))
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (_method _path _payload callback &rest _)
+                 (funcall callback nil "missing token")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt choices &rest _) (car choices)))
+              ((symbol-function 'emacsos-assist-web--read-cache) #'ignore)
+              ((symbol-function 'switch-to-buffer) #'ignore))
+      (unwind-protect
+          (progn
+            (emacsos-assist-web-new-thread)
+            (with-current-buffer "*assist New thread*"
+              (should (equal emacsos-assist-web--draft-repository "repo"))
+              (should (equal emacsos-assist-web--draft-harness "deepagents")))
+            (should-not emacsos-assist-web--new-thread-pending-p))
+        (when (get-buffer "*assist New thread*")
+          (kill-buffer "*assist New thread*"))))))
+
 (ert-deftest test-assist-web-catalog-consumers-coalesce-one-refresh ()
   (let ((emacsos-assist-web--catalog nil)
         (emacsos-assist-web--catalog-state nil)
