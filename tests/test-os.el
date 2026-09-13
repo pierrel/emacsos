@@ -45,6 +45,7 @@
                      ("C-c e f" . emacsos-assist-new-file)
                      ("C-c e d" . emacsos-call)
                      ("C-c e m" . emacsos-send-message)
+                     ("C-c e s" . emacsos-sms-chat-catalog)
                      ("C-c e w" . emacsos-net-show)
                      ("C-c e h" . emacsos-open-command-reference)
                      ("C-c C-a n" . emacsos-command-new-thread)

@@ -57,6 +57,7 @@ for canonical thread navigation.
 | =C-c e f= | New .assist file |
 | =C-c e d= | Stage call |
 | =C-c e m= | Stage SMS |
+| =C-c e s= | Open SMS conversations |
 | =C-c e w= | Network controls |
 | =C-c e h= | This command reference |
 

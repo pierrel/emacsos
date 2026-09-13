@@ -556,37 +556,8 @@ When QUIET is non-nil, leave rerendering to the caller."
               (emacsos-sms-chat--rerender-all))
             result))))))
 
-(defun emacsos-sms-chat--utility-row ()
-  "Render QUIT, Refresh, and Send or ACK for an SMS conversation."
-  (let* ((target (and (fboundp 'emacsos--target) (emacsos--target)))
-         (target-buffer (and target (window-buffer target)))
-         (ack (and (buffer-live-p target-buffer)
-                   (with-current-buffer target-buffer
-                     (and (derived-mode-p 'emacsos-sms-chat-mode)
-                          (emacsos-sms-chat--unknown-record)))))
-         (window (get-buffer-window (current-buffer)))
-         (width (if window (window-body-width window) 20))
-         (unit (emacsos--unit-width width emacsos--btn-gap 3 2)))
-    (emacsos--btn (emacsos--center "QUIT" unit)
-                 #'emacsos--tap-quit nil emacsos--btn-label-scale)
-    (insert " ")
-    (put-text-property (1- (point)) (point) 'display
-                       `(space :width ,emacsos--btn-gap))
-    (emacsos--btn (emacsos--center "Refresh" unit)
-                 #'emacsos--run-command #'emacsos-sms-chat-refresh
-                 emacsos--btn-label-scale)
-    (insert " ")
-    (put-text-property (1- (point)) (point) 'display
-                       `(space :width ,emacsos--btn-gap))
-    (emacsos--btn (emacsos--center (if ack "ACK" "Send") unit)
-                 #'emacsos--run-command
-                 (if ack #'emacsos-sms-chat-acknowledge
-                   #'emacsos-sms-chat-send)
-                 emacsos--btn-label-scale "dodger blue")
-    (insert "\n")))
-
-(defun emacsos-sms-chat--catalog-utility-row ()
-  "Render QUIT, Refresh, and New for the SMS catalog."
+(defun emacsos-sms-chat--render-utility-row (final-label final-command)
+  "Render QUIT, Refresh, and FINAL-LABEL invoking FINAL-COMMAND."
   (let* ((window (get-buffer-window (current-buffer)))
          (width (if window (window-body-width window) 20))
          (unit (emacsos--unit-width width emacsos--btn-gap 3 2)))
@@ -601,10 +572,26 @@ When QUIET is non-nil, leave rerendering to the caller."
     (insert " ")
     (put-text-property (1- (point)) (point) 'display
                        `(space :width ,emacsos--btn-gap))
-    (emacsos--btn (emacsos--center "New" unit)
-                 #'emacsos--run-command #'emacsos-sms-chat-open
+    (emacsos--btn (emacsos--center final-label unit)
+                 #'emacsos--run-command final-command
                  emacsos--btn-label-scale "dodger blue")
     (insert "\n")))
+
+(defun emacsos-sms-chat--utility-row ()
+  "Render QUIT, Refresh, and Send or ACK for an SMS conversation."
+  (let* ((target (and (fboundp 'emacsos--target) (emacsos--target)))
+         (target-buffer (and target (window-buffer target)))
+         (ack (and (buffer-live-p target-buffer)
+                   (with-current-buffer target-buffer
+                     (and (derived-mode-p 'emacsos-sms-chat-mode)
+                          (emacsos-sms-chat--unknown-record))))))
+    (emacsos-sms-chat--render-utility-row
+     (if ack "ACK" "Send")
+     (if ack #'emacsos-sms-chat-acknowledge #'emacsos-sms-chat-send))))
+
+(defun emacsos-sms-chat--catalog-utility-row ()
+  "Render QUIT, Refresh, and New for the SMS catalog."
+  (emacsos-sms-chat--render-utility-row "New" #'emacsos-sms-chat-open))
 
 (define-derived-mode emacsos-sms-chat-mode fundamental-mode "SMS"
   "Major mode for one native SMS conversation."

@@ -55,6 +55,7 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
     (define-key map (kbd "f") #'emacsos-assist-new-file)
     (define-key map (kbd "d") #'emacsos-call)
     (define-key map (kbd "m") #'emacsos-send-message)
+    (define-key map (kbd "s") #'emacsos-sms-chat-catalog)
     (define-key map (kbd "w") #'emacsos-net-show)
     (define-key map (kbd "h") #'emacsos-open-command-reference)
     map)
@@ -725,6 +726,7 @@ a no-op commit at its own top."
 (declare-function emacsos-send-message "phone-sms")
 (declare-function emacsos-sms-mode-line-string "phone-sms")
 (declare-function emacsos-sms-show-status "phone-sms")
+(declare-function emacsos-sms-chat-catalog "phone-sms-chat")
 
 (defun emacsos--top-buffer ()
   "Return the top editing buffer, or nil while the minibuffer is active."

@@ -497,12 +497,12 @@ voice-assistant watcher/bridge; SMS forwarding remains separate and unchanged.
 Confirmed outbound SMS is shipped: a user or local chat agent stages an exact
 recipient and body, the phone shows the proposal, and two physical taps send it
 through a bounded ModemManager D-Bus helper.  The helper reports sent, not-sent,
-or unknown without leaking message content.  It deliberately does not add a
-conversation UI, inbound SMS, or automatic retry.
+or unknown without leaking message content.  This change adds bounded native
+per-number conversations, trusted watcher-backed inbound delivery, and bounded
+history refresh while retaining the local two-tap send authorization.
 
-Remaining: receive SMS through the shared modem-watcher, persistent per-contact
-conversation buffers, and agent-assisted handling of those threads.  Raw AT/PDU
-work is not required for the shipped outbound path.
+Remaining: agent-assisted handling of SMS threads.  Automatic retry remains
+deliberately absent, and raw AT/PDU work is not required for this path.
 
 ** TODO Modeline status bar (time / date / battery / signal)
 Display things like the date, time and battery percentage. Consider removing most of
