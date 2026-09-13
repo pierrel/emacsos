@@ -1355,7 +1355,8 @@
           (progn
             (emacsos-assist-web-show-thread-list)
             (with-current-buffer "*assist Threads*"
-              (should (string-match-p "No Assist threads yet" (buffer-string)))))
+              (should (string-match-p "No Assist threads yet" (buffer-string)))
+              (should (string-match-p "C-c e n" (buffer-string)))))
         (when (get-buffer "*assist Threads*") (kill-buffer "*assist Threads*"))))))
 
 (ert-deftest test-assist-web-loaded-catalog-without-repository-does-not-prompt ()

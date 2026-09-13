@@ -1807,7 +1807,7 @@ suppressing a genuine repeated submission."
           (if-let ((records (emacsos-assist-web--list-records width)))
               (dolist (record records)
                 (emacsos-assist-web--insert-thread-row record))
-            (insert "No Assist threads yet. Use C-c C-a n to create one.\n"))))
+            (insert "No Assist threads yet. Use C-c e n to create one.\n"))))
         (goto-char
          (or (and selected
                   (emacsos-assist-web--thread-row-position selected))
