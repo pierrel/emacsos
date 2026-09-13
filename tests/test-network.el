@@ -130,6 +130,9 @@
              "read_command nmcli -t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY" script))
     (should (string-match-p
              "read_command mmcli -m any --output-keyvalue" script))
+    (should (string-match-p "reader_dir=\\$2" script))
+    (should (string-match-p ": >\\\"\\$reader_file\\\"" script))
+    (should-not (string-match-p "reader_file=\\$(mktemp)" script))
     (should (string-match-p "@@SAVED-FAILED" script))
     (should-not (string-match-p "ip -o -4" script))))
 
@@ -168,6 +171,20 @@
     (should (emacsos-net-state-saved-known st))
     (should-not (plist-get network :saved-uuid))
     (should (eq (emacsos-net--connect-kind network) 'needs-password))))
+
+(ert-deftest test-net-duplicate-visible-ssid-collapses-and-conflict-fails-closed ()
+  (let* ((st (emacsos-net--parse
+              (concat "@@RADIO\nenabled\n@@ROUTE\n@@CONS\n:\n"
+                      "@@SAVED\n@@SAVED-OK\nyes\n@@WIFI\n"
+                      "no:43616665:40:WPA2\n"
+                      "no:43616665:80:--\n@@CELL\n@@END\n")))
+         (networks (emacsos-net-state-wifi-list st))
+         (network (car networks)))
+    (should (= (length networks) 1))
+    (should (equal (plist-get network :ssid) "Cafe"))
+    (should (= (plist-get network :signal) 80))
+    (should (eq (emacsos-net--connect-kind network)
+                'unsupported-security))))
 
 (ert-deftest test-net-parse-cell-active ()
   (let ((st (emacsos-net--parse test-net--blob-cell)))
@@ -315,21 +332,26 @@
 
 (ert-deftest test-net-reader-has-whole-process-timeout ()
   (let ((emacsos-net--proc nil)
-        command buffer)
+        command buffer reader-directory)
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
                  (setq command (plist-get args :command)
                        buffer (plist-get args :buffer))
                  'reader))
+              ((symbol-function 'process-put) #'ignore)
               ((symbol-function 'emacsos-net--render-if-shown) #'ignore))
       (unwind-protect
           (progn
             (emacsos-net--refresh)
+            (setq reader-directory (car (last command)))
             (should (equal (seq-take command 7)
                            '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "8" "sh")))
-            (should (equal (last command 2)
-                           '("emacsos-net-read" "emacsos-cellular"))))
-        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+            (should (equal (seq-take (last command 3) 2)
+                           '("emacsos-net-read" "emacsos-cellular")))
+            (should (file-directory-p reader-directory)))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (when (and reader-directory (file-exists-p reader-directory))
+          (delete-directory reader-directory t))))))
 
 (ert-deftest test-net-post-action-refresh-discards-pre-action-reader ()
   (let ((emacsos-net--proc 'old-reader)
@@ -501,6 +523,7 @@
 
 (ert-deftest test-net-discard-reaps-real-reader-descendant ()
   (let* ((directory (make-temp-file "test-net-reader-" t))
+         (reader-directory (make-temp-file "test-net-reader-tmp-" t))
          (nmcli (expand-file-name "nmcli" directory))
          (pid-file (expand-file-name "child.pid" directory))
          (process-environment
@@ -521,8 +544,11 @@
                  :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "8"
                                 "sh" "-c"
                                 (emacsos-net--reader-script)
-                                "emacsos-net-read" emacsos-net-cell-connection)
+                                "emacsos-net-read" emacsos-net-cell-connection
+                                reader-directory)
                  :noquery t))
+          (process-put emacsos-net--proc 'emacsos-net-temp-directory
+                       reader-directory)
           (let ((deadline (+ (float-time) 2)))
             (while (and (not (file-exists-p pid-file))
                         (< (float-time) deadline))
@@ -539,9 +565,12 @@
             (while (and (process-attributes child-pid)
                         (< (float-time) deadline))
               (sleep-for 0.05)))
-          (should-not (process-attributes child-pid)))
+          (should-not (process-attributes child-pid))
+          (should-not (file-exists-p reader-directory)))
       (when emacsos-net--proc (emacsos-net--discard-reader))
       (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (file-exists-p reader-directory)
+        (delete-directory reader-directory t))
       (delete-directory directory t))))
 
 (ert-deftest test-net-obsolete-reader-sentinel-keeps-replacement-guard ()
@@ -555,14 +584,18 @@
   (let* ((old-state (make-emacsos-net-state :active-iface 'wifi :ssid "Old"))
          (emacsos-net--state old-state)
          (emacsos-net--proc 'reader)
-         (buffer (generate-new-buffer " *test-net-failed-read*")))
+         (buffer (generate-new-buffer " *test-net-failed-read*"))
+         (renders 0))
     (with-current-buffer buffer (insert test-net--blob-none))
     (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
               ((symbol-function 'process-exit-status) (lambda (_) 124))
-              ((symbol-function 'process-buffer) (lambda (_) buffer)))
+              ((symbol-function 'process-buffer) (lambda (_) buffer))
+              ((symbol-function 'emacsos-net--render-if-shown)
+               (lambda () (cl-incf renders))))
       (emacsos-net--reader-sentinel 'reader "finished")
       (should-not emacsos-net--proc)
       (should (eq emacsos-net--state old-state))
+      (should (= renders 1))
       (should-not (buffer-live-p buffer)))))
 
 (ert-deftest test-net-action-translator-failure-does-not-leak-buffer ()

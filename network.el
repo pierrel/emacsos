@@ -76,7 +76,7 @@ token requires no completion.  PASSWORD is non-nil only for secured networks."
   (active-iface 'none)      ; 'wifi | 'cell | 'none — what carries the default route
   ssid                      ; current wifi SSID string, or nil
   signal                    ; 0-100 signal of the active iface, or nil
-  (wifi-list nil)           ; plists (:ssid :signal :security :in-use :saved-uuid)
+  (wifi-list nil)           ; one plist per SSID (:signal :security :in-use :saved-uuid)
   (saved-known nil)         ; t only after a complete saved-profile enumeration
   (cell-provisioned nil)    ; t once the named GSM connection exists
   (cell-on nil)             ; t while that NetworkManager profile is active
@@ -90,6 +90,15 @@ token requires no completion.  PASSWORD is non-nil only for secured networks."
   "Live status-reader process, or nil.  Single-flight guard: a refresh
 no-ops while this is live, so concurrent reads cannot stack on the phone.")
 
+(defun emacsos-net--cleanup-reader-temp (proc)
+  "Remove the private temporary directory owned by reader PROC."
+  (let ((directory (ignore-errors
+                     (process-get proc 'emacsos-net-temp-directory))))
+    (when (stringp directory)
+      (ignore-errors (delete-directory directory t))
+      (ignore-errors
+        (process-put proc 'emacsos-net-temp-directory nil)))))
+
 (defun emacsos-net--ensure-state-shape ()
   "Reset cached network state when hot reload changes its struct layout."
   (unless (condition-case nil
@@ -98,7 +107,7 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
     (setq emacsos-net--state (make-emacsos-net-state))))
 
 (defun emacsos-net--discard-reader ()
-  "Discard an in-flight status read and its output buffer."
+  "Discard an in-flight status read, output buffer, and private temp data."
   (when emacsos-net--proc
     (let ((proc emacsos-net--proc))
       (setq emacsos-net--proc nil)
@@ -109,6 +118,7 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
             (ignore-errors (signal-process (- pid) 'SIGKILL))))
         (when (process-live-p proc)
           (delete-process proc)))
+      (emacsos-net--cleanup-reader-temp proc)
       (when (buffer-live-p (process-buffer proc))
         (kill-buffer (process-buffer proc))))))
 
@@ -192,9 +202,39 @@ with \"@@<NAME>\" marker lines between each command's output."
                              records)))
     (and (= (length matches) 1) (cdar matches))))
 
+(defun emacsos-net--coalesce-visible-network (current candidate)
+  "Merge same-SSID CURRENT and CANDIDATE scan records deterministically.
+Prefer the active record, then the stronger signal.  Conflicting security
+modes fail closed as unsupported unless a saved UUID supplies the target."
+  (let* ((current-security (or (plist-get current :security) ""))
+         (candidate-security (or (plist-get candidate :security) ""))
+         (same-security
+          (or (equal current-security candidate-security)
+              (and (member current-security '("" "--"))
+                   (member candidate-security '("" "--")))))
+         (preferred
+          (cond
+           ((plist-get candidate :in-use) candidate)
+           ((plist-get current :in-use) current)
+           ((> (or (plist-get candidate :signal) 0)
+               (or (plist-get current :signal) 0))
+            candidate)
+           (t current)))
+         (merged (copy-sequence preferred)))
+    (setf (plist-get merged :in-use)
+          (or (plist-get current :in-use) (plist-get candidate :in-use))
+          (plist-get merged :saved-uuid)
+          (or (plist-get current :saved-uuid)
+              (plist-get candidate :saved-uuid)))
+    (unless same-security
+      (setf (plist-get merged :security) "ambiguous"))
+    merged))
+
 (defun emacsos-net--parse (blob)
   "Parse the reader's delimited BLOB into a fresh `emacsos-net-state'.
-Robust to missing/empty sections (no modem, no service, wifi off)."
+Robust to missing/empty sections (no modem, no service, wifi off).  Duplicate
+scan records collapse by SSID; conflicting security modes fail closed unless a
+saved UUID supplies the connection target."
   (let* ((radio (car (emacsos-net--section blob "RADIO")))
          (rfields (and radio (emacsos-net--split-terse radio)))
          (wifi-on (cond ((null rfields) 'unknown)
@@ -243,10 +283,20 @@ Robust to missing/empty sections (no modem, no service, wifi off)."
                (sec (or (nth 3 f) "")))
           (when (and (= (length f) 4) ssid)
             (when in-use (setq cur-ssid ssid cur-signal sig))
-            (push (list :ssid ssid :signal sig :security sec
-                        :in-use in-use
-                        :saved-uuid (emacsos-net--unique-saved-uuid ssid saved))
-                  wifi-list))))
+            (let* ((candidate
+                    (list :ssid ssid :signal sig :security sec
+                          :in-use in-use
+                          :saved-uuid
+                          (emacsos-net--unique-saved-uuid ssid saved)))
+                   (current
+                    (seq-find (lambda (item)
+                                (string= (plist-get item :ssid) ssid))
+                              wifi-list)))
+              (if current
+                  (setcar (memq current wifi-list)
+                          (emacsos-net--coalesce-visible-network
+                           current candidate))
+                (push candidate wifi-list))))))
       ;; cell registration/signal from mmcli key=value
       (let (cell-state cell-signal)
         (dolist (l (emacsos-net--section blob "CELL"))
@@ -319,14 +369,15 @@ WPA-Personal), or `unsupported-security' (for example 802.1X)."
   "Shell script gathering every read into one delimited blob.
 One Emacs process and sentinel own the reader.  Its TERM trap kills and reaps
 the active system tool, so the outer deadline cannot leave a child behind.
+Emacs owns and removes the private temp directory even after a forced kill.
 SSID bytes are hex-encoded before entering the line protocol."
   (concat
-   "child=; reader_file=; saved_ssid_file=; "
+   "child=; reader_dir=$2; [ -d \"$reader_dir\" ] || exit 1; reader_file=$reader_dir/connections; saved_ssid_file=$reader_dir/saved-ssid; "
    "stop_child() { if [ -n \"$child\" ]; then kill -KILL \"$child\" 2>/dev/null || :; wait \"$child\" 2>/dev/null || :; child=; fi; }; "
    "cleanup() { stop_child; [ -z \"$reader_file\" ] || rm -f -- \"$reader_file\"; [ -z \"$saved_ssid_file\" ] || rm -f -- \"$saved_ssid_file\"; }; "
    "trap 'cleanup; exit 1' HUP INT TERM; trap cleanup EXIT; "
    "read_command() { \"$@\" & child=$!; if wait \"$child\"; then status=0; else status=$?; fi; child=; return \"$status\"; }; "
-   "reader_file=$(mktemp) || exit 1; saved_ssid_file=$(mktemp) || exit 1; "
+   ": >\"$reader_file\" || exit 1; : >\"$saved_ssid_file\" || exit 1; "
    "echo @@RADIO; read_command nmcli -t -f WIFI radio 2>/dev/null || :; "
    "echo @@ROUTE; read_command ip -4 route show default 2>/dev/null || :; "
    "echo @@CONS; "
@@ -353,20 +404,27 @@ SSID bytes are hex-encoded before entering the line protocol."
   "Kick off a background status read (no-op if one is already running)."
   (interactive)
   (when (or (null emacsos-net--proc) (not (process-live-p emacsos-net--proc)))
-    (let ((buf (generate-new-buffer " *emacsos-net-read*")))
+    (let ((buf (generate-new-buffer " *emacsos-net-read*"))
+          reader-directory)
       (condition-case err
           (progn
+            (setq reader-directory (make-temp-file "emacsos-net-reader-" t))
             (setq emacsos-net--proc
                   (make-process
                    :name "emacsos-net-read"
                    :buffer buf
                    :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "8"
                                   "sh" "-c" (emacsos-net--reader-script)
-                                  "emacsos-net-read" emacsos-net-cell-connection)
+                                  "emacsos-net-read" emacsos-net-cell-connection
+                                  reader-directory)
                    :noquery t
                    :sentinel #'emacsos-net--reader-sentinel))
+            (process-put emacsos-net--proc 'emacsos-net-temp-directory
+                         reader-directory)
             (emacsos-net--render-if-shown))
         (error
+         (when reader-directory
+           (ignore-errors (delete-directory reader-directory t)))
          (kill-buffer buf)
          (message "emacsos-net: cannot read network status: %s"
                   (error-message-string err)))))))
@@ -384,9 +442,10 @@ last valid snapshot after failure or timeout."
                        (buffer-live-p buf))
               (let ((blob (with-current-buffer buf (buffer-string))))
                 (when (string-suffix-p "@@END\n" blob)
-                  (setq emacsos-net--state (emacsos-net--parse blob))
-                  (force-mode-line-update t)
-                  (emacsos-net--render-if-shown)))))
+                  (setq emacsos-net--state (emacsos-net--parse blob)))))
+            (force-mode-line-update t)
+            (emacsos-net--render-if-shown))
+        (emacsos-net--cleanup-reader-temp proc)
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 ;;; Control actions
