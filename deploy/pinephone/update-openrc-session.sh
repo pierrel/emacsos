@@ -71,6 +71,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-sms-root" \
     "$deploy_dir/openrc-network-root" \
+    "$deploy_dir/openrc-wifi-connect-root" \
     "$deploy_dir/openrc-chat-url" \
     "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \

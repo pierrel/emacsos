@@ -31,28 +31,23 @@ esac
 printf '%s\n' "$dry_run" | grep -F \
     'scp EMACSOS-COMMANDS.org phone:~/EMACSOS-COMMANDS.org' >/dev/null
 
-sh -n "$deploy_dir/openrc-session" \
-    "$deploy_dir/openrc-session-power" \
-    "$deploy_dir/openrc-suspend-root" \
-    "$deploy_dir/openrc-process-group" \
-    "$deploy_dir/openrc-call-root" \
-    "$deploy_dir/openrc-sms-root" \
-    "$deploy_dir/openrc-network-root" \
-    "$deploy_dir/openrc-boot-mode" \
-    "$deploy_dir/openrc-install-root" \
-    "$deploy_dir/openrc-update-root" \
-    "$deploy_dir/openrc-bootstrap-root" \
-    "$deploy_dir/wvkbd-transaction-root" \
-    "$deploy_dir/install-openrc-session.sh" \
-    "$deploy_dir/update-openrc-session.sh" \
-    "$deploy_dir/emacsos-ui.initd" \
-    "$deploy_dir/waydroid-container-wrapper"
+for script in openrc-session openrc-session-power openrc-suspend-root \
+    openrc-process-group openrc-call-root openrc-network-root \
+    openrc-boot-mode openrc-install-root openrc-update-root openrc-bootstrap-root \
+    wvkbd-transaction-root install-openrc-session.sh update-openrc-session.sh \
+    emacsos-ui.initd waydroid-container-wrapper; do
+    sh -n "$deploy_dir/$script"
+done
+for script in openrc-sms-root openrc-wifi-connect-root; do
+    python3 -I -c 'compile(open(__import__("sys").argv[1], encoding="utf-8").read(), __import__("sys").argv[1], "exec")' \
+        "$deploy_dir/$script"
+done
 
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
     openrc-session-power openrc-process-group openrc-suspend-root wvkbd-transaction-root \
-    openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper; do
@@ -88,7 +83,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 33 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 34 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -163,6 +158,7 @@ openrc-session-power
 openrc-sms-root
 openrc-suspend-root
 openrc-sway.config
+openrc-wifi-connect-root
 os.el
 phone-call.el
 phone-sms.el
@@ -323,7 +319,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 33 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 34 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
@@ -355,6 +351,8 @@ grep -F "/usr/bin/python3 -I -c 'import dbus'" \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args' \
+    "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "case \$digits in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null
 grep -F "case \$call_id in ''|*[!0-9]*)" "$deploy_dir/openrc-call-root" >/dev/null
 grep -F 'ulimit -f 128' "$deploy_dir/openrc-call-root" >/dev/null
@@ -364,6 +362,8 @@ grep -F 'flock -n -x 9' "$deploy_dir/openrc-call-root" >/dev/null
 grep -F 'timeout -s TERM -k 1 20 /usr/bin/nmcli' \
     "$deploy_dir/openrc-network-root" >/dev/null
 grep -F 'flock -n -x 9' "$deploy_dir/openrc-network-root" >/dev/null
+grep -F 'LOCK_PATH = "/run/emacsos-openrc-network.lock"' \
+    "$deploy_dir/openrc-wifi-connect-root" >/dev/null
 grep -F 'rc-service emacsos-ui start' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F '/usr/local/sbin/emacsos-openrc-boot-mode initialize' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'expected=@@ADMIN_SHA256@@' "$deploy_dir/openrc-bootstrap-root" >/dev/null

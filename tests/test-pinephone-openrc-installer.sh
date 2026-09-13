@@ -27,7 +27,7 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     wvkbd-transaction-root \
-    openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
@@ -310,6 +310,7 @@ fi
 [ ! -e /usr/local/sbin/emacsos-openrc-network ]
 [ ! -e /usr/local/sbin/emacsos-wvkbd-transaction ]
 [ ! -e /var/lib/emacsos-wvkbd-transaction ]
+[ ! -e /usr/local/sbin/emacsos-openrc-wifi-connect ]
 [ ! -e /etc/emacsos-openrc ]
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ]
 [ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
@@ -345,6 +346,7 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -x /usr/local/sbin/emacsos-openrc-sms ]
 [ -x /usr/local/sbin/emacsos-openrc-network ]
 [ -x /usr/local/sbin/emacsos-wvkbd-transaction ]
+[ -x /usr/local/sbin/emacsos-openrc-wifi-connect ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
 [ -f /usr/local/share/emacsos-openrc/os.el ]
@@ -368,6 +370,7 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
+    /usr/local/sbin/emacsos-openrc-wifi-connect \
     /usr/local/sbin/emacsos-openrc-boot-mode \
     /usr/local/sbin/emacsos-wvkbd-transaction \
     /usr/local/bin/wvkbd-emacsos \
@@ -453,7 +456,8 @@ fi
         'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
         'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
         'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ]
+        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
+        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args')" ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
     'root:root:600:1:regular file' ]
 [ "$(cat /etc/emacsos-openrc/chat-url)" = \
@@ -528,7 +532,8 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/bin/wvkbd-emacsos \
-    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
+    /usr/local/sbin/emacsos-openrc-wifi-connect
 rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
 install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
 printf '%s\n' legacy-keyboard >/usr/local/bin/wvkbd-emacos

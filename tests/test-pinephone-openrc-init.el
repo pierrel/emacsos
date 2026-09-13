@@ -380,7 +380,87 @@
            '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-network"
              "cell" "up")))
   (should-error
-   (emacsos-pinephone-network-command '("general" "permissions"))))
+   (emacsos-pinephone-network-command '("general" "permissions")))
+  (should-error
+   (emacsos-pinephone-network-command '("con" "up" "profile-name")))
+  (should-error
+   (emacsos-pinephone-network-command '("dev" "wifi" "connect" "SSID"))))
+
+(ert-deftest emacsos-openrc-wifi-operation-keeps-password-off-argv ()
+  (let (seen-command seen-input eof)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq seen-command (plist-get args :command))
+                 'wifi-process))
+              ((symbol-function 'process-send-string)
+               (lambda (_process value)
+                 (setq seen-input (copy-sequence value))))
+              ((symbol-function 'process-send-eof)
+               (lambda (_process) (setq eof t))))
+      (should (equal
+               (emacsos-pinephone-wifi-operation
+                'secured "Cafe network" "Exact password" #'ignore)
+               "pending: Wi-Fi connection requested"))
+      (should (equal seen-command
+                     '("/usr/bin/doas" "-n"
+                       "/usr/local/sbin/emacsos-openrc-wifi-connect")))
+      (should-not (member "Cafe network" seen-command))
+      (should-not (member "Exact password" seen-command))
+      (let* ((json-object-type 'alist)
+             (payload (json-read-from-string seen-input)))
+        (should (equal (alist-get 'ssid payload) "Cafe network"))
+        (should (equal (alist-get 'password payload) "Exact password")))
+      (should eof))))
+
+(ert-deftest emacsos-openrc-wifi-saved-operation-uses-fixed-helper ()
+  (let (seen-command sent)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq seen-command (plist-get args :command))
+                 'wifi-process))
+              ((symbol-function 'process-send-string)
+               (lambda (&rest _) (setq sent t)))
+              ((symbol-function 'process-send-eof) #'ignore))
+      (should (equal
+               (emacsos-pinephone-wifi-operation
+                'saved "11111111-2222-3333-4444-555555555555" nil #'ignore)
+               "pending: Wi-Fi connection requested"))
+      (should (equal seen-command
+                     '("/usr/bin/doas" "-n"
+                       "/usr/local/sbin/emacsos-openrc-network" "saved"
+                       "11111111-2222-3333-4444-555555555555")))
+      (should-not sent))))
+
+(ert-deftest emacsos-openrc-wifi-result-is-strict ()
+  (should (equal (emacsos-pinephone-wifi-result "connected\n" t)
+                 "connected"))
+  (should (equal (emacsos-pinephone-wifi-result
+                  "not-connected:busy\n" nil)
+                 "not-connected:busy"))
+  (dolist (case '(("connected\n" nil) ("connected" t)
+                  ("connected\nextra\n" t) ("invented\n" nil)))
+    (should (equal (emacsos-pinephone-wifi-result (car case) (cadr case))
+                   "not-connected:failed"))))
+
+(ert-deftest emacsos-openrc-wifi-finished-delivers-one-finite-result ()
+  (dolist (case '(("connected\n" 0 "connected")
+                  ("not-connected:busy\n" 1 "not-connected:busy")
+                  ("connected\nextra\n" 0 "not-connected:failed")
+                  ("connected\n" 1 "not-connected:failed")))
+    (let ((buffer (generate-new-buffer " *test-wifi-result*"))
+          (stderr-buffer (generate-new-buffer " *test-wifi-stderr*"))
+          delivered)
+      (with-current-buffer buffer (insert (nth 0 case)))
+      (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+                ((symbol-function 'process-buffer) (lambda (_) buffer))
+                ((symbol-function 'process-exit-status)
+                 (lambda (_) (nth 1 case))))
+        (emacsos-pinephone-wifi-finished
+         'process "finished" (lambda (result) (setq delivered result))
+         stderr-buffer))
+      (should (equal delivered (nth 2 case)))
+      (should-not (buffer-live-p buffer))
+      (should-not (buffer-live-p stderr-buffer)))))
 
 (ert-deftest emacsos-openrc-firefox-nonterminal-sentinel-keeps-tracking ()
   (let ((emacsos-pinephone-firefox-process 'tracked))

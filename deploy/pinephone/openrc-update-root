@@ -17,7 +17,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=36553c14c3c5b1c0dc6b06b1f52904c83da98d73af3431d88011b2ca88ca4965
+manifest_hash=5733869db3e5a9c25801ab5d5252d7343124c84c2bcc991fc9268eb580c53b4e
 mutating=0
 committed=0
 restart_only=0
@@ -55,6 +55,7 @@ openrc-boot-mode:/usr/local/sbin/emacsos-openrc-boot-mode
 openrc-call-root:/usr/local/sbin/emacsos-openrc-call
 openrc-sms-root:/usr/local/sbin/emacsos-openrc-sms
 openrc-network-root:/usr/local/sbin/emacsos-openrc-network
+openrc-wifi-connect-root:/usr/local/sbin/emacsos-openrc-wifi-connect
 openrc-chat-url:/etc/emacsos-openrc/chat-url
 openrc-assist-web-url:/etc/emacsos-openrc/assist-web-url
 assist-web-ca.pem:/etc/emacsos-openrc/assist-web-ca.pem
@@ -524,6 +525,8 @@ cleanup() {
             restore_file openrc-sms-root /usr/local/sbin/emacsos-openrc-sms 0755
             restore_file openrc-network-root \
                 /usr/local/sbin/emacsos-openrc-network 0755
+            restore_file openrc-wifi-connect-root \
+                /usr/local/sbin/emacsos-openrc-wifi-connect 0755
             restore_file openrc-chat-url /etc/emacsos-openrc/chat-url 0644
             restore_file openrc-assist-web-url /etc/emacsos-openrc/assist-web-url 0644
             restore_file assist-web-ca.pem /etc/emacsos-openrc/assist-web-ca.pem 0644
@@ -626,7 +629,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -640,7 +643,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 33 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 34 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
@@ -658,7 +661,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
     emacsos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
-    openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
+    openrc-network-root openrc-wifi-connect-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
     install -o root -g root -m 0600 /dev/null "$snapshot/$name"
     timeout -s TERM -k 1 10 su user -s /bin/sh -c \
@@ -789,6 +792,7 @@ printf '%s\n' \
     'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
     'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
     'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
+    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args' \
     >"$doas_tmp"
 chown root:root "$doas_tmp"
 chmod 0600 "$doas_tmp"
@@ -837,6 +841,8 @@ install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \
     /usr/local/sbin/emacsos-openrc-sms
 install -o root -g root -m 0755 "$snapshot/openrc-network-root" \
     /usr/local/sbin/emacsos-openrc-network
+install -o root -g root -m 0755 "$snapshot/openrc-wifi-connect-root" \
+    /usr/local/sbin/emacsos-openrc-wifi-connect
 if [ ! -d /etc/emacsos-openrc ]; then
     config_dir_created=1
     install -d -o root -g root -m 0755 /etc/emacsos-openrc
@@ -891,6 +897,8 @@ cmp -s "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-sms-root" /usr/local/sbin/emacsos-openrc-sms
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
+cmp -s "$snapshot/openrc-wifi-connect-root" \
+    /usr/local/sbin/emacsos-openrc-wifi-connect
 cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
 cmp -s "$snapshot/openrc-chat-url" /etc/emacsos-openrc/chat-url
 cmp -s "$snapshot/openrc-assist-web-url" /etc/emacsos-openrc/assist-web-url

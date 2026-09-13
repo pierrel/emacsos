@@ -447,15 +447,97 @@ every agent-config load."
          (error "invalid Wi-Fi state"))
        (append prefix (list "wifi" state)))
       (`("con" ,state ,name)
-       (cond
-        ((and (member state '("up" "down"))
-              (string= name emacsos-pinephone-cell-connection))
-         (append prefix (list "cell" state)))
-        ((string= state "up") (append prefix (list "saved" name)))
-        (t (error "unsupported connection action"))))
-      (`("dev" "wifi" "connect" ,ssid)
-       (append prefix (list "open" ssid)))
+       (if (and (member state '("up" "down"))
+                (string= name emacsos-pinephone-cell-connection))
+           (append prefix (list "cell" state))
+         (error "unsupported connection action")))
       (_ (error "unsupported network action")))))
+
+(defun emacsos-pinephone-wifi-result (status success)
+  "Return the strict terminal Wi-Fi STATUS, or conservative failure."
+  (if (and (string-match "\\`\\([^\n]*\\)\n\\'" status)
+           (member (match-string 1 status)
+                   '("connected"
+                     "not-connected:invalid-input"
+                     "not-connected:busy"
+                     "not-connected:failed"
+                     "not-connected:unavailable"
+                     "unknown:time-limit")))
+      (let ((result (match-string 1 status)))
+        (if (eq success (string= result "connected"))
+            result
+          "not-connected:failed"))
+    "not-connected:failed"))
+
+(defun emacsos-pinephone-wifi-finished
+    (process _event completion stderr-buffer)
+  "Report terminal Wi-Fi PROCESS status through COMPLETION and clean buffers."
+  (when (memq (process-status process) '(exit signal))
+    (let* ((buffer (process-buffer process))
+           (status (if (buffer-live-p buffer)
+                       (with-current-buffer buffer (buffer-string))
+                     ""))
+           (result (emacsos-pinephone-wifi-result
+                    status (zerop (process-exit-status process)))))
+      (unwind-protect
+          (condition-case err
+              (funcall completion result)
+            (error
+             (message "emacsos-net: completion failed: %s"
+                      (error-message-string err))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))))))
+
+(defun emacsos-pinephone-wifi-operation (kind target password completion)
+  "Connect KIND and TARGET, sending PASSWORD only to the credential helper."
+  (let ((buffer (generate-new-buffer " *emacsos-wifi*"))
+        (stderr-buffer (generate-new-buffer " *emacsos-wifi-stderr*"))
+        process command request)
+    (pcase kind
+      ('saved
+       (setq command (list "/usr/bin/doas" "-n"
+                           "/usr/local/sbin/emacsos-openrc-network"
+                           "saved" target)))
+      ('open
+       (setq command (list "/usr/bin/doas" "-n"
+                           "/usr/local/sbin/emacsos-openrc-network"
+                           "open" target)))
+      ('secured
+       (setq command '("/usr/bin/doas" "-n"
+                       "/usr/local/sbin/emacsos-openrc-wifi-connect")
+             request (json-encode `((ssid . ,target)
+                                    (password . ,password)))))
+      (_
+       (kill-buffer buffer)
+       (kill-buffer stderr-buffer)
+       (setq command nil)))
+    (if (null command)
+        "not-connected:invalid-input"
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (setq process
+                      (make-process
+                       :name "emacsos-wifi"
+                       :buffer buffer
+                       :stderr stderr-buffer
+                       :command command
+                       :connection-type 'pipe
+                       :coding 'utf-8-unix
+                       :noquery t
+                       :sentinel (lambda (proc event)
+                                   (emacsos-pinephone-wifi-finished
+                                    proc event completion stderr-buffer))))
+                (when request
+                  (process-send-string process request))
+                (process-send-eof process)
+                "pending: Wi-Fi connection requested")
+            (error
+             (when (process-live-p process) (delete-process process))
+             (when (buffer-live-p buffer) (kill-buffer buffer))
+             (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
+             "not-connected:unavailable"))
+        (when request (clear-string request))))))
 
 (defvar emacsos-pinephone-keyboard-hidden nil
   "Non-nil after this Emacs instance has hidden wvkbd.")
@@ -527,6 +609,7 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
         emacsos-initial-buffer-function #'emacsos--chat-buffer
         emacsos-net-cell-connection emacsos-pinephone-cell-connection
         emacsos-net-command-function #'emacsos-pinephone-network-command
+        emacsos-net-connection-function #'emacsos-pinephone-wifi-operation
         emacsos-chat-auth-file
         "/var/lib/emacsos-lab/.emacs.d/server/emacsos-openrc"
         emacsos-call-operation-function #'emacsos-pinephone-call-operation
