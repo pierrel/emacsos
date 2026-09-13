@@ -7,10 +7,15 @@
 (require 'cl-lib)
 (require 'os)
 
-(ert-deftest test-os-default-modeline-includes-sms-status ()
-  "Every ordinary EmacsOS buffer exposes pending SMS status."
-  (should (member '(:eval (emacsos-sms-mode-line-string))
-                  (default-value 'mode-line-format))))
+(ert-deftest test-os-default-modeline-keeps-navigation-and-urgent-status-first ()
+  "Thread navigation precedes urgent badges and lower-priority status."
+  (should
+   (equal (default-value 'mode-line-format)
+          '(" EmacsOS  "
+            (:eval (emacsos-assist-web-mode-line-string))
+            (:eval (emacsos-call-mode-line-string))
+            (:eval (emacsos-sms-mode-line-string))
+            (:eval (emacsos-net-mode-line-string))))))
 
 (ert-deftest test-os-command-list-surface-is-absent ()
   (dolist (symbol '(emacsos--render-commands emacsos--top-commands
@@ -502,29 +507,76 @@ collapse popup windows (harmless no-op when there are none)."
       (emacsos--tap-tab)
       (should (eq called 'complete)))))
 
-(ert-deftest test-os-tap-return-uses-conversation-activation-or-newline-and-minibuffer-ret ()
-  "Touch RET shares physical conversation activation but never steals minibuffer RET."
+(ert-deftest test-os-tap-return-runs-target-ret-and-preserves-minibuffer-ret ()
+  "Touch RET runs physical RET at the target without stealing minibuffer RET."
   (let (activated accepted)
-    (with-temp-buffer
-      (let ((target-buffer (window-buffer (selected-window))))
-        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
-                  ((symbol-function 'emacsos--target) (lambda () (selected-window)))
-                  ((symbol-function 'emacsos--refocus) (lambda () nil))
-                  ((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacsos-conversation-activate-or-newline)
-                   (lambda () (setq activated (current-buffer)))))
-          (emacsos--tap-return)
-          (should (eq activated target-buffer)))))
+    (let* ((window (selected-window))
+           (original-buffer (window-buffer window))
+           (target-buffer (generate-new-buffer " *emacsos-ret-target*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer target-buffer
+              (use-local-map (let ((map (make-sparse-keymap)))
+                               (define-key map (kbd "RET")
+                                 (lambda () (interactive)
+                                   (setq activated
+                                         (cons (current-buffer)
+                                               last-input-event))))
+                               map)))
+            (set-window-buffer window target-buffer)
+            (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
+                      ((symbol-function 'emacsos--target) (lambda () window))
+                      ((symbol-function 'emacsos--refocus) (lambda () nil))
+                      ((symbol-function 'active-minibuffer-window) (lambda () nil)))
+              (emacsos--tap-return)
+              (should (eq (car activated) target-buffer))
+              (should (eq (cdr activated) ?\r))))
+        (set-window-buffer window original-buffer)
+        (kill-buffer target-buffer)))
     (with-temp-buffer
       (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
                 ((symbol-function 'emacsos--target) (lambda () (selected-window)))
                 ((symbol-function 'emacsos--refocus) (lambda () nil))
                 ((symbol-function 'active-minibuffer-window) (lambda () 'minibuffer))
-                ((symbol-function 'exit-minibuffer) (lambda () (setq accepted t)))
-                ((symbol-function 'emacsos-conversation-activate-or-newline)
-                 (lambda () (ert-fail "minibuffer RET must not activate chat"))))
+                ((symbol-function 'exit-minibuffer) (lambda () (setq accepted t))))
         (emacsos--tap-return)
         (should accepted)))))
+
+(ert-deftest test-os-touch-ret-opens-exact-native-thread-row ()
+  "The touchscreen RET path honors the list row's exact stored identity."
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (thread '((id . "thread-b") (description . "Same")
+                   (search_description . "same")
+                   (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog
+          `((threads . (,thread)) (repositories . nil) (harnesses . nil)))
+         opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer
+              (get-buffer-create emacsos-assist-web--thread-list-buffer-name)
+            (emacsos-assist-web-thread-list-mode))
+          (emacsos-assist-web--render-thread-list)
+          (set-window-buffer window emacsos-assist-web--thread-list-buffer-name)
+          (with-selected-window window
+            (goto-char (emacsos-assist-web--thread-row-position "thread-b")))
+          (let ((last-input-event '(mouse-1 nil)))
+            (cl-letf (((symbol-function 'emacsos--commit) #'ignore)
+                      ((symbol-function 'emacsos--target) (lambda () window))
+                      ((symbol-function 'emacsos--refocus) #'ignore)
+                      ((symbol-function 'active-minibuffer-window) #'ignore)
+                      ((symbol-function 'mouse-set-point)
+                       (lambda (_event)
+                         (ert-fail "touch RET must present a RET event")))
+                      ((symbol-function 'emacsos-assist-web--show-thread)
+                       (lambda (selected)
+                         (setq opened (alist-get 'id selected)))))
+              (emacsos--tap-return)))
+          (should (equal opened "thread-b")))
+      (set-window-buffer window original-buffer)
+      (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
+        (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
 
 ;;; Modifier keys (Ctrl / Meta / Ctrl-Meta) — see
 ;;; docs/2026-05-27-modifier-keys.org.  Pure helpers tested directly;

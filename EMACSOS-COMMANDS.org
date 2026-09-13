@@ -27,6 +27,7 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Return to ordinary chat | =emacsos--chat-show-top-buffer= |
 | Start a new ordinary chat | =emacsos--chat-new-chat= |
 | Stop the current ordinary-chat response | =emacsos--chat-abort= |
+| Browse Assist Web threads | =emacsos-assist-web-show-thread-list= |
 | Open an Assist Web thread | =emacsos-assist-web-open-thread= |
 | Start an Assist Web thread | =emacsos-assist-web-new-thread= |
 | Send from an Assist Web thread | =emacsos-assist-web-send= |
@@ -85,8 +86,10 @@ the generic =phone-install= target does not define them.
 | =C-c C-a l= | Load older canonical history |
 | =C-c C-a f= | Forget a file-backed conversation |
 
-Physical =RET= and touchscreen RET open only a literal HTTP(S) object at point;
-otherwise they insert a newline.  RET accepts an active minibuffer first.
+RET accepts an active minibuffer first.  Otherwise touchscreen RET invokes the
+target buffer's physical =RET= binding: in a conversation it opens a literal
+HTTP(S) object at point or inserts a newline, and in the native thread list it
+opens the exact row at point.
 
 * Phone and network
 
@@ -100,9 +103,8 @@ otherwise they insert a newline.  RET accepts an active minibuffer first.
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
 
-The modeline network, call, and SMS labels are touch controls for their current
-status or action.  The PinePhone/OpenRC deployment also adds the keyboard
-label.
+The modeline Threads, network, call, SMS, and keyboard labels are touch controls
+for their current status or action.
 
 An SMS conversation uses the compositor text keyboard with QUIT, Refresh, and
 Send or ACK in its Emacs utility row.  Send still opens the separate two-tap

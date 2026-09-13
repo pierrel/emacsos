@@ -82,14 +82,13 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
 (menu-bar-mode -1)
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
-;; Global, minimal modeline: the EmacsOS label + device-supplied segments + a
-;; tappable cell/wifi status segment (`emacsos-net-mode-line-string', network.el)
-;; + tappable hidden call/SMS badges (`emacsos-call-mode-line-string',
-;; phone-call.el; `emacsos-sms-mode-line-string', phone-sms.el and
-;; phone-sms-chat.el), shown on every
-;; top (editing) buffer only while their status screen is hidden.  Replaces
-;; the stock clutter (buffer position, minor modes, encoding); the *keyboard*
-;; buffer overrides this to nil on each render (`emacsos--render-page').
+;; Global, minimal modeline: the EmacsOS label, native thread-list entry,
+;; transient call and SMS-chat-aware badges, then lower-priority device and
+;; network segments.
+;; This order keeps navigation and urgent status visible if the 320px line
+;; truncates.  Replaces the stock clutter (buffer position, minor modes,
+;; encoding); the *keyboard* buffer overrides this to nil on each render
+;; (`emacsos--render-page').
 ;; time/date/battery are left for the "Modeline status bar" roadmap item to
 ;; append here.  Set at load time (not in `emacsos--init') so a hot-reload
 ;; re-applies it.  The `:eval's resolve their functions at redisplay, after
@@ -100,11 +99,12 @@ Each entry must be valid `mode-line-format' data.  The platform sets this
 before loading EmacsOS so the segment also survives a live reload of os.el.")
 
 (setq-default mode-line-format
-              (append '(" EmacsOS  ")
-                      emacsos-platform-mode-line-segments
-                      '((:eval (emacsos-net-mode-line-string))
+              (append '(" EmacsOS  "
+                        (:eval (emacsos-assist-web-mode-line-string))
                         (:eval (emacsos-call-mode-line-string))
-                        (:eval (emacsos-sms-mode-line-string)))))
+                        (:eval (emacsos-sms-mode-line-string)))
+                      emacsos-platform-mode-line-segments
+                      '((:eval (emacsos-net-mode-line-string)))))
 
 ;;; Optimal-T9 Keyboard (Qin et al., ISS 2018)
 ;;
@@ -494,7 +494,7 @@ just-typed space into \". \" — the familiar mobile period shortcut (see
       (emacsos--refocus))))
 
 (defun emacsos--tap-return ()
-  "Accept the minibuffer, or activate a safe object before newline fallback."
+  "Accept the minibuffer or run the target buffer's physical RET command."
   (emacsos--commit)
   (emacsos--commit-armed-tap)         ; A3: utility tap commits armed.
   (let ((w (emacsos--target)))
@@ -502,9 +502,12 @@ just-typed space into \". \" — the familiar mobile period shortcut (see
       (if (active-minibuffer-window)
           (with-selected-window w (exit-minibuffer))
         (with-selected-window w
-          (if (fboundp 'emacsos-conversation-activate-or-newline)
-              (emacsos-conversation-activate-or-newline)
-            (newline)))
+          (let ((command (key-binding (kbd "RET") t)))
+            (if (commandp command)
+                (let ((last-input-event ?\r)
+                      (last-command-event ?\r))
+                  (call-interactively command))
+              (newline))))
         (emacsos--refocus)))))
 
 (defun emacsos--tap-backspace ()
