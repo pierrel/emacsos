@@ -72,8 +72,8 @@ back the way it was"), use `revert_config` — do NOT hand-reconstruct and
 re-apply the old config from memory.
 
 - To undo the LAST applied change, call `revert_config` with no `target` (the
-  default). It writes the prior config to the phone, then records the git
-  revert only after that write is confirmed.
+  default). It writes the nearest semantically distinct prior config to the
+  phone, then records that body as a new snapshot after the write is confirmed.
 - To go back FURTHER ("go back to before the modeline edits"), call
   `config_history` first — it lists recent versions as `<short-sha>  <summary>`,
   newest first — then call `revert_config` with the matching short-sha as

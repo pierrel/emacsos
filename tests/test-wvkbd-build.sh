@@ -219,6 +219,14 @@ EOF
             grep -F "invalid staged digest" /tmp/wvkbd-digest-error >/dev/null
             [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
         done
+        install -d -m 0755 /tmp/wvkbd-notice-directory \
+            /usr/local/share/licenses
+        ln -s /tmp/wvkbd-notice-directory \
+            /usr/local/share/licenses/wvkbd-emacsos
+        if SUDO_USER=user WVKBD_STAGE=/home/user/.cache/wvkbd-emacsos.ABC123 WVKBD_SHA256=$new WVKBD_NOTICE_STAGE=/home/user/.cache/wvkbd-notice.ABC123 WVKBD_NOTICE_SHA256=$notice /usr/local/sbin/emacsos-wvkbd-transaction activate 2>/tmp/wvkbd-notice-directory-error; then exit 1; fi
+        grep -F "unsafe keyboard notice directory" \
+            /tmp/wvkbd-notice-directory-error >/dev/null
+        rm -f /usr/local/share/licenses/wvkbd-emacsos
         SUDO_USER=user WVKBD_STAGE=/home/user/.cache/wvkbd-emacsos.ABC123 WVKBD_SHA256=$new WVKBD_NOTICE_STAGE=/home/user/.cache/wvkbd-notice.ABC123 WVKBD_NOTICE_SHA256=$notice /usr/local/sbin/emacsos-wvkbd-transaction activate
         [ ! -e /var/lib/emacsos-wvkbd-transaction/state ]
         [ "$(sha256sum /usr/local/bin/wvkbd-emacsos | awk "{print \$1}")" = "$new" ]

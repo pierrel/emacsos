@@ -622,11 +622,11 @@ async def chat(req: ChatRequest, request: Request):
 
 def _do_rollback(phone_ctx: PhoneContext) -> dict:
     """Sync rollback (run on the executor): preview the prior config, write
-    it to the phone, then git-revert HEAD.  Returns a small
+    it to the phone, then record it as a new snapshot.  Returns a small
     status dict for the JSON response.  Any git/repo failure is caught
     and returned as a structured error — never a bare 500 (apply_to_phone
     already returns structured results, but ConfigRepo can raise on a
-    revert conflict / corrupted repo)."""
+    corrupted repo)."""
     try:
         repo = ConfigRepo(config.config_dir)
         # Shared with the revert_config tool (channel.py), including its
@@ -641,8 +641,8 @@ def _do_rollback(phone_ctx: PhoneContext) -> dict:
 @app.post("/rollback")
 async def rollback(req: RollbackRequest, request: Request):
     """Roll the phone config back one version: load the prior config on the
-    phone, then `git revert` the repo's HEAD.  Not a stream — it's a
-    fast git op + one emacsclient apply — so it returns plain JSON.
+    phone, then record that body as a new snapshot.  Not a stream — it's a
+    fast git operation + one emacsclient apply — so it returns plain JSON.
     Serialized behind the same `_STREAM_LOCK` as /chat so it can't race
     a stream's phone access."""
     log.info("POST /rollback")

@@ -725,6 +725,14 @@ for unsafe_mode in 0664 0646; do
 done
 chmod 0644 /usr/local/share/emacsos-openrc/os.el
 
+mv /usr/local/share/licenses/wvkbd-emacsos \
+    /tmp/wvkbd-emacsos-notice-directory
+ln -s /tmp /usr/local/share/licenses/wvkbd-emacsos
+assert_preflight_rejection keyboard-notice-directory-symlink
+rm -f /usr/local/share/licenses/wvkbd-emacsos
+mv /tmp/wvkbd-emacsos-notice-directory \
+    /usr/local/share/licenses/wvkbd-emacsos
+
 # The one-generation bridge accepts only the exact old root-owned paths.
 # Reject each unsafe old installation before changing the helper or stopping UI.
 install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos

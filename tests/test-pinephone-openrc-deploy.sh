@@ -385,6 +385,11 @@ grep -F 'PasswordAuthentication=no' "$deploy_dir/install-openrc-session.sh" >/de
 for client in install-openrc-session.sh update-openrc-session.sh; do
     grep -F '"$repo_dir/EMACSOS-COMMANDS.org"' "$deploy_dir/$client" >/dev/null
 done
+grep -F "trap cleanup EXIT" "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F "trap 'exit 1' HUP INT TERM" \
+    "$deploy_dir/update-openrc-session.sh" >/dev/null
+grep -F 'generic =phone-install= target does not define them' \
+    "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 grep -F 'EMACSOS-COMMANDS.org' "$deploy_dir/openrc-manifest.sha256" >/dev/null
 for root in openrc-install-root openrc-update-root; do
     grep -F 'install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org"' \

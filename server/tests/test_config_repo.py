@@ -14,6 +14,7 @@ from emacsos_server.config_repo import (
     ConfigRepoError,
     _extract_body,
     migrate_emacos_symbols,
+    migrate_historical_emacos_symbols,
     render,
 )
 
@@ -184,6 +185,21 @@ def test_namespace_migration_rejects_incomplete_lisp_before_apply(body):
         migrate_emacos_symbols(body)
 
 
+def test_historical_migration_preserves_incomplete_body_without_legacy_symbol():
+    body = "(setq foo 1"
+    assert migrate_historical_emacos_symbols(body) == body
+
+
+def test_historical_migration_preserves_emacos_text_in_incomplete_string():
+    body = '"emacos-call'
+    assert migrate_historical_emacos_symbols(body) == body
+
+
+def test_historical_migration_rejects_incomplete_potential_legacy_symbol():
+    with pytest.raises(ConfigRepoError, match="incomplete Lisp config"):
+        migrate_historical_emacos_symbols("(emacos-call")
+
+
 def _repo(tmp_path):
     return ConfigRepo(str(tmp_path / "config-repo"))
 
@@ -241,9 +257,10 @@ def test_rollback_reverts_to_prior_body(tmp_path):
     r.write_and_commit("(setq foo 1)", "set foo")
     r.write_and_commit("(setq foo 2)", "set foo to 2")
     assert r.current().body == "(setq foo 2)"
-    res = r.rollback()
-    assert res.ok
-    # Reverting the "set foo to 2" commit restores foo 1.
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
+    # Recording the prior snapshot restores foo 1.
     assert r.current().body == "(setq foo 1)"
 
 
@@ -251,20 +268,20 @@ def test_rollback_preserves_history_for_roll_forward(tmp_path):
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")
     r.write_and_commit("(setq foo 2)", "v2")
-    r.rollback()
-    # The reverted-from commit must still be in history (roll-forward).
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
+    # The prior current commit must stay in history (roll-forward).
     log = subprocess.run(
         ["git", "-C", r.repo_dir, "log", "--format=%s"],
         capture_output=True, text=True).stdout
     assert "v2" in log
-    assert "Revert" in log or "revert" in log
+    assert "rollback last config" in log
 
 
 def test_rollback_on_empty_repo_reports_nothing(tmp_path):
     r = _repo(tmp_path)
-    res = r.rollback()  # only scaffold (or nothing) exists
-    assert not res.ok
-    assert "nothing to roll back" in res.detail
+    assert r.rollback_body() is None  # only scaffold (or nothing) exists
 
 
 def test_rollback_body_previews_without_changing_history(tmp_path):
@@ -278,6 +295,13 @@ def test_rollback_body_previews_without_changing_history(tmp_path):
 def test_rollback_body_is_none_for_scaffold_only(tmp_path):
     r = _repo(tmp_path)
     assert r.rollback_body() is None
+
+
+def test_rollback_body_can_escape_incomplete_current_config(tmp_path):
+    r = _repo(tmp_path)
+    r.write_and_commit("(setq foo 1)", "working config")
+    r.write_and_commit("(setq foo 2", "broken config")
+    assert r.rollback_body() == "(setq foo 1)"
 
 
 def test_ensure_recovers_from_interrupted_staging(tmp_path):
@@ -298,7 +322,7 @@ def test_ensure_recovers_from_interrupted_staging(tmp_path):
 
 def test_ensure_scaffolds_committless_repo(tmp_path):
     """`.git` exists but no commits (manual init / partial) → ensure()
-    scaffolds a first commit so current()/rollback() have a HEAD."""
+    scaffolds a first commit so history readers have a HEAD."""
     repo_dir = str(tmp_path / "config-repo")
     os.makedirs(repo_dir)
     subprocess.run(["git", "-C", repo_dir, "init", "-q"], check=True)
@@ -310,9 +334,8 @@ def test_ensure_scaffolds_committless_repo(tmp_path):
 
 
 def test_ensure_restores_dirty_working_tree(tmp_path):
-    """A prior interrupted write leaves agent.el dirty; without a hard
-    reset, `git revert` would fail with 'local changes would be
-    overwritten'.  ensure() restores the tree to HEAD so rollback works."""
+    """A prior interrupted write leaves agent.el dirty.  ensure() restores
+    the tree to HEAD so rollback starts from recorded state."""
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")
     r.write_and_commit("(setq foo 2)", "v2")
@@ -320,9 +343,11 @@ def test_ensure_restores_dirty_working_tree(tmp_path):
     with open(r.agent_path, "w") as f:
         f.write(render("(setq garbage 99)"))
     r.ensure()
-    # Tree restored to HEAD (v2), and rollback (a revert) succeeds.
+    # Tree restored to HEAD (v2), and snapshot rollback succeeds.
     assert r.current().body == "(setq foo 2)"
-    assert r.rollback().ok
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
     assert r.current().body == "(setq foo 1)"
 
 
@@ -346,7 +371,7 @@ def test_reapplying_identical_config_creates_no_empty_commit(tmp_path):
     count2 = int(subprocess.run(
         ["git", "-C", r.repo_dir, "rev-list", "--count", "HEAD"],
         capture_output=True, text=True).stdout.strip())
-    # No new commit, same HEAD — no empty commit to break a later revert.
+    # No new commit, same HEAD: identical snapshots are not history.
     assert sha2 == sha1
     assert count2 == count1
 
@@ -366,14 +391,13 @@ def test_post_commit_sha_read_failure_stays_recorded(tmp_path):
 
 
 def test_rollback_after_identical_reapply_does_not_error(tmp_path):
-    """Regression: an empty commit would make `git revert` abort. With
-    the no-diff guard, a second identical apply makes no commit, so
-    rollback still cleanly reverts the one real change."""
+    """An identical reapply adds no snapshot, so undo reaches the prior body."""
     r = _repo(tmp_path)
     r.write_and_commit("(setq foo 1)", "v1")
     r.write_and_commit("(setq foo 1)", "v1 again")  # no-op, no commit
-    res = r.rollback()
-    assert res.ok
+    body = r.rollback_body()
+    assert body is not None
+    r.write_and_commit(body, "rollback last config")
     assert r.current().body == ""  # reverted the only real apply → scaffold
 
 

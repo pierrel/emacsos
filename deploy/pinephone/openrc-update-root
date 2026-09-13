@@ -17,7 +17,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=238f51ddbe8e5a83e7ea880953b0910edc3e9c8060c3e11f1b3014d5e738f5a0
+manifest_hash=6a251082895da04919d84636aa4638a0297ae101be24deb9b2b9a680e84cd2e7
 mutating=0
 committed=0
 restart_only=0
@@ -646,6 +646,13 @@ for directory in /usr/local/bin /usr/local/share/emacsos-openrc /usr/local/sbin 
     [ -d "$directory" ] && [ ! -L "$directory" ] ||
         fail "unsafe installed directory: $directory"
 done
+if [ -e /usr/local/share/licenses/wvkbd-emacsos ] ||
+   [ -L /usr/local/share/licenses/wvkbd-emacsos ]; then
+    [ -d /usr/local/share/licenses/wvkbd-emacsos ] &&
+        [ ! -L /usr/local/share/licenses/wvkbd-emacsos ] &&
+        [ "$(stat -c '%U:%G:%a:%F' /usr/local/share/licenses/wvkbd-emacsos)" = \
+            'root:root:755:directory' ] || fail 'unsafe keyboard notice directory'
+fi
 if [ -e /etc/emacsos-openrc ] || [ -L /etc/emacsos-openrc ]; then
     [ -d /etc/emacsos-openrc ] && [ ! -L /etc/emacsos-openrc ] ||
         fail 'unsafe installed directory: /etc/emacsos-openrc'

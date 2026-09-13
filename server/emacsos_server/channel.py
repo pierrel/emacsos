@@ -35,6 +35,7 @@ from .config_repo import (
     ConfigRepoError,
     SCAFFOLD_SUMMARY,
     migrate_emacos_symbols,
+    migrate_historical_emacos_symbols,
     render,
 )
 
@@ -344,22 +345,23 @@ def get_config() -> str:
 
 def revert_head_and_apply(ctx: PhoneContext, repo: ConfigRepo) -> tuple[str, str]:
     """Undo the last apply: preview the prior body, write it to the phone,
-    then git-revert HEAD.  Returns ``(status, detail)`` where status is
-    ``"noop"`` (nothing to undo), ``"unrecorded"`` (phone written but git
-    failed), or one of ``apply_to_phone``'s statuses.
+    then record that prior body as a new snapshot.  Returns ``(status, detail)``
+    where status is ``"noop"`` (nothing to undo), ``"unrecorded"`` (phone
+    written but git failed), or one of ``apply_to_phone``'s statuses.
 
     Shared by the ``/rollback`` endpoint (app.py) and the ``revert_config`` tool
     so the apply-then-record undo transaction lives in one place.  May raise
-    ``ConfigRepoError`` on a corrupt repo / revert conflict — callers convert it
-    to a structured result."""
-    body = repo.rollback_body()
-    if body is None:
+    ``ConfigRepoError`` on a corrupt repo or historical body; callers convert
+    it to a structured result."""
+    historical_body = repo.rollback_body()
+    if historical_body is None:
         return ("noop", "nothing to roll back (no config applied yet)")
+    body = migrate_historical_emacos_symbols(historical_body)
     ar = apply_mod.apply_to_phone(ctx, render(body))
     if ar.status not in ("applied", "load_error"):
         return (ar.status, ar.detail)
     try:
-        repo.rollback()
+        repo.write_and_commit(body, "rollback last config")
     except Exception as e:  # noqa: BLE001 — preserve phone + git outcomes
         activation = ("loaded cleanly" if ar.status == "applied" else
                       f"activation failed ({ar.detail})")
@@ -429,21 +431,21 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
     target = target.strip()
     verb = "reverted" if not target else "restored"
     try:
-        # No explicit ensure(): rollback()/body_at()/write_and_commit() each
-        # ensure() first, so the path taken below brings the repo to a clean
-        # state itself.
+        # No explicit ensure(): rollback_body()/body_at()/write_and_commit()
+        # each ensure first, so the path taken below brings the repo to a
+        # clean state itself.
         if not target:
             log.info("revert_config (undo last) on %s", ctx.phone_host)
             status, detail = revert_head_and_apply(ctx, repo)
             if status == "noop":
                 return detail  # "nothing to roll back (no config applied yet)"
-            body = None  # rollback() already committed the git revert
+            body = None  # revert_head_and_apply already recorded the snapshot
         else:
             log.info("revert_config (restore %s) on %s", target, ctx.phone_host)
             # Roll-forward: re-apply the old body as a new commit.  A true git
             # revert of a non-HEAD commit would conflict on the single
             # full-snapshot file, so restore = re-apply that version's content.
-            body = repo.body_at(target)
+            body = migrate_historical_emacos_symbols(repo.body_at(target))
             ar = apply_mod.apply_to_phone(ctx, render(body))
             status, detail = ar.status, ar.detail
     except ConfigRepoError as e:
@@ -462,13 +464,13 @@ def revert_config(target: str = "", config: RunnableConfig = None) -> str:
         return f"reverted-but-unrecorded: {detail}; retrying is safe"
     if body is not None:
         # Restore path: commit only after the phone received it (mirrors
-        # apply_config); undo-last was already committed by rollback().
+        # apply_config); undo-last was already recorded by the shared helper.
         try:
             repo.write_and_commit(body, f"restore config to {target[:7]}")
         except Exception as e:  # noqa: BLE001
             log.exception("revert_config: commit failed")
             # Reachable only on the restore path (undo-last is already committed
-            # by rollback()), so the verb is always "restored".
+            # by the shared undo helper), so the verb is always "restored".
             activation = ("loaded cleanly" if status == "applied" else
                           f"activation failed ({detail})")
             return ("restored-but-unrecorded: written on the phone and "

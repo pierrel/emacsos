@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from emacsos_server.apply import ApplyResult
 from emacsos_server.channel import (
     EMACS_TOOLS,
@@ -17,6 +19,7 @@ from emacsos_server.channel import (
     eval_elisp,
     get_config,
     migrate_legacy_config,
+    revert_head_and_apply,
     revert_config,
 )
 from emacsos_server.config_repo import ConfigRepo, ConfigRepoError, render
@@ -324,6 +327,20 @@ def test_release_migrates_persisted_legacy_config_through_apply_and_commit(tmp_p
     assert not repo.namespace_migration_reconciliation_pending()
 
 
+def test_undo_skips_canonical_equivalent_namespace_migration(tmp_path):
+    """Release migration is not a user-visible config for undo purposes."""
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.write_and_commit("(setq x 1)", "first config")
+    repo.write_and_commit('(emacos-call "+1")', "legacy config")
+    repo.write_and_commit('(emacsos-call "+1")', "migrate EmacsOS Lisp symbols")
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok: loaded")) as apply:
+        status, detail = revert_head_and_apply(_CTX, repo)
+    assert (status, detail) == ("applied", "ok: loaded")
+    assert repo.current().body == "(setq x 1)"
+    assert apply.call_args.args[1] == render("(setq x 1)")
+
+
 def test_release_leaves_legacy_text_without_symbol_tokens_untouched(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     body = '(message "emacos-call is historical text")\n; emacos-call comment'
@@ -515,6 +532,37 @@ def test_revert_config_undo_last_reverts_and_applies(tmp_path):
     assert repo.current().body == ""  # back to the empty scaffold
 
 
+def test_revert_config_undo_migrates_legacy_historical_body(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit('(emacos-call "+1")', "legacy")
+    repo.write_and_commit('(emacsos-call "+2")', "current")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": ""}, config=cfg)
+    assert out.startswith("reverted:")
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert apply.call_args.args[1] == render('(emacsos-call "+1")')
+
+
+@pytest.mark.parametrize("broken", ["(setq x 1", '\"emacos-call'])
+def test_revert_config_undo_restores_recorded_incomplete_load_error(tmp_path, broken):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    repo.write_and_commit(broken, "recorded load error")
+    repo.write_and_commit("(setq x 2)", "correction")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "read error")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": ""}, config=cfg)
+    assert out.startswith("reverted-but-broken:")
+    assert repo.current().body == broken
+    assert apply.call_args.args[1] == render(broken)
+
+
 def test_revert_config_noop_when_nothing_applied(tmp_path):
     repo = ConfigRepo(str(tmp_path / "repo"))
     repo.ensure()  # scaffold only
@@ -557,6 +605,37 @@ def test_revert_config_restore_to_version_reapplies_old_body(tmp_path):
     assert out.startswith("restored:")
     assert repo.current().body == "(setq x 1)"  # rolled forward to v1
     assert m.call_args.args[1] == render("(setq x 1)")  # phone got rendered v1
+
+
+def test_revert_config_restore_migrates_legacy_historical_body(tmp_path):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    sha1 = repo.write_and_commit('(emacos-call "+1")', "legacy")
+    repo.write_and_commit('(emacsos-call "+2")', "current")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("applied", "ok")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": sha1[:7]}, config=cfg)
+    assert out.startswith("restored:")
+    assert repo.current().body == '(emacsos-call "+1")'
+    assert apply.call_args.args[1] == render('(emacsos-call "+1")')
+
+
+@pytest.mark.parametrize("body", ["(setq x 1", '\"emacos-call'])
+def test_revert_config_restore_recorded_incomplete_load_error(tmp_path, body):
+    repo = ConfigRepo(str(tmp_path / "repo"))
+    repo.ensure()
+    broken = repo.write_and_commit(body, "recorded load error")
+    repo.write_and_commit("(setq x 2)", "correction")
+    cfg = {"configurable": {PHONE_CONTEXT_KEY: _CTX}}
+    with patch("emacsos_server.channel.apply_mod.apply_to_phone",
+               return_value=ApplyResult("load_error", "read error")) as apply, \
+         patch("emacsos_server.channel.ConfigRepo", lambda _d: repo):
+        out = revert_config.invoke({"target": broken[:7]}, config=cfg)
+    assert out.startswith("restored-but-broken:")
+    assert repo.current().body == body
+    assert apply.call_args.args[1] == render(body)
 
 
 def test_revert_config_unknown_target_errors_without_applying(tmp_path):

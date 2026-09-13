@@ -4,7 +4,10 @@ Swipe downward from =x= on the modifier-swipe keyboard to type =Meta+x=, then
 type a command name and press =RET=.  Run =M-x emacsos-open-command-reference=
 to return to this file.
 
-* Applications
+* PinePhone/OpenRC applications
+
+These commands are installed only by the PinePhone/OpenRC deployment; the
+generic =phone-install= target does not define them.
 
 | Action | M-x command |
 |--------+-------------|
@@ -12,6 +15,7 @@ to return to this file.
 | Quit Firefox started by EmacsOS | =emacsos-firefox-quit= |
 | Start or switch to Android | =emacsos-android-start= |
 | Stop Android | =emacsos-android-quit= |
+| Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
 
 Use =Alt+Tab= to move between full-screen applications.  Return to ordinary
 chat with =M-x emacsos--chat-show-top-buffer=.
@@ -52,9 +56,19 @@ for canonical thread navigation.
 | =C-c e m= | Stage SMS |
 | =C-c e w= | Network controls |
 | =C-c e h= | This command reference |
+
+** PinePhone/OpenRC-only bindings
+
+These bindings are installed only by the PinePhone/OpenRC deployment;
+the generic =phone-install= target does not define them.
+
+| Key | Action |
+|-----+--------|
 | =C-c e k= | Hide or show the PinePhone keyboard |
 | =C-c e b= | Start or switch to Firefox on PinePhone |
 | =C-c e a= | Start or switch to Android on PinePhone |
+
+** Conversation bindings
 
 | Key | Action |
 |-----+--------|
@@ -80,10 +94,10 @@ otherwise they insert a newline.  RET accepts an active minibuffer first.
 | Open network controls | =emacsos-net-show= |
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
-| Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
 
-The modeline network, call, SMS, and keyboard labels are touch controls for
-their current status or action.
+The modeline network, call, and SMS labels are touch controls for their current
+status or action.  The PinePhone/OpenRC deployment also adds the keyboard
+label.
 
 Ordinary chat, editing, and Assist buffers have no separate Emacs control
 pane.  Call and SMS confirmation controls appear temporarily only while those
@@ -100,7 +114,7 @@ safety-critical flows are active.
 | Open or choose a persistent terminal | =M-x dtach-shell= or =C-c d= |
 | Reconnect the current persistent terminal | =M-x dtach-shell-reconnect= or =C-c S-d= |
 
-* Hardware
+* PinePhone/OpenRC hardware
 
 | Control | Action |
 |---------+--------|

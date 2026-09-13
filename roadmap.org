@@ -252,62 +252,21 @@ bounded, and New chat is the release valve.  See
 Keyed by a single fixed id (one personal phone) — per-phone keying is
 deferred with the WireGuard/away-phone work.
 
-** TODO Flexible config change management (revert any past change via chat)
+** DONE Config history and conversational snapshot restore
 
-The next experiment *immediately after* conversation history — we go
-straight here, deliberately skipping any intermediate "N-level only"
-chat-revert step.
+=config_history= lists saved versions and =revert_config(target)= restores a
+selected version by applying its complete body and recording a new snapshot.
+Without a target, =revert_config= and =M-x emacsos--chat-rollback= write the
+nearest semantically distinct prior config and record it, providing the quick
+"undo the thing I just did" path.  =get_config= reads the committed source of
+truth even after =/clear=, so persistent changes do not depend on conversation
+memory.
 
-Today =M-x emacsos--chat-rollback= is strictly one-level: it calls
-=config_repo.rollback()= → =git revert --no-edit HEAD=, undoing only the
-most recent =apply_config=.  It remains the quick "undo the thing I just did"
-path.
+** TODO Selectively revert one historical config change
 
-The full system is conversational and *targeted*: "revert the change
-about X, where X is any past apply" — e.g. "undo the cursor color change
-but keep the font change", or "revert the last two things".  Driven from
-*chat* (it needs the conversation context that conversation history
-unlocks), the agent:
-- surfaces the apply history to itself — each =apply_config= already
-  commits with its SUMMARY as the git message, so =git log= IS the
-  change list; no new persistence needed;
-- maps a natural-language reference ("the cursor change") to a commit;
-- reverts just that commit (=git revert --no-edit <sha>=), or a chosen
-  set/range, history-preserving so roll-forward stays possible;
-- handles conflicts honestly (=git revert --abort= + a "can't cleanly
-  revert that — a later change touched the same thing" result) when a
-  targeted/range revert doesn't invert cleanly.
-
-So this single item subsumes what was once "chat-revert" + "N-level" +
-"targeted": the one-level phone button is the fast path; this is the
-rich, conversational path, and it's where we head next.
-
-*** TODO Agent can't read current config after =/clear= (prerequisite)
-
-Surfaced 2026-05-23 by a live "set the cursor blue" turn right after a
-=/clear= ("New chat").  =apply_config= replaces the whole config file, so
-the config-apply skill tells the agent to *read the current config first*
-and restate it.  But with conversation memory wiped by =/clear=, the agent
-has no way to *find* the config: it tried =(user-init-file)=,
-=(load-file)=, =(getenv "EMACS_CONFIG")= — none reach
-=~/.emacs.d/emacsos/agent.el= (a server-side path it can't know) — and
-LoopDetection then caught the distinct-args thrash and terminated the
-turn.  Nothing was applied (the failure was *safe*), but the user's most
-likely action after a reset — "now change X" — currently can't persist.
-
-Root cause: the agent relies on conversation *memory* as the source of
-truth for current config.  That memory is double-edged — with it the
-agent can restate config (but resurrects stale settings, e.g. the
-line-numbers bug that =/clear= was meant to cure); without it
-(post-=/clear=) it can't apply at all.
-
-Fix direction: stop relying on memory — give the agent a reliable read
-path (a =get_config= / =read_config= tool, or inject the current
-=agent.el= body into the skill/system context).  Then =/clear= is safe
-(memory gone, config still readable) AND there's no resurrection (the
-committed file is the source of truth, not memory).  A prerequisite for
-the flexible config management above — that work also needs the agent to
-navigate config state, so fold it in or land it first.
+Snapshot restore replaces the complete config.  A future conversational path
+could invert one selected past change while preserving compatible later
+changes, with an honest conflict result when that cannot be done cleanly.
 
 ** DONE Phone tempdir leak
 

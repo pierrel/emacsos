@@ -41,6 +41,31 @@ root_dir() {
 safe_target() { root_file "$target" 755; }
 safe_notice() { root_file "$notice" 644; }
 
+safe_notice_parent() {
+    if [ -e /usr/local/share/licenses ] || [ -L /usr/local/share/licenses ]; then
+        root_dir /usr/local/share/licenses 755 || return 1
+    fi
+    if [ -e /usr/local/share/licenses/wvkbd-emacsos ] ||
+       [ -L /usr/local/share/licenses/wvkbd-emacsos ]; then
+        root_dir /usr/local/share/licenses/wvkbd-emacsos 755
+    fi
+}
+
+ensure_notice_parent() {
+    safe_notice_parent || fail 'unsafe keyboard notice directory'
+    if [ ! -e /usr/local/share/licenses ]; then
+        install -d -o root -g root -m 0755 /usr/local/share/licenses
+        root_dir /usr/local/share/licenses 755 ||
+            fail 'could not create license directory'
+    fi
+    if [ ! -e /usr/local/share/licenses/wvkbd-emacsos ]; then
+        install -d -o root -g root -m 0755 \
+            /usr/local/share/licenses/wvkbd-emacsos
+        root_dir /usr/local/share/licenses/wvkbd-emacsos 755 ||
+            fail 'could not create keyboard notice directory'
+    fi
+}
+
 # Copy user-owned staged input through the one descriptor we validated.  The
 # root-only transaction directory makes the snapshot safe to hash and install.
 snapshot_stage() {
@@ -270,7 +295,7 @@ restore_old() {
     verified_backup
     copy_checked "$previous" "$target" 755 "$old_sha"
     if [ "$prior_notice" = 1 ]; then
-        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
+        ensure_notice_parent
         copy_checked "$previous_notice" "$notice" 644 "$(sha "$previous_notice")"
     else
         if [ -e "$notice" ] || [ -L "$notice" ]; then
@@ -384,7 +409,7 @@ restore_legacy_old() {
     verified_backup
     copy_checked "$previous" "$target" 755 "$old_sha"
     if [ "$prior_notice" = 1 ]; then
-        install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
+        ensure_notice_parent
         copy_checked "$previous_notice" "$notice" 644 "$(sha "$previous_notice")"
     elif [ -e "$notice" ] || [ -L "$notice" ]; then
         safe_notice || fail 'unsafe current notice during legacy restore'
@@ -503,6 +528,7 @@ activate() {
     [ "$(sha "$candidate_snapshot")" = "$expected_new" ] || fail 'staged keyboard digest mismatch'
     [ "$(sha "$notice_snapshot")" = "$expected_notice" ] || fail 'staged notice digest mismatch'
     safe_target || fail 'unsafe current keyboard'
+    safe_notice_parent || fail 'unsafe keyboard notice directory'
     old_sha=$(sha "$target")
     copy_checked "$target" "$previous" 600 "$old_sha"
     prior_notice=0
@@ -515,7 +541,7 @@ activate() {
     checkpoint before-pending
     write_state pending "$old_sha" "$expected_new" "$prior_notice" - 0 0
     checkpoint after-pending
-    install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacsos
+    ensure_notice_parent
     copy_checked "$notice_snapshot" "$notice" 644 "$expected_notice"
     checkpoint after-notice-install
     copy_checked "$candidate_snapshot" "$target" 755 "$expected_new"

@@ -179,15 +179,7 @@ def _skip_char_literal(body: str, index: int) -> int:
     return _skip_char_component(body, index + 1)
 
 
-def migrate_emacos_symbols(body: str) -> str:
-    """Return complete BODY with legacy Lisp symbols renamed.
-
-    The caller still owns the confirmed full-body ConfigRepo -> apply_config
-    transaction.  This pure transform deliberately does not inspect or write a
-    phone file.  It changes only lexical atoms, including an escaped hyphen in
-    a symbol, and fails closed before apply on incomplete strings, comments,
-    characters, byte-skipping comments, or list/vector delimiters.
-    """
+def _migrate_emacos_symbols(body: str, observed: list[bool] | None = None) -> str:
     pieces: list[str] = []
     index = 0
     length = len(body)
@@ -248,13 +240,47 @@ def migrate_emacos_symbols(body: str) -> str:
             index += 1
             pieces.append(body[start:index])
         else:
-            pieces.append(_LEGACY_SYMBOL.sub(
+            atom = body[start:index]
+            migrated = _LEGACY_SYMBOL.sub(
                 lambda match: (
                     f"{match.group('keyword')}emacsos{match.group('hyphen')}"),
-                body[start:index]))
+                atom)
+            if observed is not None and migrated != atom:
+                observed[0] = True
+            pieces.append(migrated)
     if delimiters:
         raise _incomplete_config("unclosed list or vector")
     return "".join(pieces)
+
+
+def migrate_emacos_symbols(body: str) -> str:
+    """Return complete BODY with legacy Lisp symbols renamed.
+
+    The caller still owns the confirmed full-body ConfigRepo -> apply_config
+    transaction.  This pure transform deliberately does not inspect or write a
+    phone file.  It changes only lexical atoms, including an escaped hyphen in
+    a symbol, and fails closed before apply on incomplete strings, comments,
+    characters, byte-skipping comments, or list/vector delimiters.
+    """
+    return _migrate_emacos_symbols(body)
+
+
+def migrate_historical_emacos_symbols(body: str) -> str:
+    """Rename legacy symbols in a historical snapshot when that is safe.
+
+    A failed phone load is still recorded, so history can contain deliberately
+    incomplete Lisp.  Such a snapshot remains restorable byte for byte when the
+    scanner encountered no lexical legacy symbol before the syntax failure.
+    If it did encounter one, keep the ordinary fail-closed behavior rather than
+    partially migrating an invalid snapshot.
+    """
+    observed = [False]
+    try:
+        return _migrate_emacos_symbols(body, observed)
+    except ConfigRepoError:
+        if observed[0]:
+            raise
+        return body
 
 
 class ConfigRepoError(RuntimeError):
@@ -266,12 +292,6 @@ class ConfigVersion:
     sha: str
     summary: str
     body: str  # the agent-supplied body (between header and footer)
-
-
-@dataclass(frozen=True)
-class RollbackResult:
-    ok: bool
-    detail: str
 
 
 def render(body: str) -> str:
@@ -356,13 +376,12 @@ class ConfigRepo:
         """Idempotent: bring the repo to a clean, usable state.
         - No `.git`: init + scaffold the first commit.
         - `.git` but zero commits (manual `git init` / partial init):
-          scaffold so `current()`/`rollback()` have a HEAD.
+          scaffold so history readers have a HEAD.
         - Otherwise: hard-reset index + working tree to HEAD.  This drops
-          any staged or dirty state from a prior interrupted write — which
-          would otherwise make `git revert` fail with "local changes would
-          be overwritten" — and restores `agent.el` if it was deleted out
-          of band.  The repo is server-owned; there's no legitimate
-          uncommitted work between operations to lose."""
+          any staged or dirty state from a prior interrupted write and
+          restores `agent.el` if it was deleted out of band.  The repo is
+          server-owned; there's no legitimate uncommitted work between
+          operations to lose."""
         if not os.path.isdir(os.path.join(self.repo_dir, ".git")):
             os.makedirs(self.repo_dir, exist_ok=True)
             self._git("init", "-q")
@@ -398,9 +417,8 @@ class ConfigRepo:
             f.write(render(body))
         self._git("add", AGENT_FILE)
         # If the staged tree is identical to HEAD, do NOT create an empty
-        # commit: an empty commit later breaks `git revert` ("revert is
-        # now empty" aborts).  Re-applying an identical config is a clean
-        # no-op — return the existing HEAD sha.
+        # snapshot.  Re-applying an identical config is a clean no-op, so
+        # return the existing HEAD sha.
         no_diff = subprocess.run(
             ["git", "-C", self.repo_dir, "diff", "--cached", "--quiet"],
             capture_output=True,
@@ -423,23 +441,37 @@ class ConfigRepo:
             body = _extract_body(f.read())
         return ConfigVersion(sha=sha, summary=summary, body=body)
 
-    def rollback(self) -> RollbackResult:
-        """Record a revert of the last apply as a new commit."""
-        self.ensure()
-        # Need at least scaffold + one real apply to have something to
-        # undo.  rev-list count: 1 == scaffold only.
-        if self._commit_count() < 2:
-            return RollbackResult(ok=False, detail="nothing to roll back (no config applied yet)")
-        self._git(*_GIT_IDENTITY, "revert", "--no-edit", "HEAD")
-        return RollbackResult(ok=True, detail="reverted last apply")
-
     def rollback_body(self) -> str | None:
-        """Return the body an undo would restore, without changing history."""
+        """Return the nearest semantically distinct prior body.
+
+        Release namespace migration can add a canonical snapshot whose legacy
+        parent has the same meaning.  Skip such migration-only history so an
+        undo reaches the preceding user-visible config instead of repeatedly
+        recording no change.
+        """
         self.ensure()
         if self._commit_count() < 2:
             return None
-        full = self._git("show", f"HEAD^:{AGENT_FILE}").stdout
-        return _extract_body(full)
+        with open(self.agent_path) as current_file:
+            current_body = _extract_body(current_file.read())
+        try:
+            current = migrate_emacos_symbols(current_body)
+        except ConfigRepoError:
+            # A load_error is still recorded, so HEAD may be incomplete.
+            # Such a commit cannot be a successful release-migration snapshot;
+            # use exact bytes so undo can still escape the broken config.
+            current = current_body
+        refs = self._git("rev-list", "--first-parent", "HEAD^").stdout.splitlines()
+        for ref in refs:
+            full = self._git("show", f"{ref}:{AGENT_FILE}").stdout
+            body = _extract_body(full)
+            try:
+                comparable = migrate_emacos_symbols(body)
+            except ConfigRepoError:
+                comparable = body
+            if comparable != current:
+                return body
+        return None
 
     def body_at(self, ref: str) -> str:
         """The agent body committed at REF (e.g. a sha from `history()`), with

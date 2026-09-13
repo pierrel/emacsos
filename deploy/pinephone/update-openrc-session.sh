@@ -18,7 +18,8 @@ keyboard_build=$(mktemp -d)
 cleanup() {
     rm -rf -- "$keyboard_build"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 [ -f "$token_file" ] && [ ! -L "$token_file" ] &&
     LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \
