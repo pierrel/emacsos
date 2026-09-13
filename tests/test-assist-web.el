@@ -1318,6 +1318,10 @@
                            emacsos-conversation-abort)))))
   (with-temp-buffer
     (emacsos-assist-web-mode)
+    (should (eq (key-binding (kbd "C-c C-a t"))
+                #'emacsos-command-open-thread))
+    (should (eq (key-binding (kbd "C-c C-a n"))
+                #'emacsos-command-new-thread))
     (dolist (binding '(("C-c C-a g" . emacsos-conversation-refresh)
                        ("C-c C-a s" . emacsos-conversation-send)
                        ("C-c C-a o" . emacsos-conversation-open-object)

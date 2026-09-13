@@ -97,6 +97,7 @@ phone-install:
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
 	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp EMACSOS-COMMANDS.org $(PINEPHONE_HOST):~/EMACSOS-COMMANDS.org
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
 	ssh $(PINEPHONE_HOST) "chmod 0600 ~/.config/emacsos/assist-web-token && chmod 0644 ~/.config/emacsos/assist-web-ca.pem"

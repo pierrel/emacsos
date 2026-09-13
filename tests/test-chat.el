@@ -56,8 +56,8 @@ Sets up the buffer so handlers operate against a realistic state."
 
 (ert-deftest chat-test-retained-global-thread-navigation-is-owned-by-os ()
   (let (opened started required)
-    (with-temp-buffer
-      (org-mode)
+  (with-temp-buffer
+    (org-mode)
       (setq-local emacsos-conversation-actions nil)
       (cl-letf (((symbol-function 'require)
                  (lambda (feature &rest _)
@@ -72,7 +72,13 @@ Sets up the buffer so handlers operate against a realistic state."
                     #'emacsos-command-new-thread))))
     (should-not required)
     (should-not opened)
-    (should-not started)))
+    (should-not started))
+  (let ((buf (emacsos--chat-buffer)))
+    (with-current-buffer buf
+      (should (eq (key-binding (kbd "C-c C-a t"))
+                  #'emacsos-command-open-thread))
+      (should (eq (key-binding (kbd "C-c C-a n"))
+                  #'emacsos-command-new-thread)))))
 
 (ert-deftest chat-test-conversation-command-is-contextual ()
   "The shared M-x chooser exposes only actions installed by this buffer."

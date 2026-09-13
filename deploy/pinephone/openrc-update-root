@@ -17,7 +17,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=88b88605daaa8ce9c4cd9cbabd3416061318a64a679c6259719c40c0df7dc2c6
+manifest_hash=238f51ddbe8e5a83e7ea880953b0910edc3e9c8060c3e11f1b3014d5e738f5a0
 mutating=0
 committed=0
 restart_only=0
@@ -35,6 +35,7 @@ dtach-shell-init.el:/usr/local/share/emacsos-openrc/dtach-shell-init.el
 openrc-sway.config:/usr/local/share/emacsos-openrc/sway.config
 openrc-session:/usr/local/share/emacsos-openrc/session
 openrc-session-power:/usr/local/share/emacsos-openrc/session-power
+openrc-process-group:/usr/local/share/emacsos-openrc/process-group
 os.el:/usr/local/share/emacsos-openrc/os.el
 chat.el:/usr/local/share/emacsos-openrc/chat.el
 assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el
@@ -453,6 +454,8 @@ cleanup() {
             restore_file openrc-session /usr/local/share/emacsos-openrc/session 0755
             restore_file openrc-session-power \
                 /usr/local/share/emacsos-openrc/session-power 0755
+            restore_file openrc-process-group \
+                /usr/local/share/emacsos-openrc/process-group 0755
             restore_file os.el /usr/local/share/emacsos-openrc/os.el 0644
             restore_file chat.el /usr/local/share/emacsos-openrc/chat.el 0644
             restore_file assist-web.el /usr/local/share/emacsos-openrc/assist-web.el 0644
@@ -651,6 +654,7 @@ for target in /usr/local/share/emacsos-openrc/init.el \
     /usr/local/share/emacsos-openrc/sway.config \
     /usr/local/share/emacsos-openrc/session \
     /usr/local/share/emacsos-openrc/session-power \
+    /usr/local/share/emacsos-openrc/process-group \
     /usr/local/sbin/emacsos-openrc-boot-mode; do
     [ -f "$target" ] && [ ! -L "$target" ] || fail "unsafe installed file: $target"
 done
@@ -788,6 +792,8 @@ install -o root -g root -m 0755 "$snapshot/openrc-session" \
     /usr/local/share/emacsos-openrc/session
 install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
+install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
+    /usr/local/share/emacsos-openrc/process-group
 install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
 install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \
@@ -834,6 +840,8 @@ cmp -s "$snapshot/openrc-sway.config" \
 cmp -s "$snapshot/openrc-session" /usr/local/share/emacsos-openrc/session
 cmp -s "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
+cmp -s "$snapshot/openrc-process-group" \
+    /usr/local/share/emacsos-openrc/process-group
 cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
 cmp -s "$snapshot/wvkbd-transaction-root" /usr/local/sbin/emacsos-wvkbd-transaction
 cmp -s "$snapshot/wvkbd-emacsos" "$current_wvkbd"

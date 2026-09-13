@@ -758,6 +758,7 @@ rmdir /usr/local/share/licenses/wvkbd-emacos
 printf '%s\n' old-session >/usr/local/share/emacsos-openrc/session
 printf '%s\n' old-sway-after >/usr/local/share/emacsos-openrc/sway.config
 printf '%s\n' old-power-after >/usr/local/share/emacsos-openrc/session-power
+printf '%s\n' old-process-group >/usr/local/share/emacsos-openrc/process-group
 printf '%s\n' old-initd >/etc/init.d/emacsos-ui
 chmod 0755 /etc/init.d/emacsos-ui
 printf '%s\n' old-reference >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
@@ -765,6 +766,7 @@ chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chmod 0600 /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chmod 0755 /usr/local/share/emacsos-openrc/session
 chmod 0755 /usr/local/share/emacsos-openrc/session-power
+chmod 0755 /usr/local/share/emacsos-openrc/process-group
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
@@ -774,6 +776,7 @@ fi
 [ "$(cat /usr/local/share/emacsos-openrc/session)" = old-session ]
 [ "$(cat /usr/local/share/emacsos-openrc/sway.config)" = old-sway-after ]
 [ "$(cat /usr/local/share/emacsos-openrc/session-power)" = old-power-after ]
+[ "$(cat /usr/local/share/emacsos-openrc/process-group)" = old-process-group ]
 [ "$(cat /etc/init.d/emacsos-ui)" = old-initd ]
 [ "$(cat /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = old-reference ]
 [ "$(stat -c '%U:%G:%a:%h:%F' /var/lib/emacsos-lab/EMACSOS-COMMANDS.org)" = \
@@ -783,6 +786,7 @@ fi
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 cmp -s /source/emacsos-ui.initd /etc/init.d/emacsos-ui
+cmp -s /source/openrc-process-group /usr/local/share/emacsos-openrc/process-group
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/init.d/emacsos-ui)" = \
     'root:root:755:1:regular file' ]
 grep -F '/usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1' \

@@ -25,6 +25,8 @@ case $dry_run in
         exit 1
         ;;
 esac
+printf '%s\n' "$dry_run" | grep -F \
+    'scp EMACSOS-COMMANDS.org phone:~/EMACSOS-COMMANDS.org' >/dev/null
 
 sh -n "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
@@ -533,11 +535,14 @@ grep -F "manifest_hash=$manifest_hash" "$deploy_dir/openrc-update-root" >/dev/nu
 grep -F 'updated UI did not become ready: $detail' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file openrc-session' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'restore_file openrc-process-group' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file openrc-suspend-root' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
     "$deploy_dir/openrc-update-root" "$deploy_dir/openrc-install-root" \
     "$deploy_dir/openrc-boot-mode" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/openrc-suspend-root"' \
+    "$deploy_dir/openrc-update-root" "$deploy_dir/openrc-install-root" >/dev/null
+grep -F 'install -o root -g root -m 0755 "$snapshot/openrc-process-group"' \
     "$deploy_dir/openrc-update-root" "$deploy_dir/openrc-install-root" >/dev/null
 grep -F '/usr/sbin/nft -f /etc/nftables.nft' \
     "$deploy_dir/openrc-update-root" >/dev/null

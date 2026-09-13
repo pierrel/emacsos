@@ -257,6 +257,8 @@ remain owned by the backend; this small kernel owns only discovery and binding."
 
 (defvar emacsos-conversation-command-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "n") #'emacsos-command-new-thread)
+    (define-key map (kbd "t") #'emacsos-command-open-thread)
     (define-key map (kbd "s") #'emacsos-conversation-send)
     (define-key map (kbd "a") #'emacsos-conversation-abort)
     (define-key map (kbd "g") #'emacsos-conversation-refresh)
@@ -264,7 +266,9 @@ remain owned by the backend; this small kernel owns only discovery and binding."
     (define-key map (kbd "l") #'emacsos-conversation-load-older)
     (define-key map (kbd "f") #'emacsos-conversation-forget)
     map)
-  "Contextual Assist commands under the C-c C-a prefix.")
+  "Assist commands under C-c C-a.
+The n and t leaves retain global thread navigation; the others dispatch
+through the current conversation backend.")
 
 (defun emacsos--chat-add-face (beg end face)
   "Append FACE to text from BEG to END through the inert font-lock channel."
