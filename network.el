@@ -261,11 +261,6 @@ modes fail closed as unsupported unless a saved UUID supplies the target."
             candidate)
            (t current)))
          (merged (copy-sequence preferred)))
-    (setf (plist-get merged :in-use)
-          (or (plist-get current :in-use) (plist-get candidate :in-use))
-          (plist-get merged :saved-uuid)
-          (or (plist-get current :saved-uuid)
-              (plist-get candidate :saved-uuid)))
     (unless same-security
       (setf (plist-get merged :security) "ambiguous"))
     merged))

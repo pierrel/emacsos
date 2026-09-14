@@ -109,9 +109,28 @@ if WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/output \
     exit 1
 fi
 
+# A repository-local replacement ref must not substitute different source bytes
+# while HEAD still prints the pinned object name.
+rm -f -- "$scratch/wvkbd/untracked"
+printf '%s\n' '/* hostile replacement */' >>"$scratch/wvkbd/main.c"
+git -C "$scratch/wvkbd" add main.c
+replacement_tree=$(git -C "$scratch/wvkbd" write-tree)
+replacement=$(printf '%s\n' replacement |
+    git -C "$scratch/wvkbd" -c user.name=Test \
+        -c user.email=test@example.invalid \
+        commit-tree "$replacement_tree" -p "$revision^")
+git -C "$scratch/wvkbd" replace "$revision" "$replacement"
+git -C "$scratch/wvkbd" reset -q --hard "$revision"
+if WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/output \
+    "$repo_dir/deploy/pinephone/build-wvkbd-emacsos.sh" 2>/dev/null; then
+    printf '%s\n' 'replacement source object was accepted' >&2
+    exit 1
+fi
+git -C "$scratch/wvkbd" replace -d "$revision" >/dev/null
+git -C "$scratch/wvkbd" reset -q --hard "$revision"
+
 # The builder archives the pinned tree.  Ignored hostile build debris must not
 # reach that archive or alter either installed artifact.
-rm -f -- "$scratch/wvkbd/untracked"
 WVKBD_REPO_DIR=$scratch/wvkbd WVKBD_BUILD_DIR=$scratch/archive-baseline \
     "$repo_dir/deploy/pinephone/build-wvkbd-emacsos.sh" >/dev/null
 baseline_keyboard=$(sha256sum "$scratch/archive-baseline/wvkbd-emacsos" | awk '{print $1}')
