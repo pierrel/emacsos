@@ -105,7 +105,7 @@ before loading EmacsOS when its primary entry replaces network status.")
 
 (defun emacsos--mode-line-format ()
   "Return the global minimal mode-line format for this platform."
-  (append '(" EmacsOS  "
+  (append '((:propertize " EmacsOS  " face (:height 0.8))
             (:eval (emacsos-call-mode-line-string))
             (:eval (emacsos-sms-mode-line-string)))
           (list (or emacsos-platform-primary-mode-line-segment

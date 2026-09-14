@@ -496,7 +496,8 @@ everything else from the modeline.
 *PARTIAL* — the original *network (wifi/cell) segment* shipped with the cellular branch
 ([[file:docs/2026-05-26-cellular-data-connectivity.org][docs/2026-05-26-cellular-data-connectivity.org]]):
 =mode-line-format= is now a minimal global default (=setq-default= at the top of
-=os.el=) carrying the =" EmacsOS"= label + a tappable =:eval= segment from
+=os.el=) carrying the compact 0.8-height =" EmacsOS"= label + a tappable
+=:eval= segment from
 =emacsos-net-mode-line-string= (=network.el=), with the stock clutter (buffer
 position, minor modes, encoding) stripped.  On the PinePhone, that network
 entry and the adjacent keyboard entry are now replaced by one compact, tappable

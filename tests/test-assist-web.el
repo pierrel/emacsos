@@ -1813,7 +1813,7 @@
                                (concat "false" (string #x2029) "row")
                                (concat "ready" (string #x202e) "not")
                                (concat "same" (string #x034f))
-                               (concat "same" (string #xfe0f))))
+                               (concat "same" (string #xfe0e))))
       (let ((thread (copy-tree valid-thread)))
         (setf (alist-get 'description thread) description)
         (should-error
@@ -1823,6 +1823,50 @@
      (emacsos-assist-web--require-catalog
       (test-assist-web--wire-catalog
        (list valid-thread (copy-tree valid-thread)) nil nil)))))
+
+(ert-deftest test-assist-web-catalog-accepts-production-emoji-zwj-and-vs16 ()
+  (let* ((joined (concat "Coding " (string #x1f469 #x200d #x1f4bb)))
+         (emoji (concat "Weather " (string #x2600 #xfe0f)))
+         (threads
+          (cl-loop
+           for index from 1 to 148
+           collect
+           `((id . ,(format "thread-%d" index))
+             (description . ,(cond ((= index 7) joined)
+                                    ((= index 60) emoji)
+                                    (t (format "Thread %d" index))))
+             (search_description . ,(if (= index 48) joined
+                                      (format "thread %d" index)))
+             (repo_label . "Assist") (status . "ready"))))
+         (catalog
+          (emacsos-assist-web--require-catalog
+           (test-assist-web--wire-catalog threads nil nil))))
+    (should (= (length (alist-get 'threads catalog)) 148))
+    (should (equal (alist-get 'threads catalog) threads))))
+
+(ert-deftest test-assist-web-catalog-rejects-other-hostile-format-text ()
+  (let ((valid-thread '((id . "thread-1") (description . "Thread")
+                        (search_description . "thread")
+                        (repo_label . "Assist") (status . "ready"))))
+    (dolist (character '(#x00ad #x200b #x200c #x200e
+                         #x2066 #xfe0e #xe0100))
+      (dolist (field '(description search_description))
+        (let ((thread (copy-tree valid-thread)))
+          (setf (alist-get field thread)
+                (concat "hostile" (string character) "text"))
+          (should-error
+           (emacsos-assist-web--require-catalog
+            (test-assist-web--wire-catalog (list thread) nil nil))))))
+    (dolist (character '(#x200d #xfe0f))
+      (let ((key (concat "key" (string character))))
+        (should-error
+         (emacsos-assist-web--require-catalog
+          (test-assist-web--wire-catalog
+           nil `(((repo_key . ,key) (label . "Repository"))) nil)))
+        (should-error
+         (emacsos-assist-web--require-catalog
+          (test-assist-web--wire-catalog
+           nil nil `(((key . ,key) (label . "Harness"))))))))))
 
 (ert-deftest test-assist-web-native-list-renders-stable-collision-ordinals ()
   (let* ((a '((id . "a") (description . "Same description alpha")
@@ -1853,6 +1897,24 @@
             (should (equal ordinals '(("a" . 1) ("z" . 2))))))
       (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
         (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
+
+(ert-deftest test-assist-web-native-list-ordinals-cover-admitted-emoji-marks ()
+  (let* ((plain '((id . "a") (description . "Same")
+                  (search_description . "same")
+                  (repo_label . "Assist") (status . "ready")))
+         (vs16 `((id . "b") (description . ,(concat "Same" (string #xfe0f)))
+                 (search_description . "same")
+                 (repo_label . "Assist") (status . "ready")))
+         (zwj `((id . "c") (description . ,(concat "Sa" (string #x200d) "me"))
+                (search_description . "same")
+                (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog (test-assist-web--catalog plain vs16 zwj)))
+    (should
+     (equal (mapcar (lambda (record)
+                      (cons (alist-get 'id (plist-get record :thread))
+                            (plist-get record :ordinal)))
+                    (emacsos-assist-web--list-records 40))
+            '(("a" . 1) ("b" . 2) ("c" . 3))))))
 
 (ert-deftest test-assist-web-native-list-groups-canonically-equivalent-rows ()
   (let* ((composed '((id . "a") (description . "é")

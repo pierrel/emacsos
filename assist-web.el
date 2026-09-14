@@ -283,11 +283,13 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
   (and (stringp value)
        (<= (string-bytes value) emacsos-assist-web--max-catalog-text-bytes)
        (cl-loop for character across value
-                never (or (memq (get-char-code-property
-                                 character 'general-category)
-                                '(Cc Cf Zl Zp))
+                never (or (and (memq (get-char-code-property
+                                      character 'general-category)
+                                     '(Cc Cf Zl Zp))
+                               (/= character #x200d))
                           ;; Non-format default-ignorable characters can make
-                          ;; distinct server strings render identically.
+                          ;; distinct server strings render identically.  VS16
+                          ;; and ZWJ are the only admitted emoji format points.
                           (= character #x034f)
                           (<= #x115f character #x1160)
                           (<= #x17b4 character #x17b5)
@@ -295,7 +297,8 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
                           (= character #x180f)
                           (<= #x2060 character #x206f)
                           (= character #x3164)
-                          (<= #xfe00 character #xfe0f)
+                          (and (<= #xfe00 character #xfe0f)
+                               (/= character #xfe0f))
                           (= character #xffa0)
                           (<= #xfff0 character #xfff8)
                           (<= #x1bca0 character #x1bca3)
@@ -305,6 +308,12 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
 (defun emacsos-assist-web--isolate-display-text (text)
   "Return server-supplied TEXT inside trusted bidirectional isolates."
   (concat (string #x2068) text (string #x2069)))
+
+(defun emacsos-assist-web--collision-key-text (text)
+  "Return normalized TEXT with admitted zero-width emoji marks removed."
+  (ucs-normalize-NFC-string
+   (string-replace (string #x200d) ""
+                   (string-replace (string #xfe0f) "" text))))
 
 (defun emacsos-assist-web--catalog-entry (value fields)
   "Return wire catalog object VALUE normalized to symbol FIELDS."
@@ -349,8 +358,7 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
             (dolist (choice choices)
               (let ((key (and (emacsos-assist-web--object-p choice)
                               (alist-get key-field choice))))
-                (unless (and (emacsos-assist-web--valid-catalog-text-p key)
-                             (not (string-empty-p key))
+                (unless (and (emacsos-assist-web--valid-id-p key)
                              (not (gethash key seen))
                              (emacsos-assist-web--valid-catalog-text-p
                               (alist-get 'label choice)))
@@ -1677,10 +1685,10 @@ suppressing a genuine repeated submission."
                                          emacsos-assist-web--list-ordinal-width))))
                     (key (list
                           (emacsos-assist-web--fit-list-line
-                           (ucs-normalize-NFC-string
+                           (emacsos-assist-web--collision-key-text
                             (alist-get 'description thread)) width)
                           (emacsos-assist-web--fit-list-line
-                           (ucs-normalize-NFC-string metadata-source)
+                           (emacsos-assist-web--collision-key-text metadata-source)
                            (max 0 (- width
                                      emacsos-assist-web--list-ordinal-width))))))
                (list :thread thread :description description

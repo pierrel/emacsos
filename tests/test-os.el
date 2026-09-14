@@ -11,7 +11,7 @@
   "Urgent badges precede the lower-priority platform control."
   (should
    (equal (default-value 'mode-line-format)
-          '(" EmacsOS  "
+          '((:propertize " EmacsOS  " face (:height 0.8))
             (:eval (emacsos-call-mode-line-string))
             (:eval (emacsos-sms-mode-line-string))
             (:eval (emacsos-net-mode-line-string))))))
