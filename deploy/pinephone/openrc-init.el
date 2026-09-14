@@ -982,11 +982,12 @@ RESERVED-ACTIONS keeps the status width stable when some actions are absent."
   "Keymap for the PinePhone Controls entry.")
 
 (defun emacsos-pinephone-controls-mode-line-string ()
-  "Return the enlarged PinePhone Controls modeline entry."
+  "Return the compact PinePhone Controls modeline entry."
   (propertize " Controls "
               'local-map emacsos-pinephone-controls-mode-line-map
               'mouse-face 'mode-line-highlight
-              'face `(:box (:line-width (3 . ,emacsos--btn-vpad)
+              'face `(:height 0.8
+                      :box (:line-width (3 . ,emacsos--btn-vpad)
                             :style released-button))
               'help-echo "Open phone controls"))
 

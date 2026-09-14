@@ -52,7 +52,7 @@ for canonical thread navigation.
 | Key | Action |
 |-----+--------|
 | =C-c e c= | Ordinary chat |
-| =C-c e t= | Open canonical thread |
+| =C-c e t= | Browse canonical threads |
 | =C-c e n= | New canonical thread |
 | =C-c e r= | Refresh thread list |
 | =C-c e f= | New .assist file |
@@ -77,7 +77,7 @@ the generic =phone-install= target does not define them.
 
 | Key | Action |
 |-----+--------|
-| =C-c C-a t= | Open thread |
+| =C-c C-a t= | Browse canonical threads |
 | =C-c C-a n= | New canonical Assist thread |
 | =C-c C-a g= | Refresh current conversation |
 | =C-c C-a s= | Send |
@@ -112,10 +112,11 @@ opens the exact row at point.
 Parenthesized entries are =eval_elisp= forms.  Bare command names run through
 =M-x=.
 
-The modeline Threads, call, and SMS labels are touch controls for their current
-status or action.  Its primary platform label opens Network controls on generic
-systems and the combined Controls buffer on PinePhone/OpenRC.  Keyboard
-hide/show and device state live in that Controls buffer.
+The transient call and SMS modeline labels are touch controls for their current
+status or action.  The primary platform label opens Network controls on generic
+systems and the combined Controls buffer on PinePhone/OpenRC.  Assist threads
+open through =C-c e t=.  Keyboard hide/show and device state live in the
+Controls buffer.
 
 An SMS conversation uses the compositor text keyboard with QUIT, Refresh, and
 Send or ACK in its Emacs utility row.  Send still opens the separate two-tap

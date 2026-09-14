@@ -104,7 +104,7 @@
                '((comm . "wvkbd-mobintl") (user . "emacsos-lab")))))
     (should-not (emacsos-pinephone-valid-wvkbd-pid-p "43"))))
 
-(ert-deftest emacsos-openrc-controls-mode-line-is-large-and-tappable ()
+(ert-deftest emacsos-openrc-controls-mode-line-is-compact-and-tappable ()
   (let* ((text (emacsos-pinephone-controls-mode-line-string))
          (face (get-text-property 0 'face text))
          (line-width (plist-get (plist-get face :box) :line-width)))
@@ -112,6 +112,7 @@
     (should (eq (lookup-key (get-text-property 0 'local-map text)
                             [mode-line mouse-1])
                 #'emacsos-controls-show))
+    (should (= (plist-get face :height) 0.8))
     (should (= (cdr line-width) emacsos--btn-vpad))))
 
 (ert-deftest emacsos-openrc-controls-replaces-primary-network-segment ()

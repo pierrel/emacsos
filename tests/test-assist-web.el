@@ -1739,10 +1739,7 @@
       (setq reply "offline")
       (emacsos-assist-web-refresh-threads))
     (should emacsos-assist-web--catalog)
-    (should (eq emacsos-assist-web--catalog-state 'refresh-failed))
-    (should (equal (substring-no-properties
-                    (emacsos-assist-web-mode-line-string))
-                   " Threads! "))))
+    (should (eq emacsos-assist-web--catalog-state 'refresh-failed))))
 
 (ert-deftest test-assist-web-reload-keeps-one-refresh-until-old-callback-finishes ()
   (let* ((old (test-assist-web--catalog
@@ -1926,24 +1923,6 @@
           (should (equal opened "thread-b")))
       (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
         (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
-
-(ert-deftest test-assist-web-modeline-entry-reflects-refresh-state-and-opens-list ()
-  (let ((emacsos-assist-web--catalog-refreshing-p nil)
-        (emacsos-assist-web--catalog-state nil))
-    (let ((segment (emacsos-assist-web-mode-line-string)))
-      (should (equal (substring-no-properties segment) " Threads "))
-      (should (eq (lookup-key (get-text-property 0 'local-map segment)
-                              [mode-line mouse-1])
-                  #'emacsos-assist-web-show-thread-list)))
-    (setq emacsos-assist-web--catalog-refreshing-p t)
-    (should (equal (substring-no-properties
-                    (emacsos-assist-web-mode-line-string))
-                   " Threads… "))
-    (setq emacsos-assist-web--catalog-refreshing-p nil
-          emacsos-assist-web--catalog-state 'refresh-failed)
-    (should (equal (substring-no-properties
-                    (emacsos-assist-web-mode-line-string))
-                   " Threads! "))))
 
 (ert-deftest test-assist-web-has-contextual-conversation-command-prefix ()
   (with-temp-buffer

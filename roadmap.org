@@ -499,7 +499,7 @@ everything else from the modeline.
 =os.el=) carrying the =" EmacsOS"= label + a tappable =:eval= segment from
 =emacsos-net-mode-line-string= (=network.el=), with the stock clutter (buffer
 position, minor modes, encoding) stripped.  On the PinePhone, that network
-entry and the adjacent keyboard entry are now replaced by one enlarged
+entry and the adjacent keyboard entry are now replaced by one compact, tappable
 =Controls= entry.  It opens the phone-sized surface for modem data, brightness,
 flashlight, keyboard recovery, and the bounded Wi-Fi chooser; call and SMS
 badges remain independent.  *REMAINING:* time + date

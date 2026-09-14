@@ -1,0 +1,26 @@
+#+title: Stage A keyboard evidence amendment
+#+date: 2026-09-13
+
+* Historical supersessions
+
+This amendment supersedes only the exact source pin in =Integrated behavior=
+and the artifact hash and validation totals in =Verification= from
+=2026-09-13-swipe-suggestions-ctrl-meta-integration.org=.  Its
+=f2a9c77eb68f2a798d33290cf7645b6b5365ea6b= source,
+=a0f71b1779e040658a0e7309532390761664646e99f0ad5c247a3564e1026b82=
+artifact, and 45/428/304 totals remain point-in-time evidence for that earlier
+keyboard candidate.
+
+* Current exact source
+
+The cumulative Stage A generation advances the EmacsOS keyboard pin to wvkbd
+commit =a5e44d0ef9bf49f83fb252f6c856c75fa42c708c=.  Its reproducible AArch64
+artifact SHA-256 is
+=ec4384cd8fd18616224e12997ef87e95f7e4524ba950eb94cb9a591b2bb1bb28=.
+
+* Current validation
+
+The exact source passed the reproducible wvkbd build and atomic side-by-side
+install checks.  The PinePhone script suite, including its 71 Emacs Lisp tests,
+passed.  The complete 540-test Emacs Lisp suite and 305-test server suite also
+passed, as did =git diff --check= and the local review loop.

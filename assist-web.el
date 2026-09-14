@@ -1852,26 +1852,6 @@ suppressing a genuine repeated submission."
         (emacsos-assist-web--render-thread-list)
       (emacsos-assist-web-refresh-threads))))
 
-(defconst emacsos-assist-web--mode-line-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mode-line mouse-1] #'emacsos-assist-web-show-thread-list)
-    map)
-  "Keymap for the persistent native thread-list entry.")
-
-(defun emacsos-assist-web-mode-line-string ()
-  "Return the compact, tappable native thread-list entry."
-  (condition-case nil
-      (propertize (cond
-                   (emacsos-assist-web--catalog-refreshing-p " Threads… ")
-                   ((memq emacsos-assist-web--catalog-state
-                          '(refresh-failed cache-write-failed))
-                    " Threads! ")
-                   (t " Threads "))
-                  'local-map emacsos-assist-web--mode-line-map
-                  'mouse-face 'mode-line-highlight
-                  'help-echo "Tap to open Assist threads")
-    (error " Threads? ")))
-
 (defun emacsos-assist-web--show-thread (thread)
   "Select THREAD's dedicated buffer and refresh it unless a send is active."
   (let* ((name (emacsos-assist-web--thread-label thread))

@@ -7,12 +7,11 @@
 (require 'cl-lib)
 (require 'os)
 
-(ert-deftest test-os-default-modeline-keeps-navigation-and-urgent-status-first ()
-  "Thread navigation precedes urgent badges and lower-priority status."
+(ert-deftest test-os-default-modeline-keeps-urgent-status-and-primary-control ()
+  "Urgent badges precede the lower-priority platform control."
   (should
    (equal (default-value 'mode-line-format)
           '(" EmacsOS  "
-            (:eval (emacsos-assist-web-mode-line-string))
             (:eval (emacsos-call-mode-line-string))
             (:eval (emacsos-sms-mode-line-string))
             (:eval (emacsos-net-mode-line-string))))))
@@ -52,6 +51,17 @@
               (emacsos-open-command-reference))
             (should (equal opened path))))
       (delete-directory home t))))
+
+(ert-deftest test-os-thread-command-opens-native-thread-list ()
+  "The global phone command bypasses the minibuffer thread chooser."
+  (let (opened)
+    (cl-letf (((symbol-function 'emacsos-assist-web-show-thread-list)
+               (lambda () (interactive) (setq opened t)))
+              ((symbol-function 'emacsos-assist-web-open-thread)
+               (lambda () (interactive)
+                 (ert-fail "phone command must open the native list"))))
+      (emacsos-command-open-thread))
+    (should opened)))
 
 (ert-deftest test-os-global-command-prefix-owns-portable-actions ()
   (should emacsos-command-mode)

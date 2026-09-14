@@ -1,0 +1,39 @@
+#+title: Stage A live thread and modeline correction
+#+date: 2026-09-13
+
+* State
+
+Live testing of the cumulative phone generation found that the working native
+Assist thread list was not the path used by the global phone keybinding.  It
+also found that permanent Threads and large Controls modeline labels consumed
+too much of the 320-pixel line.
+
+* Historical supersessions
+
+This record supersedes only the persistent Threads modeline and conditional
+keybinding claims in =2026-09-12-assist-thread-list-buffer.org=, sections
+=Objective=, =User flow=, and =State and interface=;
+=2026-09-13-assist-thread-list-navigation-amendment.org=, section
+=Conditional thread navigation=;
+=2026-09-12-phone-control-panel.org=, section =User flow=, only for the
+Controls label size while retaining its touch padding; and
+=2026-09-13-phone-control-panel-integration.org=, section =Integrated behavior=.
+The native list, asynchronous refresh, exact row identity, and Controls surface
+remain unchanged.
+
+* Corrected behavior
+
+The global =C-c e t= and =C-c C-a t= bindings open the native Assist thread
+list directly.  Threads has no persistent modeline entry.  The modeline keeps
+transient call and SMS status plus its primary Network or Controls entry.
+
+On PinePhone/OpenRC, Controls keeps its existing boxed touch padding and action,
+but its label renders at 0.8 of the inherited modeline text height.  This changes
+the rendered label while retaining the click binding, explicit padding, and
+Controls behavior.
+
+* Acceptance
+
+ERT proves the global thread command bypasses the minibuffer chooser, the
+default modeline has no Threads segment, and the compact Controls label retains
+its exact click binding and vertical touch padding.

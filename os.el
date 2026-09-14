@@ -41,10 +41,10 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
   (call-interactively #'emacsos-assist-web-new-thread))
 
 (defun emacsos-command-open-thread ()
-  "Open a canonical Assist thread."
+  "Open the native list of canonical Assist threads."
   (interactive)
   (require 'assist-web)
-  (call-interactively #'emacsos-assist-web-open-thread))
+  (call-interactively #'emacsos-assist-web-show-thread-list))
 
 (defvar emacsos-command-map
   (let ((map (make-sparse-keymap)))
@@ -82,13 +82,12 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
 (menu-bar-mode -1)
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
-;; Global, minimal modeline: the EmacsOS label, native thread-list entry,
-;; transient call and SMS-chat-aware badges, then the platform's primary
-;; device segment and optional extras.  The primary segment falls back to
-;; network status when a platform does not replace it.
-;; This order keeps navigation and urgent status visible if the 320px line
-;; truncates.  Replaces the stock clutter (buffer position, minor modes,
-;; encoding); the *keyboard* buffer overrides this to nil on each render
+;; Global, minimal modeline: the EmacsOS label, transient call and
+;; SMS-chat-aware badges, then the platform's primary device segment and
+;; optional extras.  The primary segment falls back to network status when a
+;; platform does not replace it.  This order keeps urgent status visible if
+;; the 320px line truncates.  Replaces the stock clutter (buffer position,
+;; minor modes, encoding); the *keyboard* buffer overrides this to nil on each render
 ;; (`emacsos--render-page').
 ;; time/date/battery are left for the "Modeline status bar" roadmap item to
 ;; append here.  Set at load time (not in `emacsos--init') so a hot-reload
@@ -107,7 +106,6 @@ before loading EmacsOS when its primary entry replaces network status.")
 (defun emacsos--mode-line-format ()
   "Return the global minimal mode-line format for this platform."
   (append '(" EmacsOS  "
-            (:eval (emacsos-assist-web-mode-line-string))
             (:eval (emacsos-call-mode-line-string))
             (:eval (emacsos-sms-mode-line-string)))
           (list (or emacsos-platform-primary-mode-line-segment
