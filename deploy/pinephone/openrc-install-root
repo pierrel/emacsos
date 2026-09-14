@@ -9,8 +9,9 @@ export PATH
 stage=/home/user/.cache/emacsos-openrc-stage
 snapshot=
 reference_tmp=
+doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=36553c14c3c5b1c0dc6b06b1f52904c83da98d73af3431d88011b2ca88ca4965
+manifest_hash=2086899f6b6a331cddad3f27989365b902803f69f98482ed4074bfeb0b1797fe
 committed=0
 mutating=0
 lab_group_created=0
@@ -36,6 +37,17 @@ fail() {
 valid_sha256() {
     [ "${#1}" -eq 64 ] || return 1
     case $1 in *[!0-9a-f]*) return 1 ;; esac
+}
+
+check_safe_root_directory() {
+    directory=$1
+    [ -d "$directory" ] && [ ! -L "$directory" ] ||
+        fail "unsafe publication directory: $directory"
+    [ "$(stat -c '%U:%G:%F' "$directory")" = 'root:root:directory' ] ||
+        fail "unsafe publication directory owner: $directory"
+    mode=$(stat -c '%a' "$directory")
+    [ "$((0$mode & 022))" -eq 0 ] ||
+        fail "writable publication directory: $directory"
 }
 
 valid_ipv4() (
@@ -136,10 +148,12 @@ cleanup() {
                     /usr/local/sbin/emacsos-openrc-call \
                     /usr/local/sbin/emacsos-openrc-sms \
                     /usr/local/sbin/emacsos-openrc-network \
+                    /usr/local/sbin/emacsos-openrc-device \
                     /usr/local/sbin/emacsos-openrc-boot-mode \
                     /usr/local/sbin/emacsos-wvkbd-transaction \
                     /usr/local/bin/wvkbd-emacsos \
-                    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+                    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
+                    /usr/local/sbin/emacsos-openrc-wifi-connect
                 if [ -d /var/lib/emacsos-wvkbd-transaction ] &&
                    [ ! -L /var/lib/emacsos-wvkbd-transaction ] &&
                    [ "$(stat -c '%U:%G:%a:%F' /var/lib/emacsos-wvkbd-transaction)" = \
@@ -169,6 +183,7 @@ cleanup() {
     fi
     [ -z "$snapshot" ] || rm -rf -- "$snapshot"
     [ -z "$reference_tmp" ] || rm -f -- "$reference_tmp"
+    [ -z "$doas_tmp" ] || rm -f -- "$doas_tmp"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -203,7 +218,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -217,7 +232,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 33 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 37 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
@@ -227,10 +242,11 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper \
-    os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+    os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
-    openrc-network-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
+    openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
+    openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem wvkbd-emacsos wvkbd-notice; do
     case $name in
         wvkbd-emacsos) maximum=16777216; file_limit=32768 ;;
@@ -312,6 +328,12 @@ if [ -e /usr/local/share/licenses/wvkbd-emacsos ] ||
         [ "$(stat -c '%U:%G:%a:%F' /usr/local/share/licenses/wvkbd-emacsos)" = \
             'root:root:755:directory' ] || fail 'unsafe keyboard notice directory'
 fi
+[ ! -e /usr/local/sbin/emacsos-openrc-wifi-connect ] &&
+    [ ! -L /usr/local/sbin/emacsos-openrc-wifi-connect ] ||
+    fail 'Wi-Fi credential helper already exists'
+[ ! -e /usr/local/sbin/emacsos-openrc-device ] &&
+    [ ! -L /usr/local/sbin/emacsos-openrc-device ] ||
+    fail 'device helper already exists'
 [ ! -e /etc/emacsos-openrc ] && [ ! -L /etc/emacsos-openrc ] ||
     fail 'EmacsOS configuration already exists'
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ] &&
@@ -372,6 +394,9 @@ for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
 /usr/bin/python3 -I -c 'import dbus' || fail 'Python D-Bus binding is absent'
+for directory in /usr /usr/local /usr/local/sbin /etc /etc/doas.d; do
+    check_safe_root_directory "$directory"
+done
 [ -d /etc/doas.d ] && [ ! -L /etc/doas.d ] || fail 'unsafe doas directory'
 [ "$(stat -c '%U:%G:%a:%F' /etc/doas.d)" = 'root:root:750:directory' ] ||
     fail 'unsafe doas directory policy'
@@ -405,16 +430,10 @@ password=${password%%:*}
 case $password in '!'*|'*'*) ;; *) fail 'lab account password is not locked' ;; esac
 
 payload_started=1
-install -o root -g root -m 0600 /dev/null \
-    /etc/doas.d/95-emacsos-ui.conf
-doas_rule_created=1
-printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
-    >/etc/doas.d/95-emacsos-ui.conf
-/usr/bin/doas -C /etc/doas.d/95-emacsos-ui.conf >/dev/null
+doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
+install -o root -g root -m 0600 "$snapshot/openrc-doas.conf" "$doas_tmp"
+cmp -s "$snapshot/openrc-doas.conf" "$doas_tmp"
+/usr/bin/doas -C "$doas_tmp" >/dev/null
 for directory in /var/lib/emacsos-lab /var/lib/emacsos-lab/.config \
     /var/lib/emacsos-lab/.config/emacsos; do
     if [ -e "$directory" ] || [ -L "$directory" ]; then
@@ -425,7 +444,7 @@ for directory in /var/lib/emacsos-lab /var/lib/emacsos-lab/.config \
     fi
 done
 install -d -o root -g root -m 0755 /usr/local/share/emacsos-openrc
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -462,6 +481,20 @@ install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \
     /usr/local/sbin/emacsos-openrc-sms
 install -o root -g root -m 0755 "$snapshot/openrc-network-root" \
     /usr/local/sbin/emacsos-openrc-network
+install -o root -g root -m 0755 "$snapshot/openrc-wifi-connect-root" \
+    /usr/local/sbin/emacsos-openrc-wifi-connect
+install -o root -g root -m 0755 "$snapshot/openrc-device-root" \
+    /usr/local/sbin/emacsos-openrc-device
+cmp -s "$snapshot/openrc-device-root" /usr/local/sbin/emacsos-openrc-device
+[ "$(stat -c '%U:%G:%a:%h:%F' /usr/local/sbin/emacsos-openrc-device)" = \
+    'root:root:755:1:regular file' ]
+sync
+doas_rule_created=1
+mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf
+doas_tmp=
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
+    'root:root:600:1:regular file' ]
+cmp -s "$snapshot/openrc-doas.conf" /etc/doas.d/95-emacsos-ui.conf
 install -d -o root -g root -m 0755 /etc/emacsos-openrc
 install -o root -g root -m 0644 "$snapshot/openrc-chat-url" \
     /etc/emacsos-openrc/chat-url
@@ -518,6 +551,9 @@ cmp -s "$snapshot/wvkbd-notice" \
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-sms-root" /usr/local/sbin/emacsos-openrc-sms
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
+cmp -s "$snapshot/openrc-wifi-connect-root" \
+    /usr/local/sbin/emacsos-openrc-wifi-connect
+cmp -s "$snapshot/openrc-device-root" /usr/local/sbin/emacsos-openrc-device
 cmp -s "$snapshot/openrc-chat-url" /etc/emacsos-openrc/chat-url
 cmp -s "$snapshot/openrc-assist-web-url" /etc/emacsos-openrc/assist-web-url
 cmp -s "$snapshot/assist-web-ca.pem" /etc/emacsos-openrc/assist-web-ca.pem
@@ -527,7 +563,7 @@ cmp -s "$snapshot/assist-web-token" \
     'emacsos-lab:emacsos-lab:600:1:regular file' ]
 cmp -s "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done

@@ -17,9 +17,11 @@
          (emacsos-sms--previous-buffer nil)
          (emacsos-sms--next-proposal-id 0)
          (emacsos-sms--proposal-id nil)
+         (emacsos-sms--context nil)
          (emacsos-sms--confirm-id nil)
          (emacsos-sms--confirm-timer nil)
          (emacsos-sms--skip-next-post-command-disarm nil)
+         (emacsos-sms-lifecycle-functions nil)
          (emacsos-sms-operation-function nil))
      (cl-letf (((symbol-function 'emacsos--target) (lambda () 'window))
                ((symbol-function 'window-buffer)
@@ -49,6 +51,76 @@
       (should (equal emacsos-sms--body "Hi “Ana” 👋"))
       (with-current-buffer "*SMS*"
         (should (string-match-p "Hi “Ana” 👋" (buffer-string)))))))
+
+(ert-deftest emacsos-sms-lifecycle-is-ordered-copied-and-observer-isolated ()
+  (test-sms--with-ui
+    (let (events completion)
+      (setq emacsos-sms-operation-function
+            (lambda (_number _body done)
+              (setq completion done)
+              "pending: SMS requested")
+            emacsos-sms-lifecycle-functions
+            (list (lambda (event)
+                    (setf (plist-get event :body) "mutated")
+                    (error "observer failure"))
+                  (lambda (event) (push event events))))
+      (emacsos-send-message "+14155550123" "exact" 42)
+      (emacsos-sms--send-tap)
+      (emacsos-sms--post-command-disarm)
+      (emacsos-sms--send-tap)
+      (funcall completion "sent")
+      (setq events (nreverse events))
+      (should (equal (mapcar (lambda (event) (plist-get event :event)) events)
+                     '(staged sending terminal)))
+      (should (equal (mapcar (lambda (event) (plist-get event :body)) events)
+                     '("exact" "exact" "exact")))
+      (should (equal (mapcar (lambda (event) (plist-get event :context)) events)
+                     '(42 42 42))))))
+
+(ert-deftest emacsos-sms-owner-change-makes-in-flight-send-stably-unknown ()
+  (test-sms--with-ui
+    (let (completion)
+      (setq emacsos-sms-operation-function
+            (lambda (_number _body done)
+              (setq completion done)
+              "pending: SMS requested"))
+      (emacsos-send-message "+14155550123" "exact")
+      (emacsos-sms--send-tap)
+      (emacsos-sms--post-command-disarm)
+      (emacsos-sms--send-tap)
+      (emacsos-sms--on-owner-changed ":1.old" ":1.new" 4)
+      (should (eq emacsos-sms--state 'unknown))
+      (should (string-match-p "restarted" emacsos-sms--detail))
+      (funcall completion "sent")
+      (should (eq emacsos-sms--state 'unknown))
+      (should (string-prefix-p
+               "error: dismiss unknown"
+               (emacsos-send-message "+14155550124" "next"))))))
+
+(ert-deftest emacsos-sms-ui-failure-discards-staged-context ()
+  (test-sms--with-ui
+    (let (events)
+      (setq emacsos-sms-lifecycle-functions
+            (list (lambda (event) (push (plist-get event :event) events))))
+      (cl-letf (((symbol-function 'emacsos--target) #'ignore))
+        (should (equal (emacsos-send-message "+14155550123" "exact" 7)
+                       "error: SMS UI unavailable")))
+      (should (equal (nreverse events) '(staged discarded)))
+      (should-not emacsos-sms--state)
+      (should-not emacsos-sms--context))))
+
+(ert-deftest emacsos-sms-acknowledge-is-local-and-unblocks-staging ()
+  (test-sms--with-ui
+    (let (events)
+      (setq emacsos-sms-lifecycle-functions
+            (list (lambda (event) (push (plist-get event :event) events))))
+      (emacsos-send-message "+14155550123" "uncertain" 9)
+      (setq emacsos-sms--state 'unknown)
+      (emacsos-sms-acknowledge)
+      (should-not emacsos-sms--state)
+      (should (memq 'acknowledged events))
+      (should (equal (emacsos-send-message "+14155550124" "next")
+                     "confirmation-required: confirm on phone")))))
 
 (ert-deftest emacsos-sms-rejects-invalid-input ()
   (test-sms--with-ui
@@ -280,6 +352,22 @@
                                [mode-line mouse-1])))
       (should (eq binding #'emacsos-sms-show-status)))
     (kill-buffer "chat-like-buffer")))
+
+(ert-deftest emacsos-sms-mode-line-keeps-inbound-and-outbound-actions ()
+  (test-sms--with-ui
+    (let ((inbound-map (make-sparse-keymap)))
+      (setq emacsos-sms--state 'unknown
+            test-sms--window-buffer (get-buffer-create "chat-like-buffer"))
+      (cl-letf (((symbol-function 'emacsos-sms-chat-mode-line-string)
+                 (lambda ()
+                   (concat " " (propertize "● SMS" 'local-map inbound-map)))))
+        (let ((badge (emacsos-sms-mode-line-string)))
+          (should (text-property-any 0 (length badge)
+                                     'local-map inbound-map badge))
+          (should (text-property-any 0 (length badge)
+                                     'local-map emacsos-sms--mode-line-keymap
+                                     badge))))
+      (kill-buffer "chat-like-buffer"))))
 
 (ert-deftest emacsos-sms-invalid-terminal-result-is-unknown ()
   (test-sms--with-ui

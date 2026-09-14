@@ -1,0 +1,24 @@
+#+title: Assist thread-list synchronous refresh amendment
+#+date: 2026-09-13
+
+* Immediate cached chooser
+
+When a validated catalog already contains repository and harness choices, New
+Thread starts the shared refresh before opening its chooser.  If request setup
+fails synchronously while no other minibuffer is active, the command still
+opens those usable cached choices immediately.  This is an immediate local
+fallback, not retained background intent.
+
+If another minibuffer is active, the existing refresh-failure rule remains in
+force: synchronous or asynchronous failure clears the deferred new-thread
+intent and no chooser opens after that minibuffer exits.  A successful refresh
+may still open or defer the chooser once, or report confirmed-empty choices.
+
+* Lineage
+
+This document amends
+=2026-09-13-assist-thread-list-navigation-amendment.org=.  It narrows that
+record's categorical refresh-failure rule only for an immediately openable
+chooser backed by already validated choices.  The earlier record remains an
+immutable account of the rule before this synchronous request-setup case was
+found.

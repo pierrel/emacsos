@@ -2,16 +2,18 @@
 # Fixed NetworkManager mutations for the unprivileged EmacsOS session.
 
 set -eu
+set -f
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
 umask 077
 ulimit -f 128
 export PATH
+export LC_ALL=C
 
 lock=/run/emacsos-openrc-network.lock
 output=
 
 fail() {
-    printf 'error: %s\n' "$1"
+    printf '%s\n' "$1"
     exit 1
 }
 
@@ -21,61 +23,89 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-[ "$(id -u)" -eq 0 ] || fail 'network helper must run as root'
-[ "$#" -ge 1 ] || fail 'missing operation'
-[ -x /usr/bin/nmcli ] || fail 'nmcli is unavailable'
+[ "$(id -u)" -eq 0 ] || fail 'not-connected:invalid-input'
+[ "$#" -ge 1 ] || fail 'not-connected:invalid-input'
+[ -x /usr/bin/nmcli ] || fail 'not-connected:unavailable'
 
 touch "$lock"
 chown root:root "$lock"
 chmod 0600 "$lock"
 exec 9>"$lock"
-flock -n -x 9 || fail 'another network operation is running'
+flock -n -x 9 || fail 'not-connected:busy'
 
 run_nmcli() {
     [ -z "$output" ] || rm -f -- "$output"
     output=$(mktemp /run/emacsos-network.XXXXXX)
-    if timeout -s TERM -k 1 20 /usr/bin/nmcli "$@" >"$output" 2>&1; then
+    if timeout -s TERM -k 1 20 /usr/bin/nmcli "$@" 9>&- >"$output" 2>&1; then
         return 0
     else
         status=$?
-        detail=$(head -c 4096 "$output" | tr '\n' ' ')
-        [ -n "$detail" ] || detail="nmcli exited $status"
-        fail "$detail"
+        case $status in 124|137) fail 'unknown:time-limit' ;; esac
+        fail 'not-connected:failed'
     fi
 }
 
-validate_name() {
-    name=$1
-    [ -n "$name" ] && [ "${#name}" -le 128 ] || fail 'invalid network name'
-    [ "$(printf '%s\n' "$name" | wc -l)" -eq 1 ] || fail 'invalid network name'
+validate_ssid() {
+    ssid=$1
+    [ -n "$ssid" ] && [ "${#ssid}" -le 32 ] || fail 'not-connected:invalid-input'
+    printf '%s' "$ssid" 9>&- | timeout -s TERM -k 1 3 /usr/bin/python3 -I -c '
+import sys
+
+try:
+    value = sys.stdin.buffer.read(33).decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit(1)
+if any(ord(character) < 32 or 127 <= ord(character) <= 159 or
+       ord(character) in {0x061C, 0x200E, 0x200F} or
+       0x202A <= ord(character) <= 0x202E or
+       0x2066 <= ord(character) <= 0x2069 for character in value):
+    raise SystemExit(1)
+' 9>&- 2>/dev/null || fail 'not-connected:invalid-input'
+}
+
+validate_uuid() {
+    uuid=$1
+    old_ifs=$IFS
+    IFS=-
+    set -- $uuid
+    IFS=$old_ifs
+    [ "$#" -eq 5 ] &&
+        [ "${#1}" -eq 8 ] && [ "${#2}" -eq 4 ] &&
+        [ "${#3}" -eq 4 ] && [ "${#4}" -eq 4 ] &&
+        [ "${#5}" -eq 12 ] || fail 'not-connected:invalid-input'
+    case $1$2$3$4$5 in
+        *[!0-9A-Fa-f]*) fail 'not-connected:invalid-input' ;;
+    esac
 }
 
 operation=$1
 shift
 case $operation in
     wifi)
-        [ "$#" -eq 1 ] || fail 'wifi requires one state'
-        case $1 in on|off) ;; *) fail 'invalid Wi-Fi state' ;; esac
+        [ "$#" -eq 1 ] || fail 'not-connected:invalid-input'
+        case $1 in on|off) ;; *) fail 'not-connected:invalid-input' ;; esac
         run_nmcli radio wifi "$1"
         ;;
     cell)
-        [ "$#" -eq 1 ] || fail 'cell requires one state'
-        case $1 in up|down) ;; *) fail 'invalid cellular state' ;; esac
+        [ "$#" -eq 1 ] || fail 'not-connected:invalid-input'
+        case $1 in up|down) ;; *) fail 'not-connected:invalid-input' ;; esac
         run_nmcli con "$1" emacsos-cellular
         ;;
     saved)
-        [ "$#" -eq 1 ] || fail 'saved requires one connection name'
-        validate_name "$1"
-        run_nmcli -g connection.type con show id "$1"
+        [ "$#" -eq 1 ] || fail 'not-connected:invalid-input'
+        validate_uuid "$1"
+        run_nmcli -g connection.type con show uuid "$1"
         [ "$(sed -n '1p' "$output")" = 802-11-wireless ] &&
             [ "$(wc -l <"$output")" -eq 1 ] ||
-            fail 'saved connection is not Wi-Fi'
-        run_nmcli con up id "$1"
+            fail 'not-connected:failed'
+        run_nmcli con up uuid "$1"
+        printf '%s\n' connected
         ;;
     open)
-        [ "$#" -eq 1 ] || fail 'open requires one SSID'
-        validate_name "$1"
+        [ "$#" -eq 1 ] || fail 'not-connected:invalid-input'
+        validate_ssid "$1"
         run_nmcli dev wifi connect "$1"
+        printf '%s\n' connected
         ;;
-    *) fail 'unknown operation' ;;
+    *) fail 'not-connected:invalid-input' ;;
 esac

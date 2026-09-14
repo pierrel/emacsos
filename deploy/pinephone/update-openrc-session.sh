@@ -71,6 +71,9 @@ scp -q "$@" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-sms-root" \
     "$deploy_dir/openrc-network-root" \
+    "$deploy_dir/openrc-wifi-connect-root" \
+    "$deploy_dir/openrc-device-root" \
+    "$deploy_dir/openrc-doas.conf" \
     "$deploy_dir/openrc-chat-url" \
     "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
@@ -82,7 +85,7 @@ scp -q "$@" \
     "$phone_host:$stage/"
 scp -q "$@" "$repo_dir/os.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
     "$repo_dir/emacsos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
-    "$repo_dir/phone-sms.el" \
+    "$repo_dir/phone-sms.el" "$repo_dir/phone-sms-chat.el" \
     "$repo_dir/EMACSOS-COMMANDS.org" \
     "$phone_host:$stage/"
 scp -q "$@" "$token_file" "$phone_host:$stage/assist-web-token"

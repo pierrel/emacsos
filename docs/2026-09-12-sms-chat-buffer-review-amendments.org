@@ -1,0 +1,34 @@
+#+title: Native SMS conversation review amendments
+#+date: 2026-09-12
+
+* Amendments
+
+The external-keyboard phone keeps only the conversation-owned QUIT, Refresh,
+and Send or ACK utility row; the internal keyboard also keeps its T9 and action
+rows.  Inbound unread and hidden outbound-status badges remain independently
+tappable when both exist.
+
+Before staging, the conversation reserves one hidden protected record.  The
+context is exactly nil, a string, a symbol, or an integer.  Sending makes the
+reserved record visible before transport starts, and discard removes it.  A
+ModemManager owner change makes both that record and the phone-global send
+state unknown, so a delayed completion cannot authorize another send.
+
+Conversation selection counts the final inert display bytes, including role
+prefixes, visible control escapes, status suffixes, and separators, against the
+64 KiB render bound.  Refresh progress, partial results, and terminal failures
+remain visible in an open conversation as well as the catalog.  A refresh may
+attach an exact outgoing modem object to the sole matching local sending
+record, or to the sole matching sent record when no sending match exists.
+Failed complete-refresh rollback preserves record identity; successful partial
+snapshots update only same-owner modem records that are not newer than the
+refresh cutoff.
+
+* Historical supersessions
+
+This document supersedes [[file:2026-09-12-sms-chat-buffer.org][Native SMS conversation buffer]], sections /Phone flow/,
+/State and presentation/, and /Trusted modem boundary/, only for the amended
+facts above.  It also supersedes the utility-only external-phone statement in
+[[file:2026-09-08-remove-control-pane.org][Remove the persistent Emacs control pane]], section /Interfaces and safety
+boundaries/: a buffer-owned SMS utility row now creates a temporary control
+surface even when the compositor keyboard supplies text entry.

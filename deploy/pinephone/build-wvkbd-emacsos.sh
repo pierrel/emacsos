@@ -2,6 +2,7 @@
 # Build the pinned EmacsOS wvkbd revision for the PinePhone.
 
 set -eu
+export GIT_NO_REPLACE_OBJECTS=1
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 source_dir=${WVKBD_REPO_DIR:?set WVKBD_REPO_DIR to the wvkbd checkout}

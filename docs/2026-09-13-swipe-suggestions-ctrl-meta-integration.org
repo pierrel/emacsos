@@ -1,0 +1,93 @@
+#+title: Ranked swipe suggestions and Control-Meta integration
+#+date: 2026-09-13
+
+* Lineage
+
+This amendment directly affects
+=2026-09-08-glide-modifier-keyboard.org= and
+=2026-09-11-glide-shift-followup-integration.org=.  It preserves their build,
+transaction, service, and recovery boundaries while advancing the exact wvkbd
+source integrated by EmacsOS.
+
+* Historical supersessions
+
+This supersedes =2026-09-08-glide-modifier-keyboard.org='s =Phone experience=,
+=Tradeoffs and risks=, =Explicit non-goals=, and =Decision= claims that a glide
+has one top result, no candidate UI, and only explicit separators.  A qualified
+glide now produces up to three ranked local words.  The first word and one
+Space commit immediately; the keyboard-owned suggestion strip can replace that
+word-plus-Space unit with another result during the same bounded candidate
+session.
+
+This also supersedes that record's =Phone experience= and
+=Cross-repository interface= dictionary-source and MIT-license descriptions.
+The compiled dictionary is derived from hermitdave/FrequencyWords and is
+licensed under CC BY-SA 4.0.  The exact notice comes from the accepted wvkbd
+source's =THIRD_PARTY_LICENSES.md=.  The installed filename
+=/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt= remains the current
+stable notice path; renaming it would add an unrelated migration to this
+pin-only integration.  The older =wvkbd-emacos= path remains historical only.
+
+This supersedes only =2026-09-11-glide-shift-followup-integration.org='s
+=Final live verification= exact source pin and artifact hash.  Those values
+remain historical evidence for their deployed revision; they are not evidence
+for this one.
+
+* Integrated behavior
+
+EmacsOS pins wvkbd commit
+=f2a9c77eb68f2a798d33290cf7645b6b5365ea6b=.  Its ranked recognizer and
+candidate strip remain entirely keyboard-owned.  A candidate press highlights
+its cell; release in that cell replaces the committed glide word and trailing
+Space; release outside dismisses the strip.  Candidate input ownership prevents
+the same touch from starting a second keyboard action.  The result retains the
+existing one-shot word-plus-Space editing behavior: Backspace retracts the
+unit, explicit Space coalesces with its separator, and punctuation replaces the
+separator.
+
+An eligible character swipe whose first threshold crossing is predominantly
+rightward produces Control-Meta feedback and emits Control plus Alt with the
+character on release.  Existing upward Control and downward Meta gestures are
+unchanged.  A rightward candidate that continues far enough can still become a
+glide through the existing takeover gates, after which the ranked suggestion
+flow owns the result.
+
+The directly supervised command remains
+=/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300=.  There is no Emacs,
+network, or phone-server protocol change.  The dictionary, recognition, and
+candidate state are local and compiled into the keyboard; the change adds no
+network request, telemetry, or persistent learning.
+
+This supersedes the same 2026-09-08 record's =Cross-repository interface=
+=--mod-swipe= enumeration only by adding the rightward Control-Meta gesture and
+ranked glide result.  The option name and all other process interfaces remain
+unchanged.
+
+* Build and deployment boundary
+
+The existing EmacsOS builder requires a clean checkout at the exact revision,
+archives that commit, and builds the archive in the digest-pinned Alpine ARM64
+container.  It validates the AArch64 executable, bounded compiled dictionary,
+benchmark, dependency set, and exact third-party notice.  The existing
+side-by-side installer stages digest-bound regular files and activates them
+through the durable transaction and verified service restart, retaining its
+rollback behavior.
+
+Both benchmark and install commands must set =WVKBD_REPO_DIR= to the accepted
+wvkbd worktree.  The install target is phony and rebuilds the source; relying
+on a neighboring default checkout would therefore break the exact-source
+claim.
+
+* Verification
+
+The exact source passed the reproducible wvkbd build and atomic side-by-side
+install checks.  Its AArch64 artifact SHA-256 is
+=a0f71b1779e040658a0e7309532390761664646e99f0ad5c247a3564e1026b82=.
+The PinePhone script suite, including its 45 Emacs Lisp tests, passed.  The
+complete 428-test Emacs Lisp suite and 304-test server suite also passed, as did
+=git diff --check= and the local review loop.
+
+Live deployment and touch verification remain workspace-orchestrator effects.
+They must prove the exact built digest is installed, the service has exactly
+one matching keyboard process, ranked replacement works, rightward Control-Meta
+works, and the existing upward/downward modifiers still work.

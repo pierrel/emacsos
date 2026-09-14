@@ -1,0 +1,111 @@
+#+title: Wi-Fi network access
+#+date: 2026-09-12
+
+* Historical supersessions
+
+This design replaces only the new-secured-network deferral in
+[[file:2026-05-26-cellular-data-connectivity.org][Cellular Data Connectivity]], Decision 6, and the saved/open-only network
+acceptance boundary in [[file:2026-09-03-pinephone-assist-parity.org][PinePhone Assist parity]], Threat model.  The earlier records
+remain historical descriptions of their shipped states.
+
+* Goal and scope
+
+The existing =*network*= page discovers visible networks and connects to saved,
+open, WEP, and WPA-Personal networks.  Saved profiles are identified by their
+NetworkManager UUID and actual =802-11-wireless.ssid=, not by the editable
+profile name.  Hidden networks and 802.1X enrollment are outside this
+SSID/password operation.  Captive networks associate normally; portal
+detection, browser launch, and automated sign-in are not part of this change.
+The complete status reader is time-bounded, and cancellation kills and reaps
+its active daemon query.  Connection rows remain inert unless every saved
+profile was mapped to its actual SSID successfully.
+SSID bytes cross its line-delimited internal protocol only as hexadecimal;
+decoded values must be valid UTF-8 without C0, DEL, C1, or bidi controls before
+they can become a row or a connection target.  The cellular lookup queries
+only the configured profile's type and device, so an editable connection name
+cannot inject protocol lines.
+
+This effort owns connection semantics, transient credential capture, visible
+attempt/result state, and the privilege boundary.  It does not add another
+control surface, server tool, or agent skill.
+
+* Connection contract
+
+One platform hook receives =(KIND TARGET PASSWORD COMPLETION)=.  =KIND= is
+=saved=, =open=, or =secured=.  A saved target is a canonical profile UUID;
+other targets are visible SSIDs.  =PASSWORD= is non-nil only for =secured=.
+
+The complete result grammar is:
+
+#+begin_example
+pending: Wi-Fi connection requested
+connected
+not-connected:invalid-input
+not-connected:busy
+not-connected:failed
+not-connected:unavailable
+unknown:time-limit
+not-connected:unsupported-security
+not-connected:network-not-found
+#+end_example
+
+A pending return requires exactly one later terminal completion.  A direct
+terminal return requires no completion.  The caller owns the single finish
+path, so synchronous validation failures and asynchronous helper results cannot
+double-finish.
+
+The page creates one attempt ID before transport launch.  While it is pending,
+network rows are not actionable and direct later calls return busy without
+replacing the owner.  A terminal result is retained for eight seconds across
+status refreshes; stale completions and expiry timers cannot update a later
+attempt.  Helper tokens and diagnostics are never rendered.  Every successful
+association says which sanitized SSID connected and tells the user to open
+Firefox if pages require sign-in.
+
+* Credential and privilege boundary
+
+The password path is deliberately narrower than other network actions:
+
+#+begin_example
+masked local read-passwd
+  -> transient lexical Emacs string
+  -> bounded JSON on a process pipe
+  -> exact zero-argument doas helper
+  -> bounded validated root memory
+  -> fresh stdin pipe to nmcli --ask
+  -> root-owned NetworkManager profile
+#+end_example
+
+The password never enters chat, command argv, environment, messages, cached
+network state, rendered buffers, helper output, or logs.  The root helper
+accepts exact JSON, bounds input time and bytes, shares the existing nonblocking
+network mutation lock before reading stdin, calls =nmcli= with a fixed argument
+array, discards its output, and emits one finite token on ordinary completion.
+On signal termination the Emacs sentinel supplies the conservative finite
+failure result after the helper kills and reaps =nmcli=.  Taking the lock first
+allows at most one root process to wait on a slow request writer.  Timeout is
+unknown because NetworkManager may have accepted the operation before the
+client deadline.
+
+Radio, cellular, saved, and open actions retain the existing noncredential
+helper.  The generic command translator remains limited to radio and cellular;
+saved/open joins use the unified connection hook so their results cannot bypass
+attempt ownership.  Saved/open results are normalized to the same finite
+grammar.  Saved activation validates the UUID, proves that its connection type
+is Wi-Fi, and uses =con up uuid=; it never falls back to a profile name or SSID.
+
+* Deployment and validation
+
+The credential helper and its exact =doas= rule are installed, verified,
+backed up, and rolled back through the existing manifest-bound OpenRC
+transaction.  Deterministic coverage exercises classification, UUID matching,
+pending/direct completion ownership, UI result lifetime, credential
+non-persistence, exact helper argv/stdin, malformed and oversized input,
+metacharacter-safe SSIDs, shared-lock contention, finite timeout, output
+suppression, control- and bidi-control rejection at the status boundary,
+installation, update, rollback, and boot verification.
+
+Live acceptance requires a transactional OpenRC update, then an on-phone join
+of a first-seen WPA-Personal network, wrong-password retry, saved UUID reconnect,
+open-network and radio/cellular regressions, autoconnect after restart, and
+inspection of process argv and journals for credential absence.

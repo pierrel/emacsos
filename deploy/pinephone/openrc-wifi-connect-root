@@ -1,0 +1,148 @@
+#!/usr/bin/python3 -I
+"""Bounded root helper for one credentialed Wi-Fi connection."""
+
+import fcntl
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+
+MAX_REQUEST_BYTES = 1024
+MAX_SSID_BYTES = 32
+MAX_PASSWORD_BYTES = 256
+LOCK_PATH = "/run/emacsos-openrc-network.lock"
+NMCLI = "/usr/bin/nmcli"
+
+
+class InputTimeout(Exception):
+    """The request writer did not complete within the input deadline."""
+
+
+def _alarm(_signum, _frame):
+    raise InputTimeout()
+
+
+def _valid_line(value, maximum):
+    """Return whether VALUE is a nonempty bounded string without NUL, CR, or LF."""
+    return (isinstance(value, str) and value and "\0" not in value and
+            "\r" not in value and "\n" not in value and
+            len(value.encode("utf-8")) <= maximum)
+
+
+def parse_request(raw):
+    """Return validated ``(ssid, password)`` from bounded JSON bytes."""
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError("oversized")
+    value = json.loads(raw.decode("utf-8"))
+    if not isinstance(value, dict) or set(value) != {"ssid", "password"}:
+        raise ValueError("shape")
+    ssid, password = value["ssid"], value["password"]
+    if (not _valid_line(ssid, MAX_SSID_BYTES) or
+            any(ord(char) < 32 or 127 <= ord(char) <= 159 or
+                ord(char) in {0x061C, 0x200E, 0x200F} or
+                0x202A <= ord(char) <= 0x202E or
+                0x2066 <= ord(char) <= 0x2069 for char in ssid)):
+        raise ValueError("ssid")
+    if not _valid_line(password, MAX_PASSWORD_BYTES):
+        raise ValueError("password")
+    return ssid, password
+
+
+def _emit(status):
+    """Emit one controlled result without request or exception data."""
+    sys.stdout.write(status + "\n")
+    sys.stdout.flush()
+
+
+def _kill_process_group(process):
+    """Kill PROCESS's private process group and reap PROCESS."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def main():
+    """Serialize, validate stdin, mutate NetworkManager, and ordinarily emit a result."""
+    if os.geteuid() != 0 or len(sys.argv) != 1:
+        _emit("not-connected:invalid-input")
+        return 2
+    try:
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
+        lock_fd = os.open(LOCK_PATH, flags, 0o600)
+        info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or
+                info.st_gid != 0 or info.st_nlink != 1):
+            os.close(lock_fd)
+            raise OSError("unsafe lock")
+        os.fchmod(lock_fd, 0o600)
+        lock_file = os.fdopen(lock_fd, "a+b")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _emit("not-connected:busy")
+            return 1
+    except OSError:
+        _emit("not-connected:unavailable")
+        return 1
+
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(3)
+    try:
+        raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+        ssid, password = parse_request(raw)
+    except InputTimeout:
+        _emit("not-connected:invalid-input")
+        return 2
+    except (UnicodeError, ValueError, TypeError):
+        _emit("not-connected:invalid-input")
+        return 2
+    finally:
+        signal.alarm(0)
+
+    if not os.access(NMCLI, os.X_OK):
+        _emit("not-connected:unavailable")
+        return 1
+    process = None
+
+    def terminate(signum, _frame):
+        if process is not None:
+            _kill_process_group(process)
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, terminate)
+    blocked = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
+    try:
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            process = subprocess.Popen(
+                [NMCLI, "--ask", "dev", "wifi", "connect", ssid],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env={"PATH": "/usr/bin:/usr/sbin:/bin:/sbin",
+                     "LC_ALL": "C"})
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        process.communicate(input=(password + "\n").encode("utf-8"), timeout=20)
+        status = ("connected" if process.returncode == 0
+                  else "not-connected:failed")
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process)
+        status = "unknown:time-limit"
+    except OSError:
+        status = "not-connected:unavailable"
+    finally:
+        if process is not None and process.poll() is None:
+            _kill_process_group(process)
+    _emit(status)
+    return 0 if status == "connected" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

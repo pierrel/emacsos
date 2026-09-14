@@ -86,7 +86,7 @@ The =emacsos--tap-key= function handles multi-tap and inserts into the correct b
 emacsclient -f ./server-file -e '(emacsos--tap-key "qw")'    # types "q"
 emacsclient -f ./server-file -e '(emacsos--tap-key "qw")'    # cycles to "w"
 emacsclient -f ./server-file -e '(emacsos--tap-space)'        # space
-emacsclient -f ./server-file -e '(emacsos--tap-return)'       # exit minibuffer; otherwise open safe object, or newline
+emacsclient -f ./server-file -e '(emacsos--tap-return)'       # exit minibuffer; otherwise run the target buffer's RET command
 emacsclient -f ./server-file -e '(emacsos--tap-backspace)'    # delete backward
 #+end_src
 
@@ -208,6 +208,14 @@ ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 
 Assist Web thread buffers use the authenticated HTTPS phone API and SSE only as
 a provisional observation: the final canonical Assist snapshot remains truth.
+The global =C-c e t= and =C-c C-a t= bindings open a native, touch-sized thread
+list.  It renders the validated local catalog immediately, refreshes it
+asynchronously, and exposes visible refresh or retry rows.  Each two-line row
+opens its exact thread with mouse-1 or RET.  The separate
+=M-x emacsos-assist-web-open-thread= command offers the filtered catalog
+completion chooser when that catalog contains threads, and otherwise opens the
+native list.  Both surfaces share the same complete thread, repository, and
+harness catalog.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second
@@ -235,6 +243,7 @@ and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the strea
 
 - =os.el= — main init file (keyboard, frame setup)
 - =chat.el= — CHAT page, =*chat*= transcript, SEND wiring to =/chat=
+- =phone-sms.el= / =phone-sms-chat.el= — confirmed SMS transport and bounded native conversations
 - =server/= — emacsos-server (FastAPI + phone driver)
 - =docs/= — design docs for in-progress and planned features
 - =deploy/= — install artifacts (init snippet template)

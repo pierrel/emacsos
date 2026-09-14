@@ -27,7 +27,8 @@ install -d -o user -g user -m 0700 /home/user /home/user/.cache \
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
     wvkbd-transaction-root \
-    openrc-call-root openrc-sms-root openrc-network-root openrc-chat-url openrc-assist-web-url \
+    openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
+    openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
@@ -35,7 +36,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -310,6 +311,8 @@ fi
 [ ! -e /usr/local/sbin/emacsos-openrc-network ]
 [ ! -e /usr/local/sbin/emacsos-wvkbd-transaction ]
 [ ! -e /var/lib/emacsos-wvkbd-transaction ]
+[ ! -e /usr/local/sbin/emacsos-openrc-wifi-connect ]
+[ ! -e /usr/local/sbin/emacsos-openrc-device ]
 [ ! -e /etc/emacsos-openrc ]
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ]
 [ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
@@ -345,6 +348,8 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -x /usr/local/sbin/emacsos-openrc-sms ]
 [ -x /usr/local/sbin/emacsos-openrc-network ]
 [ -x /usr/local/sbin/emacsos-wvkbd-transaction ]
+[ -x /usr/local/sbin/emacsos-openrc-wifi-connect ]
+[ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
 [ -f /usr/local/share/emacsos-openrc/os.el ]
@@ -368,6 +373,8 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
+    /usr/local/sbin/emacsos-openrc-wifi-connect \
+    /usr/local/sbin/emacsos-openrc-device \
     /usr/local/sbin/emacsos-openrc-boot-mode \
     /usr/local/sbin/emacsos-wvkbd-transaction \
     /usr/local/bin/wvkbd-emacsos \
@@ -425,6 +432,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /usr/local/bin/wvkbd-emacsos ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]
+[ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
 grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
@@ -448,12 +456,7 @@ fi
 [ -f /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
 [ -f /etc/dbus-1/system.d/99-emacsos-waydroid.conf ]
 [ -x /usr/local/libexec/emacsos-waydroid-container ]
-[ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
-    "$(printf '%s\n' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
-        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
-        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network')" ]
+cmp -s /source/openrc-doas.conf /etc/doas.d/95-emacsos-ui.conf
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
     'root:root:600:1:regular file' ]
 [ "$(cat /etc/emacsos-openrc/chat-url)" = \
@@ -524,11 +527,14 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/share/emacsos-openrc/phone-sms.el \
+    /usr/local/share/emacsos-openrc/phone-sms-chat.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/bin/wvkbd-emacsos \
-    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
+    /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
+    /usr/local/sbin/emacsos-openrc-wifi-connect \
+    /usr/local/sbin/emacsos-openrc-device
 rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
 install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
 printf '%s\n' legacy-keyboard >/usr/local/bin/wvkbd-emacos
