@@ -396,7 +396,8 @@
                (lambda (_process value)
                  (setq seen-input (copy-sequence value))))
               ((symbol-function 'process-send-eof)
-               (lambda (_process) (setq eof t))))
+               (lambda (_process) (setq eof t)))
+              ((symbol-function 'set-process-sentinel) #'ignore))
       (should (equal
                (emacsos-pinephone-wifi-operation
                 'secured "Cafe network" "Exact password" #'ignore)
@@ -412,6 +413,49 @@
         (should (equal (alist-get 'password payload) "Exact password")))
       (should eof))))
 
+(ert-deftest emacsos-openrc-wifi-early-exit-preserves-terminal-result ()
+  (dolist (failure '(write eof))
+    (let (stdout stderr initial-sentinel installed-sentinel delivered
+                 write-called eof-called)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (setq stdout (plist-get args :buffer)
+                         stderr (plist-get args :stderr)
+                         initial-sentinel (plist-get args :sentinel))
+                   (with-current-buffer stdout
+                     (insert "not-connected:busy\n"))
+                   'wifi-process))
+                ((symbol-function 'process-send-string)
+                 (lambda (&rest _)
+                   (setq write-called t)
+                   (when (eq failure 'write) (error "process exited"))))
+                ((symbol-function 'process-send-eof)
+                 (lambda (&rest _)
+                   (setq eof-called t)
+                   (when (eq failure 'eof) (error "process exited"))))
+                ((symbol-function 'set-process-sentinel)
+                 (lambda (_process sentinel)
+                   (setq installed-sentinel sentinel)))
+                ((symbol-function 'process-live-p) (lambda (_) nil))
+                ((symbol-function 'process-status) (lambda (_) 'exit))
+                ((symbol-function 'process-buffer) (lambda (_) stdout))
+                ((symbol-function 'process-exit-status) (lambda (_) 1)))
+        (should (equal
+                 (emacsos-pinephone-wifi-operation
+                  'secured "Cafe network" "Exact password"
+                  (lambda (result) (setq delivered result)))
+                 "pending: Wi-Fi connection requested"))
+        (should write-called)
+        (should (eq (not (null eof-called)) (eq failure 'eof)))
+        (should (eq initial-sentinel #'ignore))
+        (should (functionp installed-sentinel))
+        (should (buffer-live-p stdout))
+        (should (buffer-live-p stderr))
+        (funcall installed-sentinel 'wifi-process "finished")
+        (should (equal delivered "not-connected:busy"))
+        (should-not (buffer-live-p stdout))
+        (should-not (buffer-live-p stderr))))))
+
 (ert-deftest emacsos-openrc-wifi-saved-operation-uses-fixed-helper ()
   (let (seen-command sent)
     (cl-letf (((symbol-function 'make-process)
@@ -420,7 +464,8 @@
                  'wifi-process))
               ((symbol-function 'process-send-string)
                (lambda (&rest _) (setq sent t)))
-              ((symbol-function 'process-send-eof) #'ignore))
+              ((symbol-function 'process-send-eof) #'ignore)
+              ((symbol-function 'set-process-sentinel) #'ignore))
       (should (equal
                (emacsos-pinephone-wifi-operation
                 'saved "11111111-2222-3333-4444-555555555555" nil #'ignore)
