@@ -15,23 +15,12 @@ cat >/usr/bin/nmcli <<'NMCLI'
 #!/bin/sh
 printf '%s\n' "$*" >>/tmp/nmcli-argv
 case $1 in
-    -t)
-        [ ! -e /tmp/nmcli-list-fail ] || exit 1
-        [ ! -e /tmp/nmcli-list-hang ] || {
-            printf '%s\n' "$$" >/tmp/nmcli-list-pid
-            sleep 30
-        }
-        for profile in /tmp/profile-emacsos-wifi-attempt-*; do
-            [ -e "$profile" ] || continue
-            printf '%s:%s\n' "$(cat "$profile")" "${profile#/tmp/profile-}"
-        done
-        ;;
     --ask)
         shift
         profile_name=${6-}
         [ "$5" = name ] &&
             printf '%s\n' "$profile_name" | grep -E '^emacsos-wifi-attempt-[0-9a-f]{32}$' >/dev/null
-        [ "$(find /tmp -maxdepth 1 -name 'profile-emacsos-wifi-attempt-*' | wc -l)" -eq 0 ]
+        [ ! -e "/tmp/profile-$profile_name" ]
         if [ ! -e /tmp/nmcli-no-profile ]; then
             profile_count=$(cat /tmp/profile-count 2>/dev/null || printf 0)
             profile_count=$((profile_count + 1))
@@ -50,6 +39,14 @@ case $1 in
     -g)
         profile_name=$6
         [ ! -e /tmp/nmcli-lookup-fail ] || exit 1
+        if [ -e /tmp/nmcli-lookup-fail-after-connect ] &&
+                [ -e /run/emacsos-openrc-wifi-pending ]; then
+            exit 1
+        fi
+        [ ! -e /tmp/nmcli-lookup-hang ] || {
+            printf '%s\n' "$$" >/tmp/nmcli-lookup-pid
+            sleep 30
+        }
         [ -e "/tmp/profile-$profile_name" ] || exit 10
         cat "/tmp/profile-$profile_name"
         ;;
@@ -58,19 +55,20 @@ case $1 in
             delete)
                 [ "$3" = uuid ]
                 [ ! -e /tmp/nmcli-delete-fail ] || exit 1
-                shift 3
-                for profile_uuid in "$@"; do
-                    profile=$(grep -l -Fx "$profile_uuid" /tmp/profile-emacsos-wifi-attempt-*)
-                    [ -n "$profile" ] && [ "$(printf '%s\n' "$profile" | wc -l)" -eq 1 ]
-                    rm -f -- "$profile"
-                done
+                profile=$(grep -l -Fx "$4" /tmp/profile-*) || exit 10
+                [ "$(printf '%s\n' "$profile" | wc -l)" -eq 1 ]
+                rm -f -- "$profile"
                 ;;
             modify)
                 [ "$3" = uuid ] && [ "$5" = connection.id ]
                 [ ! -e /tmp/nmcli-modify-fail ] || exit 1
                 profile=$(grep -l -Fx "$4" /tmp/profile-emacsos-wifi-attempt-*)
                 [ -n "$profile" ] && [ "$(printf '%s\n' "$profile" | wc -l)" -eq 1 ]
-                rm -f -- "$profile"
+                mv -- "$profile" "/tmp/profile-published-$4"
+                [ ! -e /tmp/nmcli-modify-hang ] || {
+                    printf '%s\n' "$$" >/tmp/nmcli-modify-pid
+                    sleep 30
+                }
                 ;;
             *) exit 2 ;;
         esac
@@ -84,10 +82,17 @@ valid_request='{"ssid":"Cafe network","password":"Exact password"}'
 stale_name=emacsos-wifi-attempt-00000000000000000000000000000000
 stale_uuid=fedcba98-7654-3210-fedc-ba9876543210
 printf '%s\n' "$stale_uuid" >"/tmp/profile-$stale_name"
+printf 'name=%s\n' "$stale_name" >/run/emacsos-openrc-wifi-pending
+chmod 0644 /run/emacsos-openrc-wifi-pending
+legit_name=emacsos-wifi-attempt-11111111111111111111111111111111
+legit_uuid=abcdef01-2345-6789-abcd-ef0123456789
+printf '%s\n' "$legit_uuid" >"/tmp/profile-$legit_name"
 printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result
 grep -Fx connected /tmp/result >/dev/null
-grep -Fx -- '-t -f UUID,NAME con show' /tmp/nmcli-argv >/dev/null
 grep -Fx "con delete uuid $stale_uuid" /tmp/nmcli-argv >/dev/null
+[ -e "/tmp/profile-$legit_name" ]
+[ ! -e /run/emacsos-openrc-wifi-pending ]
+rm -f -- "/tmp/profile-$legit_name"
 grep -E '^--ask dev wifi connect Cafe network name emacsos-wifi-attempt-[0-9a-f]{32}$' \
     /tmp/nmcli-argv >/dev/null
 grep -Fx 'con modify uuid 01234567-89ab-cdef-0123-000000000001 connection.id Cafe network' \
@@ -132,13 +137,16 @@ fi
 grep -Fx 'not-connected:failed' /tmp/result >/dev/null
 rm -f /tmp/nmcli-no-profile
 
-touch /tmp/nmcli-lookup-fail
+touch /tmp/nmcli-lookup-fail-after-connect
 if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
     printf '%s\n' 'failed profile lookup reported success' >&2
     exit 1
 fi
 grep -Fx 'not-connected:unavailable' /tmp/result >/dev/null
-rm -f /tmp/nmcli-lookup-fail /tmp/profile-emacsos-wifi-attempt-*
+grep -Eq '^name=emacsos-wifi-attempt-[0-9a-f]{32}$' \
+    /run/emacsos-openrc-wifi-pending
+rm -f /tmp/nmcli-lookup-fail-after-connect /tmp/profile-emacsos-wifi-attempt-* \
+    /run/emacsos-openrc-wifi-pending
 
 touch /tmp/nmcli-delete-fail
 if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
@@ -146,8 +154,10 @@ if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
     exit 1
 fi
 grep -Fx 'not-connected:unavailable' /tmp/result >/dev/null
+grep -Eq '^name=emacsos-wifi-attempt-[0-9a-f]{32}$' \
+    /run/emacsos-openrc-wifi-pending
 rm -f /tmp/nmcli-fail /tmp/nmcli-delete-fail /tmp/profile-emacsos-wifi-attempt-* \
-    /tmp/profile-count
+    /run/emacsos-openrc-wifi-pending
 
 touch /tmp/nmcli-modify-fail
 if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
@@ -155,8 +165,9 @@ if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
     exit 1
 fi
 grep -Fx 'not-connected:unavailable' /tmp/result >/dev/null
-[ "$(find /tmp -maxdepth 1 -name 'profile-emacsos-wifi-attempt-*' | wc -l)" -eq 1 ]
-rm -f /tmp/nmcli-modify-fail /tmp/profile-emacsos-wifi-attempt-* /tmp/profile-count
+[ "$(find /tmp -maxdepth 1 -name 'profile-emacsos-wifi-attempt-*' | wc -l)" -eq 0 ]
+[ ! -e /run/emacsos-openrc-wifi-pending ]
+rm -f /tmp/nmcli-modify-fail /tmp/profile-emacsos-wifi-attempt-*
 
 for request in \
     '{}' \
@@ -238,31 +249,16 @@ rm -f /tmp/nmcli-hang
 printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result
 grep -Fx connected /tmp/result >/dev/null
 
-touch /tmp/nmcli-list-fail
-if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
-    printf '%s\n' 'failed pending-profile listing reported success' >&2
-    exit 1
-fi
-grep -Fx 'not-connected:unavailable' /tmp/result >/dev/null
-rm -f /tmp/nmcli-list-fail
-
-for profile_count in $(seq 1 65); do
-    profile_name=$(printf 'emacsos-wifi-attempt-%032x' "$profile_count")
-    printf 'fedcba98-7654-3210-fedc-%012x\n' "$profile_count" \
-        >"/tmp/profile-$profile_name"
-done
-if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
-    printf '%s\n' 'unbounded pending-profile set was accepted' >&2
-    exit 1
-fi
-grep -Fx 'not-connected:unavailable' /tmp/result >/dev/null
-rm -f /tmp/profile-emacsos-wifi-attempt-*
-
 ask_count=$(grep -c '^--ask ' /tmp/nmcli-argv)
-touch /tmp/nmcli-list-hang
+blocked_name=emacsos-wifi-attempt-22222222222222222222222222222222
+blocked_uuid=22222222-2222-2222-2222-222222222222
+printf '%s\n' "$blocked_uuid" >"/tmp/profile-$blocked_name"
+printf 'name=%s\n' "$blocked_name" >/run/emacsos-openrc-wifi-pending
+chmod 0644 /run/emacsos-openrc-wifi-pending
+touch /tmp/nmcli-lookup-hang
 /usr/bin/python3 -I /helper </tmp/request >/tmp/terminated-before-connect &
 helper=$!
-while [ ! -s /tmp/nmcli-list-pid ]; do sleep 0.01; done
+while [ ! -s /tmp/nmcli-lookup-pid ]; do sleep 0.01; done
 kill -TERM "$helper"
 if wait "$helper"; then
     printf '%s\n' 'terminated preflight helper reported success' >&2
@@ -270,12 +266,17 @@ if wait "$helper"; then
 fi
 grep -Fx 'not-connected:unavailable' /tmp/terminated-before-connect >/dev/null
 [ "$(grep -c '^--ask ' /tmp/nmcli-argv)" -eq "$ask_count" ]
-rm -f /tmp/nmcli-list-pid
+rm -f /tmp/nmcli-lookup-pid /tmp/nmcli-lookup-hang \
+    "/tmp/profile-$blocked_name" /run/emacsos-openrc-wifi-pending
 
+printf '%s\n' "$blocked_uuid" >"/tmp/profile-$blocked_name"
+printf 'name=%s\n' "$blocked_name" >/run/emacsos-openrc-wifi-pending
+chmod 0644 /run/emacsos-openrc-wifi-pending
+touch /tmp/nmcli-lookup-hang
 /usr/bin/python3 -I /helper </tmp/request >/tmp/killed-during-preflight &
 helper=$!
-while [ ! -s /tmp/nmcli-list-pid ]; do sleep 0.01; done
-nmcli_pid=$(cat /tmp/nmcli-list-pid)
+while [ ! -s /tmp/nmcli-lookup-pid ]; do sleep 0.01; done
+nmcli_pid=$(cat /tmp/nmcli-lookup-pid)
 kill -KILL "$helper"
 wait "$helper" 2>/dev/null || true
 if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
@@ -289,7 +290,33 @@ import signal
 import sys
 os.killpg(int(sys.argv[1]), signal.SIGKILL)
 PY
-rm -f /tmp/nmcli-list-hang /tmp/nmcli-list-pid
+rm -f /tmp/nmcli-lookup-hang /tmp/nmcli-lookup-pid \
+    "/tmp/profile-$blocked_name" /run/emacsos-openrc-wifi-pending
+
+touch /tmp/nmcli-modify-hang
+/usr/bin/python3 -I /helper </tmp/request >/tmp/terminated-publication &
+helper=$!
+while [ ! -s /tmp/nmcli-modify-pid ]; do sleep 0.01; done
+published_uuid=$(cat /run/emacsos-openrc-wifi-pending)
+published_uuid=${published_uuid#uuid=}
+kill -TERM "$helper"
+if wait "$helper"; then
+    printf '%s\n' 'terminated publication reported success' >&2
+    exit 1
+fi
+grep -Fx 'not-connected:unavailable' /tmp/terminated-publication >/dev/null
+[ ! -e "/tmp/profile-published-$published_uuid" ]
+[ ! -e /run/emacsos-openrc-wifi-pending ]
+rm -f /tmp/nmcli-modify-hang /tmp/nmcli-modify-pid
+
+printf '%s\n' invalid >/run/emacsos-openrc-wifi-pending
+chmod 0644 /run/emacsos-openrc-wifi-pending
+if printf '%s' "$valid_request" | /usr/bin/python3 -I /helper >/tmp/result; then
+    printf '%s\n' 'invalid pending marker reported success' >&2
+    exit 1
+fi
+grep -Fx 'not-connected:unavailable' /tmp/result >/dev/null
+rm -f /run/emacsos-openrc-wifi-pending
 
 printf '%s\n' 'PinePhone Wi-Fi credential helper: OK'
 CONTAINER

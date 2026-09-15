@@ -128,8 +128,15 @@
              "read_command nmcli -e no -t -g connection.id con show uuid"
              script))
     (should (string-match-p
+             (regexp-quote "pending_file=/run/emacsos-openrc-wifi-pending")
+             script))
+    (should (string-match-p
              (regexp-quote
-              "grep -Eq '^emacsos-wifi-attempt-[0-9a-f]{32}$'")
+              "[ \"$pending_kind\" = uuid ] && [ \"$pending_value\" = \"$uuid\" ]")
+             script))
+    (should (string-match-p
+             (regexp-quote
+              "[ \"$(wc -l <\"$saved_id_file\")\" -ne 1 ]")
              script))
     (should (string-match-p
              "read -r uuid type || \\[ -n \\\"\\$uuid\\$type\\\" \\]" script))

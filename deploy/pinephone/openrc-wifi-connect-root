@@ -14,8 +14,8 @@ import sys
 MAX_REQUEST_BYTES = 1024
 MAX_SSID_BYTES = 32
 MAX_PASSWORD_BYTES = 256
-MAX_PENDING_PROFILES = 64
 LOCK_PATH = "/run/emacsos-openrc-network.lock"
+PENDING_PATH = "/run/emacsos-openrc-wifi-pending"
 NMCLI = "/usr/bin/nmcli"
 PROFILE_PREFIX = "emacsos-wifi-attempt-"
 # A complete attempt name is longer than any valid SSID, so publishing to the
@@ -119,9 +119,12 @@ def main():
     process = None
     reconciliation_in_progress = False
     termination_signal = None
+    operation_complete = False
 
     def terminate(signum, _frame):
         nonlocal termination_signal
+        if operation_complete:
+            return
         termination_signal = signum
         if (not reconciliation_in_progress and process is not None and
                 process.poll() is None):
@@ -152,40 +155,126 @@ def main():
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         return process
 
-    def pending_profiles():
-        """Return ``(resolved, uuids)`` for helper-owned pending profiles."""
-        nonlocal reconciliation_in_progress
-        reconciliation_in_progress = True
-        listing = start(
-            [NMCLI, "-t", "-f", "UUID,NAME", "con", "show"],
-            stdout=subprocess.PIPE)
-        try:
-            output, _ = listing.communicate(timeout=3)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(listing)
-            return False, []
-        finally:
-            reconciliation_in_progress = False
-        if listing.returncode != 0:
-            return False, []
-        uuids = []
-        for row in output.splitlines():
-            if (len(row) == 37 + len(PROFILE_PREFIX) + 32 and
-                    row[36:37] == b":" and
-                    UUID_RE.fullmatch(row[:36]) is not None and
-                    PROFILE_RE.fullmatch(row[37:]) is not None):
-                uuids.append(row[:36].decode("ascii"))
-                if len(uuids) > MAX_PENDING_PROFILES:
-                    return False, []
-        return True, uuids
+    def marker_value(kind, value):
+        """Return one validated marker record, or ``None``."""
+        encoded = value.encode("ascii", "strict")
+        if ((kind == "name" and PROFILE_RE.fullmatch(encoded) is not None) or
+                (kind == "uuid" and UUID_RE.fullmatch(encoded) is not None)):
+            return kind.encode("ascii") + b"=" + encoded + b"\n"
+        return None
 
-    def discard_profiles(profile_uuids):
-        """Delete exact PROFILE_UUIDS while deferring termination signals."""
-        nonlocal reconciliation_in_progress
-        if not profile_uuids:
+    def read_pending_marker(path=PENDING_PATH):
+        """Return ``(valid, kind, value)`` from one root-owned marker."""
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return True, None, None
+        except OSError:
+            return False, None, None
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or
+                    info.st_gid != 0 or info.st_nlink != 1 or
+                    info.st_mode & 0o777 != 0o644):
+                return False, None, None
+            raw = os.read(fd, 128)
+            if os.read(fd, 1):
+                return False, None, None
+        finally:
+            os.close(fd)
+        for kind in ("name", "uuid"):
+            prefix = kind.encode("ascii") + b"="
+            if raw.startswith(prefix) and raw.endswith(b"\n"):
+                value = raw[len(prefix):-1]
+                try:
+                    decoded = value.decode("ascii")
+                except UnicodeError:
+                    return False, None, None
+                if marker_value(kind, decoded) == raw:
+                    return True, kind, decoded
+        return False, None, None
+
+    def remove_marker(path, kind=None, value=None):
+        """Remove a safe marker PATH, optionally requiring KIND and VALUE."""
+        valid, actual_kind, actual_value = read_pending_marker(path)
+        if not valid:
+            return False
+        if actual_kind is None:
             return True
+        if kind is not None and (actual_kind, actual_value) != (kind, value):
+            return False
+        try:
+            os.unlink(path)
+        except OSError:
+            return False
+        return True
+
+    def remove_marker_temp():
+        """Remove only a bounded root-owned interrupted marker temporary."""
+        path = PENDING_PATH + ".new"
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or
+                info.st_gid != 0 or info.st_nlink != 1 or
+                info.st_size > 128 or info.st_mode & 0o022):
+            return False
+        try:
+            os.unlink(path)
+        except OSError:
+            return False
+        return True
+
+    def write_pending_marker(kind, value, *, replace=False):
+        """Publish one root-owned marker, atomically when replacing it."""
+        raw = marker_value(kind, value)
+        if raw is None:
+            return False
+        if not remove_marker_temp():
+            return False
+        if not replace:
+            try:
+                os.lstat(PENDING_PATH)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            else:
+                return False
+        path = PENDING_PATH + ".new"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            return False
+        complete = False
+        try:
+            os.fchmod(fd, 0o644)
+            complete = os.write(fd, raw) == len(raw)
+            if complete:
+                os.fsync(fd)
+        except OSError:
+            complete = False
+        finally:
+            os.close(fd)
+        if not complete:
+            remove_marker_temp()
+            return False
+        try:
+            os.replace(path, PENDING_PATH)
+        except OSError:
+            remove_marker_temp()
+            return False
+        return True
+
+    def discard_profile(profile_uuid):
+        """Delete exact PROFILE_UUID while deferring termination signals."""
+        nonlocal reconciliation_in_progress
         reconciliation_in_progress = True
-        delete = start([NMCLI, "con", "delete", "uuid", *profile_uuids])
+        delete = start([NMCLI, "con", "delete", "uuid", profile_uuid])
         try:
             delete.communicate(timeout=5)
         except subprocess.TimeoutExpired:
@@ -193,7 +282,7 @@ def main():
             return False
         finally:
             reconciliation_in_progress = False
-        return delete.returncode == 0
+        return delete.returncode in (0, 10)
 
     def resolve_attempt_profile(profile_name):
         """Return ``(resolved, uuid)`` for one helper-owned profile name."""
@@ -224,43 +313,93 @@ def main():
             return False
         if profile_uuid is None:
             return True
-        return discard_profiles([profile_uuid])
+        return discard_profile(profile_uuid)
 
     def publish_connected_profile(profile_name):
         """Make a successfully connected attempt visible as an ordinary profile."""
-        nonlocal reconciliation_in_progress
+        nonlocal operation_complete
         resolved, profile_uuid = resolve_attempt_profile(profile_name)
         if not resolved or profile_uuid is None:
             return False
-        if termination_signal is not None:
-            discard_profiles([profile_uuid])
+        if not write_pending_marker("uuid", profile_uuid, replace=True):
+            discard_profile(profile_uuid)
             return False
-        reconciliation_in_progress = True
+        if termination_signal is not None:
+            if discard_profile(profile_uuid):
+                remove_marker(PENDING_PATH, "uuid", profile_uuid)
+            return False
         rename = start([NMCLI, "con", "modify", "uuid", profile_uuid,
-                        "connection.id", ssid])
+                        "connection.id", ssid], cancellable=True)
+        if rename is None:
+            if discard_profile(profile_uuid):
+                remove_marker(PENDING_PATH, "uuid", profile_uuid)
+            return False
         try:
             rename.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             _kill_process_group(rename)
+        if rename.returncode != 0 or termination_signal is not None:
+            if discard_profile(profile_uuid):
+                remove_marker(PENDING_PATH, "uuid", profile_uuid)
             return False
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            if termination_signal is None and remove_marker(
+                    PENDING_PATH, "uuid", profile_uuid):
+                operation_complete = True
         finally:
-            reconciliation_in_progress = False
-        return rename.returncode == 0
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        if operation_complete:
+            return True
+        if discard_profile(profile_uuid):
+            remove_marker(PENDING_PATH, "uuid", profile_uuid)
+        return False
 
     try:
-        resolved, stale_profile_uuids = pending_profiles()
-        if not resolved or not discard_profiles(stale_profile_uuids):
+        if not remove_marker_temp():
+            _emit("not-connected:unavailable")
+            return 1
+        valid_marker, pending_kind, pending_value = read_pending_marker()
+        if not valid_marker:
+            _emit("not-connected:unavailable")
+            return 1
+        if pending_kind == "name":
+            discarded = discard_failed_profile(pending_value)
+        elif pending_kind == "uuid":
+            discarded = discard_profile(pending_value)
+        else:
+            discarded = True
+        if (not discarded or
+                (pending_kind is not None and not remove_marker(
+                    PENDING_PATH, pending_kind, pending_value))):
             _emit("not-connected:unavailable")
             return 1
         if termination_signal is not None:
             _emit("not-connected:failed")
             return 1
-        profile_name = PROFILE_PREFIX + secrets.token_hex(16)
+        for _attempt in range(4):
+            profile_name = PROFILE_PREFIX + secrets.token_hex(16)
+            resolved, existing_uuid = resolve_attempt_profile(profile_name)
+            if not resolved:
+                _emit("not-connected:unavailable")
+                return 1
+            if existing_uuid is None:
+                break
+        else:
+            _emit("not-connected:unavailable")
+            return 1
+        if termination_signal is not None:
+            _emit("not-connected:failed")
+            return 1
+        if not write_pending_marker("name", profile_name):
+            _emit("not-connected:unavailable")
+            return 1
         process = start(
             [NMCLI, "--ask", "dev", "wifi", "connect", ssid,
              "name", profile_name],
             stdin=subprocess.PIPE, cancellable=True)
         if process is None:
+            remove_marker(PENDING_PATH, "name", profile_name)
             _emit("not-connected:failed")
             return 1
         process.communicate(input=(password + "\n").encode("utf-8"), timeout=20)
@@ -268,9 +407,11 @@ def main():
             status = ("connected" if publish_connected_profile(profile_name)
                       else "not-connected:unavailable")
         else:
-            status = ("not-connected:failed"
-                      if discard_failed_profile(profile_name)
-                      else "not-connected:unavailable")
+            if discard_failed_profile(profile_name) and remove_marker(
+                    PENDING_PATH, "name", profile_name):
+                status = "not-connected:failed"
+            else:
+                status = "not-connected:unavailable"
     except subprocess.TimeoutExpired:
         _kill_process_group(process)
         status = "unknown:time-limit"
