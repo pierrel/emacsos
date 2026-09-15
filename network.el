@@ -365,17 +365,21 @@ WPA-Personal), or `unsupported-security' (for example 802.1X)."
 One Emacs process and sentinel own the reader.  Its TERM trap kills and reaps
 the active system tool, so the outer deadline cannot leave a child behind.
 Emacs owns and removes the private temp directory even after a forced kill.
-SSID bytes are hex-encoded before entering the line protocol."
+The saved-profile snapshot is accepted only when the helper's durable,
+monotonic ownership record is identical before and after enumeration.  SSID
+bytes are hex-encoded before entering the line protocol."
   (concat
-   "child=; reader_dir=$2; [ -d \"$reader_dir\" ] || exit 1; reader_file=$reader_dir/connections; saved_ssid_file=$reader_dir/saved-ssid; saved_id_file=$reader_dir/saved-id; pending_file=/run/emacsos-openrc-wifi-pending; pending_kind=; pending_value=; pending_valid=yes; "
+   "child=; reader_dir=$2; pending_file=$3; [ -d \"$reader_dir\" ] && [ -n \"$pending_file\" ] || exit 1; reader_file=$reader_dir/connections; saved_ssid_file=$reader_dir/saved-ssid; saved_id_file=$reader_dir/saved-id; pending_before_file=$reader_dir/pending-before; pending_after_file=$reader_dir/pending-after; pending_generation=; pending_kind=; pending_value=; pending_extra=; pending_valid=yes; "
    "stop_child() { if [ -n \"$child\" ]; then kill -KILL \"$child\" 2>/dev/null || :; wait \"$child\" 2>/dev/null || :; child=; fi; }; "
-   "cleanup() { stop_child; [ -z \"$reader_file\" ] || rm -f -- \"$reader_file\"; [ -z \"$saved_ssid_file\" ] || rm -f -- \"$saved_ssid_file\"; [ -z \"$saved_id_file\" ] || rm -f -- \"$saved_id_file\"; }; "
+   "cleanup() { stop_child; [ -z \"$reader_file\" ] || rm -f -- \"$reader_file\"; [ -z \"$saved_ssid_file\" ] || rm -f -- \"$saved_ssid_file\"; [ -z \"$saved_id_file\" ] || rm -f -- \"$saved_id_file\"; [ -z \"$pending_before_file\" ] || rm -f -- \"$pending_before_file\"; [ -z \"$pending_after_file\" ] || rm -f -- \"$pending_after_file\"; }; "
    "trap 'cleanup; exit 1' HUP INT TERM; trap cleanup EXIT; "
    "read_command() { \"$@\" & child=$!; if wait \"$child\"; then status=0; else status=$?; fi; child=; return \"$status\"; }; "
+   "snapshot_marker() { marker_target=$1; if [ -e \"$pending_file\" ]; then read_command cat -- \"$pending_file\" >\"$marker_target\" 2>/dev/null || return 1; else printf '0:idle\\n' >\"$marker_target\" || return 1; fi; [ \"$(wc -c <\"$marker_target\")\" -le 128 ] && [ \"$(wc -l <\"$marker_target\")\" -eq 1 ]; }; "
    ": >\"$reader_file\" || exit 1; : >\"$saved_ssid_file\" || exit 1; : >\"$saved_id_file\" || exit 1; "
-   "if [ -e \"$pending_file\" ]; then if [ -f \"$pending_file\" ] && [ \"$(wc -l <\"$pending_file\")\" -eq 1 ] && IFS== read -r pending_kind pending_value <\"$pending_file\"; then "
-   "case $pending_kind in name) printf '%s\\n' \"$pending_value\" | grep -Eq '^emacsos-wifi-attempt-[0-9a-f]{32}$' || pending_valid=no ;; uuid) printf '%s\\n' \"$pending_value\" | grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' || pending_valid=no ;; *) pending_valid=no ;; esac; "
-   "else pending_valid=no; fi; fi; "
+   "if snapshot_marker \"$pending_before_file\" && grep -Eq '^(0|[1-9][0-9]*):(idle|name:emacsos-wifi-attempt-[0-9a-f]{32}|uuid:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$' \"$pending_before_file\" && IFS=: read -r pending_generation pending_kind pending_value pending_extra <\"$pending_before_file\"; then "
+   "case $pending_generation in ''|*[!0-9]*) pending_valid=no ;; esac; [ \"${#pending_generation}\" -le 19 ] || pending_valid=no; "
+   "case $pending_kind in idle) [ -z \"$pending_value$pending_extra\" ] || pending_valid=no ;; name) [ -z \"$pending_extra\" ] && printf '%s\\n' \"$pending_value\" | grep -Eq '^emacsos-wifi-attempt-[0-9a-f]{32}$' || pending_valid=no ;; uuid) [ -z \"$pending_extra\" ] && printf '%s\\n' \"$pending_value\" | grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' || pending_valid=no ;; *) pending_valid=no ;; esac; "
+   "else pending_valid=no; fi; "
    "echo @@RADIO; read_command nmcli -t -f WIFI radio 2>/dev/null || :; "
    "echo @@ROUTE; read_command ip -4 route show default 2>/dev/null || :; "
    "echo @@CONS; "
@@ -388,10 +392,10 @@ SSID bytes are hex-encoded before entering the line protocol."
    "while IFS=: read -r uuid type || [ -n \"$uuid$type\" ]; do "
    "[ \"$type\" = 802-11-wireless ] || continue; "
    "if [ \"$pending_kind\" = uuid ] && [ \"$pending_value\" = \"$uuid\" ]; then continue; fi; "
-   "if read_command nmcli -e no -t -g connection.id con show uuid \"$uuid\" >\"$saved_id_file\" 2>/dev/null; then "
+   "if [ \"$pending_kind\" = name ] && read_command nmcli -e no -t -g connection.id con show uuid \"$uuid\" >\"$saved_id_file\" 2>/dev/null; then "
    "if [ \"$(wc -l <\"$saved_id_file\")\" -ne 1 ]; then echo @@SAVED-FAILED; echo yes; continue; fi; "
-   "if [ \"$pending_kind\" = name ] && [ \"$(cat \"$saved_id_file\")\" = \"$pending_value\" ]; then continue; fi; "
-   "else echo @@SAVED-FAILED; echo yes; continue; fi; "
+   "if [ \"$(cat \"$saved_id_file\")\" = \"$pending_value\" ]; then continue; fi; "
+   "elif [ \"$pending_kind\" = name ]; then echo @@SAVED-FAILED; echo yes; continue; fi; "
    "if read_command nmcli -e no -t -g 802-11-wireless.ssid con show uuid \"$uuid\" >\"$saved_ssid_file\" 2>/dev/null; then "
    "ssid_hex=$(od -An -v -tx1 \"$saved_ssid_file\" | tr -d '[:space:]'); "
    "case $ssid_hex in *0a) ssid_hex=${ssid_hex%0a} ;; *) ssid_hex= ;; esac; "
@@ -399,6 +403,7 @@ SSID bytes are hex-encoded before entering the line protocol."
    "else echo @@SAVED-FAILED; echo yes; fi; "
    "else echo @@SAVED-FAILED; echo yes; fi; done <\"$reader_file\"; "
    "else echo @@SAVED-FAILED; echo yes; fi; "
+   "if ! snapshot_marker \"$pending_after_file\" || ! cmp -s \"$pending_before_file\" \"$pending_after_file\"; then echo @@SAVED-FAILED; echo yes; fi; "
    "echo @@SAVED-OK; echo yes; "
    "echo @@WIFI;  read_command nmcli -t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY dev wifi 2>/dev/null || :; "
    "echo @@CELL;  read_command mmcli -m any --output-keyvalue 2>/dev/null || :; "
@@ -420,7 +425,8 @@ SSID bytes are hex-encoded before entering the line protocol."
                    :command (list "/usr/bin/timeout" "-s" "TERM" "-k" "1" "8"
                                   "sh" "-c" (emacsos-net--reader-script)
                                   "emacsos-net-read" emacsos-net-cell-connection
-                                  reader-directory)
+                                  reader-directory
+                                  "/var/lib/emacsos-openrc-wifi-pending")
                    :noquery t
                    :sentinel #'emacsos-net--reader-sentinel))
             (process-put emacsos-net--proc 'emacsos-net-temp-directory

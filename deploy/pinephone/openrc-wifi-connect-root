@@ -6,16 +6,20 @@ import json
 import os
 import re
 import secrets
+import select
 import signal
 import stat
 import subprocess
 import sys
+import time
 
 MAX_REQUEST_BYTES = 1024
 MAX_SSID_BYTES = 32
 MAX_PASSWORD_BYTES = 256
+MAX_MARKER_GENERATION = 9999999999999999999
+MAX_NMCLI_OUTPUT_BYTES = 4096
 LOCK_PATH = "/run/emacsos-openrc-network.lock"
-PENDING_PATH = "/run/emacsos-openrc-wifi-pending"
+PENDING_PATH = "/var/lib/emacsos-openrc-wifi-pending"
 NMCLI = "/usr/bin/nmcli"
 PROFILE_PREFIX = "emacsos-wifi-attempt-"
 # A complete attempt name is longer than any valid SSID, so publishing to the
@@ -155,59 +159,55 @@ def main():
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         return process
 
-    def marker_value(kind, value):
-        """Return one validated marker record, or ``None``."""
+    def marker_value(generation, kind, value=None):
+        """Return one validated durable marker record, or ``None``."""
+        if (not isinstance(generation, int) or generation < 0 or
+                generation > MAX_MARKER_GENERATION):
+            return None
+        prefix = str(generation).encode("ascii") + b":" + kind.encode("ascii")
+        if kind == "idle" and value is None:
+            return prefix + b"\n"
+        if not isinstance(value, str):
+            return None
         encoded = value.encode("ascii", "strict")
         if ((kind == "name" and PROFILE_RE.fullmatch(encoded) is not None) or
                 (kind == "uuid" and UUID_RE.fullmatch(encoded) is not None)):
-            return kind.encode("ascii") + b"=" + encoded + b"\n"
+            return prefix + b":" + encoded + b"\n"
         return None
 
     def read_pending_marker(path=PENDING_PATH):
-        """Return ``(valid, kind, value)`` from one root-owned marker."""
+        """Return ``(valid, generation, kind, value)`` from the marker."""
         try:
             fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         except FileNotFoundError:
-            return True, None, None
+            return True, 0, "idle", None
         except OSError:
-            return False, None, None
+            return False, None, None, None
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or
                     info.st_gid != 0 or info.st_nlink != 1 or
                     info.st_mode & 0o777 != 0o644):
-                return False, None, None
+                return False, None, None, None
             raw = os.read(fd, 128)
             if os.read(fd, 1):
-                return False, None, None
+                return False, None, None, None
         finally:
             os.close(fd)
-        for kind in ("name", "uuid"):
-            prefix = kind.encode("ascii") + b"="
-            if raw.startswith(prefix) and raw.endswith(b"\n"):
-                value = raw[len(prefix):-1]
-                try:
-                    decoded = value.decode("ascii")
-                except UnicodeError:
-                    return False, None, None
-                if marker_value(kind, decoded) == raw:
-                    return True, kind, decoded
-        return False, None, None
-
-    def remove_marker(path, kind=None, value=None):
-        """Remove a safe marker PATH, optionally requiring KIND and VALUE."""
-        valid, actual_kind, actual_value = read_pending_marker(path)
-        if not valid:
-            return False
-        if actual_kind is None:
-            return True
-        if kind is not None and (actual_kind, actual_value) != (kind, value):
-            return False
         try:
-            os.unlink(path)
-        except OSError:
-            return False
-        return True
+            fields = raw[:-1].decode("ascii").split(":")
+            generation = int(fields[0])
+        except (UnicodeError, ValueError):
+            return False, None, None, None
+        if len(fields) == 2:
+            kind, value = fields[1], None
+        elif len(fields) == 3:
+            kind, value = fields[1], fields[2]
+        else:
+            return False, None, None, None
+        if marker_value(generation, kind, value) == raw:
+            return True, generation, kind, value
+        return False, None, None, None
 
     def remove_marker_temp():
         """Remove only a bounded root-owned interrupted marker temporary."""
@@ -228,22 +228,13 @@ def main():
             return False
         return True
 
-    def write_pending_marker(kind, value, *, replace=False):
-        """Publish one root-owned marker, atomically when replacing it."""
-        raw = marker_value(kind, value)
+    def write_pending_marker(generation, kind, value=None):
+        """Atomically publish one durable root-owned marker state."""
+        raw = marker_value(generation, kind, value)
         if raw is None:
             return False
         if not remove_marker_temp():
             return False
-        if not replace:
-            try:
-                os.lstat(PENDING_PATH)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                return False
-            else:
-                return False
         path = PENDING_PATH + ".new"
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
@@ -265,10 +256,25 @@ def main():
             return False
         try:
             os.replace(path, PENDING_PATH)
+            directory = os.open("/var/lib", os.O_RDONLY | os.O_DIRECTORY |
+                                os.O_CLOEXEC)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         except OSError:
             remove_marker_temp()
             return False
         return True
+
+    def finish_pending_marker(generation, kind, value):
+        """Advance exact pending state to a durable idle generation."""
+        valid, actual_generation, actual_kind, actual_value = read_pending_marker()
+        if (not valid or
+                (actual_generation, actual_kind, actual_value) !=
+                (generation, kind, value)):
+            return False
+        return write_pending_marker(generation + 1, "idle")
 
     def discard_profile(profile_uuid):
         """Delete exact PROFILE_UUID while deferring termination signals."""
@@ -288,17 +294,45 @@ def main():
         """Return ``(resolved, uuid)`` for one helper-owned profile name."""
         nonlocal reconciliation_in_progress
         reconciliation_in_progress = True
-        lookup = start(
-            [NMCLI, "-g", "UUID", "con", "show", "id", profile_name],
-            stdout=subprocess.PIPE)
+        read_fd = write_fd = None
         try:
-            output, _ = lookup.communicate(timeout=3)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(lookup)
-            return False, None
+            read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+            lookup = start(
+                [NMCLI, "-g", "UUID", "con", "show", "id", profile_name],
+                stdout=write_fd)
+            os.close(write_fd)
+            write_fd = None
+            deadline = time.monotonic() + 3
+            output = bytearray()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _kill_process_group(lookup)
+                    return False, None
+                readable, _, _ = select.select([read_fd], [], [], remaining)
+                if not readable:
+                    _kill_process_group(lookup)
+                    return False, None
+                available = MAX_NMCLI_OUTPUT_BYTES - len(output)
+                chunk = os.read(read_fd, min(4096, available + 1))
+                if not chunk:
+                    break
+                if len(chunk) > available:
+                    _kill_process_group(lookup)
+                    return False, None
+                output.extend(chunk)
+            try:
+                lookup.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                _kill_process_group(lookup)
+                return False, None
         finally:
+            if write_fd is not None:
+                os.close(write_fd)
+            if read_fd is not None:
+                os.close(read_fd)
             reconciliation_in_progress = False
-        uuids = output.splitlines()
+        uuids = bytes(output).splitlines()
         if lookup.returncode == 10 and not uuids:
             return True, None
         if (lookup.returncode != 0 or len(uuids) != 1 or
@@ -315,51 +349,47 @@ def main():
             return True
         return discard_profile(profile_uuid)
 
-    def publish_connected_profile(profile_name):
+    def publish_connected_profile(generation, profile_name):
         """Make a successfully connected attempt visible as an ordinary profile."""
         nonlocal operation_complete
         resolved, profile_uuid = resolve_attempt_profile(profile_name)
         if not resolved or profile_uuid is None:
             return False
-        if not write_pending_marker("uuid", profile_uuid, replace=True):
+        if not write_pending_marker(generation, "uuid", profile_uuid):
             discard_profile(profile_uuid)
             return False
         if termination_signal is not None:
-            if discard_profile(profile_uuid):
-                remove_marker(PENDING_PATH, "uuid", profile_uuid)
+            discard_profile(profile_uuid)
             return False
         rename = start([NMCLI, "con", "modify", "uuid", profile_uuid,
                         "connection.id", ssid], cancellable=True)
         if rename is None:
-            if discard_profile(profile_uuid):
-                remove_marker(PENDING_PATH, "uuid", profile_uuid)
+            discard_profile(profile_uuid)
             return False
         try:
             rename.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             _kill_process_group(rename)
         if rename.returncode != 0 or termination_signal is not None:
-            if discard_profile(profile_uuid):
-                remove_marker(PENDING_PATH, "uuid", profile_uuid)
+            discard_profile(profile_uuid)
             return False
         old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
         try:
-            if termination_signal is None and remove_marker(
-                    PENDING_PATH, "uuid", profile_uuid):
+            if termination_signal is None and finish_pending_marker(
+                    generation, "uuid", profile_uuid):
                 operation_complete = True
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         if operation_complete:
             return True
-        if discard_profile(profile_uuid):
-            remove_marker(PENDING_PATH, "uuid", profile_uuid)
+        discard_profile(profile_uuid)
         return False
 
     try:
         if not remove_marker_temp():
             _emit("not-connected:unavailable")
             return 1
-        valid_marker, pending_kind, pending_value = read_pending_marker()
+        valid_marker, generation, pending_kind, pending_value = read_pending_marker()
         if not valid_marker:
             _emit("not-connected:unavailable")
             return 1
@@ -369,9 +399,7 @@ def main():
             discarded = discard_profile(pending_value)
         else:
             discarded = True
-        if (not discarded or
-                (pending_kind is not None and not remove_marker(
-                    PENDING_PATH, pending_kind, pending_value))):
+        if not discarded:
             _emit("not-connected:unavailable")
             return 1
         if termination_signal is not None:
@@ -391,7 +419,8 @@ def main():
         if termination_signal is not None:
             _emit("not-connected:failed")
             return 1
-        if not write_pending_marker("name", profile_name):
+        generation += 1
+        if not write_pending_marker(generation, "name", profile_name):
             _emit("not-connected:unavailable")
             return 1
         process = start(
@@ -399,16 +428,15 @@ def main():
              "name", profile_name],
             stdin=subprocess.PIPE, cancellable=True)
         if process is None:
-            remove_marker(PENDING_PATH, "name", profile_name)
             _emit("not-connected:failed")
             return 1
         process.communicate(input=(password + "\n").encode("utf-8"), timeout=20)
         if process.returncode == 0 and termination_signal is None:
-            status = ("connected" if publish_connected_profile(profile_name)
+            status = ("connected" if publish_connected_profile(
+                          generation, profile_name)
                       else "not-connected:unavailable")
         else:
-            if discard_failed_profile(profile_name) and remove_marker(
-                    PENDING_PATH, "name", profile_name):
+            if discard_failed_profile(profile_name):
                 status = "not-connected:failed"
             else:
                 status = "not-connected:unavailable"

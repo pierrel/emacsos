@@ -128,11 +128,19 @@
              "read_command nmcli -e no -t -g connection.id con show uuid"
              script))
     (should (string-match-p
-             (regexp-quote "pending_file=/run/emacsos-openrc-wifi-pending")
+             (regexp-quote "pending_file=$3")
+             script))
+    (should (string-match-p
+             (regexp-quote
+              "cmp -s \"$pending_before_file\" \"$pending_after_file\"")
              script))
     (should (string-match-p
              (regexp-quote
               "[ \"$pending_kind\" = uuid ] && [ \"$pending_value\" = \"$uuid\" ]")
+             script))
+    (should (string-match-p
+             (regexp-quote
+              "[ \"$pending_kind\" = name ] && read_command nmcli")
              script))
     (should (string-match-p
              (regexp-quote
@@ -149,6 +157,81 @@
     (should-not (string-match-p "reader_file=\\$(mktemp)" script))
     (should (string-match-p "@@SAVED-FAILED" script))
     (should-not (string-match-p "ip -o -4" script))))
+
+(ert-deftest test-net-reader-rejects-profile-snapshot-across-marker-generation ()
+  (let* ((directory (make-temp-file "test-net-marker-race-" t))
+         (reader-directory (make-temp-file "test-net-marker-reader-" t))
+         (marker (expand-file-name "pending" directory))
+         (nmcli (expand-file-name "nmcli" directory))
+         (ip (expand-file-name "ip" directory))
+         (mmcli (expand-file-name "mmcli" directory))
+         (uuid "11111111-2222-3333-4444-555555555555")
+         (process-environment
+          (cons (concat "TEST_NET_PENDING=" marker)
+                (cons (concat "PATH=" directory ":" (getenv "PATH"))
+                      process-environment))))
+    (unwind-protect
+        (progn
+          (with-temp-file marker
+            (insert "1:name:emacsos-wifi-attempt-00000000000000000000000000000000\n"))
+          (with-temp-file nmcli
+            (insert
+             "#!/bin/sh\n"
+             "case $* in\n"
+             "  '-t -f WIFI radio') echo enabled ;;\n"
+             "  '-e no -t -g connection.type con show id emacsos-cellular') echo gsm ;;\n"
+             "  '-e no -t -g GENERAL.DEVICES con show id emacsos-cellular') echo -- ;;\n"
+             "  '-t -f UUID,TYPE con show') printf '2:idle\\n' >\"$TEST_NET_PENDING\"; echo '"
+             uuid ":802-11-wireless' ;;\n"
+             "  '-e no -t -g connection.id con show uuid " uuid "') echo Ordinary ;;\n"
+             "  '-e no -t -g 802-11-wireless.ssid con show uuid " uuid "') echo Cafe ;;\n"
+             "  '-t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY dev wifi') : ;;\n"
+             "  *) exit 1 ;;\n"
+             "esac\n"))
+          (with-temp-file ip (insert "#!/bin/sh\nexit 0\n"))
+          (with-temp-file mmcli (insert "#!/bin/sh\nexit 0\n"))
+          (mapc (lambda (file) (set-file-modes file #o755))
+                (list nmcli ip mmcli))
+          (with-temp-buffer
+            (should (= 0 (call-process
+                          "/bin/sh" nil t nil "-c"
+                          (emacsos-net--reader-script)
+                          "emacsos-net-read" emacsos-net-cell-connection
+                          reader-directory marker)))
+            (let ((blob (buffer-string)))
+              (should (string-match-p "@@SAVED-FAILED\nyes" blob))
+              (should-not (emacsos-net-state-saved-known
+                           (emacsos-net--parse blob))))))
+      (delete-directory reader-directory t)
+      (delete-directory directory t))))
+
+(ert-deftest test-net-reader-rejects-noncanonical-marker-records ()
+  (dolist (record '("1:idle:\n" "01:idle\n"))
+    (let* ((directory (make-temp-file "test-net-marker-invalid-" t))
+           (reader-directory (make-temp-file "test-net-marker-reader-" t))
+           (marker (expand-file-name "pending" directory))
+           (process-environment
+            (cons (concat "PATH=" directory ":" (getenv "PATH"))
+                  process-environment)))
+      (unwind-protect
+          (progn
+            (with-temp-file marker (insert record))
+            (dolist (name '("nmcli" "ip" "mmcli"))
+              (let ((tool (expand-file-name name directory)))
+                (with-temp-file tool (insert "#!/bin/sh\nexit 1\n"))
+                (set-file-modes tool #o755)))
+            (with-temp-buffer
+              (should (= 0 (call-process
+                            "/bin/sh" nil t nil "-c"
+                            (emacsos-net--reader-script)
+                            "emacsos-net-read" emacsos-net-cell-connection
+                            reader-directory marker)))
+              (let ((blob (buffer-string)))
+                (should (string-match-p "@@SAVED-FAILED\nyes" blob))
+                (should-not (emacsos-net-state-saved-known
+                             (emacsos-net--parse blob))))))
+        (delete-directory reader-directory t)
+        (delete-directory directory t)))))
 
 (ert-deftest test-net-ssid-hex-rejects-controls-and-invalid-utf8 ()
   (should (equal (emacsos-net--decode-ssid-hex "436166c3a9") "Café"))
@@ -357,11 +440,13 @@
       (unwind-protect
           (progn
             (emacsos-net--refresh)
-            (setq reader-directory (car (last command)))
+            (setq reader-directory (car (last command 2)))
             (should (equal (seq-take command 7)
                            '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "8" "sh")))
-            (should (equal (seq-take (last command 3) 2)
+            (should (equal (seq-take (last command 4) 2)
                            '("emacsos-net-read" "emacsos-cellular")))
+            (should (equal (car (last command))
+                           "/var/lib/emacsos-openrc-wifi-pending"))
             (should (file-directory-p reader-directory)))
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when (and reader-directory (file-exists-p reader-directory))
@@ -559,7 +644,8 @@
                                 "sh" "-c"
                                 (emacsos-net--reader-script)
                                 "emacsos-net-read" emacsos-net-cell-connection
-                                reader-directory)
+                                reader-directory
+                                "/var/lib/emacsos-openrc-wifi-pending")
                  :noquery t))
           (process-put emacsos-net--proc 'emacsos-net-temp-directory
                        reader-directory)
