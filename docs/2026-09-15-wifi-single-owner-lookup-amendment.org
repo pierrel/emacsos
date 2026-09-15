@@ -1,0 +1,25 @@
+#+title: Wi-Fi single owner lookup amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment replaces only the status-reader ownership paragraph in
+[[file:2026-09-15-wifi-wrong-password-retry-amendment.org][Wi-Fi wrong-password retry amendment]], Correction, beginning "The status
+reader hides only the profile owned by the stable marker."  That document
+remains the historical record for the rest of the correction.
+
+* Correction
+
+The status reader first captures the complete saved-profile UUID and type
+list.  While stable name ownership survives, it then resolves that exact name
+once to either no profile or one canonical UUID before iterating the captured
+list; any other result fails the snapshot closed.  Resolving after capture
+ensures that a profile created during the read cannot appear in the snapshot
+without being considered for exclusion.  The reader skips only that resolved
+UUID, so ownership work stays constant as the saved-profile list grows.
+
+UUID ownership needs no editable-name lookup.  Emitted saved profiles remain
+identified solely by UUID and actual SSID.  The reader also requires the
+complete ownership marker to remain byte-identical through publication; an
+attempt that begins, changes ownership form, or finishes during the read makes
+the saved snapshot inert.

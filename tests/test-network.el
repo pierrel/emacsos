@@ -125,11 +125,6 @@
              "read_command nmcli -e no -t -g 802-11-wireless.ssid con show uuid"
              script))
     (should (string-match-p
-             "read_command nmcli -e no -t -g UUID con show id"
-             script))
-    (should-not (string-match-p
-                 "connection.id con show uuid" script))
-    (should (string-match-p
              (regexp-quote "pending_file=$3")
              script))
     (should (string-match-p
@@ -140,7 +135,6 @@
              (regexp-quote
               "[ -n \"$pending_uuid\" ] && [ \"$pending_uuid\" = \"$uuid\" ]")
              script))
-    (should (string-match-p "case \\$pending_lookup_status" script))
     (should (string-match-p
              "read -r uuid type || \\[ -n \\\"\\$uuid\\$type\\\" \\]" script))
     (should (string-match-p
@@ -178,7 +172,7 @@
              "  '-e no -t -g GENERAL.DEVICES con show id emacsos-cellular') echo -- ;;\n"
              "  '-t -f UUID,TYPE con show') printf '2:idle\\n' >\"$TEST_NET_PENDING\"; echo '"
              uuid ":802-11-wireless' ;;\n"
-             "  '-e no -t -g connection.id con show uuid " uuid "') echo Ordinary ;;\n"
+             "  '-e no -t -g UUID con show id emacsos-wifi-attempt-00000000000000000000000000000000') echo " uuid " ;;\n"
              "  '-e no -t -g 802-11-wireless.ssid con show uuid " uuid "') echo Cafe ;;\n"
              "  '-t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY dev wifi') : ;;\n"
              "  *) exit 1 ;;\n"
@@ -200,12 +194,13 @@
       (delete-directory reader-directory t)
       (delete-directory directory t))))
 
-(ert-deftest test-net-reader-resolves-name-marker-once-before-enumeration ()
+(ert-deftest test-net-reader-resolves-name-marker-once-after-snapshot ()
   (dolist (owned-present '(t nil))
     (let* ((directory (make-temp-file "test-net-marker-owner-" t))
            (reader-directory (make-temp-file "test-net-marker-reader-" t))
            (marker (expand-file-name "pending" directory))
            (calls (expand-file-name "calls" directory))
+           (listed (expand-file-name "listed" directory))
            (nmcli (expand-file-name "nmcli" directory))
            (ip (expand-file-name "ip" directory))
            (mmcli (expand-file-name "mmcli" directory))
@@ -214,8 +209,9 @@
            (saved-uuid "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
            (process-environment
             (cons (concat "TEST_NET_CALLS=" calls)
-                  (cons (concat "PATH=" directory ":" (getenv "PATH"))
-                        process-environment))))
+                  (cons (concat "TEST_NET_LISTED=" listed)
+                        (cons (concat "PATH=" directory ":" (getenv "PATH"))
+                              process-environment)))))
       (unwind-protect
           (progn
             (with-temp-file marker (insert "1:name:" attempt "\n"))
@@ -228,10 +224,11 @@
                "  '-e no -t -g connection.type con show id emacsos-cellular') echo gsm ;;\n"
                "  '-e no -t -g GENERAL.DEVICES con show id emacsos-cellular') echo -- ;;\n"
                "  '-e no -t -g UUID con show id " attempt "') "
+               "[ -e \"$TEST_NET_LISTED\" ] || exit 9; "
                (if owned-present
                    (concat "echo " owned-uuid " ;;\n")
                  "exit 10 ;;\n")
-               "  '-t -f UUID,TYPE con show') "
+               "  '-t -f UUID,TYPE con show') touch \"$TEST_NET_LISTED\"; "
                (if owned-present
                    (concat "echo '" owned-uuid ":802-11-wireless'; ")
                  "")
