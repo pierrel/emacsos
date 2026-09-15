@@ -416,7 +416,7 @@
 (ert-deftest emacsos-openrc-wifi-early-exit-preserves-terminal-result ()
   (dolist (failure '(write eof))
     (let (stdout stderr initial-sentinel installed-sentinel delivered
-                 write-called eof-called)
+                 write-called eof-called (completions 0))
       (cl-letf (((symbol-function 'make-process)
                  (lambda (&rest args)
                    (setq stdout (plist-get args :buffer)
@@ -443,7 +443,9 @@
         (should (equal
                  (emacsos-pinephone-wifi-operation
                   'secured "Cafe network" "Exact password"
-                  (lambda (result) (setq delivered result)))
+                  (lambda (result)
+                    (setq delivered result)
+                    (cl-incf completions)))
                  "pending: Wi-Fi connection requested"))
         (should write-called)
         (should (eq (not (null eof-called)) (eq failure 'eof)))
@@ -451,7 +453,9 @@
         (should (functionp installed-sentinel))
         (should (buffer-live-p stdout))
         (should (buffer-live-p stderr))
+        (should (zerop completions))
         (funcall installed-sentinel 'wifi-process "finished")
+        (should (= completions 1))
         (should (equal delivered "not-connected:busy"))
         (should-not (buffer-live-p stdout))
         (should-not (buffer-live-p stderr))))))
