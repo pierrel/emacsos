@@ -125,6 +125,13 @@
              "read_command nmcli -e no -t -g 802-11-wireless.ssid con show uuid"
              script))
     (should (string-match-p
+             "read_command nmcli -e no -t -g connection.id con show uuid"
+             script))
+    (should (string-match-p
+             (regexp-quote
+              "grep -Eq '^emacsos-wifi-attempt-[0-9a-f]{32}$'")
+             script))
+    (should (string-match-p
              "read -r uuid type || \\[ -n \\\"\\$uuid\\$type\\\" \\]" script))
     (should (string-match-p
              "read_command nmcli -t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY" script))
