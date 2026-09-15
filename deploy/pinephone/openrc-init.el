@@ -492,7 +492,7 @@ every agent-config load."
   "Connect KIND and TARGET, sending PASSWORD only to the credential helper."
   (let ((buffer (generate-new-buffer " *emacsos-wifi*"))
         (stderr-buffer (generate-new-buffer " *emacsos-wifi-stderr*"))
-        process command request sentinel)
+        process command request sentinel finished)
     (pcase kind
       ('saved
        (setq command (list "/usr/bin/doas" "-n"
@@ -515,8 +515,11 @@ every agent-config load."
         "not-connected:invalid-input"
       (setq sentinel
             (lambda (proc event)
-              (emacsos-pinephone-wifi-finished
-               proc event completion stderr-buffer)))
+              (when (and (not finished)
+                         (memq (process-status proc) '(exit signal)))
+                (setq finished t)
+                (emacsos-pinephone-wifi-finished
+                 proc event completion stderr-buffer))))
       (unwind-protect
           (condition-case nil
               (progn
@@ -539,6 +542,8 @@ every agent-config load."
                              nil)
                          (error t))))
                   (set-process-sentinel process sentinel)
+                  (when (memq (process-status process) '(exit signal))
+                    (run-at-time 0 nil sentinel process "finished"))
                   (when (and write-failed (process-live-p process))
                     (delete-process process)))
                 "pending: Wi-Fi connection requested")

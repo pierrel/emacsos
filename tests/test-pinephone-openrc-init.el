@@ -397,7 +397,8 @@
                  (setq seen-input (copy-sequence value))))
               ((symbol-function 'process-send-eof)
                (lambda (_process) (setq eof t)))
-              ((symbol-function 'set-process-sentinel) #'ignore))
+              ((symbol-function 'set-process-sentinel) #'ignore)
+              ((symbol-function 'process-status) (lambda (_) 'run)))
       (should (equal
                (emacsos-pinephone-wifi-operation
                 'secured "Cafe network" "Exact password" #'ignore)
@@ -415,8 +416,9 @@
 
 (ert-deftest emacsos-openrc-wifi-early-exit-preserves-terminal-result ()
   (dolist (failure '(write eof))
-    (let (stdout stderr initial-sentinel installed-sentinel delivered
-                 write-called eof-called (completions 0))
+    (let (stdout stderr initial-sentinel installed-sentinel scheduled-function
+                 scheduled-arguments delivered write-called eof-called
+                 (completions 0))
       (cl-letf (((symbol-function 'make-process)
                  (lambda (&rest args)
                    (setq stdout (plist-get args :buffer)
@@ -436,6 +438,10 @@
                 ((symbol-function 'set-process-sentinel)
                  (lambda (_process sentinel)
                    (setq installed-sentinel sentinel)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat function &rest arguments)
+                   (setq scheduled-function function
+                         scheduled-arguments arguments)))
                 ((symbol-function 'process-live-p) (lambda (_) nil))
                 ((symbol-function 'process-status) (lambda (_) 'exit))
                 ((symbol-function 'process-buffer) (lambda (_) stdout))
@@ -454,11 +460,14 @@
         (should (buffer-live-p stdout))
         (should (buffer-live-p stderr))
         (should (zerop completions))
-        (funcall installed-sentinel 'wifi-process "finished")
+        (should (eq scheduled-function installed-sentinel))
+        (apply scheduled-function scheduled-arguments)
         (should (= completions 1))
         (should (equal delivered "not-connected:busy"))
         (should-not (buffer-live-p stdout))
-        (should-not (buffer-live-p stderr))))))
+        (should-not (buffer-live-p stderr))
+        (funcall installed-sentinel 'wifi-process "finished")
+        (should (= completions 1))))))
 
 (ert-deftest emacsos-openrc-wifi-saved-operation-uses-fixed-helper ()
   (let (seen-command sent)
@@ -469,7 +478,8 @@
               ((symbol-function 'process-send-string)
                (lambda (&rest _) (setq sent t)))
               ((symbol-function 'process-send-eof) #'ignore)
-              ((symbol-function 'set-process-sentinel) #'ignore))
+              ((symbol-function 'set-process-sentinel) #'ignore)
+              ((symbol-function 'process-status) (lambda (_) 'run)))
       (should (equal
                (emacsos-pinephone-wifi-operation
                 'saved "11111111-2222-3333-4444-555555555555" nil #'ignore)
