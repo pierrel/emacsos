@@ -125,8 +125,10 @@
              "read_command nmcli -e no -t -g 802-11-wireless.ssid con show uuid"
              script))
     (should (string-match-p
-             "read_command nmcli -e no -t -g connection.id con show uuid"
+             "read_command nmcli -e no -t -g UUID con show id"
              script))
+    (should-not (string-match-p
+                 "connection.id con show uuid" script))
     (should (string-match-p
              (regexp-quote "pending_file=$3")
              script))
@@ -136,16 +138,9 @@
              script))
     (should (string-match-p
              (regexp-quote
-              "[ \"$pending_kind\" = uuid ] && [ \"$pending_value\" = \"$uuid\" ]")
+              "[ -n \"$pending_uuid\" ] && [ \"$pending_uuid\" = \"$uuid\" ]")
              script))
-    (should (string-match-p
-             (regexp-quote
-              "[ \"$pending_kind\" = name ] && read_command nmcli")
-             script))
-    (should (string-match-p
-             (regexp-quote
-              "[ \"$(wc -l <\"$saved_id_file\")\" -ne 1 ]")
-             script))
+    (should (string-match-p "case \\$pending_lookup_status" script))
     (should (string-match-p
              "read -r uuid type || \\[ -n \\\"\\$uuid\\$type\\\" \\]" script))
     (should (string-match-p
@@ -204,6 +199,70 @@
                            (emacsos-net--parse blob))))))
       (delete-directory reader-directory t)
       (delete-directory directory t))))
+
+(ert-deftest test-net-reader-resolves-name-marker-once-before-enumeration ()
+  (dolist (owned-present '(t nil))
+    (let* ((directory (make-temp-file "test-net-marker-owner-" t))
+           (reader-directory (make-temp-file "test-net-marker-reader-" t))
+           (marker (expand-file-name "pending" directory))
+           (calls (expand-file-name "calls" directory))
+           (nmcli (expand-file-name "nmcli" directory))
+           (ip (expand-file-name "ip" directory))
+           (mmcli (expand-file-name "mmcli" directory))
+           (attempt "emacsos-wifi-attempt-00000000000000000000000000000000")
+           (owned-uuid "11111111-2222-3333-4444-555555555555")
+           (saved-uuid "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+           (process-environment
+            (cons (concat "TEST_NET_CALLS=" calls)
+                  (cons (concat "PATH=" directory ":" (getenv "PATH"))
+                        process-environment))))
+      (unwind-protect
+          (progn
+            (with-temp-file marker (insert "1:name:" attempt "\n"))
+            (with-temp-file nmcli
+              (insert
+               "#!/bin/sh\n"
+               "printf '%s\\n' \"$*\" >>\"$TEST_NET_CALLS\"\n"
+               "case $* in\n"
+               "  '-t -f WIFI radio') echo enabled ;;\n"
+               "  '-e no -t -g connection.type con show id emacsos-cellular') echo gsm ;;\n"
+               "  '-e no -t -g GENERAL.DEVICES con show id emacsos-cellular') echo -- ;;\n"
+               "  '-e no -t -g UUID con show id " attempt "') "
+               (if owned-present
+                   (concat "echo " owned-uuid " ;;\n")
+                 "exit 10 ;;\n")
+               "  '-t -f UUID,TYPE con show') "
+               (if owned-present
+                   (concat "echo '" owned-uuid ":802-11-wireless'; ")
+                 "")
+               "echo '" saved-uuid ":802-11-wireless' ;;\n"
+               "  '-e no -t -g 802-11-wireless.ssid con show uuid "
+               saved-uuid "') echo Cafe ;;\n"
+               "  '-t -f ACTIVE,SSID-HEX,SIGNAL,SECURITY dev wifi') : ;;\n"
+               "  *) exit 1 ;;\n"
+               "esac\n"))
+            (with-temp-file ip (insert "#!/bin/sh\nexit 0\n"))
+            (with-temp-file mmcli (insert "#!/bin/sh\nexit 0\n"))
+            (mapc (lambda (file) (set-file-modes file #o755))
+                  (list nmcli ip mmcli))
+            (with-temp-buffer
+              (should (= 0 (call-process
+                            "/bin/sh" nil t nil "-c"
+                            (emacsos-net--reader-script)
+                            "emacsos-net-read" emacsos-net-cell-connection
+                            reader-directory marker)))
+              (let ((blob (buffer-string)))
+                (should (emacsos-net-state-saved-known
+                         (emacsos-net--parse blob)))
+                (should (string-match-p (regexp-quote saved-uuid) blob))
+                (should-not (string-match-p (regexp-quote owned-uuid) blob))))
+            (with-temp-buffer
+              (insert-file-contents calls)
+              (should (= 1 (how-many (concat "^-e no -t -g UUID con show id "
+                                              (regexp-quote attempt) "$"))))
+              (should-not (search-forward "connection.id con show uuid" nil t))))
+        (delete-directory reader-directory t)
+        (delete-directory directory t)))))
 
 (ert-deftest test-net-reader-rejects-noncanonical-marker-records ()
   (dolist (record '("1:idle:\n" "01:idle\n"))
