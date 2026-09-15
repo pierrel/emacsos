@@ -417,7 +417,7 @@
 (ert-deftest emacsos-openrc-wifi-early-exit-preserves-terminal-result ()
   (dolist (failure '(write eof))
     (let (stdout stderr initial-sentinel installed-sentinel scheduled-function
-                 scheduled-arguments delivered write-called eof-called
+                 scheduled-arguments output-drained delivered write-called eof-called
                  (completions 0))
       (cl-letf (((symbol-function 'make-process)
                  (lambda (&rest args)
@@ -442,6 +442,8 @@
                  (lambda (_seconds _repeat function &rest arguments)
                    (setq scheduled-function function
                          scheduled-arguments arguments)))
+                ((symbol-function 'accept-process-output)
+                 (lambda (_process _seconds) (setq output-drained t)))
                 ((symbol-function 'process-live-p) (lambda (_) nil))
                 ((symbol-function 'process-status) (lambda (_) 'exit))
                 ((symbol-function 'process-buffer) (lambda (_) stdout))
@@ -460,8 +462,9 @@
         (should (buffer-live-p stdout))
         (should (buffer-live-p stderr))
         (should (zerop completions))
-        (should (eq scheduled-function installed-sentinel))
+        (should-not output-drained)
         (apply scheduled-function scheduled-arguments)
+        (should output-drained)
         (should (= completions 1))
         (should (equal delivered "not-connected:busy"))
         (should-not (buffer-live-p stdout))
