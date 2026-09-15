@@ -518,6 +518,7 @@ every agent-config load."
               (when (and (not finished)
                          (memq (process-status proc) '(exit signal)))
                 (setq finished t)
+                (accept-process-output proc 0)
                 (emacsos-pinephone-wifi-finished
                  proc event completion stderr-buffer))))
       (unwind-protect
@@ -543,11 +544,7 @@ every agent-config load."
                          (error t))))
                   (set-process-sentinel process sentinel)
                   (when (memq (process-status process) '(exit signal))
-                    (run-at-time
-                     0 nil
-                     (lambda ()
-                       (accept-process-output process 0)
-                       (funcall sentinel process "finished"))))
+                    (run-at-time 0 nil sentinel process "finished"))
                   (when (and write-failed (process-live-p process))
                     (delete-process process)))
                 "pending: Wi-Fi connection requested")
