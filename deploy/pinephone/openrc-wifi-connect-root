@@ -14,9 +14,13 @@ import sys
 MAX_REQUEST_BYTES = 1024
 MAX_SSID_BYTES = 32
 MAX_PASSWORD_BYTES = 256
+MAX_PENDING_PROFILES = 64
 LOCK_PATH = "/run/emacsos-openrc-network.lock"
 NMCLI = "/usr/bin/nmcli"
 PROFILE_PREFIX = "emacsos-wifi-attempt-"
+# A complete attempt name is longer than any valid SSID, so publishing to the
+# SSID can never leave an ordinary profile inside the reserved namespace.
+PROFILE_RE = re.compile(rb"emacsos-wifi-attempt-[0-9a-f]{32}")
 UUID_RE = re.compile(
     rb"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     rb"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
@@ -128,22 +132,68 @@ def main():
     blocked = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
 
     def start(arguments, *, stdin=subprocess.DEVNULL,
-              stdout=subprocess.DEVNULL):
+              stdout=subprocess.DEVNULL, cancellable=False):
         """Start one isolated nmcli child without a signal handoff race."""
         nonlocal process
         old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
         try:
+            if cancellable and termination_signal is not None:
+                return None
             process = subprocess.Popen(
                 arguments,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                pass_fds=(lock_file.fileno(),),
                 env={"PATH": "/usr/bin:/usr/sbin:/bin:/sbin",
                      "LC_ALL": "C"})
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         return process
+
+    def pending_profiles():
+        """Return ``(resolved, uuids)`` for helper-owned pending profiles."""
+        nonlocal reconciliation_in_progress
+        reconciliation_in_progress = True
+        listing = start(
+            [NMCLI, "-t", "-f", "UUID,NAME", "con", "show"],
+            stdout=subprocess.PIPE)
+        try:
+            output, _ = listing.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(listing)
+            return False, []
+        finally:
+            reconciliation_in_progress = False
+        if listing.returncode != 0:
+            return False, []
+        uuids = []
+        for row in output.splitlines():
+            if (len(row) == 37 + len(PROFILE_PREFIX) + 32 and
+                    row[36:37] == b":" and
+                    UUID_RE.fullmatch(row[:36]) is not None and
+                    PROFILE_RE.fullmatch(row[37:]) is not None):
+                uuids.append(row[:36].decode("ascii"))
+                if len(uuids) > MAX_PENDING_PROFILES:
+                    return False, []
+        return True, uuids
+
+    def discard_profiles(profile_uuids):
+        """Delete exact PROFILE_UUIDS while deferring termination signals."""
+        nonlocal reconciliation_in_progress
+        if not profile_uuids:
+            return True
+        reconciliation_in_progress = True
+        delete = start([NMCLI, "con", "delete", "uuid", *profile_uuids])
+        try:
+            delete.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(delete)
+            return False
+        finally:
+            reconciliation_in_progress = False
+        return delete.returncode == 0
 
     def resolve_attempt_profile(profile_name):
         """Return ``(resolved, uuid)`` for one helper-owned profile name."""
@@ -157,6 +207,8 @@ def main():
         except subprocess.TimeoutExpired:
             _kill_process_group(lookup)
             return False, None
+        finally:
+            reconciliation_in_progress = False
         uuids = output.splitlines()
         if lookup.returncode == 10 and not uuids:
             return True, None
@@ -172,19 +224,18 @@ def main():
             return False
         if profile_uuid is None:
             return True
-        delete = start([NMCLI, "con", "delete", "uuid", profile_uuid])
-        try:
-            delete.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(delete)
-            return False
-        return delete.returncode == 0
+        return discard_profiles([profile_uuid])
 
     def publish_connected_profile(profile_name):
         """Make a successfully connected attempt visible as an ordinary profile."""
+        nonlocal reconciliation_in_progress
         resolved, profile_uuid = resolve_attempt_profile(profile_name)
         if not resolved or profile_uuid is None:
             return False
+        if termination_signal is not None:
+            discard_profiles([profile_uuid])
+            return False
+        reconciliation_in_progress = True
         rename = start([NMCLI, "con", "modify", "uuid", profile_uuid,
                         "connection.id", ssid])
         try:
@@ -192,16 +243,28 @@ def main():
         except subprocess.TimeoutExpired:
             _kill_process_group(rename)
             return False
+        finally:
+            reconciliation_in_progress = False
         return rename.returncode == 0
 
     try:
+        resolved, stale_profile_uuids = pending_profiles()
+        if not resolved or not discard_profiles(stale_profile_uuids):
+            _emit("not-connected:unavailable")
+            return 1
+        if termination_signal is not None:
+            _emit("not-connected:failed")
+            return 1
         profile_name = PROFILE_PREFIX + secrets.token_hex(16)
         process = start(
             [NMCLI, "--ask", "dev", "wifi", "connect", ssid,
              "name", profile_name],
-            stdin=subprocess.PIPE)
+            stdin=subprocess.PIPE, cancellable=True)
+        if process is None:
+            _emit("not-connected:failed")
+            return 1
         process.communicate(input=(password + "\n").encode("utf-8"), timeout=20)
-        if process.returncode == 0:
+        if process.returncode == 0 and termination_signal is None:
             status = ("connected" if publish_connected_profile(profile_name)
                       else "not-connected:unavailable")
         else:
@@ -216,8 +279,6 @@ def main():
     finally:
         if process is not None and process.poll() is None:
             _kill_process_group(process)
-    if termination_signal is not None:
-        raise SystemExit(128 + termination_signal)
     _emit(status)
     return 0 if status == "connected" else 1
 
