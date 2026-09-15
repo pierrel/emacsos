@@ -424,8 +424,6 @@
                    (setq stdout (plist-get args :buffer)
                          stderr (plist-get args :stderr)
                          initial-sentinel (plist-get args :sentinel))
-                   (with-current-buffer stdout
-                     (insert "not-connected:busy\n"))
                    'wifi-process))
                 ((symbol-function 'process-send-string)
                  (lambda (&rest _)
@@ -443,7 +441,10 @@
                    (setq scheduled-function function
                          scheduled-arguments arguments)))
                 ((symbol-function 'accept-process-output)
-                 (lambda (_process _seconds) (setq output-drained t)))
+                 (lambda (_process _seconds)
+                   (setq output-drained t)
+                   (with-current-buffer stdout
+                     (insert "not-connected:busy\n"))))
                 ((symbol-function 'process-live-p) (lambda (_) nil))
                 ((symbol-function 'process-status) (lambda (_) 'exit))
                 ((symbol-function 'process-buffer) (lambda (_) stdout))
