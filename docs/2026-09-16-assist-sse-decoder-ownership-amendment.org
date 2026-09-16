@@ -1,0 +1,38 @@
+#+title: Assist SSE decoder ownership amendment
+#+date: 2026-09-16
+
+* Correction
+
+The Assist Web stream guard treats each process-filter callback as opaque raw
+HTTP transport.  It caps one callback at 1 MiB, admits no transfer coding other
+than one exact =chunked= value, and forwards an accepted SSE response to stock
+=url-http= in bounded opaque slices.  Between slices it caps transport bytes
+that =url-http= has retained while waiting for complete chunk framing.  It does
+not interpret SSE delimiters or duplicate the chunk grammar.
+
+The event reader scans only through =url-http='s decoder-confirmed entity
+boundary.  It accepts LF and CRLF SSE record delimiters, bounds the complete or
+unfinished record before copying it for dispatch, and keeps only the bytes
+still owned by either the SSE record marker or the stock chunk decoder.  It
+does not prune during stock's split-final-terminator state.  A fixed-length SSE
+response is admitted only when its declared body fits the 1 MiB whole-response
+bound, because stock =url-http= retains that body until completion.
+
+* Verification
+
+ERT drives stock =url-http= with a CRLF SSE record split across two HTTP chunks.
+The first chunk's raw terminator cannot complete the partial event, while the
+second chunk dispatches it exactly once.  Additional stock-filter regressions
+cover an incomplete chunk header across callbacks, an oversized fixed-length
+response, a split final-chunk CRLF, and an unsupported transfer-coding chain.
+Direct parser coverage proves an oversized unfinished event is rejected without
+an oversized parser copy and hot reload ignores the obsolete raw-byte counter.
+
+* Historical supersessions
+
+This document supersedes only the sections /Correction/, /Verification/, and
+/Historical supersessions/ in
+[[file:2026-09-16-assist-sse-framing-amendment.org][Assist SSE framing and accounting amendment]].  The prior delta-accounting
+construction is replaced by decoder-boundary scanning and joint parser/decoder
+ownership; its intended boundary in
+[[file:2026-09-03-assist-web-thread-flow.org][Assist Web thread flow]] is under /Step 2 implementation/.

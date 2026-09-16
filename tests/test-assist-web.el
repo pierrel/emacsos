@@ -42,6 +42,35 @@
              (vconcat (mapcar #'test-assist-web--wire-object harnesses)) catalog)
     catalog))
 
+(defun test-assist-web--initialize-url-http-response (buffer process)
+  "Initialize BUFFER and PROCESS for stock `url-http-generic-filter' tests."
+  (with-current-buffer buffer
+    (mm-disable-multibyte)
+    (setq-local url-http-after-change-function
+                'url-http-wait-for-headers-change-function
+                url-http-end-of-headers nil
+                url-http-chunked-counter 0
+                url-http-chunked-last-crlf-missing nil
+                url-http-chunked-length nil
+                url-http-chunked-start nil
+                url-http-response-status nil
+                url-http-content-type nil
+                url-http-transfer-encoding nil
+                url-http-content-length nil
+                url-http-process process
+                url-http-no-retry t
+                url-http-connection-opened t
+                url-http-method "GET"
+                url-http-extra-headers nil
+                url-http-noninteractive t
+                url-http-data nil
+                url-http-response-version nil
+                url-callback-function nil
+                url-callback-arguments nil
+                url-current-object
+                (url-generic-parse-url "https://assist.invalid/")
+                url-http-target-url url-current-object)))
+
 (ert-deftest test-assist-web-completion-matches-server-search-text-and-keeps-identity ()
   (let* ((emacsos-assist-web--catalog
           (test-assist-web--catalog
@@ -544,7 +573,7 @@
                 (insert-char byte)
                 (emacsos-assist-web--drain-events target 0 (point-max)))))
           ;; The old parser copied the whole unfinished record per callback.
-          ;; This implementation copies it once, after the delimiter arrives.
+          ;; This implementation copies only a completed record for dispatch.
           (should (< copied (* 3 (length payload))))
           (should (equal seen '("status"))))
       (when (buffer-live-p target) (kill-buffer target))
@@ -716,6 +745,21 @@
     (should-not forwarded)
     (should (equal rejected "Assist stream transport chunk is too large"))))
 
+(ert-deftest test-assist-web-raw-filter-rejects-transfer-encoding-chains ()
+  "Only the exact transfer coding decoded by stock `url-http' is admitted."
+  (let (forwarded rejected)
+    (funcall
+     (emacsos-assist-web--guarded-filter
+      (lambda (&rest _) (setq forwarded t))
+      (lambda (_process problem) (setq rejected problem))
+      t)
+     nil
+     (concat "HTTP/1.1 200 OK\r\n"
+             "Content-Type: text/event-stream\r\n"
+             "Transfer-Encoding: identity, chunked\r\n\r\n"))
+    (should-not forwarded)
+    (should (equal rejected "Assist Web transfer encoding is not accepted"))))
+
 (ert-deftest test-assist-web-chunked-crlf-stream-uses-decoded-event-accounting ()
   "Stock `url-http' chunk framing never becomes decoded SSE data."
   (let ((target (generate-new-buffer " *assist-web-target*"))
@@ -728,32 +772,7 @@
           (setq process (make-pipe-process :name "assist-web-chunked-crlf"
                                            :buffer source :noquery t))
           (with-current-buffer target (emacsos-assist-web-mode))
-          (with-current-buffer source
-            (mm-disable-multibyte)
-            (setq-local url-http-after-change-function
-                        'url-http-wait-for-headers-change-function
-                        url-http-end-of-headers nil
-                        url-http-chunked-counter 0
-                        url-http-chunked-last-crlf-missing nil
-                        url-http-chunked-length nil
-                        url-http-chunked-start nil
-                        url-http-response-status nil
-                        url-http-content-type nil
-                        url-http-transfer-encoding nil
-                        url-http-content-length nil
-                        url-http-process process
-                        url-http-no-retry t
-                        url-http-connection-opened t
-                        url-http-method "GET"
-                        url-http-extra-headers nil
-                        url-http-noninteractive t
-                        url-http-data nil
-                        url-http-response-version nil
-                        url-http-target-url nil
-                        url-callback-function nil
-                        url-callback-arguments nil
-                        url-current-object
-                        (url-generic-parse-url "https://assist.invalid/")))
+          (test-assist-web--initialize-url-http-response source process)
           (setq filter
                 (emacsos-assist-web--guarded-filter
                  (emacsos-assist-web--event-filter
@@ -807,6 +826,128 @@
                          (setq seen (list event data)))))
               (emacsos-assist-web--drain-events target 0 (point-max))))
           (should (equal seen '("terminal" ""))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-bounds-an-incomplete-chunk-header ()
+  "Opaque chunk framing is bounded before stock regex matching can grow."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-header-bytes 128)
+        process rejected filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-incomplete-chunk"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (funcall filter process
+                   (concat "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/event-stream\r\n"
+                           "Transfer-Encoding: chunked\r\n\r\n"
+                           "a"))
+          (funcall filter process (make-string 64 ?a))
+          (funcall filter process (make-string 64 ?a))
+          (should (equal rejected
+                         "Assist stream transport framing is too large"))
+          (with-current-buffer source
+            (should (<= (emacsos-assist-web--pending-transport-bytes process)
+                        emacsos-assist-web-max-header-bytes))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-rejects-an-oversized-content-length ()
+  "A fixed-length SSE response cannot retain an attacker-sized body."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-response-bytes 128)
+        process interrupted filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-content-length"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 #'ignore t))
+          (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                     (lambda (_target problem) (setq interrupted problem))))
+            (funcall filter process
+                     (concat "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Content-Length: 129\r\n\r\n")))
+          (should (equal interrupted "Assist stream response is too large")))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-preserves-split-final-chunk-crlf ()
+  "Parser pruning preserves stock `url-http' final-chunk positions."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        process activated seen filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-final-crlf"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (with-current-buffer source
+            (setq-local url-callback-function (lambda (&rest _) (setq activated t))))
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 #'ignore t))
+          (let ((event "event: terminal\r\ndata: {}\r\n\r\n"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                       (lambda (_target name _data) (setq seen name))))
+              (funcall filter process
+                       (concat "HTTP/1.1 200 OK\r\n"
+                               "Content-Type: text/event-stream\r\n"
+                               "Transfer-Encoding: chunked\r\n\r\n"
+                               (format "%x\r\n" (string-bytes event))
+                               event "\r\n0\r\n"))
+              (should (equal seen "terminal"))
+              (with-current-buffer source
+                (should (integerp url-http-chunked-last-crlf-missing)))
+              (funcall filter process "\r\n")))
+          (should activated)
+          (with-current-buffer source
+            (should (= url-http-chunked-counter 2))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-event-parser-rejects-an-oversized-tail-in-place ()
+  "An unfinished event is rejected without an oversized parser copy."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-event-bytes 32)
+        interrupted)
+    (unwind-protect
+        (progn
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (with-current-buffer source
+            (insert "\n" (make-string 33 ?x))
+            (setq-local url-http-end-of-headers (copy-marker (point-min))
+                        url-http-transfer-encoding nil
+                        url-http-content-length nil)
+            (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                       (lambda (_target problem) (setq interrupted problem))))
+              (emacsos-assist-web--drain-events target 0 (point-max)))
+            (should (= (buffer-size) 1)))
+          (should (equal interrupted "Assist event is too large")))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
