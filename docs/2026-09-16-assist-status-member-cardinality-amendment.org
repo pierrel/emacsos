@@ -1,0 +1,23 @@
+#+title: Assist status member cardinality amendment
+#+date: 2026-09-16
+
+* Correction
+
+An Assist Web status event must be a JSON object containing exactly one
+=status= member.  The member's value must then pass the existing bounded,
+single-line, non-spoofing string validation.  Missing, duplicate, null,
+malformed, and otherwise invalid status payloads interrupt the observation
+stream.
+
+* Verification
+
+ERT covers a duplicate-key object whose first =status= value is valid and
+whose second is null, proving that member ambiguity is rejected rather than
+resolved by first-value lookup.  The existing cases cover missing, null,
+malformed, spoofing, and oversized status values.
+
+* Historical supersessions
+
+This document supersedes only the status-validation statement in
+[[file:2026-09-16-live-boundary-final-amendment.org][Live boundary final amendment]], section /Correction/, by making the
+exact-one-member requirement explicit.
