@@ -1,0 +1,23 @@
+#+title: Phone remote message-shape amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment replaces only the retained-message accounting statement in
+[[file:2026-09-15-phone-remote-input-bounds-amendment.org][Phone remote-input bounds amendment]], section /Correction/.  That record
+remains the historical source for the numeric transcript and network-reader
+limits.
+
+* Correction
+
+After validating a canonical Assist message, the phone retains only its bounded
+identifier, fixed role, bounded text, and fixed state.  Unconsumed remote
+extension fields are discarded before cache, pagination merge, or render.
+Consequently, the message-count and text-byte caps also bound the complete
+retained message records instead of allowing extension data to accumulate over
+successive individually bounded pages.
+
+* Verification
+
+ERT supplies a large valid JSON extension field, admits the canonical message,
+and proves that only =id=, =role=, =text=, and =state= remain.

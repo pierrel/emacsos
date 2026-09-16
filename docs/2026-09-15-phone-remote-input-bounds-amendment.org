@@ -30,4 +30,3 @@ ERT covers oversized individual Assist messages, cumulative snapshot and
 history limits, retained-history render limits, exact reader-filter bounds,
 process-group termination, and fail-closed handling of an overflowed partial
 snapshot.  The ordinary Assist history and network-reader suites remain green.
-

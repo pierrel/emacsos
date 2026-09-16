@@ -437,9 +437,6 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
-    (emacsos-assist-web--require-transcript-limits
-     messages emacsos-assist-web--max-snapshot-messages
-     emacsos-assist-web--max-snapshot-transcript-bytes)
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
         (unless (and (emacsos-assist-web--object-p message)
@@ -457,6 +454,20 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
           (when (gethash identity seen)
             (error "Assist Web returned duplicate message identities"))
           (puthash identity t seen))))
+    ;; Retain only the message schema this client consumes.  Remote extensions
+    ;; cannot accumulate across otherwise bounded history pages.
+    (setq messages
+          (mapcar
+           (lambda (message)
+             `((id . ,(alist-get 'id message))
+               (role . ,(alist-get 'role message))
+               (text . ,(alist-get 'text message))
+               (state . ,(alist-get 'state message))))
+           messages))
+    (setf (alist-get 'messages value) messages)
+    (emacsos-assist-web--require-transcript-limits
+     messages emacsos-assist-web--max-snapshot-messages
+     emacsos-assist-web--max-snapshot-transcript-bytes)
     (when-let ((cursor (alist-get 'next_before value)))
       (emacsos-assist-web--require-record-id cursor))
     value))

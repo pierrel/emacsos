@@ -20,4 +20,3 @@ without cellular activation or a ModemManager restart.
 The focused root-helper regression supplies a syntactically valid modem object
 path followed by an arbitrary suffix and requires =not-connected:failed=
 without service restart.  The existing valid Quectel listing remains accepted.
-

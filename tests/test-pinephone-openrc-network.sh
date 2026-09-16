@@ -34,6 +34,10 @@ printf '%s\n' '#!/bin/sh' \
     '  printf "%s\n" "unexpected modem output"' \
     'elif [ -f /tmp/mmcli-bad-suffix ]; then' \
     '  printf "%s\n" "/org/freedesktop/ModemManager1/Modem/0 arbitrary suffix"' \
+    'elif [ -f /tmp/mmcli-control-model ]; then' \
+    '  printf "/org/freedesktop/ModemManager1/Modem/0 [Quectel] \001\n"' \
+    'elif [ -f /tmp/mmcli-high-model ]; then' \
+    '  printf "/org/freedesktop/ModemManager1/Modem/0 [Quectel] \200\n"' \
     'elif [ -f /tmp/mmcli-valid-mixed ]; then' \
     '  printf "%s\n" "/org/freedesktop/ModemManager1/Modem/0 [Quectel] EG25-G" "unexpected trailing output"' \
     'elif [ -f /tmp/mmcli-mixed ]; then' \
@@ -111,6 +115,17 @@ fi
 grep -Fx 'not-connected:failed' /tmp/probe-bad-suffix >/dev/null
 [ ! -e /tmp/rc-service-log ]
 rm -f /tmp/mmcli-bad-suffix
+
+for invalid_model in control high; do
+    touch "/tmp/mmcli-${invalid_model}-model"
+    if /bin/sh /helper cell up >"/tmp/probe-${invalid_model}-model" 2>&1; then
+        printf '%s\n' 'non-printable modem model was accepted' >&2
+        exit 1
+    fi
+    grep -Fx 'not-connected:failed' "/tmp/probe-${invalid_model}-model" >/dev/null
+    [ ! -e /tmp/rc-service-log ]
+    rm -f "/tmp/mmcli-${invalid_model}-model"
+done
 
 touch /tmp/mmcli-mixed
 if /bin/sh /helper cell up >/tmp/probe-mixed 2>&1; then

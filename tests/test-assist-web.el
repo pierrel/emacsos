@@ -953,6 +953,17 @@
     (let ((emacsos-assist-web--max-snapshot-transcript-bytes 2))
       (should-error (emacsos-assist-web--require-snapshot snapshot)))))
 
+(ert-deftest test-assist-web-snapshot-discards-unconsumed-message-extensions ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'remote_extension
+                     (car (alist-get 'messages snapshot)))
+          (make-string (* 512 1024) ?x))
+    (emacsos-assist-web--require-snapshot snapshot)
+    (should-not (assq 'remote_extension
+                      (car (alist-get 'messages snapshot))))
+    (should (equal (mapcar #'car (car (alist-get 'messages snapshot)))
+                   '(id role text state)))))
+
 (ert-deftest test-assist-web-history-bounds-the-loaded-cumulative-state ()
   (let ((current (copy-tree test-assist-web--snapshot))
         (page '((thread . ((id . "thread-1") (description . "Thread")

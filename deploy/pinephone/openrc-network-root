@@ -65,7 +65,7 @@ probe_modem() {
     fi
     if awk '
         BEGIN { valid = 1; found = 0 }
-        /^[[:space:]]*\/org\/freedesktop\/ModemManager1\/Modem\/[0-9]+[[:space:]]+\[[^][]+\][[:space:]]+[^[:space:]][^[:cntrl:]]*$/ {
+        /^[[:space:]]*\/org\/freedesktop\/ModemManager1\/Modem\/[0-9]+[[:space:]]+\[[^][]+\][[:space:]]+[^[:space:]][^[:cntrl:]]*$/ && $0 !~ /[^[:print:]]/ {
             found = 1
             next
         }
