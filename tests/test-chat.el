@@ -351,6 +351,55 @@ the next status's clear-bracket would wipe out streamed tokens."
         (emacsos--chat-drain-body))
       (should (equal terminated "assistant event too large")))))
 
+(ert-deftest chat-test-drain-rejects-oversized-tail-after-a-complete-event ()
+  "A complete event must not hide an oversized unfinished event behind it."
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated dispatched)
+      (insert "{\"type\":\"heartbeat\"}\n"
+              (make-string (1+ emacsos--chat-max-event-bytes) ?x))
+      (setq-local url-http-end-of-headers header-end)
+      (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                 (lambda (reason) (setq terminated reason)))
+                ((symbol-function 'emacsos--chat-dispatch-line)
+                 (lambda (_) (setq dispatched t))))
+        (emacsos--chat-drain-body))
+      (should (equal terminated "assistant event too large"))
+      (should-not dispatched))))
+
+(ert-deftest chat-test-drain-counts-an-unfinished-event-incrementally ()
+  "Repeated fragments cross the event cap without rescanning prior bytes."
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated)
+      (setq-local url-http-end-of-headers header-end)
+      (dotimes (_ 3)
+        (insert (make-string 4 ?x))
+        (let ((emacsos--chat-max-event-bytes 10))
+          (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                     (lambda (reason) (setq terminated reason))))
+            (emacsos--chat-drain-body))))
+      (should (= emacsos--chat-pending-event-bytes 12))
+      (should (equal terminated "assistant event too large")))))
+
+(ert-deftest chat-test-filter-rejects-raw-response-before-url-filter ()
+  "The cumulative raw cap applies before url-http copies the crossing chunk."
+  (chat-test--reset)
+  (let ((emacsos--chat-process 'current)
+        (emacsos--chat-max-transport-bytes 5)
+        (raw-filter-calls 0) terminated)
+    (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+               (lambda (reason) (setq terminated reason)))
+              ((symbol-function 'process-buffer) (lambda (_) nil)))
+      (let ((filter (emacsos--chat-make-filter
+                     (lambda (_proc _bytes) (cl-incf raw-filter-calls)))))
+        (funcall filter 'current "123")
+        (funcall filter 'current "456")))
+    (should (equal terminated "assistant response too large"))
+    (should (= raw-filter-calls 1))))
+
 (ert-deftest chat-test-drain-rejects-cumulative-bounded-events ()
   (chat-test--reset)
   (setq emacsos--chat-in-flight t)
@@ -385,6 +434,7 @@ the next status's clear-bracket would wipe out streamed tokens."
         (emacsos--chat-drain-body))
       (should (= emacsos--chat-body-bytes-received
                  (string-bytes (concat first second))))
+      (should (= emacsos--chat-pending-event-bytes 0))
       (should (equal dispatched
                      '("{\"type\":\"token\",\"text\":\"new\"}"))))))
 

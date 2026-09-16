@@ -100,7 +100,8 @@
   "Maximum message-text bytes retained across recent and loaded history.")
 (defconst emacsos-assist-web--active-snapshot-statuses
   '("queued" "processing" "paused" "initializing" "cloning"
-    "starting_sandbox" "pending" "running" "transitioning")
+    "starting_sandbox" "pending" "running" "transitioning"
+    "awaiting_approval")
   "Snapshot statuses that prove work is still active.")
 (defconst emacsos-assist-web--settled-snapshot-statuses '("ready" "error")
   "Snapshot statuses that may settle an accepted local submission.")

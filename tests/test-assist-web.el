@@ -1354,7 +1354,7 @@
       (should (equal emacsos-assist-web--run-id "run-1")))))
 
 (ert-deftest test-assist-web-refresh-keeps-every-recognized-active-status ()
-  "Thread and accepted-Run active states cannot settle local ownership."
+  "A manual refresh cannot settle local ownership from an active status alone."
   (dolist (status emacsos-assist-web--active-snapshot-statuses)
     (let ((snapshot
            `((thread . ((id . "thread-1") (description . "Thread")
