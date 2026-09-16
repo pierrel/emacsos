@@ -52,7 +52,7 @@ Ignore callbacks from an older operation."
                       (funcall success value text)
                     (emacsos-swipe-learning--display text)))
               (error (emacsos-swipe-learning--display
-                      "Swipe learning returned invalid status.")))
+                      "Swipe learning returned malformed output.")))
           (emacsos-swipe-learning--display
            (format "Swipe learning failed: %s" (string-trim text))))))))
 

@@ -65,6 +65,22 @@
     (should-not displayed)
     (should-not (buffer-live-p output))))
 
+(ert-deftest emacsos-swipe-learning-malformed-success-output-is-identified ()
+  (let ((emacsos-swipe-learning--operation 4)
+        (output (generate-new-buffer " *swipe-learning-malformed-test*"))
+        displayed)
+    (with-current-buffer output
+      (insert "not-json"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+                  ((symbol-function 'process-exit-status) (lambda (_) 0))
+                  ((symbol-function 'process-buffer) (lambda (_) output))
+                  ((symbol-function 'emacsos-swipe-learning--display)
+                   (lambda (text) (setq displayed text))))
+          (emacsos-swipe-learning--finish 'fake "finished" 4 nil))
+      (when (buffer-live-p output) (kill-buffer output)))
+    (should (equal displayed "Swipe learning returned malformed output."))))
+
 (ert-deftest emacsos-swipe-learning-does-not-interrupt-live-helper ()
   (let ((emacsos-swipe-learning--process 'active)
         displayed)

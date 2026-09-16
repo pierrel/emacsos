@@ -21,6 +21,7 @@ EPOCH = re.compile(rb"[0-9a-f]{32}\Z")
 STATUS_TIMEOUT = 1.0
 TERM_GRACE = 0.5
 KILL_GRACE = 1.0
+PR_SET_PDEATHSIG = 1
 
 
 def _ensure_standard_fds() -> None:
@@ -99,7 +100,7 @@ def _collector_child(parent_pid: int, collector_fd: int, epoch: str) -> None:
         if collector_fd != 3:
             os.close(collector_fd)
         libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
             _child_fail(b"pdeathsig")
         if os.getppid() != parent_pid:
             _child_fail(b"parent-race")
