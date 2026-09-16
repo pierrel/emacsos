@@ -892,7 +892,10 @@ Preserve records newer than CUTOFF when it is non-nil."
 
 (defun emacsos-sms-chat--job-finalize (job)
   "Remove JOB after its terminal result and finish refresh consumers."
-  (remhash (emacsos-sms-chat-job-key job) emacsos-sms-chat--jobs)
+  (when (eq (gethash (emacsos-sms-chat-job-key job)
+                     emacsos-sms-chat--jobs)
+            job)
+    (remhash (emacsos-sms-chat-job-key job) emacsos-sms-chat--jobs))
   (dolist (refresh (emacsos-sms-chat-job-refreshes job))
     (emacsos-sms-chat--refresh-consume refresh nil t)))
 
@@ -1069,8 +1072,10 @@ Preserve records newer than CUTOFF when it is non-nil."
              (emacsos-call--valid-sms-path-p path))
     (let* ((key (list generation path))
            (job (gethash key emacsos-sms-chat--jobs)))
+      (when (and job (emacsos-sms-chat-job-stale job))
+        (remhash key emacsos-sms-chat--jobs)
+        (setq job nil))
       (cond
-       ((and job (emacsos-sms-chat-job-stale job)) nil)
        (job
         (when live (setf (emacsos-sms-chat-job-live job) t))
         (when (and refresh

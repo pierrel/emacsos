@@ -1,0 +1,28 @@
+#+title: Live boundary final amendment
+#+date: 2026-09-16
+
+* Correction
+
+An Assist Web status event must contain one explicit bounded, single-line,
+non-spoofing string.  Missing, null, malformed, and invalid status payloads all
+interrupt the observation stream.  No local fallback may make an unverified
+remote event appear healthy.
+
+A refresh deadline may leave a canceled running SMS child alive until its
+callback arrives.  A later refresh may replace that stale keyed job
+immediately.  The delayed old callback removes a hash entry only when that
+entry still names the old job, so it cannot delete the replacement.
+
+* Verification
+
+ERT covers missing, null, malformed, spoofing, and oversized Assist Web status
+events.  A callback-driven SMS test expires a running snapshot, starts a new
+refresh for the same path, delivers the old callback after replacement, and
+then proves the new snapshot completes normally.
+
+* Historical supersessions
+
+This document supersedes only the status-validation statement in
+[[file:2026-09-16-sms-live-snapshot-validation-amendment.org][SMS live snapshot validation amendment]], section /Correction/, by making
+missing and malformed status events explicit.  The stale-job replacement rule
+is new and does not supersede an earlier dated record.

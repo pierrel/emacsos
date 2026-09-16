@@ -684,22 +684,25 @@
   (test-sms-chat--with-state
     (let ((path "/org/freedesktop/ModemManager1/SMS/7")
           (other "/org/freedesktop/ModemManager1/SMS/8")
-          (recoveries 0))
-      (cl-letf (((symbol-function 'emacsos-sms-chat--request-recovery-refresh)
+          (recoveries 0)
+          callback)
+      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
+                 (lambda (_args _limit completion)
+                   (setq callback completion)
+                   'pending-process))
+                ((symbol-function 'emacsos-sms-chat--request-recovery-refresh)
                  (lambda () (cl-incf recoveries))))
         (dolist (output
                  (list (test-sms-chat--snapshot
                         "received" "deliver" "hello" other)
                        (test-sms-chat--snapshot
                         "sent" "submit" "hello" path)))
-          (let ((job
-                 (make-emacsos-sms-chat-job
-                  :key (list 3 path) :kind 'snapshot :owner ":1.mm"
-                  :generation 3 :path path :live t :attempts 1
-                  :state 'complete)))
-            (puthash (emacsos-sms-chat-job-key job) job
-                     emacsos-sms-chat--jobs)
-            (emacsos-sms-chat--snapshot-finished job 'ok output))))
+          (setq callback nil)
+          (emacsos-sms-chat--on-added ":1.mm" 3 path)
+          (let ((job (gethash (list 3 path) emacsos-sms-chat--jobs)))
+            (should callback)
+            (setf (emacsos-sms-chat-job-attempts job) 1)
+            (funcall callback 'ok output))))
       (should-not emacsos-sms-chat--records)
       (should (= recoveries 2)))))
 
@@ -786,6 +789,39 @@
         (emacsos-sms-chat-refresh)
         (should emacsos-sms-chat--refresh)
           (should-not (eq expired emacsos-sms-chat--refresh)))))))
+
+(ert-deftest emacsos-sms-chat-refresh-replaces-stale-running-snapshot ()
+  (test-sms-chat--with-state
+    (let ((path "/org/freedesktop/ModemManager1/SMS/7") requests)
+      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
+                 (lambda (args _limit callback)
+                   (push (cons args callback) requests)
+                   (list 'process args)))
+                ((symbol-function 'process-live-p) (lambda (_process) t))
+                ((symbol-function 'delete-process) #'ignore))
+        (emacsos-sms-chat-refresh)
+        (funcall (cdar requests) 'ok
+                 (concat "modem.messaging.sms.length : 1\n"
+                         "modem.messaging.sms.value[1] : " path "\n"))
+        (let* ((key (list 3 path))
+               (old-job (gethash key emacsos-sms-chat--jobs))
+               (old-callback (cdar requests))
+               (expired emacsos-sms-chat--refresh))
+          (emacsos-sms-chat--refresh-deadline expired)
+          (should (emacsos-sms-chat-job-stale old-job))
+          (emacsos-sms-chat-refresh)
+          (funcall (cdar requests) 'ok
+                   (concat "modem.messaging.sms.length : 1\n"
+                           "modem.messaging.sms.value[1] : " path "\n"))
+          (let ((new-job (gethash key emacsos-sms-chat--jobs))
+                (new-callback (cdar requests)))
+            (should new-job)
+            (should-not (eq old-job new-job))
+            (funcall old-callback 'error "")
+            (should (eq (gethash key emacsos-sms-chat--jobs) new-job))
+            (funcall new-callback 'ok (test-sms-chat--snapshot))
+            (should-not emacsos-sms-chat--refresh)
+            (should (emacsos-sms-chat--find-path path))))))))
 
 (ert-deftest emacsos-sms-chat-partial-refresh-preserves-prior-history ()
   (test-sms-chat--with-state

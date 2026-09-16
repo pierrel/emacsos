@@ -488,16 +488,20 @@
       (when (buffer-live-p source) (kill-buffer source)))))
 
 (ert-deftest test-assist-web-live-status-rejects-spoofing-and-oversized-text ()
-  (dolist (text (list (concat "spoof" (string #x202e))
-                      (make-string 513 ?x)))
+  (dolist (data
+           (list (json-serialize
+                  `((status . ,(concat "spoof" (string #x202e)))))
+                 (json-serialize `((status . ,(make-string 513 ?x))))
+                 "{}"
+                 "null"
+                 "not json"))
     (let (interrupted)
       (with-temp-buffer
         (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
                    (lambda (buffer reason)
                      (setq interrupted (list buffer reason)))))
           (emacsos-assist-web--dispatch-event
-           (current-buffer) "status"
-           (json-serialize `((status . ,text))))
+           (current-buffer) "status" data)
           (should (equal interrupted
                          (list (current-buffer) "invalid Assist status"))))))))
 
