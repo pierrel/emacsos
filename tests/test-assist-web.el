@@ -494,6 +494,7 @@
                  (json-serialize `((status . ,(make-string 513 ?x))))
                  "{}"
                  "null"
+                 "{\"status\":\"working\",\"status\":null}"
                  "not json"))
     (let (interrupted)
       (with-temp-buffer

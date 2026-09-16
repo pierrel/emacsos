@@ -931,7 +931,9 @@ observes its durable state."
         (condition-case nil
             (let* ((status (json-parse-string data :object-type 'alist))
                    (text (alist-get 'status status)))
-              (if (emacsos-conversation-valid-status-p text)
+              (if (and (listp status)
+                       (= (cl-count 'status status :key #'car) 1)
+                       (emacsos-conversation-valid-status-p text))
                   (emacsos-assist-web--set-status text)
                 (emacsos-assist-web--stream-interrupted
                  target "invalid Assist status")))
