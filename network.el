@@ -109,6 +109,9 @@ token requires no completion.  PASSWORD is non-nil only for secured networks."
 (defvar emacsos-net--wifi-operation nil
   "Current Wi-Fi radio setter completion identity, or nil.")
 
+(defvar emacsos-net--action-processes nil
+  "Network-action processes retained across reload for bounded teardown.")
+
 (defvar emacsos-net--settle-generation 0
   "Monotonic identity for delayed post-action status refreshes.")
 
@@ -145,7 +148,7 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
     (setq emacsos-net--state (make-emacsos-net-state))))
 
 (defun emacsos-net--kill-reader-process (proc)
-  "Kill background PROC and its shell process group when it is still live."
+  "Kill background PROC and its process group when it is still live."
   (when (process-live-p proc)
     (let ((pid (process-id proc)))
       (when (integerp pid)
@@ -200,9 +203,27 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
               (goto-char (point-max))
               (insert output))))))))
 
+(defun emacsos-net--discard-actions ()
+  "Terminate tracked and pre-upgrade network actions, retaining sentinels."
+  (let ((processes
+         (delete-dups
+          (append emacsos-net--action-processes
+                  (seq-filter
+                   (lambda (proc)
+                     (string-match-p
+                      "\\`emacsos-net-act\\(?:<[0-9]+>\\)?\\'"
+                      (process-name proc)))
+                   (process-list))))))
+    (setq emacsos-net--action-processes nil)
+    (dolist (proc processes)
+      ;; The existing sentinel owns exactly-once completion and pending-state
+      ;; release, including for an action launched by pre-upgrade code.
+      (emacsos-net--kill-reader-process proc))))
+
 ;; `defvar' preserves old state and processes when this file is hot-reloaded.
 (emacsos-net--ensure-state-shape)
 (emacsos-net--discard-reader)
+(emacsos-net--discard-actions)
 
 (defvar emacsos-net--timer nil
   "Repeat timer driving background refresh.  Guarded so a hot-reload of
@@ -623,48 +644,61 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
                            (funcall emacsos-net-command-function args)
                          (cons "nmcli" args))))
           (setq buffer (generate-new-buffer " *emacsos-net-act*"))
-          (make-process
-           :name "emacsos-net-act"
-           :buffer buffer
-           :command (append '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "8")
+          (let ((process
+                 (make-process
+                  :name "emacsos-net-act"
+                  :buffer buffer
+                  :command (append
+                            '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "8")
                             command)
-           :coding 'binary
-           :filter #'emacsos-net--action-filter
-           :noquery t
-           :sentinel
-           (lambda (process _event)
-             (when (and (not completed)
-                        (memq (process-status process) '(exit signal)))
-               (setq completed t)
-               (let* ((status (process-exit-status process))
-                      (overflow (process-get process
-                                             'emacsos-net-action-overflow))
-                      (success (and (not overflow)
-                                    (eq (process-status process) 'exit)
-                                    (zerop status)))
-                      (process-buffer (process-buffer process))
-                      (output (if (buffer-live-p process-buffer)
-                                  (with-current-buffer process-buffer
-                                    (buffer-string))
-                                ""))
-                      (detail (emacsos-net--bounded-detail
-                               output
-                               (cond
-                                (overflow "network action response is too large")
-                                (success "ok")
-                                ((= status 124) "network action timed out")
-                                (t (format "network action exited %s" status))))))
-                 (when (buffer-live-p process-buffer)
-                   (kill-buffer process-buffer))
-                 (emacsos-net--discard-reader)
-                 (setq emacsos-net--settle-generation
-                       (1+ emacsos-net--settle-generation)
-                       emacsos-net--settle-pending emacsos-net--settle-generation)
-                 (unwind-protect
-                     (when completion (funcall completion success detail))
-                   (run-with-timer
-                    1.5 nil #'emacsos-net--refresh-after-action
-                    emacsos-net--settle-generation)))))))
+                  :coding 'binary
+                  :filter #'emacsos-net--action-filter
+                  :noquery t
+                  :sentinel
+                  (lambda (process _event)
+                    (when (memq (process-status process) '(exit signal))
+                      (setq emacsos-net--action-processes
+                            (delq process emacsos-net--action-processes))
+                      (when (not completed)
+                        (setq completed t)
+                        (let* ((status (process-exit-status process))
+                               (overflow
+                                (process-get
+                                 process 'emacsos-net-action-overflow))
+                               (success (and (not overflow)
+                                             (eq (process-status process) 'exit)
+                                             (zerop status)))
+                               (process-buffer (process-buffer process))
+                               (output (if (buffer-live-p process-buffer)
+                                           (with-current-buffer process-buffer
+                                             (buffer-string))
+                                         ""))
+                               (detail
+                                (cond
+                                 (overflow
+                                  "network action response is too large")
+                                 ((= status 124) "network action timed out")
+                                 (t (emacsos-net--bounded-detail
+                                     output
+                                     (if success "ok"
+                                       (format
+                                        "network action exited %s" status)))))))
+                          (when (buffer-live-p process-buffer)
+                            (kill-buffer process-buffer))
+                          (emacsos-net--discard-reader)
+                          (setq emacsos-net--settle-generation
+                                (1+ emacsos-net--settle-generation)
+                                emacsos-net--settle-pending
+                                emacsos-net--settle-generation)
+                          (unwind-protect
+                              (when completion
+                                (funcall completion success detail))
+                            (run-with-timer
+                             1.5 nil #'emacsos-net--refresh-after-action
+                             emacsos-net--settle-generation)))))))))
+            (when (process-live-p process)
+              (push process emacsos-net--action-processes))
+            process))
       (error
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (let ((detail (emacsos-net--bounded-detail

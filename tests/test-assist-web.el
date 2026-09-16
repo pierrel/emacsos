@@ -988,6 +988,26 @@
       (should (equal emacsos-assist-web--stream-status
                      "invalid Assist delta")))))
 
+(ert-deftest test-assist-web-hot-reload-recovers-provisional-byte-count ()
+  (let ((emacsos-assist-web--max-message-bytes 7))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (emacsos-assist-web--append-pending "hello")
+      (emacsos-assist-web--reset-assistant 1)
+      (emacsos-assist-web--append-delta 1 1 "partial")
+      ;; A newly introduced `defvar-local' has only its default value in an
+      ;; already-streaming buffer after code reload.
+      (kill-local-variable 'emacsos-assist-web--stream-assistant-bytes)
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       (json-encode '((attempt . 1) (index . 2) (text . "x"))))
+      (should (string-match-p "partial" (buffer-string)))
+      (should-not (string-match-p "partialx" (buffer-string)))
+      (should (= emacsos-assist-web--stream-index 1))
+      (should (equal emacsos-assist-web--stream-status
+                     "invalid Assist delta")))))
+
 (ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
   (with-temp-buffer
     (emacsos-assist-web-mode)
@@ -1042,7 +1062,7 @@
     (should (equal (mapcar #'car (car (alist-get 'messages snapshot)))
                    '(id role text state)))))
 
-(ert-deftest test-assist-web-history-bounds-the-loaded-cumulative-state ()
+(ert-deftest test-assist-web-history-page-validates-before-union-policy ()
   (let ((current (copy-tree test-assist-web--snapshot))
         (page '((thread . ((id . "thread-1") (description . "Thread")
                            (status . "ready")
@@ -1051,9 +1071,10 @@
                               (state . "final"))))
                 (has_older_messages . nil) (next_before . nil)))
         (emacsos-assist-web--max-rendered-messages 1))
-    (should-error
-     (emacsos-assist-web--require-history-page
-      page "thread-1" current "cursor-1"))))
+    (should (eq
+             (emacsos-assist-web--require-history-page
+              page "thread-1" current "cursor-1")
+             page))))
 
 (ert-deftest test-assist-web-history-combines-wire-pages-to-rendered-limit ()
   (let ((current (copy-tree test-assist-web--snapshot))
@@ -1135,7 +1156,6 @@
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
         (emacsos-assist-web--max-rendered-messages 2)
         (snapshot (copy-tree test-assist-web--snapshot))
-        rendered
         (page '((thread . ((id . "thread-1") (description . "Thread")
                            (status . "ready")
                            (workspace . ((repo_label . "Assist")))))
@@ -1150,13 +1170,13 @@
                      (lambda (&rest _) snapshot))
                     ((symbol-function 'emacsos-assist-web--request)
                      (lambda (_method _path _payload callback &rest _)
-                       (funcall callback page nil)))
-                    ((symbol-function 'emacsos-assist-web--render)
-                     (lambda (value &rest _) (setq rendered value))))
+                       (funcall callback page nil))))
             (emacsos-assist-web-load-older))
-          (should (= (length (alist-get 'messages rendered)) 2))
-          (should-not (alist-get 'has_older_messages rendered))
-          (should-not (alist-get 'next_before rendered)))
+          (should (= (length (alist-get 'messages
+                                        emacsos-assist-web--snapshot)) 2))
+          (should-not (alist-get 'has_older_messages
+                                 emacsos-assist-web--snapshot))
+          (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-history-at-rendered-byte-cap-clears-older-cursor ()
@@ -1186,6 +1206,56 @@
           (should-not (alist-get 'has_older_messages rendered))
           (should-not (alist-get 'next_before rendered)))
       (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-history-over-rendered-cap-keeps-current-and-stops ()
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
+        (emacsos-assist-web--max-rendered-messages 1)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        requested
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . t) (next_before . "cursor-0"))))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                     (lambda (&rest _) snapshot))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (setq requested t)
+                       (funcall callback page nil))))
+            (emacsos-assist-web-load-older))
+          (should requested)
+          (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                                 (alist-get 'messages
+                                            emacsos-assist-web--snapshot))
+                         '("m-1")))
+          (should-not (alist-get 'has_older_messages
+                                 emacsos-assist-web--snapshot))
+          (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-load-older-drops-oversized-legacy-state-before-copy ()
+  (let ((emacsos-assist-web--max-rendered-messages 1)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        requested)
+    (setf (alist-get 'messages snapshot)
+          '(((id . "m-0") (role . "user") (text . "older") (state . "final"))
+            ((id . "m-1") (role . "assistant") (text . "newer")
+             (state . "final"))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--snapshot snapshot)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web-load-older))
+      (should-not requested)
+      (should-not emacsos-assist-web--snapshot))))
 
 (ert-deftest test-assist-web-history-rejects-a-mismatched-thread-page ()
   (let ((snapshot (copy-tree test-assist-web--snapshot)) rendered)
@@ -3017,6 +3087,39 @@
       (should (string-match-p "recent final" (buffer-string)))
       (should (equal (alist-get 'next_before emacsos-assist-web--snapshot)
                      "cursor-old")))))
+
+(ert-deftest test-assist-web-refresh-evicts-oldest-loaded-history-at-cap ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((emacsos-assist-web--max-rendered-messages 2)
+          (old
+           '((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-old") (role . "assistant")
+                           (text . "older") (state . "final"))
+                          ((id . "m-1") (role . "assistant")
+                           (text . "recent") (state . "final"))))
+             (has_older_messages . t) (next_before . "cursor-old")))
+          (fresh
+           '((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-1") (role . "assistant")
+                           (text . "recent final") (state . "final"))
+                          ((id . "m-2") (role . "assistant")
+                           (text . "new") (state . "final"))))
+             (has_older_messages . t) (next_before . "cursor-new"))))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) #'ignore))
+        (emacsos-assist-web--render old)
+        (emacsos-assist-web--render fresh))
+      (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                             (alist-get 'messages
+                                        emacsos-assist-web--snapshot))
+                     '("m-1" "m-2")))
+      (should-not (alist-get 'has_older_messages
+                             emacsos-assist-web--snapshot))
+      (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))))
 
 (ert-deftest test-assist-web-render-keeps-phone-viewport-on-message-anchor ()
   (let ((buffer (generate-new-buffer " *assist-anchor-test*"))

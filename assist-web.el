@@ -481,10 +481,6 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
       (error "Assist Web history cursor did not advance"))
     (when (and (alist-get 'has_older_messages page) (not next))
       (error "Assist Web returned incomplete history progress")))
-  (emacsos-assist-web--require-transcript-limits
-   (append (alist-get 'messages page) (alist-get 'messages current))
-   emacsos-assist-web--max-rendered-messages
-   emacsos-assist-web--max-rendered-transcript-bytes)
   page)
 
 (defun emacsos-assist-web--run-store-unavailable-response-p (buffer)
@@ -1000,7 +996,19 @@ observes its durable state."
      (current-buffer) "Assist stream has a gap; refresh to reconcile"))
    ((and (markerp emacsos-assist-web--assistant-end)
          (marker-buffer emacsos-assist-web--assistant-end))
-    (let ((total (+ emacsos-assist-web--stream-assistant-bytes
+    (let* ((prior-bytes
+            (if (local-variable-p
+                 'emacsos-assist-web--stream-assistant-bytes (current-buffer))
+                emacsos-assist-web--stream-assistant-bytes
+              (unless (and (markerp emacsos-assist-web--assistant-start)
+                           (eq (marker-buffer emacsos-assist-web--assistant-start)
+                               (current-buffer)))
+                (error "invalid Assist delta"))
+              (string-bytes
+               (buffer-substring-no-properties
+                emacsos-assist-web--assistant-start
+                emacsos-assist-web--assistant-end))))
+           (total (+ prior-bytes
                     (string-bytes text))))
       (when (> total emacsos-assist-web--max-message-bytes)
         (error "invalid Assist delta"))
@@ -1441,23 +1449,47 @@ matching ids; older records no longer present in that bounded page stay ahead
 of it, together with the oldest pagination cursor already reached."
   (if (not previous)
       fresh
-    (let ((fresh-by-id (make-hash-table :test #'equal))
+    (let* ((fresh-by-id (make-hash-table :test #'equal))
           (older nil)
-          (has-old-only nil)
+          (old-only-p nil)
+          (dropped nil)
+          (fresh-messages (alist-get 'messages fresh))
+          (remaining-count (- emacsos-assist-web--max-rendered-messages
+                              (length fresh-messages)))
+          (remaining-bytes
+           (- emacsos-assist-web--max-rendered-transcript-bytes
+              (cl-loop for message in fresh-messages
+                       sum (string-bytes (alist-get 'text message)))))
+          (retained nil)
           (result (copy-tree fresh)))
-      (dolist (message (alist-get 'messages fresh))
+      (dolist (message fresh-messages)
         (puthash (alist-get 'id message) message fresh-by-id))
       (dolist (message (alist-get 'messages previous))
         (unless (gethash (alist-get 'id message) fresh-by-id)
-          (setq has-old-only t)
+          (setq old-only-p t)
           (push message older)))
+      ;; OLDER is newest-first here.  Keep the newest contiguous suffix that
+      ;; fits before FRESH, so a growing thread evicts the oldest loaded rows.
+      (dolist (message older)
+        (let ((bytes (string-bytes (alist-get 'text message))))
+          (if (and (> remaining-count 0) (>= remaining-bytes bytes))
+              (progn
+                (push message retained)
+                (setq remaining-count (1- remaining-count)
+                      remaining-bytes (- remaining-bytes bytes)))
+            (setq dropped t))))
       (setf (alist-get 'messages result)
-            (append (nreverse older) (alist-get 'messages fresh)))
-      (when has-old-only
+            (append retained fresh-messages))
+      (when old-only-p
         (setf (alist-get 'has_older_messages result)
               (alist-get 'has_older_messages previous)
               (alist-get 'next_before result)
               (alist-get 'next_before previous)))
+      (when (or dropped
+                (zerop remaining-count)
+                (zerop remaining-bytes))
+        (setf (alist-get 'has_older_messages result) nil
+              (alist-get 'next_before result) nil))
       result)))
 
 (defun emacsos-assist-web--render (snapshot &optional stale)
@@ -1466,7 +1498,10 @@ of it, together with the oldest pagination cursor already reached."
         (inhibit-modification-hooks t)
         (draft (emacsos-assist-web--input))
         (render-state (emacsos-assist-web--capture-render-state)))
-    (emacsos-assist-web--require-snapshot snapshot emacsos-assist-web--thread-id)
+    (emacsos-assist-web--require-snapshot
+     snapshot emacsos-assist-web--thread-id
+     emacsos-assist-web--max-rendered-messages
+     emacsos-assist-web--max-rendered-transcript-bytes)
     (let ((previous emacsos-assist-web--snapshot))
       (when previous
         (condition-case nil
@@ -2170,11 +2205,22 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
       (message "This draft has no history")
     (let* ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
            (name (emacsos-assist-web--snapshot-cache-name tid))
-           (cached (or emacsos-assist-web--snapshot
-                       (emacsos-assist-web--read-cache name)))
+           (raw-cached (or emacsos-assist-web--snapshot
+                           (emacsos-assist-web--read-cache name)))
+           (cached
+            (condition-case nil
+                (when raw-cached
+                  (emacsos-assist-web--require-snapshot
+                   raw-cached tid
+                   emacsos-assist-web--max-rendered-messages
+                   emacsos-assist-web--max-rendered-transcript-bytes))
+              (error nil)))
            (before (and cached (alist-get 'next_before cached)))
            (buffer (current-buffer))
            (generation (cl-incf emacsos-assist-web--refresh-generation)))
+      (when (and raw-cached (not cached)
+                 (eq raw-cached emacsos-assist-web--snapshot))
+        (setq emacsos-assist-web--snapshot nil))
       (if (not before)
           (message "No older messages are available")
         (emacsos-assist-web--request
@@ -2196,19 +2242,29 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                          (let* ((messages
                                  (append (alist-get 'messages page)
                                          (alist-get 'messages updated)))
+                                (count (length messages))
+                                (bytes
+                                 (cl-loop for message in messages
+                                          sum (string-bytes
+                                               (alist-get 'text message))))
+                                (over-cap
+                                 (or (> count
+                                        emacsos-assist-web--max-rendered-messages)
+                                     (> bytes
+                                        emacsos-assist-web--max-rendered-transcript-bytes)))
                                 (at-cap
-                                 (or (>= (length messages)
+                                 (or (>= count
                                          emacsos-assist-web--max-rendered-messages)
-                                     (>= (cl-loop for message in messages
-                                                  sum (string-bytes
-                                                       (alist-get 'text message)))
+                                     (>= bytes
                                          emacsos-assist-web--max-rendered-transcript-bytes))))
-                           (setf (alist-get 'messages updated) messages
+                           (unless over-cap
+                             (setf (alist-get 'messages updated) messages))
+                           (setf
                                (alist-get 'has_older_messages updated)
-                               (and (not at-cap)
+                               (and (not over-cap) (not at-cap)
                                     (alist-get 'has_older_messages page))
                                (alist-get 'next_before updated)
-                               (and (not at-cap)
+                               (and (not over-cap) (not at-cap)
                                     (alist-get 'next_before page))))
                          (emacsos-assist-web--render updated))
                      (error
