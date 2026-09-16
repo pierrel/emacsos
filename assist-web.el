@@ -135,6 +135,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--stream-process nil)
 (defvar-local emacsos-assist-web--stream-response nil)
 (defvar-local emacsos-assist-web--stream-body-marker nil)
+(defvar-local emacsos-assist-web--stream-prune-marker nil)
+(defvar-local emacsos-assist-web--stream-event-buffer nil)
 (defvar-local emacsos-assist-web--stream-scan-marker nil)
 (defvar-local emacsos-assist-web--stream-unconsumed-bytes nil)
 (defvar-local emacsos-assist-web--status-start nil)
@@ -794,6 +796,8 @@ do not ask the phone shell to redraw a dying buffer."
     (setq emacsos-assist-web--stream-process nil
           emacsos-assist-web--stream-response nil
           emacsos-assist-web--stream-body-marker nil
+          emacsos-assist-web--stream-prune-marker nil
+          emacsos-assist-web--stream-event-buffer nil
           emacsos-assist-web--stream-scan-marker nil
           emacsos-assist-web--stream-unconsumed-bytes nil
           emacsos-assist-web--stream-header-timer nil
@@ -1020,87 +1024,145 @@ the canonical snapshot must retain its durable identity."
             emacsos-assist-web--stream-assistant-bytes total)
       (emacsos-assist-web--set-status "working")))))
 
-(defun emacsos-assist-web--drain-events (target generation &optional decoded-bytes)
-  "Consume new complete SSE records for TARGET without rescanning a suffix.
-DECODED-BYTES is the decoded response-buffer size appended after its first
-parsed response."
-  (unless (markerp emacsos-assist-web--stream-body-marker)
-    (setq-local emacsos-assist-web--stream-body-marker
-                (copy-marker (marker-position url-http-end-of-headers) nil)
-                emacsos-assist-web--stream-scan-marker
-                (copy-marker (marker-position url-http-end-of-headers) nil)))
-  (let* ((marker emacsos-assist-web--stream-body-marker)
-         (scan-marker emacsos-assist-web--stream-scan-marker)
-         (start (marker-position marker))
-         (too-large nil))
-    ;; The first callback includes headers.  Thereafter the decoded-buffer
-    ;; delta lets us enforce the incomplete-record cap without mixing HTTP
-    ;; framing bytes into SSE accounting or rescanning every tiny callback.
-    (if (and (integerp emacsos-assist-web--stream-unconsumed-bytes)
-             (integerp decoded-bytes))
-        (cl-incf emacsos-assist-web--stream-unconsumed-bytes decoded-bytes)
-      (setq-local emacsos-assist-web--stream-unconsumed-bytes
-                  (string-bytes (buffer-substring-no-properties start (point-max)))))
-    ;; url-http can split a decoded CRLF delimiter across callbacks.  Resume at
-    ;; the final possible delimiter start, so each retained character is
-    ;; scanned at most once apart from that three-character boundary.
-    (goto-char (marker-position scan-marker))
-    (while (and (not too-large) (re-search-forward "\r?\n\r?\n" nil t))
-      (let* ((record-end (point))
-             (delimiter-start (match-beginning 0))
-             (delimiter-bytes
-              (string-bytes (buffer-substring-no-properties delimiter-start record-end)))
-             (event nil) (data nil)
-             (record (buffer-substring-no-properties start delimiter-start)))
-        (if (> (string-bytes record) emacsos-assist-web-max-event-bytes)
-            (progn
-              (setq too-large t)
-              (when (and (buffer-live-p target)
-                         (with-current-buffer target
-                           (= generation emacsos-assist-web--stream-generation)))
-                (emacsos-assist-web--stream-interrupted
-                 target "Assist event is too large")))
-          (dolist (line (split-string record "\r?\n" t))
-            (cond
-             ((string-prefix-p "event: " line) (setq event (substring line 7)))
-             ((string-prefix-p "data: " line) (setq data (substring line 6)))))
-          (when (and event (buffer-live-p target)
-                     (with-current-buffer target
-                       (= generation emacsos-assist-web--stream-generation)))
-            (emacsos-assist-web--dispatch-event target event (or data "")))
-          (cl-decf emacsos-assist-web--stream-unconsumed-bytes
-                   (+ (string-bytes record) delimiter-bytes))
-          (delete-region start record-end)
-          (set-marker marker start)
-          (set-marker scan-marker start)
-          (goto-char start))))
-    (when too-large
-      (delete-region start (point-max))
-      (set-marker scan-marker start)
-      (setq-local emacsos-assist-web--stream-unconsumed-bytes 0))
-    (unless too-large
-      ;; Retain only an incomplete final record.  Otherwise a long healthy
-      ;; stream would still accumulate every already-consumed event.
-      (set-marker scan-marker (max start (- (point-max) 3))))
-    (when (> emacsos-assist-web--stream-unconsumed-bytes
-             emacsos-assist-web-max-event-bytes)
-      (delete-region start (point-max))
-      (set-marker scan-marker start)
-      (setq-local emacsos-assist-web--stream-unconsumed-bytes 0)
-      (when (and (buffer-live-p target)
-                 (with-current-buffer target
-                   (= generation emacsos-assist-web--stream-generation)))
-        (emacsos-assist-web--stream-interrupted target "Assist event is too large")))))
+(defun emacsos-assist-web--kill-event-buffer ()
+  "Kill the private decoded-SSE buffer owned by this response buffer."
+  (when (buffer-live-p emacsos-assist-web--stream-event-buffer)
+    (kill-buffer emacsos-assist-web--stream-event-buffer))
+  (setq emacsos-assist-web--stream-event-buffer nil))
+
+(defun emacsos-assist-web--decoded-end ()
+  "Return the response-buffer end known to contain decoded entity bytes."
+  (if (and (boundp 'url-http-transfer-encoding)
+           (equal url-http-transfer-encoding "chunked"))
+      (when (and (boundp 'url-http-chunked-start)
+                 (markerp url-http-chunked-start)
+                 (boundp 'url-http-chunked-length)
+                 (integerp url-http-chunked-length))
+        (min (point-max)
+             (+ (marker-position url-http-chunked-start)
+                url-http-chunked-length)))
+    (point-max)))
+
+(defun emacsos-assist-web--drain-events (target generation decoded-end)
+  "Consume decoded SSE through DECODED-END and dispatch it to TARGET.
+
+The current response buffer remains owned by `url-http'.  Complete decoded
+bytes are copied into a private bounded parser buffer, so HTTP chunk markers
+and terminators can never become SSE data and parser cleanup cannot invalidate
+the stock chunk decoder."
+  (let* ((header-end (marker-position url-http-end-of-headers))
+         (body-start (min (point-max) (1+ header-end))))
+    (unless (and (buffer-live-p emacsos-assist-web--stream-event-buffer)
+                 (markerp emacsos-assist-web--stream-body-marker)
+                 (eq (marker-buffer emacsos-assist-web--stream-body-marker)
+                     (current-buffer)))
+      (let ((legacy-start
+             (and (markerp emacsos-assist-web--stream-body-marker)
+                  (eq (marker-buffer emacsos-assist-web--stream-body-marker)
+                      (current-buffer))
+                  (marker-position emacsos-assist-web--stream-body-marker))))
+        (when (buffer-live-p emacsos-assist-web--stream-event-buffer)
+          (kill-buffer emacsos-assist-web--stream-event-buffer))
+        (setq-local emacsos-assist-web--stream-event-buffer
+                    (generate-new-buffer " *assist-web-sse*"))
+        (setq-local emacsos-assist-web--stream-body-marker
+                    (copy-marker (max body-start (or legacy-start body-start)) nil)
+                    emacsos-assist-web--stream-prune-marker
+                    (copy-marker body-start nil))
+        (with-current-buffer emacsos-assist-web--stream-event-buffer
+          (set-buffer-multibyte nil)
+          (setq-local emacsos-assist-web--stream-scan-marker
+                      (copy-marker (point-min) nil)
+                      emacsos-assist-web--stream-unconsumed-bytes 0))
+        (add-hook 'kill-buffer-hook #'emacsos-assist-web--kill-event-buffer nil t)))
+    (let* ((event-buffer emacsos-assist-web--stream-event-buffer)
+           (copy-marker emacsos-assist-web--stream-body-marker)
+           (copy-start (marker-position copy-marker))
+           (copy-end (max copy-start (or decoded-end copy-start)))
+           (decoded (buffer-substring-no-properties copy-start copy-end)))
+      (set-marker copy-marker copy-end)
+      (with-current-buffer event-buffer
+        (goto-char (point-max))
+        (insert decoded)
+        (cl-incf emacsos-assist-web--stream-unconsumed-bytes
+                 (string-bytes decoded))
+        (unless (and (markerp emacsos-assist-web--stream-scan-marker)
+                     (eq (marker-buffer emacsos-assist-web--stream-scan-marker)
+                         event-buffer))
+          (setq emacsos-assist-web--stream-scan-marker
+                (copy-marker (point-min) nil)))
+        (let ((scan-marker emacsos-assist-web--stream-scan-marker)
+              (start (point-min))
+              (too-large nil))
+          ;; Resume at the final possible CRLF delimiter start.  Complete
+          ;; records are deleted only from this private parser buffer.
+          (goto-char (marker-position scan-marker))
+          (while (and (not too-large) (re-search-forward "\r?\n\r?\n" nil t))
+            (let* ((record-end (point))
+                   (delimiter-start (match-beginning 0))
+                   (delimiter-bytes
+                    (string-bytes
+                     (buffer-substring-no-properties delimiter-start record-end)))
+                   (event nil) (data nil)
+                   (record (buffer-substring-no-properties start delimiter-start)))
+              (if (> (string-bytes record) emacsos-assist-web-max-event-bytes)
+                  (setq too-large t)
+                (dolist (line (split-string record "\r?\n" t))
+                  (cond
+                   ((string-prefix-p "event: " line) (setq event (substring line 7)))
+                   ((string-prefix-p "data: " line) (setq data (substring line 6)))))
+                (when (and event (buffer-live-p target)
+                           (with-current-buffer target
+                             (= generation emacsos-assist-web--stream-generation)))
+                  (emacsos-assist-web--dispatch-event target event (or data "")))
+                (cl-decf emacsos-assist-web--stream-unconsumed-bytes
+                         (+ (string-bytes record) delimiter-bytes))
+                (delete-region start record-end)
+                (set-marker scan-marker start)
+                (goto-char start))))
+          (if too-large
+              (progn
+                (erase-buffer)
+                (set-marker scan-marker (point-min))
+                (setq emacsos-assist-web--stream-unconsumed-bytes 0))
+            (set-marker scan-marker (max (point-min) (- (point-max) 3))))
+          (when (or too-large
+                    (> emacsos-assist-web--stream-unconsumed-bytes
+                       emacsos-assist-web-max-event-bytes))
+            (erase-buffer)
+            (set-marker scan-marker (point-min))
+            (setq emacsos-assist-web--stream-unconsumed-bytes 0)
+            (when (and (buffer-live-p target)
+                       (with-current-buffer target
+                         (= generation emacsos-assist-web--stream-generation)))
+              (emacsos-assist-web--stream-interrupted
+               target "Assist event is too large")))))
+      ;; Reclaim only bytes the stock decoder no longer addresses.  Its active
+      ;; chunk payload remains intact until a later chunk header advances the
+      ;; decoder's start marker.
+      (let* ((prune-marker emacsos-assist-web--stream-prune-marker)
+             (prune-start (marker-position prune-marker))
+             (prune-end
+              (cond
+               ((and (boundp 'url-http-transfer-encoding)
+                     (equal url-http-transfer-encoding "chunked"))
+                (if (and (boundp 'url-http-chunked-start)
+                         (markerp url-http-chunked-start))
+                    (min copy-end (marker-position url-http-chunked-start))
+                  prune-start))
+               ((and (boundp 'url-http-content-length)
+                     (integerp url-http-content-length))
+                prune-start)
+               (t copy-end))))
+        (when (> prune-end prune-start)
+          (delete-region prune-start prune-end))))))
 
 (defun emacsos-assist-web--event-filter (url-filter target generation)
   "Wrap URL-FILTER and dispatch SSE records to TARGET for GENERATION."
   (lambda (process bytes)
     ;; The stock filter may detach PROCESS from its buffer on the final chunk.
     ;; Retain the response first so a terminal event in that chunk is not lost.
-    (let* ((response (process-buffer process))
-           (decoded-start
-            (and (buffer-live-p response)
-                 (with-current-buffer response (point-max)))))
+    (let ((response (process-buffer process)))
       (when (functionp url-filter) (funcall url-filter process bytes))
       (when (buffer-live-p response)
         (with-current-buffer response
@@ -1127,14 +1189,16 @@ parsed response."
                   (when (timerp emacsos-assist-web--stream-header-timer)
                     (cancel-timer emacsos-assist-web--stream-header-timer)
                     (setq emacsos-assist-web--stream-header-timer nil))))
-              (let ((decoded-bytes
-                     (and (integerp decoded-start)
-                          (<= decoded-start (point-max))
-                          (string-bytes
-                           (buffer-substring-no-properties
-                            decoded-start (point-max))))))
+              (if (and (boundp 'url-http-transfer-encoding)
+                       (equal url-http-transfer-encoding "chunked")
+                       (boundp 'url-http-chunked-length)
+                       (integerp url-http-chunked-length)
+                       (> url-http-chunked-length
+                          emacsos-assist-web-max-stream-chunk-bytes))
+                  (emacsos-assist-web--stream-interrupted
+                   target "Assist stream transport chunk is too large")
                 (emacsos-assist-web--drain-events
-                 target generation decoded-bytes)))))))))
+                 target generation (emacsos-assist-web--decoded-end))))))))))
 
 (defun emacsos-assist-web--observe-run (buffer)
   "Open BUFFER's authenticated status stream for its current run.

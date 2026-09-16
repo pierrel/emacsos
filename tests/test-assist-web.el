@@ -348,12 +348,12 @@
         seen)
     (unwind-protect
         (with-current-buffer source
-          (insert "event: terminal\ndata: {}\n\n")
+          (insert "\nevent: terminal\ndata: {}\n\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
                      (lambda (actual-target event data)
                        (setq seen (list actual-target event data)))))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (equal seen (list target "terminal" "{}"))))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -367,9 +367,9 @@
             (emacsos-assist-web-mode)
             (setq-local emacsos-assist-web--stream-response source))
           (with-current-buffer source
-            (insert "event: terminal\ndata: {}\n\n")
+            (insert "\nevent: terminal\ndata: {}\n\n")
             (setq-local url-http-end-of-headers (copy-marker (point-min)))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (buffer-live-p source)))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -390,7 +390,7 @@
                   (lambda (active _bytes)
                     (with-current-buffer source
                       (erase-buffer)
-                      (insert "event: terminal\ndata: {}\n\n")
+                      (insert "\nevent: terminal\ndata: {}\n\n")
                       (setq-local url-http-response-status 200
                                   url-http-content-type "text/event-stream"
                                   url-http-end-of-headers (copy-marker (point-min))))
@@ -430,7 +430,7 @@
                         (lambda (_active _bytes)
                           (with-current-buffer source
                             (erase-buffer)
-                            (insert "event: terminal\ndata: {}\n\n")
+                            (insert "\nevent: terminal\ndata: {}\n\n")
                             (setq-local url-http-response-status 200
                                         url-http-content-type "text/event-stream"
                                         url-http-end-of-headers
@@ -478,11 +478,11 @@
         seen)
     (unwind-protect
         (with-current-buffer source
-          (insert "event: status\ndata: {}\n\nevent: status\ndata: {}\n\n")
+          (insert "\nevent: status\ndata: {}\n\nevent: status\ndata: {}\n\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
                      (lambda (_target event _data) (push event seen))))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (equal seen '("status" "status"))))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -494,11 +494,11 @@
         seen)
     (unwind-protect
         (with-current-buffer source
-          (insert "event: status\r\ndata: {\"status\":\"working\"}\r\n\r\n")
+          (insert "\nevent: status\r\ndata: {\"status\":\"working\"}\r\n\r\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
                      (lambda (_target event data) (setq seen (list event data)))))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (equal seen '("status" "{\"status\":\"working\"}"))))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -530,6 +530,7 @@
         (copied 0) seen)
     (unwind-protect
         (with-current-buffer source
+          (insert "\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (let ((original (symbol-function 'buffer-substring-no-properties)))
             (cl-letf (((symbol-function 'buffer-substring-no-properties)
@@ -541,7 +542,7 @@
               (dolist (byte (string-to-list payload))
                 (goto-char (point-max))
                 (insert-char byte)
-                (emacsos-assist-web--drain-events target 0 1))))
+                (emacsos-assist-web--drain-events target 0 (point-max)))))
           ;; The old parser copied the whole unfinished record per callback.
           ;; This implementation copies it once, after the delimiter arrives.
           (should (< copied (* 3 (length payload))))
@@ -716,43 +717,96 @@
     (should (equal rejected "Assist stream transport chunk is too large"))))
 
 (ert-deftest test-assist-web-chunked-crlf-stream-uses-decoded-event-accounting ()
-  "HTTP chunk framing is forwarded raw while only decoded SSE bytes are counted."
+  "Stock `url-http' chunk framing never becomes decoded SSE data."
   (let ((target (generate-new-buffer " *assist-web-target*"))
         (source (generate-new-buffer " *assist-web-source*"))
         (emacsos-assist-web-max-event-bytes 52)
         (emacsos-assist-web-max-stream-chunk-bytes 512)
-        process seen rejected)
+        process seen rejected filter)
     (unwind-protect
         (progn
           (setq process (make-pipe-process :name "assist-web-chunked-crlf"
                                            :buffer source :noquery t))
           (with-current-buffer target (emacsos-assist-web-mode))
-          (let* ((decoded "event: status\r\ndata: {\"status\":\"working\"}\r\n\r\n")
-                 (raw (concat "HTTP/1.1 200 OK\r\n"
-                              "Content-Type: text/event-stream\r\n"
-                              "Transfer-Encoding: chunked\r\n\r\n"
-                              (format "%x\r\n" (string-bytes decoded))
-                              decoded "\r\n0\r\n\r\n"))
-                 (url-filter
-                  (lambda (_active _bytes)
-                    (with-current-buffer source
-                      (erase-buffer)
-                      (insert decoded)
-                      (setq-local url-http-response-status 200
-                                  url-http-content-type "text/event-stream"
-                                  url-http-end-of-headers (copy-marker (point-min))))))
-                 (filter
-                  (emacsos-assist-web--guarded-filter
-                   (emacsos-assist-web--event-filter url-filter target 0)
-                   (lambda (_active problem) (setq rejected problem))
-                   t)))
-            (should (> (string-bytes raw) emacsos-assist-web-max-event-bytes))
+          (with-current-buffer source
+            (mm-disable-multibyte)
+            (setq-local url-http-after-change-function
+                        'url-http-wait-for-headers-change-function
+                        url-http-end-of-headers nil
+                        url-http-chunked-counter 0
+                        url-http-chunked-last-crlf-missing nil
+                        url-http-chunked-length nil
+                        url-http-chunked-start nil
+                        url-http-response-status nil
+                        url-http-content-type nil
+                        url-http-transfer-encoding nil
+                        url-http-content-length nil
+                        url-http-process process
+                        url-http-no-retry t
+                        url-http-connection-opened t
+                        url-http-method "GET"
+                        url-http-extra-headers nil
+                        url-http-noninteractive t
+                        url-http-data nil
+                        url-http-response-version nil
+                        url-http-target-url nil
+                        url-callback-function nil
+                        url-callback-arguments nil
+                        url-current-object
+                        (url-generic-parse-url "https://assist.invalid/")))
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (let ((first "event: status\r\n")
+                (second "data: {\"status\":\"working\"}\r\n\r\n"))
             (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
-                       (lambda (_target event data) (setq seen (list event data)))))
-              (funcall filter process raw))
+                       (lambda (_target event data)
+                         (push (list event data) seen))))
+              (funcall
+               filter process
+               (concat "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: text/event-stream\r\n"
+                       "Transfer-Encoding: chunked\r\n\r\n"
+                       (format "%x\r\n" (string-bytes first)) first "\r\n"))
+              ;; The raw transport terminator after an incomplete decoded
+              ;; record must not complete or dispatch that record.
+              (should-not seen)
+              (funcall filter process
+                       (concat (format "%x\r\n" (string-bytes second))
+                               second "\r\n")))
             (should-not rejected)
-            (should (equal seen '("status" "{\"status\":\"working\"}")))))
+            (should (equal (nreverse seen)
+                           '(("status" "{\"status\":\"working\"}"))))
+            (with-current-buffer source
+              (should (= url-http-chunked-counter 2)))))
       (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stream-parser-hot-reload-ignores-old-raw-count ()
+  "A legacy response migrates its decoded tail without retaining raw accounting."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        seen)
+    (unwind-protect
+        (progn
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (with-current-buffer source
+            (insert "HTTP/1.1 200 OK\r\n\r\nevent: terminal\r\n\r\n")
+            (setq-local url-http-end-of-headers (copy-marker 19)
+                        url-http-transfer-encoding nil
+                        url-http-content-length nil
+                        emacsos-assist-web--stream-body-marker (copy-marker 20)
+                        emacsos-assist-web--stream-unconsumed-bytes
+                        emacsos-assist-web-max-event-bytes)
+            (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                       (lambda (_target event data)
+                         (setq seen (list event data)))))
+              (emacsos-assist-web--drain-events target 0 (point-max))))
+          (should (equal seen '("terminal" ""))))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
