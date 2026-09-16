@@ -67,7 +67,7 @@
   :group 'emacsos-assist-web)
 
 (defcustom emacsos-assist-web-max-stream-chunk-bytes (* 1024 1024)
-  "Maximum raw HTTP bytes accepted in one Assist stream callback."
+  "Maximum bytes in one raw callback or one declared decoded HTTP chunk."
   :type 'integer
   :group 'emacsos-assist-web)
 
@@ -631,7 +631,8 @@ them."
                     (funcall fail process
                              "Assist Web response headers are too large"))
                    ((string-match-p "\r?\n[ \t]" headers-only)
-                    ;; Stock `url-http' unfolds obsolete continuation lines.
+                    ;; Stock `url-http' includes obsolete continuation lines
+                    ;; in its parsed field value.
                     ;; Reject them before our line-oriented admission checks
                     ;; can disagree with the decoder about transfer coding.
                     (setq failed t)

@@ -1,0 +1,39 @@
+#+title: Assist SSE transport hardening amendment
+#+date: 2026-09-16
+
+* Correction
+
+The Assist Web stream guard rejects obsolete folded response headers before
+stock =url-http= sees them.  This keeps the guard's line-oriented transfer
+coding admission from disagreeing with the value stock extracts: one exact
+=chunked= field is the only admitted transfer coding, so raw chunk framing can
+never reach the SSE event reader as decoded entity data.
+
+The 1 MiB transport setting has two independent applications: one raw process
+filter callback and one declared decoded HTTP chunk.  The second bound keeps
+stock =url-http= from retaining an attacker-sized entity chunk while it waits
+for that chunk to complete; it does not treat a batch of bounded SSE records as
+one SSE event.  Reloading the module retires active observations through their
+ordinary cleanup path, so no process-filter closure from the prior definitions
+continues using obsolete framing or accounting behavior.
+
+* Verification
+
+ERT drives the stock filter with a folded transfer-coding attack and proves the
+guard rejects it before dispatching any SSE event.  Separate regressions prove
+an oversized declared decoded chunk is interrupted before its body is retained
+and an installed pre-reload stream filter is retired with its process.  The
+existing stock-filter suite continues to cover incomplete chunk headers,
+fixed-length bounds, split final-chunk CRLF, decoded LF and CRLF events, and
+unsupported transfer-coding chains.
+
+* Historical supersessions
+
+This document supersedes only /Correction/ and /Verification/ in
+[[file:2026-09-16-assist-sse-decoder-ownership-amendment.org][Assist SSE decoder ownership amendment]] by adding folded-header admission,
+the decoded-chunk bound, and active-filter retirement.
+
+It also supersedes only /Correction/ in
+[[file:2026-09-09-conversation-stream-batching-amendment.org][Conversation stream batching-bound amendment]]: valid SSE records may still be
+batched, but one raw callback and one decoded HTTP chunk now have independent
+1 MiB transport-retention limits.

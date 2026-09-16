@@ -10,11 +10,6 @@ than one exact =chunked= value, and forwards an accepted SSE response to stock
 that =url-http= has retained while waiting for complete chunk framing.  It does
 not interpret SSE delimiters or duplicate the chunk grammar.
 
-The 1 MiB transport limit has two separate applications: one raw callback and
-one declared decoded HTTP chunk.  The latter keeps stock =url-http= from
-retaining an attacker-sized entity chunk while it waits for that chunk to
-complete; it does not treat a batch of bounded SSE records as one SSE event.
-
 The event reader scans only through =url-http='s decoder-confirmed entity
 boundary.  It accepts LF and CRLF SSE record delimiters, bounds the complete or
 unfinished record before copying it for dispatch, and keeps only the bytes
@@ -29,8 +24,7 @@ ERT drives stock =url-http= with a CRLF SSE record split across two HTTP chunks.
 The first chunk's raw terminator cannot complete the partial event, while the
 second chunk dispatches it exactly once.  Additional stock-filter regressions
 cover an incomplete chunk header across callbacks, an oversized fixed-length
-response and decoded chunk, a split final-chunk CRLF, a folded or unsupported
-transfer-coding chain, and retirement of an installed pre-reload stream filter.
+response, a split final-chunk CRLF, and an unsupported transfer-coding chain.
 Direct parser coverage proves an oversized unfinished event is rejected without
 an oversized parser copy and hot reload ignores the obsolete raw-byte counter.
 
@@ -42,8 +36,3 @@ This document supersedes only the sections /Correction/, /Verification/, and
 construction is replaced by decoder-boundary scanning and joint parser/decoder
 ownership; its intended boundary in
 [[file:2026-09-03-assist-web-thread-flow.org][Assist Web thread flow]] is under /Step 2 implementation/.
-
-It also supersedes only /Correction/ in
-[[file:2026-09-09-conversation-stream-batching-amendment.org][Conversation stream batching-bound amendment]]: valid SSE records may still be
-batched, but one raw callback and one decoded HTTP chunk now have independent
-1 MiB transport-retention limits.
