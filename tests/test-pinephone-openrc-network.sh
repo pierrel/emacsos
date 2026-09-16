@@ -32,6 +32,8 @@ printf '%s\n' '#!/bin/sh' \
     '  exit 137' \
     'elif [ -f /tmp/mmcli-unrecognized ]; then' \
     '  printf "%s\n" "unexpected modem output"' \
+    'elif [ -f /tmp/mmcli-valid-mixed ]; then' \
+    '  printf "%s\n" "/org/freedesktop/ModemManager1/Modem/0 [Quectel] EG25-G" "unexpected trailing output"' \
     'elif [ -f /tmp/mmcli-mixed ]; then' \
     '  printf "%s\n" "No modems were found" "unexpected trailing output"' \
     'elif [ -f /tmp/modem-missing ]; then' \
@@ -107,6 +109,15 @@ fi
 grep -Fx 'not-connected:failed' /tmp/probe-mixed >/dev/null
 [ ! -e /tmp/rc-service-log ]
 rm -f /tmp/mmcli-mixed
+
+touch /tmp/mmcli-valid-mixed
+if /bin/sh /helper cell up >/tmp/probe-valid-mixed 2>&1; then
+    printf '%s\n' 'valid modem plus unrecognized output was accepted' >&2
+    exit 1
+fi
+grep -Fx 'not-connected:failed' /tmp/probe-valid-mixed >/dev/null
+[ ! -e /tmp/rc-service-log ]
+rm -f /tmp/mmcli-valid-mixed
 
 touch /tmp/modem-missing /tmp/restart-fails
 if /bin/sh /helper cell up >/tmp/recovery-failed 2>&1; then
