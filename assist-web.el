@@ -1470,14 +1470,17 @@ of it, together with the oldest pagination cursor already reached."
           (push message older)))
       ;; OLDER is newest-first here.  Keep the newest contiguous suffix that
       ;; fits before FRESH, so a growing thread evicts the oldest loaded rows.
-      (dolist (message older)
-        (let ((bytes (string-bytes (alist-get 'text message))))
+      (while older
+        (let* ((message (pop older))
+               (bytes (string-bytes (alist-get 'text message))))
           (if (and (> remaining-count 0) (>= remaining-bytes bytes))
               (progn
                 (push message retained)
                 (setq remaining-count (1- remaining-count)
                       remaining-bytes (- remaining-bytes bytes)))
-            (setq dropped t))))
+            ;; Older rows cannot be retained across this gap.
+            (setq dropped t
+                  older nil))))
       (setf (alist-get 'messages result)
             (append retained fresh-messages))
       (when old-only-p

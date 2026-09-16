@@ -677,7 +677,8 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
                                 (cond
                                  (overflow
                                   "network action response is too large")
-                                 ((= status 124) "network action timed out")
+                                 ((memq status '(124 137))
+                                  "network action timed out")
                                  (t (emacsos-net--bounded-detail
                                      output
                                      (if success "ok"

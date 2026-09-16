@@ -796,7 +796,7 @@
                    '(legacy tracked)))
     (should-not changed-sentinel)))
 
-(ert-deftest test-net-action-timeout-clears-wifi-pending-exactly-once ()
+(ert-deftest test-net-action-timeout-kill-clears-wifi-pending-exactly-once ()
   (let ((emacsos-net--state
          (make-emacsos-net-state :valid t :wifi-on nil))
         (emacsos-net--wifi-operation nil)
@@ -809,7 +809,8 @@
                        action-buffer (plist-get args :buffer))
                  'action-process))
               ((symbol-function 'process-status) (lambda (_) 'exit))
-              ((symbol-function 'process-exit-status) (lambda (_) 124))
+              ;; GNU timeout returns 137 when its grace-period KILL is needed.
+              ((symbol-function 'process-exit-status) (lambda (_) 137))
               ((symbol-function 'process-buffer) (lambda (_) action-buffer))
               ((symbol-function 'process-get) (lambda (&rest _) nil))
               ((symbol-function 'emacsos-net--discard-reader) #'ignore)
