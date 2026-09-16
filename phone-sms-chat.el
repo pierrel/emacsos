@@ -31,30 +31,7 @@
 
 (defun emacsos-sms-chat--restore-record (record saved)
   "Restore every field of RECORD from its SAVED copy."
-  (setf (emacsos-sms-chat-record-id record)
-        (emacsos-sms-chat-record-id saved)
-        (emacsos-sms-chat-record-number record)
-        (emacsos-sms-chat-record-number saved)
-        (emacsos-sms-chat-record-body record)
-        (emacsos-sms-chat-record-body saved)
-        (emacsos-sms-chat-record-direction record)
-        (emacsos-sms-chat-record-direction saved)
-        (emacsos-sms-chat-record-state record)
-        (emacsos-sms-chat-record-state saved)
-        (emacsos-sms-chat-record-origin record)
-        (emacsos-sms-chat-record-origin saved)
-        (emacsos-sms-chat-record-owner record)
-        (emacsos-sms-chat-record-owner saved)
-        (emacsos-sms-chat-record-generation record)
-        (emacsos-sms-chat-record-generation saved)
-        (emacsos-sms-chat-record-path record)
-        (emacsos-sms-chat-record-path saved)
-        (emacsos-sms-chat-record-revision record)
-        (emacsos-sms-chat-record-revision saved)
-        (emacsos-sms-chat-record-unread record)
-        (emacsos-sms-chat-record-unread saved)
-        (emacsos-sms-chat-record-acknowledged record)
-        (emacsos-sms-chat-record-acknowledged saved)))
+  (cl-replace record saved))
 
 (defvar emacsos-sms-chat--records nil
   "Global SMS records ordered oldest first.")
@@ -793,7 +770,10 @@ Preserve records newer than CUTOFF when it is non-nil."
               (lambda (record)
                 (and (eq (emacsos-sms-chat-record-origin record) 'local)
                      (equal number (emacsos-sms-chat-record-number record))
-                     (equal body (emacsos-sms-chat-record-body record)))))
+                     (equal body (emacsos-sms-chat-record-body record))
+                     (or (null cutoff)
+                         (<= (emacsos-sms-chat-record-revision record)
+                             cutoff)))))
              (sending
               (seq-filter
                (lambda (record)

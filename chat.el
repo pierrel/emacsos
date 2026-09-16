@@ -527,6 +527,39 @@ When TRAILING-SPACE is non-nil, retain the local stream's token separator."
   "Append read-only TEXT at provisional assistant marker END and return its end."
   (emacsos-conversation-replace-marked end end text))
 
+(defun emacsos-conversation--unsafe-display-character-p
+    (character &optional multiline)
+  "Return non-nil when CHARACTER can spoof display text.
+When MULTILINE is non-nil, admit ordinary newline and tab layout."
+  (or (and (memq (get-char-code-property character 'general-category)
+                 '(Cc Cf Zl Zp))
+           (not (and multiline (memq character '(?\n ?\t))))
+           (/= character #x200d))
+      ;; Non-format default-ignorable characters can make distinct server
+      ;; strings render identically.  VS16 and ZWJ are the only admitted emoji
+      ;; format points.
+      (= character #x034f)
+      (<= #x115f character #x1160)
+      (<= #x17b4 character #x17b5)
+      (<= #x180b character #x180d)
+      (= character #x180f)
+      (<= #x2060 character #x206f)
+      (= character #x3164)
+      (and (<= #xfe00 character #xfe0f) (/= character #xfe0f))
+      (= character #xffa0)
+      (<= #xfff0 character #xfff8)
+      (<= #x1bca0 character #x1bca3)
+      (<= #x1d173 character #x1d17a)
+      (<= #xe0000 character #xe0fff)))
+
+(defun emacsos-conversation-valid-text-p (value &optional multiline)
+  "Return non-nil when VALUE contains no display-spoofing characters.
+When MULTILINE is non-nil, admit ordinary newline and tab layout."
+  (and (stringp value)
+       (cl-loop for character across value
+                never (emacsos-conversation--unsafe-display-character-p
+                       character multiline))))
+
 (defun emacsos-conversation-finish-assistant (body-start body-end)
   "Present the completed assistant body delimited by BODY-START and BODY-END."
   (emacsos--chat-present-markdown-1 body-start body-end))
@@ -737,8 +770,11 @@ clears any lingering status bracket (the agent is now talking, not
 working silently)."
   (let ((text (plist-get event :text))
         (buf (emacsos--chat-render-buffer)))
-    (when (and text buf (buffer-live-p buf)
-               (markerp emacsos--chat-stream-insert-marker))
+    (cond
+     ((not (emacsos-conversation-valid-text-p text t))
+      (emacsos--chat-terminate-stream "invalid assistant text"))
+     ((and buf (buffer-live-p buf)
+           (markerp emacsos--chat-stream-insert-marker))
       (with-current-buffer buf
         (cl-incf emacsos--chat-tokens-seen)
         (let ((inhibit-read-only t))
@@ -747,7 +783,7 @@ working silently)."
               (emacsos--chat-clear-status-bracket))
             (set-marker emacsos--chat-stream-insert-marker
                         (emacsos-conversation-append-delta
-                         emacsos--chat-stream-insert-marker text))))))))
+                         emacsos--chat-stream-insert-marker text)))))))))
 
 (defun emacsos--chat-handle-heartbeat (_event)
   "Heartbeat is purely transport-level — no UI change."

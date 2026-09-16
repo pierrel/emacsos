@@ -1,0 +1,33 @@
+#+title: Streaming transcript and SMS refresh-cutoff amendment
+#+date: 2026-09-16
+
+* Correction
+
+The display-spoof boundary applies before every server-supplied assistant text
+fragment is rendered.  It therefore covers canonical Assist snapshots and
+history, provisional Assist Web SSE deltas, and local =/chat= NDJSON tokens.
+Newline and tab remain valid multiline layout, and ZWJ and VS16 remain the only
+admitted zero-width emoji format points.  A rejected live fragment terminates
+its observation without inserting the fragment.
+
+An outgoing modem snapshot from a complete refresh may attach only to a sole
+matching local record whose revision is at or before that refresh's cutoff.
+Thus an old modem snapshot cannot attach to or terminalize a newly created
+identical local send.  A live ModemManager Added snapshot has no cutoff and
+retains the existing exact-match attachment behavior.
+
+* Verification
+
+ERT drives hostile and admitted text through both live transports.  The SMS
+interleaving fixture creates an identical local send after the refresh cutoff,
+proves that the old snapshot remains a separate modem record, and proves that
+the send's later failed lifecycle result remains authoritative.
+
+* Historical supersessions
+
+This document supersedes only the transcript-boundary and SMS-attachment
+statements in [[file:2026-09-16-transcript-spoof-and-sms-refresh-amendment.org][Transcript spoofing and SMS refresh amendment]], sections
+/Corrections/ and /Verification/, with the live-stream and cutoff requirements
+above.  It also supersedes only the decoded-delta validation statement in
+[[file:2026-09-08-conversation-interface-streaming.org][Conversation interface streaming]], section /Shared native buffer contract/,
+by adding the display-spoof validation that precedes insertion.

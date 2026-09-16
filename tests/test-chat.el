@@ -148,6 +148,31 @@ the prompt and the three markers are set."
     (with-current-buffer buf
       (should (string-match-p "bot> Hello world!" (buffer-string))))))
 
+(ert-deftest chat-test-token-handler-rejects-display-spoofing-text ()
+  (chat-test--reset)
+  (let ((buf (emacsos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (setq emacsos--chat-in-flight t)
+    (emacsos--chat-handle-start '(:type "start"))
+    (emacsos--chat-handle-token
+     `(:type "token" :text ,(concat "spoof" (string #x202e))))
+    (with-current-buffer buf
+      (should-not (string-match-p (string #x202e) (buffer-string)))
+      (should (string-match-p "invalid assistant text" (buffer-string))))
+    (should-not emacsos--chat-in-flight)
+    (should (= emacsos--chat-tokens-seen 0))))
+
+(ert-deftest chat-test-token-handler-admits-layout-and-emoji-format-points ()
+  (chat-test--reset)
+  (let* ((buf (emacsos--chat-buffer))
+         (text (concat "first\n\tsecond "
+                       (string #x2764 #xfe0f #x200d #x1f525))))
+    (chat-test--seed-you-line buf "hi")
+    (emacsos--chat-handle-start '(:type "start"))
+    (emacsos--chat-handle-token `(:type "token" :text ,text))
+    (with-current-buffer buf
+      (should (string-match-p (regexp-quote text) (buffer-string))))))
+
 (ert-deftest chat-test-status-then-first-token-clears-bracket ()
   "Status renders as `[<text>] `; first token clears the bracket."
   (chat-test--reset)

@@ -394,6 +394,28 @@
       (should (eq (emacsos-sms-chat-record-state record) 'sent))
       (should (equal (emacsos-sms-chat-record-path record) path)))))
 
+(ert-deftest emacsos-sms-chat-refresh-does-not-attach-post-cutoff-send ()
+  (test-sms-chat--with-state
+    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
+           (record
+            (make-emacsos-sms-chat-record
+             :id 9 :number "+14155550123" :body "same"
+             :direction 'outgoing :state 'sending :origin 'local
+             :owner ":1.mm" :generation 3 :revision 2)))
+      (setq emacsos-sms-chat--records (list record)
+            emacsos-sms-chat--revision 2)
+      (puthash 1 (list :record record) emacsos-sms-chat--contexts)
+      (emacsos-sms-chat--apply-snapshot
+       (emacsos-sms-chat--parse-snapshot
+        (test-sms-chat--snapshot "sent" "submit" "same" path))
+       ":1.mm" 3 nil 1)
+      (should (= (length emacsos-sms-chat--records) 2))
+      (should (eq (emacsos-sms-chat-record-state record) 'sending))
+      (should-not (emacsos-sms-chat-record-path record))
+      (emacsos-sms-chat--on-lifecycle
+       '(:event terminal :proposal-id 9 :state failed :context 1))
+      (should (eq (emacsos-sms-chat-record-state record) 'failed)))))
+
 (ert-deftest emacsos-sms-chat-refresh-reconciles-attached-local-send ()
   (test-sms-chat--with-state
     (let* ((path "/org/freedesktop/ModemManager1/SMS/7")

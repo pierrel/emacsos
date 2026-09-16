@@ -931,18 +931,38 @@
 
 (ert-deftest test-assist-web-malformed-and-oversized-deltas-keep-the-real-partial ()
   "The event adapter, not only its shared failure helper, retains prior text."
-  (dolist (data (list "{not json}"
-                      (json-encode `((attempt . 1) (index . 2)
-                                     (text . ,(make-string (1+ (* 16 1024)) ?x))))))
-    (with-temp-buffer
-      (emacsos-assist-web-mode)
-      (emacsos-assist-web--write-prompt)
-      (emacsos-assist-web--append-pending "hello")
-      (emacsos-assist-web--reset-assistant 1)
-      (emacsos-assist-web--append-delta 1 1 "partial")
-      (emacsos-assist-web--dispatch-event (current-buffer) "assistant-delta" data)
-      (should (string-match-p "partial" (buffer-string)))
-      (should (equal emacsos-assist-web--stream-status "invalid Assist delta")))))
+  (let ((oversized (json-encode `((attempt . 1) (index . 2)
+                                   (text . ,(make-string
+                                             (1+ (* 16 1024)) ?x)))))
+        (hostile (json-encode `((attempt . 1) (index . 2)
+                                 (text . ,(concat "spoof"
+                                                  (string #x202e)))))))
+    (dolist (data (list "{not json}" oversized hostile))
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (emacsos-assist-web--write-prompt)
+        (emacsos-assist-web--append-pending "hello")
+        (emacsos-assist-web--reset-assistant 1)
+        (emacsos-assist-web--append-delta 1 1 "partial")
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta" data)
+        (should (string-match-p "partial" (buffer-string)))
+        (should (equal emacsos-assist-web--stream-status
+                       "invalid Assist delta"))))))
+
+(ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (emacsos-assist-web--append-pending "hello")
+    (emacsos-assist-web--reset-assistant 1)
+    (let ((text (concat "first\n\tsecond "
+                        (string #x2764 #xfe0f #x200d #x1f525))))
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       (json-encode `((attempt . 1) (index . 1) (text . ,text))))
+      (should (string-match-p (regexp-quote text) (buffer-string)))
+      (should (= emacsos-assist-web--stream-index 1)))))
 
 (ert-deftest test-assist-web-snapshot-bounds-message-and-cumulative-text ()
   (let ((snapshot (copy-tree test-assist-web--snapshot)))

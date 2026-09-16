@@ -288,45 +288,15 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
   "Return non-nil when VALUE is an alist-shaped JSON object."
   (and (listp value) (seq-every-p #'consp value)))
 
-(defun emacsos-assist-web--unsafe-display-character-p
-    (character &optional multiline)
-  "Return non-nil when CHARACTER can spoof display text.
-When MULTILINE is non-nil, admit ordinary newline and tab layout."
-  (or (and (memq (get-char-code-property character 'general-category)
-                 '(Cc Cf Zl Zp))
-           (not (and multiline (memq character '(?\n ?\t))))
-           (/= character #x200d))
-      ;; Non-format default-ignorable characters can make distinct server
-      ;; strings render identically.  VS16 and ZWJ are the only admitted emoji
-      ;; format points.
-      (= character #x034f)
-      (<= #x115f character #x1160)
-      (<= #x17b4 character #x17b5)
-      (<= #x180b character #x180d)
-      (= character #x180f)
-      (<= #x2060 character #x206f)
-      (= character #x3164)
-      (and (<= #xfe00 character #xfe0f) (/= character #xfe0f))
-      (= character #xffa0)
-      (<= #xfff0 character #xfff8)
-      (<= #x1bca0 character #x1bca3)
-      (<= #x1d173 character #x1d17a)
-      (<= #xe0000 character #xe0fff)))
-
 (defun emacsos-assist-web--valid-catalog-text-p (value)
   "Return non-nil for bounded, single-line catalog or snapshot display VALUE."
   (and (stringp value)
        (<= (string-bytes value) emacsos-assist-web--max-catalog-text-bytes)
-       (cl-loop for character across value
-                never (emacsos-assist-web--unsafe-display-character-p
-                       character))))
+       (emacsos-conversation-valid-text-p value)))
 
 (defun emacsos-assist-web--valid-message-text-p (value)
   "Return non-nil for multiline transcript VALUE without spoofing controls."
-  (and (stringp value)
-       (cl-loop for character across value
-                never (emacsos-assist-web--unsafe-display-character-p
-                       character t))))
+  (emacsos-conversation-valid-text-p value t))
 
 (defun emacsos-assist-web--isolate-display-text (text)
   "Return server-supplied TEXT inside trusted bidirectional isolates."
@@ -1008,7 +978,8 @@ observes its durable state."
 (defun emacsos-assist-web--append-delta (attempt index text)
   "Append the next bounded delta for ATTEMPT/INDEX to this buffer only."
   (unless (and (integerp attempt) (integerp index) (stringp text)
-               (<= (string-bytes text) (* 16 1024)))
+               (<= (string-bytes text) (* 16 1024))
+               (emacsos-conversation-valid-text-p text t))
     (error "invalid Assist delta"))
   (cond
    ((not (integerp emacsos-assist-web--stream-attempt))
