@@ -422,7 +422,8 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
 
 (defun emacsos-assist-web--require-snapshot
     (value &optional expected-thread-id max-messages max-bytes)
-  "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied."
+  "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied.
+MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
   (let ((thread (and (emacsos-assist-web--object-p value)
                      (alist-get 'thread value)))
         (messages (and (emacsos-assist-web--object-p value)
