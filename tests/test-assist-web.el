@@ -977,18 +977,35 @@
      (emacsos-assist-web--require-history-page
       page "thread-1" current "cursor-1"))))
 
-(ert-deftest test-assist-web-render-bounds-retained-recent-plus-older-history ()
+(ert-deftest test-assist-web-render-drops-oversized-live-reload-history ()
   (let ((fresh (copy-tree test-assist-web--snapshot))
         (older (copy-tree test-assist-web--snapshot))
         (emacsos-assist-web--max-rendered-messages 1))
     (setf (alist-get 'messages older)
           '(((id . "m-0") (role . "user") (text . "older")
+             (state . "final"))
+            ((id . "m-minus-1") (role . "assistant") (text . "oldest")
              (state . "final"))))
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1"
             emacsos-assist-web--snapshot older)
-      (should-error (emacsos-assist-web--render fresh)))))
+      (emacsos-assist-web--render fresh)
+      (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                             (alist-get 'messages
+                                        emacsos-assist-web--snapshot))
+                     '("m-1"))))))
+
+(ert-deftest test-assist-web-transcript-count-stops-at-the-first-excess-record ()
+  (let* ((first '((id . "m-1") (role . "assistant") (text . "one")
+                  (state . "final")))
+         (second '((id . "m-2") (role . "assistant") (text . "two")
+                   (state . "final")))
+         (messages (list first second)))
+    (setcdr (cdr messages) messages)
+    (should-error
+     (emacsos-assist-web--require-transcript-limits messages 1 1024))))
+
 
 (ert-deftest test-assist-web-history-merges-chronologically-and-keeps-page-cursor ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))

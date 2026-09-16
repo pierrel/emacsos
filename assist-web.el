@@ -398,13 +398,16 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
 (defun emacsos-assist-web--require-transcript-limits
     (messages max-messages max-bytes)
   "Require MESSAGES to fit MAX-MESSAGES, MAX-BYTES, and the per-message cap."
-  (unless (and (proper-list-p messages)
-               (<= (length messages) max-messages))
-    (error "Assist Web thread transcript is too large"))
-  (let ((total 0))
-    (dolist (message messages)
-      (let ((text (and (emacsos-assist-web--object-p message)
-                       (alist-get 'text message))))
+  (let ((remaining messages)
+        (count 0)
+        (total 0))
+    (while (consp remaining)
+      (setq count (1+ count))
+      (when (> count max-messages)
+        (error "Assist Web thread transcript is too large"))
+      (let* ((message (car remaining))
+             (text (and (emacsos-assist-web--object-p message)
+                        (alist-get 'text message))))
         (unless (stringp text)
           (error "Assist Web returned an invalid thread message"))
         (let ((bytes (string-bytes text)))
@@ -412,16 +415,20 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
             (error "Assist Web thread message is too large"))
           (setq total (+ total bytes))
           (when (> total max-bytes)
-            (error "Assist Web thread transcript is too large")))))))
+            (error "Assist Web thread transcript is too large"))))
+      (setq remaining (cdr remaining)))
+    (unless (null remaining)
+      (error "Assist Web returned an invalid thread transcript"))))
 
-(defun emacsos-assist-web--require-snapshot (value &optional expected-thread-id)
+(defun emacsos-assist-web--require-snapshot
+    (value &optional expected-thread-id max-messages max-bytes)
   "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied."
   (let ((thread (and (emacsos-assist-web--object-p value)
                      (alist-get 'thread value)))
         (messages (and (emacsos-assist-web--object-p value)
                        (alist-get 'messages value))))
     (unless (and (emacsos-assist-web--object-p thread)
-                 (assq 'messages value) (proper-list-p messages)
+                 (assq 'messages value)
                  (emacsos-assist-web--valid-id-p (alist-get 'id thread))
                  (emacsos-assist-web--valid-catalog-text-p
                   (alist-get 'description thread))
@@ -437,6 +444,10 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
+    (emacsos-assist-web--require-transcript-limits
+     messages
+     (or max-messages emacsos-assist-web--max-snapshot-messages)
+     (or max-bytes emacsos-assist-web--max-snapshot-transcript-bytes))
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
         (unless (and (emacsos-assist-web--object-p message)
@@ -465,9 +476,6 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
                (state . ,(alist-get 'state message))))
            messages))
     (setf (alist-get 'messages value) messages)
-    (emacsos-assist-web--require-transcript-limits
-     messages emacsos-assist-web--max-snapshot-messages
-     emacsos-assist-web--max-snapshot-transcript-bytes)
     (when-let ((cursor (alist-get 'next_before value)))
       (emacsos-assist-web--require-record-id cursor))
     value))
@@ -1461,9 +1469,16 @@ of it, together with the oldest pagination cursor already reached."
         (draft (emacsos-assist-web--input))
         (render-state (emacsos-assist-web--capture-render-state)))
     (emacsos-assist-web--require-snapshot snapshot emacsos-assist-web--thread-id)
-    (setq snapshot
-          (emacsos-assist-web--retain-loaded-history
-           snapshot emacsos-assist-web--snapshot))
+    (let ((previous emacsos-assist-web--snapshot))
+      (when previous
+        (condition-case nil
+            (emacsos-assist-web--require-snapshot
+             previous emacsos-assist-web--thread-id
+             emacsos-assist-web--max-rendered-messages
+             emacsos-assist-web--max-rendered-transcript-bytes)
+          (error (setq previous nil))))
+      (setq snapshot
+            (emacsos-assist-web--retain-loaded-history snapshot previous)))
     (emacsos-assist-web--require-transcript-limits
      (alist-get 'messages snapshot)
      emacsos-assist-web--max-rendered-messages
