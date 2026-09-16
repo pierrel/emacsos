@@ -39,6 +39,8 @@ glanceable, not real-time."
   "Maximum bytes accepted from one complete network-status reader.")
 (defconst emacsos-net--max-reader-lines 2048
   "Maximum newline-terminated records accepted from one status reader.")
+(defconst emacsos-net--max-action-bytes (* 16 1024)
+  "Maximum bytes accepted from one network action.")
 
 (defcustom emacsos-net-cell-connection "emacsos-cellular"
   "NetworkManager connection name used for cellular data."
@@ -143,7 +145,7 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
     (setq emacsos-net--state (make-emacsos-net-state))))
 
 (defun emacsos-net--kill-reader-process (proc)
-  "Kill reader PROC and its shell process group when it is still live."
+  "Kill background PROC and its shell process group when it is still live."
   (when (process-live-p proc)
     (let ((pid (process-id proc)))
       (when (integerp pid)
@@ -176,6 +178,22 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
             (emacsos-net--kill-reader-process proc))
         (process-put proc 'emacsos-net-bytes bytes)
         (process-put proc 'emacsos-net-lines lines)
+        (when-let ((buffer (process-buffer proc)))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (goto-char (point-max))
+              (insert output))))))))
+
+(defun emacsos-net--action-filter (proc output)
+  "Buffer bounded network-action OUTPUT from PROC, or terminate on overflow."
+  (unless (process-get proc 'emacsos-net-action-overflow)
+    (let ((bytes (+ (or (process-get proc 'emacsos-net-action-bytes) 0)
+                    (string-bytes output))))
+      (if (> bytes emacsos-net--max-action-bytes)
+          (progn
+            (process-put proc 'emacsos-net-action-overflow t)
+            (emacsos-net--kill-reader-process proc))
+        (process-put proc 'emacsos-net-action-bytes bytes)
         (when-let ((buffer (process-buffer proc)))
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
@@ -608,7 +626,10 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
           (make-process
            :name "emacsos-net-act"
            :buffer buffer
-           :command command
+           :command (append '("/usr/bin/timeout" "-s" "TERM" "-k" "1" "8")
+                            command)
+           :coding 'binary
+           :filter #'emacsos-net--action-filter
            :noquery t
            :sentinel
            (lambda (process _event)
@@ -616,7 +637,10 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
                         (memq (process-status process) '(exit signal)))
                (setq completed t)
                (let* ((status (process-exit-status process))
-                      (success (and (eq (process-status process) 'exit)
+                      (overflow (process-get process
+                                             'emacsos-net-action-overflow))
+                      (success (and (not overflow)
+                                    (eq (process-status process) 'exit)
                                     (zerop status)))
                       (process-buffer (process-buffer process))
                       (output (if (buffer-live-p process-buffer)
@@ -625,8 +649,11 @@ The post-action refresh is delayed ~1.5s so nmcli has time to settle."
                                 ""))
                       (detail (emacsos-net--bounded-detail
                                output
-                               (if success "ok"
-                                 (format "network action exited %s" status)))))
+                               (cond
+                                (overflow "network action response is too large")
+                                (success "ok")
+                                ((= status 124) "network action timed out")
+                                (t (format "network action exited %s" status))))))
                  (when (buffer-live-p process-buffer)
                    (kill-buffer process-buffer))
                  (emacsos-net--discard-reader)

@@ -143,6 +143,7 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--assistant-end nil)
 (defvar-local emacsos-assist-web--stream-attempt nil)
 (defvar-local emacsos-assist-web--stream-index 0)
+(defvar-local emacsos-assist-web--stream-assistant-bytes 0)
 
 (defun emacsos-assist-web--cache-path (&optional name)
   "Return the cache path for NAME without changing the filesystem."
@@ -482,8 +483,8 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
       (error "Assist Web returned incomplete history progress")))
   (emacsos-assist-web--require-transcript-limits
    (append (alist-get 'messages page) (alist-get 'messages current))
-   emacsos-assist-web--max-snapshot-messages
-   emacsos-assist-web--max-snapshot-transcript-bytes)
+   emacsos-assist-web--max-rendered-messages
+   emacsos-assist-web--max-rendered-transcript-bytes)
   page)
 
 (defun emacsos-assist-web--run-store-unavailable-response-p (buffer)
@@ -974,7 +975,8 @@ observes its durable state."
   "Clear only the provisional assistant body for ATTEMPT."
   (unless (integerp attempt) (error "invalid stream attempt"))
   (setq emacsos-assist-web--stream-attempt attempt
-        emacsos-assist-web--stream-index 0)
+        emacsos-assist-web--stream-index 0
+        emacsos-assist-web--stream-assistant-bytes 0)
   (when (and (markerp emacsos-assist-web--assistant-start)
              (markerp emacsos-assist-web--assistant-end))
     (set-marker emacsos-assist-web--assistant-end
@@ -998,11 +1000,16 @@ observes its durable state."
      (current-buffer) "Assist stream has a gap; refresh to reconcile"))
    ((and (markerp emacsos-assist-web--assistant-end)
          (marker-buffer emacsos-assist-web--assistant-end))
-    (set-marker emacsos-assist-web--assistant-end
-                (emacsos-conversation-append-delta
-                 emacsos-assist-web--assistant-end text))
-      (setq emacsos-assist-web--stream-index index)
-      (emacsos-assist-web--set-status "working"))))
+    (let ((total (+ emacsos-assist-web--stream-assistant-bytes
+                    (string-bytes text))))
+      (when (> total emacsos-assist-web--max-message-bytes)
+        (error "invalid Assist delta"))
+      (set-marker emacsos-assist-web--assistant-end
+                  (emacsos-conversation-append-delta
+                   emacsos-assist-web--assistant-end text))
+      (setq emacsos-assist-web--stream-index index
+            emacsos-assist-web--stream-assistant-bytes total)
+      (emacsos-assist-web--set-status "working")))))
 
 (defun emacsos-assist-web--drain-events (target generation &optional received-bytes)
   "Consume new complete SSE records for TARGET without rescanning a suffix.
@@ -2186,13 +2193,23 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                (or emacsos-assist-web--snapshot cached))))
                          (emacsos-assist-web--require-history-page
                           page tid updated before)
-                         (setf (alist-get 'messages updated)
-                               (append (alist-get 'messages page)
-                                       (alist-get 'messages updated))
+                         (let* ((messages
+                                 (append (alist-get 'messages page)
+                                         (alist-get 'messages updated)))
+                                (at-cap
+                                 (or (>= (length messages)
+                                         emacsos-assist-web--max-rendered-messages)
+                                     (>= (cl-loop for message in messages
+                                                  sum (string-bytes
+                                                       (alist-get 'text message)))
+                                         emacsos-assist-web--max-rendered-transcript-bytes))))
+                           (setf (alist-get 'messages updated) messages
                                (alist-get 'has_older_messages updated)
-                               (alist-get 'has_older_messages page)
+                               (and (not at-cap)
+                                    (alist-get 'has_older_messages page))
                                (alist-get 'next_before updated)
-                               (alist-get 'next_before page))
+                               (and (not at-cap)
+                                    (alist-get 'next_before page))))
                          (emacsos-assist-web--render updated))
                      (error
                       (message "Older history rejected: %s"

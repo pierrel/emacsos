@@ -1,0 +1,44 @@
+#+title: Live assistant, loaded-history, and network-action bounds amendment
+#+date: 2026-09-16
+
+* Corrections
+
+The provisional assistant body has the same 256 KiB total text bound as one
+canonical message.  Each decoded SSE delta is checked before insertion, and
+the client interrupts the observation before an otherwise valid delta would
+cross that cumulative limit.  A stream reset starts a new total.
+
+Each fetched thread snapshot or history page retains its existing 500-message,
+1 MiB wire bound.  Explicitly loaded pages may combine with the current state
+up to the separate 1,000-message, 2 MiB rendered-history bound.  On reaching
+either rendered bound, the client clears the older-history cursor and stops
+offering another page.
+
+Every asynchronous network radio action now has an eight-second whole-process
+deadline and a 16 KiB cumulative output bound.  Timeout or overflow terminates
+the process group, destroys its buffer, completes the public setter exactly
+once with a bounded error, and releases the pending state before the normal
+settled refresh.
+
+* Verification
+
+ERT proves two individually valid deltas cannot exceed the cumulative message
+bound, two wire-bounded history pages can fill the larger rendered state and
+remove its cursor at the cap, cumulative action output is rejected before the
+excess chunk is inserted, and a timed-out Wi-Fi action clears pending state
+while delivering only one terminal callback.
+
+* Historical supersessions
+
+This document supersedes only the live-fragment boundary in
+[[file:2026-09-16-streaming-transcript-and-sms-cutoff-amendment.org][Streaming transcript and SMS refresh-cutoff amendment]], section /Correction/,
+by adding the cumulative provisional-message limit above.
+
+It supersedes only the loaded-history limit statement in
+[[file:2026-09-16-phone-remote-live-reload-doc-correction.org][Phone remote live-reload documentation correction]], section /Correction/, by
+distinguishing each bounded wire page from the larger bounded rendered union
+and defining cursor removal at that union's cap.
+
+It supersedes only the network-action lifecycle statement in
+[[file:2026-09-12-phone-control-panel.org][Phone control panel]], section /EmacsOS control buffer and public commands/, by
+adding the action deadline, output cap, and bounded failure completion above.
