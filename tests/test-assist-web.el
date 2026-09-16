@@ -2700,7 +2700,10 @@
 
 (ert-deftest test-assist-web-awaiting-approval-recovery-keeps-the-exact-run ()
   "A nonterminal approval wait survives until its canonical refresh succeeds."
-  (let ((emacsos--assist-active-surface nil) callback refreshed)
+  (let ((emacsos--assist-active-surface nil)
+        callback
+        (snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'status (alist-get 'thread snapshot)) "awaiting_approval")
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1"
@@ -2713,14 +2716,16 @@
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                 ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
-                ((symbol-function 'emacsos-assist-web-refresh-thread)
-                 (lambda (buffer completed-run-id)
-                   (setq refreshed (list buffer completed-run-id)))))
+                ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore))
         (emacsos-assist-web--resume-accepted-run)
-        (funcall callback '((status . "awaiting_approval")) nil))
+        (funcall callback '((status . "awaiting_approval")) nil)
+        (funcall callback snapshot nil))
       (should (equal emacsos-assist-web--run-id "run-1"))
       (should emacsos-assist-web--pending-accepted-p)
-      (should (equal refreshed (list (current-buffer) "run-1"))))))
+      (should (equal (alist-get 'status
+                                (alist-get 'thread
+                                           emacsos-assist-web--snapshot))
+                     "awaiting_approval")))))
 
 (ert-deftest test-assist-web-unknown-run-status-keeps-the-exact-retry-tuple ()
   "An unrecognized projection cannot discard accepted durable work."

@@ -400,6 +400,27 @@ the next status's clear-bracket would wipe out streamed tokens."
     (should (equal terminated "assistant response too large"))
     (should (= raw-filter-calls 1))))
 
+(ert-deftest chat-test-filter-admits-body-valid-heavily-chunked-response ()
+  "Many server-sized chunks cannot consume the raw-response allowance early."
+  (chat-test--reset)
+  (let* ((emacsos--chat-process 'current)
+         (body-chunk "{\"type\":\"token\",\"text\":\"x\"}\n")
+         (raw-chunk (format "%x\r\n%s\r\n"
+                            (string-bytes body-chunk) body-chunk))
+         (count (/ emacsos--chat-max-body-bytes
+                   (string-bytes body-chunk)))
+         (raw-filter-calls 0))
+    (should (<= (* count (string-bytes body-chunk))
+                emacsos--chat-max-body-bytes))
+    (should (> (* count (string-bytes raw-chunk))
+               (+ emacsos--chat-max-body-bytes (* 64 1024))))
+    (cl-letf (((symbol-function 'process-buffer) (lambda (_) nil)))
+      (let ((filter (emacsos--chat-make-filter
+                     (lambda (_proc _bytes) (cl-incf raw-filter-calls)))))
+        (dotimes (_ count)
+          (funcall filter 'current raw-chunk))))
+    (should (= raw-filter-calls count))))
+
 (ert-deftest chat-test-drain-rejects-cumulative-bounded-events ()
   (chat-test--reset)
   (setq emacsos--chat-in-flight t)
@@ -437,6 +458,28 @@ the next status's clear-bracket would wipe out streamed tokens."
       (should (= emacsos--chat-pending-event-bytes 0))
       (should (equal dispatched
                      '("{\"type\":\"token\",\"text\":\"new\"}"))))))
+
+(ert-deftest chat-test-drain-reconstructs-pending-tail-after-live-reload ()
+  "Old read/seen markers cannot hide a pre-reload unfinished event."
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated)
+      (insert (make-string 9 ?x))
+      (setq-local url-http-end-of-headers header-end
+                  emacsos--chat-body-read-marker
+                  (copy-marker (point-min) nil)
+                  emacsos--chat-body-seen-marker
+                  (copy-marker (point-max) nil)
+                  emacsos--chat-body-bytes-received 9)
+      (kill-local-variable 'emacsos--chat-pending-event-bytes)
+      (insert "yy")
+      (let ((emacsos--chat-max-event-bytes 10))
+        (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                   (lambda (reason) (setq terminated reason))))
+          (emacsos--chat-drain-body)))
+      (should (= emacsos--chat-pending-event-bytes 11))
+      (should (equal terminated "assistant event too large")))))
 
 (ert-deftest chat-test-dispatch-line-abandons-when-stream-buffer-killed ()
   "If the .assist surface is killed mid-stream, events must NOT fall back to

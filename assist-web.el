@@ -846,11 +846,15 @@ observes its durable state."
       (emacsos-assist-web--save-draft)
     (emacsos-assist-web--stream-cleanup t t)))
 
-(defun emacsos-assist-web--stream-finish (buffer)
-  "Finish BUFFER's event observation and request its canonical transcript."
+(defun emacsos-assist-web--stream-finish (buffer &optional run-still-active)
+  "Finish BUFFER's event observation and request its canonical transcript.
+
+When RUN-STILL-ACTIVE is non-nil, do not label the accepted Run as completed;
+the canonical snapshot must retain its durable identity."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((completed-run-id emacsos-assist-web--run-id))
+      (let ((completed-run-id
+             (unless run-still-active emacsos-assist-web--run-id)))
         ;; A terminal SSE is not the answer.  Keep the marker-scoped text raw
         ;; until the canonical snapshot has replaced this provisional region.
         (emacsos-assist-web--stream-cleanup t t)
@@ -1721,7 +1725,7 @@ suppressing a genuine repeated submission."
                       ((equal status "awaiting_approval")
                        ;; It ends this observer but remains a durable Run until
                        ;; the canonical refresh has made its approval state visible.
-                       (emacsos-assist-web--stream-finish buffer))
+                       (emacsos-assist-web--stream-finish buffer t))
                       ((member status '("success" "error" "timeout" "interrupted"
                                        "cancelled"))
                        (setq emacsos-assist-web--pending-key nil

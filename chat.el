@@ -154,12 +154,19 @@ rather than pushing it forward.")
 (defconst emacsos--chat-max-body-bytes (* 2 1024 1024)
   "Maximum cumulative UTF-8 bytes accepted from one /chat response body.")
 
+(defconst emacsos--chat-max-response-header-bytes (* 64 1024)
+  "Maximum raw HTTP response-header allowance for one /chat request.")
+
 (defconst emacsos--chat-max-transport-bytes
-  (+ emacsos--chat-max-body-bytes (* 64 1024))
+  (+ (* 6 emacsos--chat-max-body-bytes)
+     emacsos--chat-max-response-header-bytes
+     5)
   "Maximum raw HTTP response bytes admitted to url-http for one /chat request.
 
-The allowance above the body cap covers bounded response headers and transfer
-framing.  This limit is enforced before url-http copies a response chunk into
+Six raw bytes per body byte covers the deployed encoder's worst-case HTTP/1.1
+framing: a one-byte chunk plus its five fixed framing bytes.  Five more bytes
+cover the terminal zero chunk, and the remaining allowance covers response
+headers.  This limit is enforced before url-http copies a response chunk into
 its buffer.")
 
 (defface emacsos-chat-user-role-face
@@ -1120,10 +1127,15 @@ continues appending bytes after it."
          (missing-seen
           (not (and (local-variable-p 'emacsos--chat-body-seen-marker)
                     (markerp emacsos--chat-body-seen-marker))))
+         (missing-pending
+          (not (local-variable-p 'emacsos--chat-pending-event-bytes)))
          (reloaded-unread
-          (and existing-read missing-seen
+          (and existing-read (or missing-seen missing-pending)
                (buffer-substring-no-properties
-                (marker-position emacsos--chat-body-read-marker) (point-max))))
+                (marker-position emacsos--chat-body-read-marker)
+                (if missing-seen
+                    (point-max)
+                  (marker-position emacsos--chat-body-seen-marker)))))
          (reloaded-last-newline
           (and reloaded-unread
                (cl-position ?\n reloaded-unread :from-end t))))
@@ -1149,8 +1161,9 @@ continues appending bytes after it."
                       (string-bytes
                        (buffer-substring-no-properties
                         (marker-position url-http-end-of-headers) (point-max)))
-                    0)
-                  emacsos--chat-pending-event-bytes
+                    0)))
+    (when missing-pending
+      (setq-local emacsos--chat-pending-event-bytes
                   (if existing-read
                       (string-bytes
                        (if reloaded-last-newline

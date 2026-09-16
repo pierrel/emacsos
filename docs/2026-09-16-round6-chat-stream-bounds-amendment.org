@@ -4,29 +4,23 @@
 * Corrections
 
 A canonical Assist thread refresh treats =pending=, =running=, and
-=transitioning=, and =awaiting_approval= as active alongside the existing thread
-setup and processing stages.  Only =ready= and =error= prove the snapshot is
-settled.  Any other bounded status fails closed without releasing the accepted
-Run identity.  An exact terminal =completed-run-id= remains authoritative and
-can settle that local Run even when the fetched thread has become active again.
+=transitioning= as active alongside the existing thread setup and processing
+stages.  Only =ready= and =error= prove the snapshot is settled.  Any other
+bounded status fails closed without releasing the accepted Run identity.
 
 The legacy =/chat= client admits at most 16 KiB of UTF-8 text in one token,
 256 KiB in one complete or unfinished NDJSON event, and 2 MiB across one
-response body.  A raw HTTP response is bounded before =url-http= copies it into
-its response buffer.  Body and event limits apply before JSON dispatch or
-rendering; the token-text limit applies after JSON parsing but before rendering.
-Server-supplied error reasons and configuration details must also pass the
-existing 512-byte single-line display-safety policy; invalid values are replaced
-with fixed local text.
+response body.  It terminates the stream before parsing or rendering a value
+that crosses those limits.  Server-supplied error reasons and configuration
+details must also pass the existing 512-byte single-line display-safety policy;
+invalid values are replaced with fixed local text.
 
 * Verification
 
 ERT covers every recognized active snapshot status and an unknown status that
 cannot settle local Run ownership.  Chat tests cover hostile and oversized
 error/detail text, an oversized token, an unfinished oversized event, and a
-cumulative response-body overflow made from individually bounded events.  They
-also cover an oversized raw response before the wrapped URL filter and an
-oversized unfinished event following a complete event in the same callback.
+cumulative response-body overflow made from individually bounded events.
 
 * Historical supersessions
 
