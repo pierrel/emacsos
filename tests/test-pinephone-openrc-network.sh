@@ -32,6 +32,8 @@ printf '%s\n' '#!/bin/sh' \
     '  exit 137' \
     'elif [ -f /tmp/mmcli-unrecognized ]; then' \
     '  printf "%s\n" "unexpected modem output"' \
+    'elif [ -f /tmp/mmcli-bad-suffix ]; then' \
+    '  printf "%s\n" "/org/freedesktop/ModemManager1/Modem/0 arbitrary suffix"' \
     'elif [ -f /tmp/mmcli-valid-mixed ]; then' \
     '  printf "%s\n" "/org/freedesktop/ModemManager1/Modem/0 [Quectel] EG25-G" "unexpected trailing output"' \
     'elif [ -f /tmp/mmcli-mixed ]; then' \
@@ -100,6 +102,15 @@ fi
 grep -Fx 'not-connected:failed' /tmp/probe-unrecognized >/dev/null
 [ ! -e /tmp/rc-service-log ]
 rm -f /tmp/mmcli-unrecognized
+
+touch /tmp/mmcli-bad-suffix
+if /bin/sh /helper cell up >/tmp/probe-bad-suffix 2>&1; then
+    printf '%s\n' 'modem path plus arbitrary suffix was accepted' >&2
+    exit 1
+fi
+grep -Fx 'not-connected:failed' /tmp/probe-bad-suffix >/dev/null
+[ ! -e /tmp/rc-service-log ]
+rm -f /tmp/mmcli-bad-suffix
 
 touch /tmp/mmcli-mixed
 if /bin/sh /helper cell up >/tmp/probe-mixed 2>&1; then

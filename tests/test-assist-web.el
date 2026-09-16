@@ -944,6 +944,41 @@
       (should (string-match-p "partial" (buffer-string)))
       (should (equal emacsos-assist-web--stream-status "invalid Assist delta")))))
 
+(ert-deftest test-assist-web-snapshot-bounds-message-and-cumulative-text ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (let ((emacsos-assist-web--max-message-bytes 2))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))
+    (let ((emacsos-assist-web--max-snapshot-messages 0))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))
+    (let ((emacsos-assist-web--max-snapshot-transcript-bytes 2))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-history-bounds-the-loaded-cumulative-state ()
+  (let ((current (copy-tree test-assist-web--snapshot))
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . nil) (next_before . nil)))
+        (emacsos-assist-web--max-snapshot-messages 1))
+    (should-error
+     (emacsos-assist-web--require-history-page
+      page "thread-1" current "cursor-1"))))
+
+(ert-deftest test-assist-web-render-bounds-retained-recent-plus-older-history ()
+  (let ((fresh (copy-tree test-assist-web--snapshot))
+        (older (copy-tree test-assist-web--snapshot))
+        (emacsos-assist-web--max-rendered-messages 1))
+    (setf (alist-get 'messages older)
+          '(((id . "m-0") (role . "user") (text . "older")
+             (state . "final"))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--snapshot older)
+      (should-error (emacsos-assist-web--render fresh)))))
+
 (ert-deftest test-assist-web-history-merges-chronologically-and-keeps-page-cursor ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
         (rendered nil)

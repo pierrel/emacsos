@@ -1,0 +1,33 @@
+#+title: Phone remote-input bounds amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment replaces only the memory-only older-history conclusion in
+[[file:2026-09-03-assist-web-thread-flow.org][Assist Web thread flow]], section /Step 2 implementation/, and the status-reader
+bounding statement in [[file:2026-09-12-wifi-network-access.org][Wi-Fi network access]], section /Goal and scope/.  Those
+records remain the historical designs for their respective features.
+
+* Correction
+
+The Assist Web client bounds both one canonical transcript and its cumulative
+in-memory pagination state.  One message is at most 256 KiB.  One snapshot or
+explicitly loaded history state is at most 500 messages and 1 MiB of message
+text.  A recent-page refresh may preserve that already loaded older state, so
+the final rendered union is independently capped at 1,000 messages and 2 MiB.
+Any response or merge outside those limits is rejected before rendering and
+the last valid buffer remains available.
+
+The asynchronous network reader accepts at most 256 KiB and 2,048 output
+lines.  A process filter accounts for the complete reader, not only the Wi-Fi
+scan section.  Crossing either limit marks the attempt failed and kills the
+reader process group; its sentinel never parses or publishes the partial
+snapshot.  The earlier eight-second whole-process deadline remains in force.
+
+* Verification
+
+ERT covers oversized individual Assist messages, cumulative snapshot and
+history limits, retained-history render limits, exact reader-filter bounds,
+process-group termination, and fail-closed handling of an overflowed partial
+snapshot.  The ordinary Assist history and network-reader suites remain green.
+

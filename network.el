@@ -35,6 +35,10 @@ glanceable, not real-time."
   :group 'emacsos)
 
 (defconst emacsos-net--buffer-name "*network*")
+(defconst emacsos-net--max-reader-bytes (* 256 1024)
+  "Maximum bytes accepted from one complete network-status reader.")
+(defconst emacsos-net--max-reader-lines 2048
+  "Maximum newline-terminated records accepted from one status reader.")
 
 (defcustom emacsos-net-cell-connection "emacsos-cellular"
   "NetworkManager connection name used for cellular data."
@@ -138,21 +142,45 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
             (error nil))
     (setq emacsos-net--state (make-emacsos-net-state))))
 
+(defun emacsos-net--kill-reader-process (proc)
+  "Kill reader PROC and its shell process group when it is still live."
+  (when (process-live-p proc)
+    (let ((pid (process-id proc)))
+      (when (integerp pid)
+        (ignore-errors (signal-process (- pid) 'SIGKILL))))
+    (when (process-live-p proc)
+      (delete-process proc))))
+
 (defun emacsos-net--discard-reader ()
   "Discard an in-flight status read, output buffer, and private temp data."
   (when emacsos-net--proc
     (let ((proc emacsos-net--proc))
       (setq emacsos-net--proc nil)
       (set-process-sentinel proc #'ignore)
-      (when (process-live-p proc)
-        (let ((pid (process-id proc)))
-          (when (integerp pid)
-            (ignore-errors (signal-process (- pid) 'SIGKILL))))
-        (when (process-live-p proc)
-          (delete-process proc)))
+      (emacsos-net--kill-reader-process proc)
       (emacsos-net--cleanup-reader-temp proc)
       (when (buffer-live-p (process-buffer proc))
         (kill-buffer (process-buffer proc))))))
+
+(defun emacsos-net--reader-filter (proc output)
+  "Buffer bounded status OUTPUT from reader PROC, or terminate it on overflow."
+  (unless (process-get proc 'emacsos-net-overflow)
+    (let ((bytes (+ (or (process-get proc 'emacsos-net-bytes) 0)
+                    (string-bytes output)))
+          (lines (+ (or (process-get proc 'emacsos-net-lines) 0)
+                    (cl-count ?\n output))))
+      (if (or (> bytes emacsos-net--max-reader-bytes)
+              (> lines emacsos-net--max-reader-lines))
+          (progn
+            (process-put proc 'emacsos-net-overflow t)
+            (emacsos-net--kill-reader-process proc))
+        (process-put proc 'emacsos-net-bytes bytes)
+        (process-put proc 'emacsos-net-lines lines)
+        (when-let ((buffer (process-buffer proc)))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (goto-char (point-max))
+              (insert output))))))))
 
 ;; `defvar' preserves old state and processes when this file is hot-reloaded.
 (emacsos-net--ensure-state-shape)
@@ -511,6 +539,8 @@ bytes are hex-encoded before entering the line protocol."
                                   reader-directory
                                   "/var/lib/emacsos-openrc-wifi-pending")
                    :noquery t
+                   :coding 'binary
+                   :filter #'emacsos-net--reader-filter
                    :sentinel #'emacsos-net--reader-sentinel))
             (process-put emacsos-net--proc 'emacsos-net-temp-directory
                          reader-directory)
@@ -534,7 +564,10 @@ last valid snapshot after failure or timeout."
             (let ((blob (if (buffer-live-p buf)
                             (with-current-buffer buf (buffer-string))
                           "")))
-              (if (and (eq (process-status proc) 'exit)
+              (if (process-get proc 'emacsos-net-overflow)
+                  (emacsos-net--record-reader-error
+                   "network status response is too large")
+                (if (and (eq (process-status proc) 'exit)
                        (zerop (process-exit-status proc))
                        (string-suffix-p "@@END\n" blob))
                   (condition-case err
@@ -552,9 +585,9 @@ last valid snapshot after failure or timeout."
                     (error
                      (emacsos-net--record-reader-error
                       (error-message-string err))))
-                (emacsos-net--record-reader-error
-                 (format "network reader exited %s"
-                         (process-exit-status proc))))))
+                  (emacsos-net--record-reader-error
+                   (format "network reader exited %s"
+                           (process-exit-status proc)))))))
         (emacsos-net--cleanup-reader-temp proc)
         (when (eq proc emacsos-net--proc)
           (setq emacsos-net--proc nil))

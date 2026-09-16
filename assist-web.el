@@ -88,6 +88,16 @@
   "Maximum entries accepted in each Assist catalog section.")
 (defconst emacsos-assist-web--max-catalog-text-bytes 512
   "Maximum UTF-8 bytes accepted in one Assist display metadata field.")
+(defconst emacsos-assist-web--max-message-bytes (* 256 1024)
+  "Maximum UTF-8 bytes accepted in one canonical thread message.")
+(defconst emacsos-assist-web--max-snapshot-messages 500
+  "Maximum messages accepted in one snapshot or loaded-history state.")
+(defconst emacsos-assist-web--max-snapshot-transcript-bytes (* 1024 1024)
+  "Maximum message-text bytes accepted in one snapshot or history state.")
+(defconst emacsos-assist-web--max-rendered-messages 1000
+  "Maximum messages retained when a recent page preserves loaded history.")
+(defconst emacsos-assist-web--max-rendered-transcript-bytes (* 2 1024 1024)
+  "Maximum message-text bytes retained across recent and loaded history.")
 (defconst emacsos-assist-web--list-ordinal-width 5
   "Columns reserved for a trusted thread-list collision ordinal.")
 (defconst emacsos-assist-web--id-regexp "\\`[A-Za-z0-9][A-Za-z0-9._-]\\{0,127\\}\\'")
@@ -385,6 +395,25 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
         (repositories . ,repositories)
         (harnesses . ,harnesses)))))
 
+(defun emacsos-assist-web--require-transcript-limits
+    (messages max-messages max-bytes)
+  "Require MESSAGES to fit MAX-MESSAGES, MAX-BYTES, and the per-message cap."
+  (unless (and (proper-list-p messages)
+               (<= (length messages) max-messages))
+    (error "Assist Web thread transcript is too large"))
+  (let ((total 0))
+    (dolist (message messages)
+      (let ((text (and (emacsos-assist-web--object-p message)
+                       (alist-get 'text message))))
+        (unless (stringp text)
+          (error "Assist Web returned an invalid thread message"))
+        (let ((bytes (string-bytes text)))
+          (when (> bytes emacsos-assist-web--max-message-bytes)
+            (error "Assist Web thread message is too large"))
+          (setq total (+ total bytes))
+          (when (> total max-bytes)
+            (error "Assist Web thread transcript is too large")))))))
+
 (defun emacsos-assist-web--require-snapshot (value &optional expected-thread-id)
   "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied."
   (let ((thread (and (emacsos-assist-web--object-p value)
@@ -392,7 +421,7 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
         (messages (and (emacsos-assist-web--object-p value)
                        (alist-get 'messages value))))
     (unless (and (emacsos-assist-web--object-p thread)
-                 (assq 'messages value) (listp messages)
+                 (assq 'messages value) (proper-list-p messages)
                  (emacsos-assist-web--valid-id-p (alist-get 'id thread))
                  (emacsos-assist-web--valid-catalog-text-p
                   (alist-get 'description thread))
@@ -408,6 +437,9 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
+    (emacsos-assist-web--require-transcript-limits
+     messages emacsos-assist-web--max-snapshot-messages
+     emacsos-assist-web--max-snapshot-transcript-bytes)
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
         (unless (and (emacsos-assist-web--object-p message)
@@ -445,6 +477,10 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
       (error "Assist Web history cursor did not advance"))
     (when (and (alist-get 'has_older_messages page) (not next))
       (error "Assist Web returned incomplete history progress")))
+  (emacsos-assist-web--require-transcript-limits
+   (append (alist-get 'messages page) (alist-get 'messages current))
+   emacsos-assist-web--max-snapshot-messages
+   emacsos-assist-web--max-snapshot-transcript-bytes)
   page)
 
 (defun emacsos-assist-web--run-store-unavailable-response-p (buffer)
@@ -1417,6 +1453,10 @@ of it, together with the oldest pagination cursor already reached."
     (setq snapshot
           (emacsos-assist-web--retain-loaded-history
            snapshot emacsos-assist-web--snapshot))
+    (emacsos-assist-web--require-transcript-limits
+     (alist-get 'messages snapshot)
+     emacsos-assist-web--max-rendered-messages
+     emacsos-assist-web--max-rendered-transcript-bytes)
     (let ((thread (alist-get 'thread snapshot))
           (presentation-bytes
            (cl-loop for message in (alist-get 'messages snapshot)
