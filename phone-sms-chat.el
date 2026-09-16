@@ -726,6 +726,27 @@ When QUIET is non-nil, leave rerendering to the caller."
               (equal path (emacsos-sms-chat-record-path record)))
             emacsos-sms-chat--records))
 
+(defun emacsos-sms-chat--refresh-result (refresh path)
+  "Return REFRESH's retained snapshot for PATH."
+  (seq-find (lambda (snapshot)
+              (equal path (plist-get snapshot :path)))
+            (emacsos-sms-chat-refresh-results refresh)))
+
+(defun emacsos-sms-chat--apply-deferred-live (refresh)
+  "Apply REFRESH snapshots proven to be live but absent from its list."
+  (when (and (equal (emacsos-sms-chat-refresh-owner refresh)
+                    emacsos-call--current-owner)
+             (= (emacsos-sms-chat-refresh-generation refresh)
+                emacsos-call--owner-generation))
+    (dolist (snapshot (emacsos-sms-chat-refresh-results refresh))
+      (when (plist-get snapshot :deferred-live)
+        (plist-put snapshot :deferred-live nil)
+        (emacsos-sms-chat--apply-snapshot
+         snapshot
+         (emacsos-sms-chat-refresh-owner refresh)
+         (emacsos-sms-chat-refresh-generation refresh)
+         t)))))
+
 (defun emacsos-sms-chat--apply-snapshot
     (snapshot owner generation unread &optional cutoff)
   "Merge SNAPSHOT from OWNER/GENERATION with UNREAD state.
@@ -870,6 +891,7 @@ Preserve records newer than CUTOFF when it is non-nil."
                       "SMS storage full; acknowledge pending status"))
             (unless (emacsos-sms-chat-refresh-failures refresh)
               (setq emacsos-sms-chat--notice nil))))
+        (emacsos-sms-chat--apply-deferred-live refresh)
         (emacsos-sms-chat--trim)
         (emacsos-sms-chat--refresh-terminal
          refresh
@@ -930,7 +952,21 @@ Preserve records newer than CUTOFF when it is non-nil."
   "Apply one snapshot JOB terminal STATUS and bounded OUTPUT."
   (let* ((snapshot (and (eq status 'ok)
                         (emacsos-sms-chat--parse-snapshot output)))
-         (refreshes (emacsos-sms-chat-job-refreshes job)))
+         (refreshes (emacsos-sms-chat-job-refreshes job))
+         (barrier
+          (and snapshot
+               (emacsos-sms-chat-job-live job)
+               (null refreshes)
+               emacsos-sms-chat--refresh
+               (not (emacsos-sms-chat-refresh-terminal
+                     emacsos-sms-chat--refresh))
+               (equal (emacsos-sms-chat-job-owner job)
+                      (emacsos-sms-chat-refresh-owner
+                       emacsos-sms-chat--refresh))
+               (= (emacsos-sms-chat-job-generation job)
+                  (emacsos-sms-chat-refresh-generation
+                   emacsos-sms-chat--refresh))
+               emacsos-sms-chat--refresh)))
     (cond
      ((and snapshot (eq (plist-get snapshot :state) 'receiving)
            (< (emacsos-sms-chat-job-attempts job) 5))
@@ -943,7 +979,8 @@ Preserve records newer than CUTOFF when it is non-nil."
       (when (and snapshot
                  (not (eq (plist-get snapshot :state) 'receiving))
                  (emacsos-sms-chat-job-live job)
-                 (null refreshes))
+                 (null refreshes)
+                 (null barrier))
         (emacsos-sms-chat--apply-snapshot
          snapshot (emacsos-sms-chat-job-owner job)
          (emacsos-sms-chat-job-generation job) t))
@@ -952,6 +989,12 @@ Preserve records newer than CUTOFF when it is non-nil."
                  (emacsos-sms-chat-job-live job)
                  refreshes)
         (setq snapshot (plist-put (copy-sequence snapshot) :unread t)))
+      (when (and snapshot
+                 (not (eq (plist-get snapshot :state) 'receiving))
+                 barrier)
+        (setq snapshot (plist-put (copy-sequence snapshot) :unread t))
+        (plist-put snapshot :deferred-live t)
+        (push snapshot (emacsos-sms-chat-refresh-results barrier)))
       (dolist (refresh refreshes)
         (emacsos-sms-chat--refresh-consume
          refresh
@@ -976,22 +1019,28 @@ Preserve records newer than CUTOFF when it is non-nil."
     (remhash (emacsos-sms-chat-job-key job) emacsos-sms-chat--jobs)
     (when (and refresh (not (emacsos-sms-chat-refresh-terminal refresh)))
       (if (not parsed)
-          (emacsos-sms-chat--refresh-terminal
-           refresh (pcase status
-                     ('timeout "Refresh timed out; tap to retry")
-                     ('overflow "Refresh overflow; tap to retry")
-                     (_ "Refresh unavailable; tap to retry")))
+          (progn
+            (emacsos-sms-chat--apply-deferred-live refresh)
+            (emacsos-sms-chat--refresh-terminal
+             refresh (pcase status
+                       ('timeout "Refresh timed out; tap to retry")
+                       ('overflow "Refresh overflow; tap to retry")
+                       (_ "Refresh unavailable; tap to retry"))))
         (let ((paths (cdr parsed)))
           (when (> (length paths) emacsos-sms-chat--max-list-paths)
             (setf (emacsos-sms-chat-refresh-overflow refresh) t)
             (setq paths (seq-take paths emacsos-sms-chat--max-list-paths)))
           (setf (emacsos-sms-chat-refresh-paths refresh)
                 (copy-sequence paths))
+          (dolist (snapshot (emacsos-sms-chat-refresh-results refresh))
+            (when (member (plist-get snapshot :path) paths)
+              (plist-put snapshot :deferred-live nil)))
           (dolist (path paths)
-            (unless (emacsos-sms-chat--enqueue-snapshot
-                     (emacsos-sms-chat-refresh-owner refresh)
-                     (emacsos-sms-chat-refresh-generation refresh)
-                     path nil refresh)
+            (unless (or (emacsos-sms-chat--refresh-result refresh path)
+                        (emacsos-sms-chat--enqueue-snapshot
+                         (emacsos-sms-chat-refresh-owner refresh)
+                         (emacsos-sms-chat-refresh-generation refresh)
+                         path nil refresh))
               (setf (emacsos-sms-chat-refresh-failures refresh) t)))
           (setf (emacsos-sms-chat-refresh-done refresh) t)
           (emacsos-sms-chat--refresh-commit refresh))))))
@@ -1240,6 +1289,7 @@ Preserve records newer than CUTOFF when it is non-nil."
         (when (eq (emacsos-sms-chat-job-state job) 'running)
           (when-let ((process (emacsos-sms-chat-job-process job)))
             (when (process-live-p process) (delete-process process)))))
+    (emacsos-sms-chat--apply-deferred-live refresh)
     (emacsos-sms-chat--refresh-terminal refresh "Refresh timed out; tap to retry"))))
 
 (defun emacsos-sms-chat-refresh ()
@@ -1279,10 +1329,22 @@ Preserve records newer than CUTOFF when it is non-nil."
 
 (defun emacsos-sms-chat--on-added (owner generation path)
   "Queue one trusted live SMS PATH from OWNER/GENERATION."
-  (unless (emacsos-sms-chat--enqueue-snapshot owner generation path t)
+  (let* ((refresh emacsos-sms-chat--refresh)
+         (retained
+          (and refresh
+               (not (emacsos-sms-chat-refresh-terminal refresh))
+               (equal owner (emacsos-sms-chat-refresh-owner refresh))
+               (= generation (emacsos-sms-chat-refresh-generation refresh))
+               (emacsos-sms-chat--refresh-result refresh path))))
+    (when retained
+      (plist-put retained :unread t)
+      (unless (member path (emacsos-sms-chat-refresh-paths refresh))
+        (plist-put retained :deferred-live t)))
+    (unless (or retained
+                (emacsos-sms-chat--enqueue-snapshot owner generation path t))
     (unless (equal emacsos-sms-chat--notice "New SMS pending; tap Refresh")
       (setq emacsos-sms-chat--notice "New SMS pending; tap Refresh")
-      (emacsos-sms-chat--rerender-all))))
+        (emacsos-sms-chat--rerender-all)))))
 
 (add-hook 'emacsos-sms-lifecycle-functions #'emacsos-sms-chat--on-lifecycle)
 (add-hook 'emacsos-call-owner-changed-functions #'emacsos-sms-chat--on-owner-changed)

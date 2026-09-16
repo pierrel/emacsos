@@ -10,19 +10,24 @@ identical sends.  An already attached local record is reconciled only through
 its same-path branch, so a later identical modem object cannot replace its
 identity.
 
-When one snapshot job belongs to a complete refresh and is also promoted by a
-live Added event, the snapshot is applied only by the refresh transaction with
-that refresh's cutoff.  This prevents the live path from mutating state before
-the transaction commits.  The promoted incoming snapshot retains its unread
-meaning when the transaction applies it.  A pure live job still applies
-immediately.
+An active refresh owns same-owner/generation live snapshots until its list and
+snapshot transaction settles.  A live snapshot already completed when the list
+arrives is routed through the refresh cutoff when listed, or applied live after
+the transaction when absent.  A delayed Added event for a retained listed path
+marks that result unread without starting a second reader.  This barrier keeps
+both pre-list and post-child-completion ordering from mutating state outside the
+refresh transaction.  A promoted incoming snapshot retains its unread meaning
+when the transaction applies it.  With no active refresh, a live job still
+applies immediately.
 
 * Verification
 
 ERT covers distinct B-then-A modem objects with identical message content,
 ambiguous pathless local =sent= and =sending= records, a post-cutoff local send
 whose refresh job is promoted live, and unread preservation for a coalesced
-incoming Added event.
+incoming Added event.  It also covers live completion before list resolution,
+a delayed Added event after one listed child completes while another remains,
+and a live path absent from the eventual list.
 
 * Historical supersessions
 
