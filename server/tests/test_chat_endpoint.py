@@ -724,7 +724,8 @@ def test_skill_sources_has_controls_skill_with_public_setters_only():
     import emacsos_server.app as app_mod
     path = os.path.join(app_mod._SKILLS_DIR, "controls", "SKILL.md")
     assert os.path.exists(path)
-    text = open(path).read()
+    with open(path, encoding="utf-8") as skill_file:
+        text = skill_file.read()
     assert "emacsos-net-set-cell" in text
     assert "emacsos-controls-set-brightness" in text
     assert "emacsos-controls-set-flashlight" in text

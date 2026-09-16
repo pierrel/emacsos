@@ -29,6 +29,33 @@
   id number body direction state origin owner generation path revision
   unread acknowledged)
 
+(defun emacsos-sms-chat--restore-record (record saved)
+  "Restore every field of RECORD from its SAVED copy."
+  (setf (emacsos-sms-chat-record-id record)
+        (emacsos-sms-chat-record-id saved)
+        (emacsos-sms-chat-record-number record)
+        (emacsos-sms-chat-record-number saved)
+        (emacsos-sms-chat-record-body record)
+        (emacsos-sms-chat-record-body saved)
+        (emacsos-sms-chat-record-direction record)
+        (emacsos-sms-chat-record-direction saved)
+        (emacsos-sms-chat-record-state record)
+        (emacsos-sms-chat-record-state saved)
+        (emacsos-sms-chat-record-origin record)
+        (emacsos-sms-chat-record-origin saved)
+        (emacsos-sms-chat-record-owner record)
+        (emacsos-sms-chat-record-owner saved)
+        (emacsos-sms-chat-record-generation record)
+        (emacsos-sms-chat-record-generation saved)
+        (emacsos-sms-chat-record-path record)
+        (emacsos-sms-chat-record-path saved)
+        (emacsos-sms-chat-record-revision record)
+        (emacsos-sms-chat-record-revision saved)
+        (emacsos-sms-chat-record-unread record)
+        (emacsos-sms-chat-record-unread saved)
+        (emacsos-sms-chat-record-acknowledged record)
+        (emacsos-sms-chat-record-acknowledged saved)))
+
 (defvar emacsos-sms-chat--records nil
   "Global SMS records ordered oldest first.")
 (defvar emacsos-sms-chat--revision 0)
@@ -745,7 +772,21 @@ Preserve records newer than CUTOFF when it is non-nil."
               (emacsos-sms-chat-record-state existing) state
               (emacsos-sms-chat-record-revision existing)
               (emacsos-sms-chat--next-revision)))
-      (when unread (setf (emacsos-sms-chat-record-unread existing) t))
+      (when (and (eq (emacsos-sms-chat-record-origin existing) 'local)
+                 (equal owner (emacsos-sms-chat-record-owner existing))
+                 (= generation (emacsos-sms-chat-record-generation existing))
+                 (or (null cutoff)
+                     (<= (emacsos-sms-chat-record-revision existing) cutoff))
+                 (eq direction 'outgoing)
+                 (equal number (emacsos-sms-chat-record-number existing))
+                 (equal body (emacsos-sms-chat-record-body existing))
+                 (eq state 'sent)
+                 (eq (emacsos-sms-chat-record-state existing) 'sending))
+        (setf (emacsos-sms-chat-record-state existing) 'sent
+              (emacsos-sms-chat-record-revision existing)
+              (emacsos-sms-chat--next-revision)))
+      (when (and unread (eq direction 'incoming))
+        (setf (emacsos-sms-chat-record-unread existing) t))
       existing)
      ((eq direction 'outgoing)
       (let* ((equivalent
@@ -771,6 +812,10 @@ Preserve records newer than CUTOFF when it is non-nil."
               (setf (emacsos-sms-chat-record-owner record) owner
                     (emacsos-sms-chat-record-generation record) generation
                     (emacsos-sms-chat-record-path record) path
+                    (emacsos-sms-chat-record-state record)
+                    (if (eq state 'sent)
+                        'sent
+                      (emacsos-sms-chat-record-state record))
                     (emacsos-sms-chat-record-revision record)
                     (emacsos-sms-chat--next-revision))
               record)
@@ -823,15 +868,10 @@ Preserve records newer than CUTOFF when it is non-nil."
                                  (emacsos-sms-chat-refresh-failures refresh))))
               (saved-records (copy-sequence emacsos-sms-chat--records))
               (saved-revision emacsos-sms-chat--revision)
-              (saved-local-attachments
-               (cl-loop
-                for record in emacsos-sms-chat--records
-                when (eq (emacsos-sms-chat-record-origin record) 'local)
-                collect (list record
-                              (emacsos-sms-chat-record-owner record)
-                              (emacsos-sms-chat-record-generation record)
-                              (emacsos-sms-chat-record-path record)
-                              (emacsos-sms-chat-record-revision record)))))
+              (saved-record-values
+               (mapcar (lambda (record)
+                         (cons record (copy-emacsos-sms-chat-record record)))
+                       emacsos-sms-chat--records)))
           (when complete
             (setq emacsos-sms-chat--records
                   (seq-filter
@@ -846,16 +886,8 @@ Preserve records newer than CUTOFF when it is non-nil."
               (setf (emacsos-sms-chat-refresh-failures refresh) t)))
           (if (and complete (emacsos-sms-chat-refresh-failures refresh))
               (progn
-                (dolist (attachment saved-local-attachments)
-                  (pcase-let ((`(,record ,saved-owner ,saved-generation
-                                 ,saved-path ,saved-record-revision)
-                               attachment))
-                    (setf (emacsos-sms-chat-record-owner record) saved-owner
-                          (emacsos-sms-chat-record-generation record)
-                          saved-generation
-                          (emacsos-sms-chat-record-path record) saved-path
-                          (emacsos-sms-chat-record-revision record)
-                          saved-record-revision)))
+                (dolist (saved saved-record-values)
+                  (emacsos-sms-chat--restore-record (car saved) (cdr saved)))
                 (setq emacsos-sms-chat--records saved-records
                       emacsos-sms-chat--revision saved-revision
                       emacsos-sms-chat--notice

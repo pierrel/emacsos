@@ -1,0 +1,35 @@
+#+title: Transcript spoofing and SMS refresh amendment
+#+date: 2026-09-16
+
+* Corrections
+
+Assist transcript messages cross the same bidirectional-control and
+default-ignorable boundary as catalog display text before they are cached or
+rendered.  Transcript text additionally admits ordinary newline and tab layout;
+ZWJ and VS16 remain the only admitted zero-width emoji format points.
+
+A complete SMS refresh rolls back every field of every pre-existing record when
+any snapshot cannot be admitted, while preserving each record's identity for
+live buffers and send contexts.  An exact outgoing modem snapshot attaches to
+the sole matching local record.  A =sent= snapshot also moves that record from
+=sending= to =sent=, both on first attachment and on a later same-path refresh;
+the nonterminal modem states =stored= and =sending= remain locally pending.
+Outgoing snapshots never create the inbound unread badge.
+
+* Verification
+
+ERT rejects control, bidi, separator, and default-ignorable characters in
+transcript messages while admitting newline, tab, ZWJ, and VS16.  SMS fixtures
+cover first attachment, later same-path terminal reconciliation, the
+nonterminal stored state, outgoing unread behavior, and a failed multi-snapshot
+refresh that restores every mutated field and the phone-global revision while
+retaining record identity.
+
+* Historical supersessions
+
+This document supersedes only the retained-message validation statement in
+[[file:2026-09-15-phone-remote-message-shape-amendment.org][Phone remote message-shape amendment]], section /Correction/, by adding the
+display-spoof boundary for canonical message text.  It also supersedes only the
+outgoing attachment and failed-refresh rollback statements in
+[[file:2026-09-12-sms-chat-buffer-review-amendments.org][Native SMS conversation review amendments]], section /Amendments/, with the
+transactional field rollback and terminal-state reconciliation above.

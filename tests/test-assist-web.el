@@ -953,6 +953,26 @@
     (let ((emacsos-assist-web--max-snapshot-transcript-bytes 2))
       (should-error (emacsos-assist-web--require-snapshot snapshot)))))
 
+(ert-deftest test-assist-web-snapshot-rejects-transcript-spoofing-controls ()
+  (dolist (character '(#x0000 #x007f #x2028 #x2029 #x202e #x034f #x2060
+                       #x3164 #xe0001))
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'text (car (alist-get 'messages snapshot)))
+            (concat "visible" (string character) "hidden"))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-snapshot-admits-layout-and-emoji-format-points ()
+  (let* ((snapshot (copy-tree test-assist-web--snapshot))
+         (text (concat "first\n\tsecond "
+                       (string #x2764 #xfe0f #x200d #x1f525))))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot))) text)
+    (should (equal (alist-get 'text
+                              (car (alist-get
+                                    'messages
+                                    (emacsos-assist-web--require-snapshot
+                                     snapshot))))
+                   text))))
+
 (ert-deftest test-assist-web-snapshot-discards-unconsumed-message-extensions ()
   (let ((snapshot (copy-tree test-assist-web--snapshot)))
     (setf (alist-get 'remote_extension

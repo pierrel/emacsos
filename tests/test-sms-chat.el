@@ -379,6 +379,54 @@
       (should (eq (emacsos-sms-chat-record-origin record) 'local))
       (should (= (length emacsos-sms-chat--records) 1)))))
 
+(ert-deftest emacsos-sms-chat-refresh-reconciles-local-send-on-attachment ()
+  (test-sms-chat--with-state
+    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
+           (record
+            (make-emacsos-sms-chat-record
+             :id 1 :number "+14155550123" :body "same"
+             :direction 'outgoing :state 'sending :origin 'local)))
+      (setq emacsos-sms-chat--records (list record))
+      (emacsos-sms-chat--apply-snapshot
+       (emacsos-sms-chat--parse-snapshot
+        (test-sms-chat--snapshot "sent" "submit" "same" path))
+       ":1.mm" 3 nil)
+      (should (eq (emacsos-sms-chat-record-state record) 'sent))
+      (should (equal (emacsos-sms-chat-record-path record) path)))))
+
+(ert-deftest emacsos-sms-chat-refresh-reconciles-attached-local-send ()
+  (test-sms-chat--with-state
+    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
+           (record
+            (make-emacsos-sms-chat-record
+             :id 1 :number "+14155550123" :body "same"
+             :direction 'outgoing :state 'sending :origin 'local
+             :owner ":1.mm" :generation 3 :path path :revision 1)))
+      (setq emacsos-sms-chat--records (list record)
+            emacsos-sms-chat--revision 1)
+      (emacsos-sms-chat--apply-snapshot
+       (emacsos-sms-chat--parse-snapshot
+        (test-sms-chat--snapshot "sent" "submit" "same" path))
+       ":1.mm" 3 t 1)
+      (should (eq (emacsos-sms-chat-record-state record) 'sent))
+      (should (= (emacsos-sms-chat-record-revision record) 2))
+      (should-not (emacsos-sms-chat-record-unread record)))))
+
+(ert-deftest emacsos-sms-chat-stored-snapshot-remains-locally-pending ()
+  (test-sms-chat--with-state
+    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
+           (record
+            (make-emacsos-sms-chat-record
+             :id 1 :number "+14155550123" :body "same"
+             :direction 'outgoing :state 'sending :origin 'local)))
+      (setq emacsos-sms-chat--records (list record))
+      (emacsos-sms-chat--apply-snapshot
+       (emacsos-sms-chat--parse-snapshot
+        (test-sms-chat--snapshot "stored" "submit" "same" path))
+       ":1.mm" 3 t)
+      (should (eq (emacsos-sms-chat-record-state record) 'sending))
+      (should-not (emacsos-sms-chat-record-unread record)))))
+
 (ert-deftest emacsos-sms-chat-refresh-preserves-modem-list-order ()
   (test-sms-chat--with-state
     (let* ((path-7 "/org/freedesktop/ModemManager1/SMS/7")
@@ -627,6 +675,42 @@
       (emacsos-sms-chat--on-lifecycle
        '(:event discarded :proposal-id 9 :context 1))
       (should-not emacsos-sms-chat--records))))
+
+(ert-deftest emacsos-sms-chat-refresh-rollback-restores-every-record-field ()
+  (test-sms-chat--with-state
+    (let* ((path-7 "/org/freedesktop/ModemManager1/SMS/7")
+           (path-8 "/org/freedesktop/ModemManager1/SMS/8")
+           (record
+            (make-emacsos-sms-chat-record
+             :id path-7 :number "+14155550123" :body "before"
+             :direction 'outgoing :state 'sending :origin 'local
+             :owner ":1.mm" :generation 3 :path path-7 :revision 1
+             :unread nil :acknowledged t))
+           (saved (copy-emacsos-sms-chat-record record))
+           (refresh
+            (make-emacsos-sms-chat-refresh
+             :owner ":1.mm" :generation 3 :cutoff 1
+             :paths (list path-7 path-8) :pending 0 :done t
+             :results
+             (list
+              (emacsos-sms-chat--parse-snapshot
+               (test-sms-chat--snapshot "sent" "submit" "before" path-7))
+              (emacsos-sms-chat--parse-snapshot
+               (test-sms-chat--snapshot "received" "deliver" "new" path-8))))))
+      (setq emacsos-sms-chat--records (list record)
+            emacsos-sms-chat--revision 1
+            emacsos-sms-chat--refresh refresh)
+      (cl-letf (((symbol-function 'emacsos-sms-chat--admit)
+                 (lambda (&rest _) nil)))
+        (emacsos-sms-chat--refresh-commit refresh))
+      (should (eq (car emacsos-sms-chat--records) record))
+      (should (equal record saved))
+      (should (equal (emacsos-sms-chat-record-body record) "before"))
+      (should (eq (emacsos-sms-chat-record-state record) 'sending))
+      (should (= (emacsos-sms-chat-record-revision record) 1))
+      (should (emacsos-sms-chat-record-acknowledged record))
+      (should (= emacsos-sms-chat--revision 1))
+      (should (emacsos-sms-chat-refresh-failures refresh)))))
 
 (ert-deftest emacsos-sms-chat-partial-refresh-updates-old-modem-state ()
   (test-sms-chat--with-state
