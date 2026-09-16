@@ -1,0 +1,34 @@
+#+title: wvkbd pin lineage integration amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment supersedes only =Historical supersessions= in
+=2026-09-15-wvkbd-round2-pin-evidence.org=.  In the cumulative current-main
+integration, the directly replaced current-pin record is =Current exact source=
+and =Current validation= in
+=2026-09-15-wvkbd-pr6-merge-pin-evidence.org=.  Both earlier documents remain
+point-in-time records for their reviewed sources.
+
+This amendment also supersedes only =Current exact source= and =Current
+validation= in =2026-09-15-wvkbd-pr6-merge-pin-evidence.org=.  The merged PR 6
+commit =cdb6ae356274038ee852f2d12347d2ded534cd94= remains the historical source
+for that record, while the phone pin has advanced to the reviewed successor
+below.
+
+* Current exact source
+
+The EmacsOS keyboard pin is wvkbd commit
+=1af8dee4ae32a15b2c8903f290895a149d0621e7=, tree
+=41c82240105573ddd02e21f9a4346967712c6e68=.  Its reproducible AArch64 artifact
+SHA-256 is
+=dff553b3f90384a55813e4c213cad9db15c005ac06d52a1abcba3fd035675db2=.
+
+* Current validation
+
+The exact source passed the complete native and sanitizer suites, dictionary
+validation, focused compose-lifecycle and incremental-build regressions, and
+the affected seven-lens local review loop.  The cumulative current-main
+EmacsOS integration passed the exact clean-archive AArch64 build and atomic
+side-by-side install suite, the complete PinePhone/OpenRC script suite with 76
+Emacs Lisp tests, and the complete 554-test Emacs Lisp suite.
