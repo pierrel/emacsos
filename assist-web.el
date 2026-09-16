@@ -98,6 +98,12 @@
   "Maximum messages retained when a recent page preserves loaded history.")
 (defconst emacsos-assist-web--max-rendered-transcript-bytes (* 2 1024 1024)
   "Maximum message-text bytes retained across recent and loaded history.")
+(defconst emacsos-assist-web--active-snapshot-statuses
+  '("queued" "processing" "paused" "initializing" "cloning"
+    "starting_sandbox" "pending" "running" "transitioning")
+  "Snapshot statuses that prove work is still active.")
+(defconst emacsos-assist-web--settled-snapshot-statuses '("ready" "error")
+  "Snapshot statuses that may settle an accepted local submission.")
 (defconst emacsos-assist-web--list-ordinal-width 5
   "Columns reserved for a trusted thread-list collision ordinal.")
 (defconst emacsos-assist-web--id-regexp "\\`[A-Za-z0-9][A-Za-z0-9._-]\\{0,127\\}\\'")
@@ -482,6 +488,16 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
     (when (and (alist-get 'has_older_messages page) (not next))
       (error "Assist Web returned incomplete history progress")))
   page)
+
+(defun emacsos-assist-web--snapshot-active-p (snapshot)
+  "Return non-nil when SNAPSHOT is active, or reject an unknown status.
+
+An unknown bounded display string is not proof that an accepted Run settled."
+  (let ((status (alist-get 'status (alist-get 'thread snapshot))))
+    (cond
+     ((member status emacsos-assist-web--active-snapshot-statuses) t)
+     ((member status emacsos-assist-web--settled-snapshot-statuses) nil)
+     (t (error "Assist Web returned an unknown thread status")))))
 
 (defun emacsos-assist-web--run-store-unavailable-response-p (buffer)
   "Return non-nil only for Assist's bounded unavailable-Run-store response."
@@ -2165,11 +2181,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                            (progn
                              (emacsos-assist-web--require-snapshot value tid)
                              (let ((busy
-                                    (member
-                                     (alist-get 'status (alist-get 'thread value))
-                                     '("queued" "processing" "paused"
-                                       "initializing" "cloning"
-                                       "starting_sandbox"))))
+                                    (emacsos-assist-web--snapshot-active-p value)))
                                (emacsos-assist-web--try-write-cache
                                 (emacsos-assist-web--snapshot-cache-name tid) value)
                                (when (or (and completed-run-id

@@ -1353,6 +1353,65 @@
       (should emacsos-assist-web--in-flight)
       (should (equal emacsos-assist-web--run-id "run-1")))))
 
+(ert-deftest test-assist-web-refresh-keeps-every-recognized-active-status ()
+  "Thread and accepted-Run active states cannot settle local ownership."
+  (dolist (status emacsos-assist-web--active-snapshot-statuses)
+    (let ((snapshot
+           `((thread . ((id . "thread-1") (description . "Thread")
+                        (status . ,status)
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . nil)))
+          rendered)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1"
+              emacsos-assist-web--run-id "run-1"
+              emacsos-assist-web--pending-key "retry-key"
+              emacsos-assist-web--submitted-text "hello"
+              emacsos-assist-web--pending-accepted-p t
+              emacsos-assist-web--in-flight t)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (funcall callback snapshot nil)))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--render)
+                   (lambda (&rest _) (setq rendered t))))
+          (emacsos-assist-web-refresh-thread))
+        (should-not rendered)
+        (should emacsos-assist-web--in-flight)
+        (should (equal emacsos-assist-web--run-id "run-1"))
+        (should (equal emacsos-assist-web--pending-key "retry-key"))))))
+
+(ert-deftest test-assist-web-refresh-unknown-status-fails-closed ()
+  "A bounded future status is not proof that an accepted Run settled."
+  (let ((snapshot
+         '((thread . ((id . "thread-1") (description . "Thread")
+                      (status . "future-state")
+                      (workspace . ((repo_label . "Assist")))))
+           (messages . nil)))
+        rendered cached)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--run-id "run-1"
+            emacsos-assist-web--pending-key "retry-key"
+            emacsos-assist-web--submitted-text "hello"
+            emacsos-assist-web--pending-accepted-p t
+            emacsos-assist-web--in-flight t)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil)))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) (setq cached t)))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (&rest _) (setq rendered t))))
+        (emacsos-assist-web-refresh-thread))
+      (should-not cached)
+      (should-not rendered)
+      (should emacsos-assist-web--in-flight)
+      (should (equal emacsos-assist-web--run-id "run-1"))
+      (should (equal emacsos-assist-web--pending-key "retry-key")))))
+
 (ert-deftest test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key ()
   (with-temp-buffer
     (emacsos-assist-web-mode)
