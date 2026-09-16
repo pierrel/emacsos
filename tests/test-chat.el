@@ -187,6 +187,20 @@ the prompt and the three markers are set."
       (should-not (string-match-p "\\[calling task\\]" (buffer-string)))
       (should (string-match-p "bot> Done\\." (buffer-string))))))
 
+(ert-deftest chat-test-status-rejects-spoofing-and-oversized-text ()
+  (dolist (text (list (concat "spoof" (string #x202e))
+                      (make-string 513 ?x)))
+    (chat-test--reset)
+    (let ((buf (emacsos--chat-buffer)))
+      (chat-test--seed-you-line buf "hi")
+      (setq emacsos--chat-in-flight t)
+      (emacsos--chat-handle-start '(:type "start"))
+      (emacsos--chat-handle-status `(:type "status" :text ,text))
+      (with-current-buffer buf
+        (should-not (string-match-p (regexp-quote text) (buffer-string)))
+        (should (string-match-p "invalid assistant status" (buffer-string))))
+      (should-not emacsos--chat-in-flight))))
+
 (ert-deftest chat-test-status-replacement-handles-read-only ()
   "Each new status replaces the previous bracket; read-only props
 on the prior bracket must not block the replacement."

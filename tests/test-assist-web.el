@@ -487,6 +487,20 @@
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-live-status-rejects-spoofing-and-oversized-text ()
+  (dolist (text (list (concat "spoof" (string #x202e))
+                      (make-string 513 ?x)))
+    (let (interrupted)
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                   (lambda (buffer reason)
+                     (setq interrupted (list buffer reason)))))
+          (emacsos-assist-web--dispatch-event
+           (current-buffer) "status"
+           (json-serialize `((status . ,text))))
+          (should (equal interrupted
+                         (list (current-buffer) "invalid Assist status"))))))))
+
 (ert-deftest test-assist-web-event-parser-tiny-fragments-scan-only-new-suffix ()
   "A fragmented record is dispatched once without quadratic retained-buffer copies."
   (let ((target (generate-new-buffer " *assist-web-target*"))

@@ -560,6 +560,12 @@ When MULTILINE is non-nil, admit ordinary newline and tab layout."
                 never (emacsos-conversation--unsafe-display-character-p
                        character multiline))))
 
+(defun emacsos-conversation-valid-status-p (value)
+  "Return non-nil for one bounded, non-spoofing status VALUE."
+  (and (stringp value)
+       (<= (string-bytes value) 512)
+       (emacsos-conversation-valid-text-p value)))
+
 (defun emacsos-conversation-finish-assistant (body-start body-end)
   "Present the completed assistant body delimited by BODY-START and BODY-END."
   (emacsos--chat-present-markdown-1 body-start body-end))
@@ -754,15 +760,17 @@ Caller must `inhibit-read-only`."
   "Replace the status bracket with `[<event.text>] '."
   (let ((text (plist-get event :text))
         (buf (emacsos--chat-render-buffer)))
-    (when (and text buf (buffer-live-p buf)
-               (markerp emacsos--chat-status-start))
+    (if (not (emacsos-conversation-valid-status-p text))
+        (emacsos--chat-terminate-stream "invalid assistant status")
+      (when (and buf (buffer-live-p buf)
+                 (markerp emacsos--chat-status-start))
       (with-current-buffer buf
         (let ((inhibit-read-only t))
           (save-excursion
             (emacsos--chat-clear-status-bracket)
             (set-marker emacsos--chat-status-end
                         (emacsos-conversation-set-status
-                         emacsos--chat-status-start emacsos--chat-status-end text t))))))))
+                         emacsos--chat-status-start emacsos--chat-status-end text t)))))))))
 
 (defun emacsos--chat-handle-token (event)
   "Append the token text after `status-end'.  First token also

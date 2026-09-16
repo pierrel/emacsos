@@ -929,9 +929,12 @@ observes its durable state."
       (cond
        ((equal event "status")
         (condition-case nil
-            (let ((status (json-parse-string data :object-type 'alist)))
-              (emacsos-assist-web--set-status
-               (or (alist-get 'status status) "working")))
+            (let* ((status (json-parse-string data :object-type 'alist))
+                   (text (or (alist-get 'status status) "working")))
+              (if (emacsos-conversation-valid-status-p text)
+                  (emacsos-assist-web--set-status text)
+                (emacsos-assist-web--stream-interrupted
+                 target "invalid Assist status")))
           (error nil)))
        ((equal event "assistant-reset")
         (condition-case nil
