@@ -769,24 +769,19 @@ Preserve records newer than CUTOFF when it is non-nil."
       (let* ((equivalent
               (lambda (record)
                 (and (eq (emacsos-sms-chat-record-origin record) 'local)
+                     (null (emacsos-sms-chat-record-path record))
                      (equal number (emacsos-sms-chat-record-number record))
                      (equal body (emacsos-sms-chat-record-body record))
                      (or (null cutoff)
                          (<= (emacsos-sms-chat-record-revision record)
                              cutoff)))))
-             (sending
+             (matches
               (seq-filter
                (lambda (record)
                  (and (funcall equivalent record)
-                      (eq (emacsos-sms-chat-record-state record) 'sending)))
-               emacsos-sms-chat--records))
-             (matches
-              (if sending sending
-                (seq-filter
-                 (lambda (record)
-                   (and (funcall equivalent record)
-                        (eq (emacsos-sms-chat-record-state record) 'sent)))
-                 emacsos-sms-chat--records))))
+                      (memq (emacsos-sms-chat-record-state record)
+                            '(sending sent))))
+               emacsos-sms-chat--records)))
         (if (= (length matches) 1)
             (let ((record (car matches)))
               (setf (emacsos-sms-chat-record-owner record) owner
@@ -862,7 +857,8 @@ Preserve records newer than CUTOFF when it is non-nil."
                    emacsos-sms-chat--records)))
           (dolist (snapshot ordered)
             (unless (emacsos-sms-chat--apply-snapshot
-                     snapshot owner generation nil cutoff)
+                     snapshot owner generation (plist-get snapshot :unread)
+                     cutoff)
               (setf (emacsos-sms-chat-refresh-failures refresh) t)))
           (if (and complete (emacsos-sms-chat-refresh-failures refresh))
               (progn
@@ -932,8 +928,9 @@ Preserve records newer than CUTOFF when it is non-nil."
 
 (defun emacsos-sms-chat--snapshot-finished (job status output)
   "Apply one snapshot JOB terminal STATUS and bounded OUTPUT."
-  (let ((snapshot (and (eq status 'ok)
-                       (emacsos-sms-chat--parse-snapshot output))))
+  (let* ((snapshot (and (eq status 'ok)
+                        (emacsos-sms-chat--parse-snapshot output)))
+         (refreshes (emacsos-sms-chat-job-refreshes job)))
     (cond
      ((and snapshot (eq (plist-get snapshot :state) 'receiving)
            (< (emacsos-sms-chat-job-attempts job) 5))
@@ -945,11 +942,17 @@ Preserve records newer than CUTOFF when it is non-nil."
      (t
       (when (and snapshot
                  (not (eq (plist-get snapshot :state) 'receiving))
-                 (emacsos-sms-chat-job-live job))
+                 (emacsos-sms-chat-job-live job)
+                 (null refreshes))
         (emacsos-sms-chat--apply-snapshot
          snapshot (emacsos-sms-chat-job-owner job)
          (emacsos-sms-chat-job-generation job) t))
-      (dolist (refresh (emacsos-sms-chat-job-refreshes job))
+      (when (and snapshot
+                 (not (eq (plist-get snapshot :state) 'receiving))
+                 (emacsos-sms-chat-job-live job)
+                 refreshes)
+        (setq snapshot (plist-put (copy-sequence snapshot) :unread t)))
+      (dolist (refresh refreshes)
         (emacsos-sms-chat--refresh-consume
          refresh
          (and snapshot
