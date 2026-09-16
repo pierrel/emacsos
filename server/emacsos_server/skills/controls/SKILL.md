@@ -13,10 +13,10 @@ platform backend, a root helper, or a shell command.
 
 Use an explicit boolean. Ordinarily this changes only the named NetworkManager
 data profile; it does not power off the modem or disable call and SMS
-registration. If cellular-on finds the observed stale state where
-ModemManager has no modem object, the same authorized action performs one
-bounded fixed-service recovery before activating the profile. Do not retry a
-failed or timed-out request blindly.
+registration. If a conclusive modem-list probe finds the observed stale state
+where ModemManager has no modem object, the same authorized action performs
+one bounded fixed-service recovery before activating the profile. Do not retry
+a failed or timed-out request blindly.
 
 ```elisp
 (emacsos-net-set-cell t)
