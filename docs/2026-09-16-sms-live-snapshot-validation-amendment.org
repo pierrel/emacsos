@@ -1,0 +1,36 @@
+#+title: SMS live snapshot validation amendment
+#+date: 2026-09-16
+
+* Correction
+
+The ModemManager observer publishes a live Added path only when the signal says
+the SMS was received.  A live snapshot is therefore accepted only when its
+parsed object path exactly matches the path requested from =mmcli= and its
+direction is incoming.  A mismatch follows the existing bounded retry and
+recovery-refresh path instead of entering conversation state.
+
+This validation makes a standalone live snapshot safe to apply immediately
+while a refresh list is unresolved: it cannot attach to or terminalize an
+outgoing local send.  When the refresh already owns the same snapshot job, live
+promotion still preserves unread state and the refresh transaction still
+applies that snapshot with its original cutoff.  No second refresh barrier or
+retained snapshot collection is needed.
+
+Live status strings from both conversation transports are also bounded to 512
+bytes and rejected when they contain multiline or display-spoofing characters.
+Invalid status data terminates the affected stream rather than entering the UI.
+
+* Verification
+
+ERT drives the real refresh and Added entry points through captured asynchronous
+callbacks.  It covers a listed outgoing snapshot after the cutoff, promotion of
+a listed received snapshot, a received Added snapshot while the refresh list is
+unresolved, wrong-path and outgoing live snapshot rejection, and hostile or
+oversized status strings on both transports.
+
+* Historical supersessions
+
+This document supersedes only the live-snapshot ordering and verification
+statements in [[file:2026-09-16-sms-snapshot-identity-amendment.org][SMS snapshot identity amendment]], sections /Correction/ and
+/Verification/.  The pathless outgoing identity rules in that record remain in
+force.

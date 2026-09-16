@@ -1,0 +1,23 @@
+#+title: Cellular modem probe grammar amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment replaces only the successful-probe classification in
+[[file:2026-09-15-cellular-modem-recovery.org][Cellular-on recovery for a missing ModemManager object]], section /Recovery
+contract/.  That record remains the historical design for the recovery flow.
+
+* Correction
+
+A successful =mmcli -L= exit authorizes ordinary cellular activation only when
+every output line is a modem-object listing and at least one listing exists.
+The exact single-line =No modems were found= result authorizes the bounded
+fixed-service recovery.  Empty, mixed, or otherwise unrecognized output fails
+conservatively without activation or restart.
+
+* Verification
+
+The focused root-helper regression supplies one valid modem listing followed by
+an unrecognized line and requires =not-connected:failed= without a service
+restart.  Existing cases retain healthy activation, exact no-modem recovery,
+and conservative handling of failed, timed-out, and unrecognized probes.

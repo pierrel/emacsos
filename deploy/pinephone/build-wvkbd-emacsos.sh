@@ -2,6 +2,7 @@
 # Build the pinned EmacsOS wvkbd revision for the PinePhone.
 
 set -eu
+export GIT_NO_REPLACE_OBJECTS=1
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 source_dir=${WVKBD_REPO_DIR:?set WVKBD_REPO_DIR to the wvkbd checkout}
@@ -111,7 +112,7 @@ readelf -l "$output" |
     grep -F 'Requesting program interpreter: /lib/ld-musl-aarch64.so.1' \
         >/dev/null || fail 'artifact does not use the AArch64 musl interpreter'
 verify_dynamic_contract "$output" artifact \
-    libc.musl-aarch64.so.1 libcairo.so.2 libpango-1.0.so.0 \
+    libc.musl-aarch64.so.1 libcairo.so.2 libgobject-2.0.so.0 libpango-1.0.so.0 \
     libpangocairo-1.0.so.0 libwayland-client.so.0
 [ -f "$benchmark" ] && [ ! -L "$benchmark" ] && [ -x "$benchmark" ] ||
     fail 'build did not produce the benchmark'

@@ -1,0 +1,49 @@
+#+title: Swipe-learning runtime review amendments
+
+* Lineage
+
+This record supersedes only the reviewed runtime and verification details in
+=2026-09-13-all-features-swipe-learning-runtime.org=.  That design already
+names the earlier capture scaffold, so this record does not repeat it.
+
+* Accepted changes
+
+The launcher treats every marker open or validation error as capture-off and
+executes the exact baseline keyboard.  Its marker open is nonblocking.  When
+capture is armed, the collector keeps the fixed readiness pipe across exec and
+acknowledges only after validating its fd, state directory, lifetime lock, exact
+epoch, and status record.  A missing acknowledgement causes bounded child
+termination and baseline exec only after the child is proven gone.  If even
+SIGKILL cannot be reaped within the bound, the launcher exits and leaves OpenRC
+session recovery to remove the process group.  A child that exits immediately
+before either signal is reaped and permits the baseline.  The fallback path
+does not perform a second synchronous state write; Status therefore truthfully
+remains =armed for next UI session= after that failed attempt.
+
+All collector state-file opens are nonblocking and reject non-regular files.
+State-lock contention fails immediately instead of blocking the phone UI.
+=Show= does not create an absent state directory or lock.  For existing state it
+takes the existing lock but neither repairs the journal nor recovers or prunes
+temporaries; it ignores an incomplete final journal line.  Mutating commands
+retain crash recovery and repair.
+
+JSON integer grammar rejects =-0=.  The capture-active no-candidate strip is
+two full-width cells.  Leaving that strip for an ordinary input removes it
+without attribution.  Candidate and no-candidate outcomes cannot consume the
+wrong pending identity.  Backspace correction remains armed through Shift and
+resolves on the next text key or reswipe.  Counter exhaustion permanently
+closes observation before another gesture is allocated.
+
+* Verification actually run
+
+Automated coverage includes the exact baseline and ready armed launcher paths,
+unsafe symlink and FIFO markers, an unready TERM-resistant collector, refusal to
+start the baseline when reaping cannot be proven, absent-state read-only Show,
+strict schema and numeric grammar, epoch fencing and status, nonblocking lock
+contention, read-only torn-tail display, crash recovery, bounds, export and
+erase rules, exact fd3 CLI admission, outcome compatibility, overflow fail-off,
+two-cell right-edge attribution, outside-strip unresolved behavior, manual
+correction, send failure, and the existing lifecycle, installer, update, and
+rollback suites.  Review directly inspects the fixed descriptor map, signal
+normalization, parent-death race guard, and bounded reap path; those mechanisms
+are not each claimed as independent fault-injection tests.

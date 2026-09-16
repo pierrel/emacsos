@@ -8,6 +8,7 @@ docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone/openrc-boot-mode:/source/openrc-boot-mode:ro" \
     -v "$repo_dir/deploy/pinephone/openrc-suspend-root:/source/openrc-suspend-root:ro" \
     -v "$repo_dir/deploy/pinephone/openrc-wifi-connect-root:/source/openrc-wifi-connect-root:ro" \
+    -v "$repo_dir/deploy/pinephone/openrc-doas.conf:/source/openrc-doas.conf:ro" \
     alpine:3.22 /bin/sh -s <<'CONTAINER'
 set -eu
 
@@ -52,21 +53,16 @@ install -o root -g root -m 0755 /dev/null /usr/local/share/emacsos-openrc/sessio
 install -o root -g root -m 0755 /dev/null \
     /usr/local/share/emacsos-openrc/process-group
 install -o root -g root -m 0755 /dev/null /etc/init.d/emacsos-ui
-printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args' \
-    >/etc/doas.d/95-emacsos-ui.conf
-chown root:root /etc/doas.d/95-emacsos-ui.conf
-chmod 0600 /etc/doas.d/95-emacsos-ui.conf
+install -o root -g root -m 0600 /source/openrc-doas.conf \
+    /etc/doas.d/95-emacsos-ui.conf
 install -o root -g root -m 0755 /source/openrc-boot-mode \
     /usr/local/sbin/emacsos-openrc-boot-mode
 install -o root -g root -m 0755 /source/openrc-suspend-root \
     /usr/local/sbin/emacsos-openrc-suspend
 install -o root -g root -m 0755 /source/openrc-wifi-connect-root \
     /usr/local/sbin/emacsos-openrc-wifi-connect
+install -o root -g root -m 0755 /dev/null \
+    /usr/local/sbin/emacsos-openrc-device
 printf '%s\n' \
     '::sysinit:/sbin/openrc sysinit' \
     'tty1::respawn:/sbin/getty 38400 tty1' \

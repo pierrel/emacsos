@@ -1,0 +1,24 @@
+#+title: Phone remote live-reload documentation correction
+#+date: 2026-09-16
+
+* Historical supersessions
+
+This correction replaces the /Historical supersessions/ and /Correction/
+sections of [[file:2026-09-16-phone-remote-live-reload-bounds-amendment.org][Phone remote live-reload bounds amendment]].  That record remains the
+historical source for its implementation and verification evidence.
+
+* Correction
+
+The live-reload change directly supersedes only the render rejection condition
+in [[file:2026-09-15-phone-remote-input-bounds-amendment.org][Phone remote-input bounds amendment]], section /Correction/.  It does not
+supersede the canonical retained-field contract in
+[[file:2026-09-15-phone-remote-message-shape-amendment.org][Phone remote message-shape amendment]].
+
+A valid prior buffer-local snapshot is boundedly canonicalized and retained.
+Malformed or oversized legacy state is dropped, and the fresh bounded page is
+rendered alone.  A wire snapshot or explicitly loaded history state remains
+limited to 500 messages and 1 MiB of text.  The buffer-local rendered union of
+a recent page and already loaded older history remains independently limited to
+1,000 messages and 2 MiB.  If only the prior state exceeds that final-render
+limit, the client drops it rather than retaining the old oversized buffer and
+rejecting the fresh page.

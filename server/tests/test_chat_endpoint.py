@@ -686,8 +686,9 @@ def test_config_apply_skill_directs_to_get_config_not_phone_probe():
     first with eval_elisp" instruction that sent the agent probing the phone
     for a server-side path it can't know."""
     import emacsos_server.app as app_mod
-    text = open(
-        os.path.join(app_mod._SKILLS_DIR, "config-apply", "SKILL.md")).read()
+    path = os.path.join(app_mod._SKILLS_DIR, "config-apply", "SKILL.md")
+    with open(path, encoding="utf-8") as skill_file:
+        text = skill_file.read()
     assert "get_config" in text
     assert "read it first with `eval_elisp`" not in text
 
@@ -697,7 +698,8 @@ def test_skill_sources_has_call_skill_with_phone_local_confirmation():
     import emacsos_server.app as app_mod
     path = os.path.join(app_mod._SKILLS_DIR, "call", "SKILL.md")
     assert os.path.exists(path)
-    text = open(path).read()
+    with open(path, encoding="utf-8") as skill_file:
+        text = skill_file.read()
     assert "emacsos-call" in text
     assert "confirmation-required: confirm on phone" in text
     assert "actual dial is a later local UI action" in text
@@ -709,11 +711,27 @@ def test_skill_sources_has_sms_skill_with_phone_local_confirmation():
     import emacsos_server.app as app_mod
     path = os.path.join(app_mod._SKILLS_DIR, "sms", "SKILL.md")
     assert os.path.exists(path)
-    text = open(path).read()
+    with open(path, encoding="utf-8") as skill_file:
+        text = skill_file.read()
     assert "emacsos-send-message" in text
     assert "confirmation-required: confirm on phone" in text
     assert "It does not send." in text
     assert "Never synthesize confirmation actions." in " ".join(text.split())
+
+
+def test_skill_sources_has_controls_skill_with_public_setters_only():
+    """Device intent reaches public deterministic elisp, never root directly."""
+    import emacsos_server.app as app_mod
+    path = os.path.join(app_mod._SKILLS_DIR, "controls", "SKILL.md")
+    assert os.path.exists(path)
+    with open(path, encoding="utf-8") as skill_file:
+        text = skill_file.read()
+    assert "emacsos-net-set-cell" in text
+    assert "emacsos-controls-set-brightness" in text
+    assert "emacsos-controls-set-flashlight" in text
+    assert "eval_elisp" in text
+    assert "Never call a private function" in text
+    assert "/usr/local/sbin" not in text
 
 
 def test_checkpointer_is_singleton(tmp_path, monkeypatch):

@@ -148,6 +148,44 @@ the prompt and the three markers are set."
     (with-current-buffer buf
       (should (string-match-p "bot> Hello world!" (buffer-string))))))
 
+(ert-deftest chat-test-token-handler-rejects-display-spoofing-text ()
+  (chat-test--reset)
+  (let ((buf (emacsos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (setq emacsos--chat-in-flight t)
+    (emacsos--chat-handle-start '(:type "start"))
+    (emacsos--chat-handle-token
+     `(:type "token" :text ,(concat "spoof" (string #x202e))))
+    (with-current-buffer buf
+      (should-not (string-match-p (string #x202e) (buffer-string)))
+      (should (string-match-p "invalid assistant text" (buffer-string))))
+    (should-not emacsos--chat-in-flight)
+    (should (= emacsos--chat-tokens-seen 0))))
+
+(ert-deftest chat-test-token-handler-rejects-oversized-text ()
+  (chat-test--reset)
+  (let ((buf (emacsos--chat-buffer)))
+    (chat-test--seed-you-line buf "hi")
+    (setq emacsos--chat-in-flight t)
+    (emacsos--chat-handle-start '(:type "start"))
+    (emacsos--chat-handle-token
+     `(:type "token" :text ,(make-string (1+ emacsos--chat-max-token-bytes) ?x)))
+    (with-current-buffer buf
+      (should (string-match-p "invalid assistant text" (buffer-string))))
+    (should-not emacsos--chat-in-flight)
+    (should (= emacsos--chat-tokens-seen 0))))
+
+(ert-deftest chat-test-token-handler-admits-layout-and-emoji-format-points ()
+  (chat-test--reset)
+  (let* ((buf (emacsos--chat-buffer))
+         (text (concat "first\n\tsecond "
+                       (string #x2764 #xfe0f #x200d #x1f525))))
+    (chat-test--seed-you-line buf "hi")
+    (emacsos--chat-handle-start '(:type "start"))
+    (emacsos--chat-handle-token `(:type "token" :text ,text))
+    (with-current-buffer buf
+      (should (string-match-p (regexp-quote text) (buffer-string))))))
+
 (ert-deftest chat-test-status-then-first-token-clears-bracket ()
   "Status renders as `[<text>] `; first token clears the bracket."
   (chat-test--reset)
@@ -161,6 +199,20 @@ the prompt and the three markers are set."
     (with-current-buffer buf
       (should-not (string-match-p "\\[calling task\\]" (buffer-string)))
       (should (string-match-p "bot> Done\\." (buffer-string))))))
+
+(ert-deftest chat-test-status-rejects-spoofing-and-oversized-text ()
+  (dolist (text (list (concat "spoof" (string #x202e))
+                      (make-string 513 ?x)))
+    (chat-test--reset)
+    (let ((buf (emacsos--chat-buffer)))
+      (chat-test--seed-you-line buf "hi")
+      (setq emacsos--chat-in-flight t)
+      (emacsos--chat-handle-start '(:type "start"))
+      (emacsos--chat-handle-status `(:type "status" :text ,text))
+      (with-current-buffer buf
+        (should-not (string-match-p (regexp-quote text) (buffer-string)))
+        (should (string-match-p "invalid assistant status" (buffer-string))))
+      (should-not emacsos--chat-in-flight))))
 
 (ert-deftest chat-test-status-replacement-handles-read-only ()
   "Each new status replaces the previous bracket; read-only props
@@ -215,6 +267,19 @@ the next status's clear-bracket would wipe out streamed tokens."
       (should (string-match-p "\\[error: boom\\]" (buffer-string))))
     (should-not emacsos--chat-in-flight)))
 
+(ert-deftest chat-test-error-handler-replaces-unsafe-or-oversized-reason ()
+  (dolist (reason (list (concat "spoof" (string #x202e))
+                        (make-string 513 ?x)))
+    (chat-test--reset)
+    (setq emacsos--chat-in-flight t)
+    (let ((buf (emacsos--chat-buffer)))
+      (chat-test--seed-you-line buf "hi")
+      (emacsos--chat-handle-start '(:type "start"))
+      (emacsos--chat-handle-error `(:type "error" :reason ,reason))
+      (with-current-buffer buf
+        (should (string-match-p "\\[error: server error\\]" (buffer-string)))
+        (should-not (string-match-p (regexp-quote reason) (buffer-string)))))))
+
 (ert-deftest chat-test-heartbeat-is-noop ()
   (chat-test--reset)
   ;; Should not change buffer or any state when called.
@@ -261,6 +326,160 @@ the next status's clear-bracket would wipe out streamed tokens."
                (lambda (_) (setq called t))))
       (emacsos--chat-dispatch-line "{\"type\":\"token\",\"text\":\"hi\"}")
       (should-not called))))
+
+(ert-deftest chat-test-drain-rejects-an-oversized-unfinished-event ()
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated)
+      (insert (make-string (1+ emacsos--chat-max-event-bytes) ?x))
+      (setq-local url-http-end-of-headers header-end)
+      (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                 (lambda (reason) (setq terminated reason))))
+        (emacsos--chat-drain-body))
+      (should (equal terminated "assistant event too large")))))
+
+(ert-deftest chat-test-drain-rejects-an-oversized-complete-event ()
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated)
+      (insert (make-string (1+ emacsos--chat-max-event-bytes) ?x) "\n")
+      (setq-local url-http-end-of-headers header-end)
+      (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                 (lambda (reason) (setq terminated reason))))
+        (emacsos--chat-drain-body))
+      (should (equal terminated "assistant event too large")))))
+
+(ert-deftest chat-test-drain-rejects-oversized-tail-after-a-complete-event ()
+  "A complete event must not hide an oversized unfinished event behind it."
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated dispatched)
+      (insert "{\"type\":\"heartbeat\"}\n"
+              (make-string (1+ emacsos--chat-max-event-bytes) ?x))
+      (setq-local url-http-end-of-headers header-end)
+      (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                 (lambda (reason) (setq terminated reason)))
+                ((symbol-function 'emacsos--chat-dispatch-line)
+                 (lambda (_) (setq dispatched t))))
+        (emacsos--chat-drain-body))
+      (should (equal terminated "assistant event too large"))
+      (should-not dispatched))))
+
+(ert-deftest chat-test-drain-counts-an-unfinished-event-incrementally ()
+  "Repeated fragments cross the event cap without rescanning prior bytes."
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated)
+      (setq-local url-http-end-of-headers header-end)
+      (dotimes (_ 3)
+        (insert (make-string 4 ?x))
+        (let ((emacsos--chat-max-event-bytes 10))
+          (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                     (lambda (reason) (setq terminated reason))))
+            (emacsos--chat-drain-body))))
+      (should (= emacsos--chat-pending-event-bytes 12))
+      (should (equal terminated "assistant event too large")))))
+
+(ert-deftest chat-test-filter-rejects-raw-response-before-url-filter ()
+  "The cumulative raw cap applies before url-http copies the crossing chunk."
+  (chat-test--reset)
+  (let ((emacsos--chat-process 'current)
+        (emacsos--chat-max-transport-bytes 5)
+        (raw-filter-calls 0) terminated)
+    (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+               (lambda (reason) (setq terminated reason)))
+              ((symbol-function 'process-buffer) (lambda (_) nil)))
+      (let ((filter (emacsos--chat-make-filter
+                     (lambda (_proc _bytes) (cl-incf raw-filter-calls)))))
+        (funcall filter 'current "123")
+        (funcall filter 'current "456")))
+    (should (equal terminated "assistant response too large"))
+    (should (= raw-filter-calls 1))))
+
+(ert-deftest chat-test-filter-admits-body-valid-heavily-chunked-response ()
+  "Many server-sized chunks cannot consume the raw-response allowance early."
+  (chat-test--reset)
+  (let* ((emacsos--chat-process 'current)
+         (body-chunk "{\"type\":\"token\",\"text\":\"x\"}\n")
+         (raw-chunk (format "%x\r\n%s\r\n"
+                            (string-bytes body-chunk) body-chunk))
+         (count (/ emacsos--chat-max-body-bytes
+                   (string-bytes body-chunk)))
+         (raw-filter-calls 0))
+    (should (<= (* count (string-bytes body-chunk))
+                emacsos--chat-max-body-bytes))
+    (should (> (* count (string-bytes raw-chunk))
+               (+ emacsos--chat-max-body-bytes (* 64 1024))))
+    (cl-letf (((symbol-function 'process-buffer) (lambda (_) nil)))
+      (let ((filter (emacsos--chat-make-filter
+                     (lambda (_proc _bytes) (cl-incf raw-filter-calls)))))
+        (dotimes (_ count)
+          (funcall filter 'current raw-chunk))))
+    (should (= raw-filter-calls count))))
+
+(ert-deftest chat-test-drain-rejects-cumulative-bounded-events ()
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let* ((header-end (copy-marker (point-min)))
+           (line (concat "{\"type\":\"heartbeat\",\"pad\":\""
+                         (make-string 180 ?x) "\"}\n"))
+           (count (1+ (/ emacsos--chat-max-body-bytes (string-bytes line))))
+           terminated)
+      (dotimes (_ count) (insert line))
+      (setq-local url-http-end-of-headers header-end)
+      (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                 (lambda (reason) (setq terminated reason))))
+        (emacsos--chat-drain-body))
+      (should (equal terminated "assistant response too large")))))
+
+(ert-deftest chat-test-drain-reconstructs-bound-without-redispatch-after-reload ()
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let* ((header-end (copy-marker (point-min)))
+           (first "{\"type\":\"heartbeat\"}\n")
+           (second "{\"type\":\"token\",\"text\":\"new\"}\n")
+           dispatched)
+      (insert first second)
+      (setq-local url-http-end-of-headers header-end
+                  ;; Simulate the pre-bound reader surviving live code reload.
+                  emacsos--chat-body-read-marker
+                  (copy-marker (+ (point-min) (length first)) nil))
+      (cl-letf (((symbol-function 'emacsos--chat-dispatch-line)
+                 (lambda (line) (push line dispatched))))
+        (emacsos--chat-drain-body))
+      (should (= emacsos--chat-body-bytes-received
+                 (string-bytes (concat first second))))
+      (should (= emacsos--chat-pending-event-bytes 0))
+      (should (equal dispatched
+                     '("{\"type\":\"token\",\"text\":\"new\"}"))))))
+
+(ert-deftest chat-test-drain-reconstructs-pending-tail-after-live-reload ()
+  "Old read/seen markers cannot hide a pre-reload unfinished event."
+  (chat-test--reset)
+  (setq emacsos--chat-in-flight t)
+  (with-temp-buffer
+    (let ((header-end (copy-marker (point-min))) terminated)
+      (insert (make-string 9 ?x))
+      (setq-local url-http-end-of-headers header-end
+                  emacsos--chat-body-read-marker
+                  (copy-marker (point-min) nil)
+                  emacsos--chat-body-seen-marker
+                  (copy-marker (point-max) nil)
+                  emacsos--chat-body-bytes-received 9)
+      (kill-local-variable 'emacsos--chat-pending-event-bytes)
+      (insert "yy")
+      (let ((emacsos--chat-max-event-bytes 10))
+        (cl-letf (((symbol-function 'emacsos--chat-terminate-stream)
+                   (lambda (reason) (setq terminated reason))))
+          (emacsos--chat-drain-body)))
+      (should (= emacsos--chat-pending-event-bytes 11))
+      (should (equal terminated "assistant event too large")))))
 
 (ert-deftest chat-test-dispatch-line-abandons-when-stream-buffer-killed ()
   "If the .assist surface is killed mid-stream, events must NOT fall back to
@@ -567,6 +786,17 @@ share one host:port."
     (should (string-match-p "BROKEN" (buffer-string)))
     (should (string-match-p "inspect failure" (buffer-string)))
     (should-not (string-match-p "consider rolling back" (buffer-string)))))
+
+(ert-deftest chat-test-applied-event-replaces-unsafe-or-oversized-detail ()
+  (dolist (detail (list (concat "spoof" (string #x202e))
+                        (make-string 513 ?x)))
+    (chat-test--reset)
+    (emacsos--chat-buffer)
+    (emacsos--chat-handle-applied
+     (list :type "applied" :detail detail :broken :false))
+    (with-current-buffer emacsos--chat-buffer-name
+      (should (string-match-p "\\[config applied\\]" (buffer-string)))
+      (should-not (string-match-p (regexp-quote detail) (buffer-string))))))
 
 
 (ert-deftest chat-test-rollback-first-tap-arms ()

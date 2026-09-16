@@ -1,5 +1,4 @@
 ;;; assist-web.el --- Assist Web threads in EmacsOS -*- lexical-binding: t -*-
-
 ;;; Commentary:
 
 ;; This is deliberately separate from emacsos-assist.el.  A .assist file is a
@@ -13,6 +12,7 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
+(require 'ucs-normalize)
 (require 'url)
 (require 'url-http)
 (require 'url-util)
@@ -66,6 +66,11 @@
   :type 'integer
   :group 'emacsos-assist-web)
 
+(defcustom emacsos-assist-web-max-stream-chunk-bytes (* 1024 1024)
+  "Maximum bytes in one raw callback or one declared decoded HTTP chunk."
+  :type 'integer
+  :group 'emacsos-assist-web)
+
 (defcustom emacsos-assist-web-max-header-bytes (* 64 1024)
   "Maximum HTTP response-header size accepted from Assist Web."
   :type 'integer
@@ -83,14 +88,42 @@
 
 (defconst emacsos-assist-web--prompt "\n> ")
 (defconst emacsos-assist-web--catalog-file "threads.json")
+(defconst emacsos-assist-web--thread-list-buffer-name "*assist Threads*")
+(defconst emacsos-assist-web--max-catalog-items 500
+  "Maximum entries accepted in each Assist catalog section.")
+(defconst emacsos-assist-web--max-catalog-text-bytes 512
+  "Maximum UTF-8 bytes accepted in one Assist display metadata field.")
+(defconst emacsos-assist-web--max-message-bytes (* 256 1024)
+  "Maximum UTF-8 bytes accepted in one canonical thread message.")
+(defconst emacsos-assist-web--max-snapshot-messages 500
+  "Maximum messages accepted in one snapshot or loaded-history state.")
+(defconst emacsos-assist-web--max-snapshot-transcript-bytes (* 1024 1024)
+  "Maximum message-text bytes accepted in one snapshot or history state.")
+(defconst emacsos-assist-web--max-rendered-messages 1000
+  "Maximum messages retained when a recent page preserves loaded history.")
+(defconst emacsos-assist-web--max-rendered-transcript-bytes (* 2 1024 1024)
+  "Maximum message-text bytes retained across recent and loaded history.")
+(defconst emacsos-assist-web--active-snapshot-statuses
+  '("queued" "processing" "paused" "initializing" "cloning"
+    "starting_sandbox" "pending" "running" "transitioning"
+    "awaiting_approval")
+  "Snapshot statuses that prove work is still active.")
+(defconst emacsos-assist-web--settled-snapshot-statuses '("ready" "error")
+  "Snapshot statuses that may settle an accepted local submission.")
+(defconst emacsos-assist-web--list-ordinal-width 5
+  "Columns reserved for a trusted thread-list collision ordinal.")
 (defconst emacsos-assist-web--id-regexp "\\`[A-Za-z0-9][A-Za-z0-9._-]\\{0,127\\}\\'")
 (defconst emacsos-assist-web--record-id-regexp
   "\\`[A-Za-z0-9_-]\\{1,242\\}\\'")
 (defconst emacsos-assist-web--idempotency-regexp "\\`emacsos-[0-9a-f]\\{32\\}\\'")
 (defvar emacsos-assist-web--catalog nil)
-(defvar emacsos-assist-web--catalog-loaded-p nil)
-(defvar emacsos-assist-web--catalog-stale nil)
+(defvar emacsos-assist-web--catalog-state nil
+  "Current catalog state.
+The value is nil, `current', `cached', `refresh-failed', or
+`cache-write-failed'.")
+(defvar emacsos-assist-web--catalog-refreshing-p nil)
 (defvar emacsos-assist-web--catalog-generation 0)
+(defvar emacsos-assist-web--new-thread-pending-p nil)
 (defvar emacsos-assist-web--requests nil)
 (defvar-local emacsos-assist-web--thread-id nil)
 (defvar-local emacsos-assist-web--draft-repository nil)
@@ -122,6 +155,7 @@
 (defvar-local emacsos-assist-web--assistant-end nil)
 (defvar-local emacsos-assist-web--stream-attempt nil)
 (defvar-local emacsos-assist-web--stream-index 0)
+(defvar-local emacsos-assist-web--stream-assistant-bytes 0)
 
 (defun emacsos-assist-web--cache-path (&optional name)
   "Return the cache path for NAME without changing the filesystem."
@@ -170,8 +204,9 @@
               (error-message-string error))
      nil)))
 
-(defun emacsos-assist-web--read-cache (name)
-  "Return parsed JSON cache NAME, or nil when no valid cache exists."
+(defun emacsos-assist-web--read-cache (name &optional array-type object-type)
+  "Return parsed JSON cache NAME, or nil when no valid cache exists.
+ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
   (condition-case nil
       (let ((path (emacsos-assist-web--cache-path name)))
         (when (and (file-readable-p path)
@@ -179,7 +214,8 @@
                        emacsos-assist-web-max-cache-bytes))
           (with-temp-buffer
             (insert-file-contents path)
-            (json-parse-buffer :object-type 'alist :array-type 'list
+            (json-parse-buffer :object-type (or object-type 'alist)
+                               :array-type (or array-type 'list)
                                :null-object nil :false-object nil))))
     (error nil)))
 
@@ -265,55 +301,150 @@
   "Return non-nil when VALUE is an alist-shaped JSON object."
   (and (listp value) (seq-every-p #'consp value)))
 
-(defun emacsos-assist-web--require-catalog (value)
-  "Return the validated thread/repository/harness catalog VALUE."
-  (unless (and (emacsos-assist-web--object-p value)
-               (assq 'threads value) (listp (alist-get 'threads value))
-               (assq 'repositories value) (listp (alist-get 'repositories value))
-               (assq 'harnesses value) (listp (alist-get 'harnesses value)))
-    (error "Assist Web returned an invalid catalog"))
-  (dolist (thread (alist-get 'threads value))
-    (unless (and (emacsos-assist-web--object-p thread)
-                 (emacsos-assist-web--valid-id-p (alist-get 'id thread))
-                 (stringp (alist-get 'description thread))
-                 (stringp (alist-get 'search_description thread))
-                 (stringp (alist-get 'repo_label thread))
-                 (stringp (alist-get 'status thread)))
-      (error "Assist Web returned an invalid thread catalog entry")))
-  (dolist (repository (alist-get 'repositories value))
-    (unless (and (emacsos-assist-web--object-p repository)
-                 (stringp (alist-get 'repo_key repository))
-                 (not (string-empty-p (alist-get 'repo_key repository)))
-                 (stringp (alist-get 'label repository)))
-      (error "Assist Web returned an invalid repository choice")))
-  (dolist (harness (alist-get 'harnesses value))
-    (unless (and (emacsos-assist-web--object-p harness)
-                 (stringp (alist-get 'key harness))
-                 (not (string-empty-p (alist-get 'key harness)))
-                 (stringp (alist-get 'label harness)))
-      (error "Assist Web returned an invalid harness choice")))
-  value)
+(defun emacsos-assist-web--valid-catalog-text-p (value)
+  "Return non-nil for bounded, single-line catalog or snapshot display VALUE."
+  (and (stringp value)
+       (<= (string-bytes value) emacsos-assist-web--max-catalog-text-bytes)
+       (emacsos-conversation-valid-text-p value)))
 
-(defun emacsos-assist-web--require-snapshot (value &optional expected-thread-id)
-  "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied."
+(defun emacsos-assist-web--valid-message-text-p (value)
+  "Return non-nil for multiline transcript VALUE without spoofing controls."
+  (emacsos-conversation-valid-text-p value t))
+
+(defun emacsos-assist-web--isolate-display-text (text)
+  "Return server-supplied TEXT inside trusted bidirectional isolates."
+  (concat (string #x2068) text (string #x2069)))
+
+(defun emacsos-assist-web--collision-key-text (text)
+  "Return normalized TEXT with admitted zero-width emoji marks removed."
+  (ucs-normalize-NFC-string
+   (string-replace (string #x200d) ""
+                   (string-replace (string #xfe0f) "" text))))
+
+(defun emacsos-assist-web--catalog-entry (value fields)
+  "Return wire catalog object VALUE normalized to symbol FIELDS."
+  (when (hash-table-p value)
+    (mapcar (lambda (field)
+              (cons field (gethash (symbol-name field) value)))
+            fields)))
+
+(defun emacsos-assist-web--require-catalog (value)
+  "Validate wire catalog VALUE and return its arrays normalized to lists."
+  (unless (hash-table-p value)
+    (error "Assist Web returned an invalid catalog"))
+  (let ((wire-threads (gethash "threads" value))
+        (wire-repositories (gethash "repositories" value))
+        (wire-harnesses (gethash "harnesses" value)))
+    (unless (and (vectorp wire-threads)
+                 (vectorp wire-repositories)
+                 (vectorp wire-harnesses)
+                 (cl-every
+                  (lambda (items)
+                    (<= (length items) emacsos-assist-web--max-catalog-items))
+                  (list wire-threads wire-repositories wire-harnesses)))
+      (error "Assist Web returned an invalid catalog"))
+    (let ((threads
+           (mapcar (lambda (entry)
+                     (emacsos-assist-web--catalog-entry
+                      entry '(id description search_description repo_label status)))
+                   (append wire-threads nil)))
+          (repositories
+           (mapcar (lambda (entry)
+                     (emacsos-assist-web--catalog-entry entry '(repo_key label)))
+                   (append wire-repositories nil)))
+          (harnesses
+           (mapcar (lambda (entry)
+                     (emacsos-assist-web--catalog-entry entry '(key label)))
+                   (append wire-harnesses nil)))
+          (seen (make-hash-table :test #'equal)))
+      (cl-labels
+          ((require-choices
+            (choices key-field noun)
+            (clrhash seen)
+            (dolist (choice choices)
+              (let ((key (and (emacsos-assist-web--object-p choice)
+                              (alist-get key-field choice))))
+                (unless (and (emacsos-assist-web--valid-id-p key)
+                             (not (gethash key seen))
+                             (emacsos-assist-web--valid-catalog-text-p
+                              (alist-get 'label choice)))
+                  (error "Assist Web returned an invalid %s choice" noun))
+                (puthash key t seen)))))
+        (dolist (thread threads)
+          (let ((id (and (emacsos-assist-web--object-p thread)
+                         (alist-get 'id thread))))
+            (unless (and (emacsos-assist-web--valid-id-p id)
+                         (not (gethash id seen))
+                         (emacsos-assist-web--valid-catalog-text-p
+                          (alist-get 'description thread))
+                         (emacsos-assist-web--valid-catalog-text-p
+                          (alist-get 'search_description thread))
+                         (emacsos-assist-web--valid-catalog-text-p
+                          (alist-get 'repo_label thread))
+                         (emacsos-assist-web--valid-catalog-text-p
+                          (alist-get 'status thread)))
+              (error "Assist Web returned an invalid thread catalog entry"))
+            (puthash id t seen)))
+        (require-choices repositories 'repo_key "repository")
+        (require-choices harnesses 'key "harness"))
+      `((threads . ,threads)
+        (repositories . ,repositories)
+        (harnesses . ,harnesses)))))
+
+(defun emacsos-assist-web--require-transcript-limits
+    (messages max-messages max-bytes)
+  "Require MESSAGES to fit MAX-MESSAGES, MAX-BYTES, and the per-message cap."
+  (let ((remaining messages)
+        (count 0)
+        (total 0))
+    (while (consp remaining)
+      (setq count (1+ count))
+      (when (> count max-messages)
+        (error "Assist Web thread transcript is too large"))
+      (let* ((message (car remaining))
+             (text (and (emacsos-assist-web--object-p message)
+                        (alist-get 'text message))))
+        (unless (emacsos-assist-web--valid-message-text-p text)
+          (error "Assist Web returned an invalid thread message"))
+        (let ((bytes (string-bytes text)))
+          (when (> bytes emacsos-assist-web--max-message-bytes)
+            (error "Assist Web thread message is too large"))
+          (setq total (+ total bytes))
+          (when (> total max-bytes)
+            (error "Assist Web thread transcript is too large"))))
+      (setq remaining (cdr remaining)))
+    (unless (null remaining)
+      (error "Assist Web returned an invalid thread transcript"))))
+
+(defun emacsos-assist-web--require-snapshot
+    (value &optional expected-thread-id max-messages max-bytes)
+  "Return validated snapshot VALUE for EXPECTED-THREAD-ID when supplied.
+MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
   (let ((thread (and (emacsos-assist-web--object-p value)
                      (alist-get 'thread value)))
         (messages (and (emacsos-assist-web--object-p value)
                        (alist-get 'messages value))))
     (unless (and (emacsos-assist-web--object-p thread)
-                 (assq 'messages value) (listp messages)
+                 (assq 'messages value)
                  (emacsos-assist-web--valid-id-p (alist-get 'id thread))
-                 (stringp (alist-get 'description thread))
-                 (stringp (alist-get 'status thread))
+                 (emacsos-assist-web--valid-catalog-text-p
+                  (alist-get 'description thread))
+                 (emacsos-assist-web--valid-catalog-text-p
+                  (alist-get 'status thread))
                  (let ((remote-error (alist-get 'error thread)))
-                   (or (null remote-error) (stringp remote-error)))
+                   (or (null remote-error)
+                       (emacsos-assist-web--valid-catalog-text-p remote-error)))
                  (emacsos-assist-web--object-p (alist-get 'workspace thread))
-                 (stringp (alist-get 'repo_label
-                                     (alist-get 'workspace thread))))
+                 (emacsos-assist-web--valid-catalog-text-p
+                  (alist-get 'repo_label (alist-get 'workspace thread))))
       (error "Assist Web returned an invalid thread snapshot"))
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
+    (emacsos-assist-web--require-transcript-limits
+     messages
+     (or max-messages emacsos-assist-web--max-snapshot-messages)
+     (or max-bytes emacsos-assist-web--max-snapshot-transcript-bytes))
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
         (unless (and (emacsos-assist-web--object-p message)
@@ -331,6 +462,17 @@
           (when (gethash identity seen)
             (error "Assist Web returned duplicate message identities"))
           (puthash identity t seen))))
+    ;; Retain only the message schema this client consumes.  Remote extensions
+    ;; cannot accumulate across otherwise bounded history pages.
+    (setq messages
+          (mapcar
+           (lambda (message)
+             `((id . ,(alist-get 'id message))
+               (role . ,(alist-get 'role message))
+               (text . ,(alist-get 'text message))
+               (state . ,(alist-get 'state message))))
+           messages))
+    (setf (alist-get 'messages value) messages)
     (when-let ((cursor (alist-get 'next_before value)))
       (emacsos-assist-web--require-record-id cursor))
     value))
@@ -352,6 +494,16 @@
     (when (and (alist-get 'has_older_messages page) (not next))
       (error "Assist Web returned incomplete history progress")))
   page)
+
+(defun emacsos-assist-web--snapshot-active-p (snapshot)
+  "Return non-nil when SNAPSHOT is active, or reject an unknown status.
+
+An unknown bounded display string is not proof that an accepted Run settled."
+  (let ((status (alist-get 'status (alist-get 'thread snapshot))))
+    (cond
+     ((member status emacsos-assist-web--active-snapshot-statuses) t)
+     ((member status emacsos-assist-web--settled-snapshot-statuses) nil)
+     (t (error "Assist Web returned an unknown thread status")))))
 
 (defun emacsos-assist-web--run-store-unavailable-response-p (buffer)
   "Return non-nil only for Assist's bounded unavailable-Run-store response."
@@ -378,11 +530,13 @@
                         (equal (alist-get 'detail value) "run-store-unavailable"))))
              (error nil))))))
 
-(defun emacsos-assist-web--response-json (buffer &optional allow-status)
+(defun emacsos-assist-web--response-json
+    (buffer &optional allow-status array-type object-type)
   "Return BUFFER's JSON value or signal a useful local error.
 When ALLOW-STATUS is non-nil, require an integer HTTP status and a top-level
 object, retaining that status as `http_status' so the DELETE adapter can
-distinguish its bounded structured 409 outcomes."
+distinguish its bounded structured 409 outcomes.  ARRAY-TYPE defaults to
+`list' and OBJECT-TYPE defaults to `alist'."
   (with-current-buffer buffer
     (let ((status url-http-response-status)
           (start (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)))
@@ -401,113 +555,169 @@ distinguish its bounded structured 409 outcomes."
       (skip-chars-forward " \t\r\n")
       (when (and allow-status (not (eq (char-after) ?{)))
         (error "Assist Web returned an unexpected response body"))
-      (let ((value (json-parse-buffer :object-type 'alist :array-type 'list
+      (let ((value (json-parse-buffer :object-type (or object-type 'alist)
+                                      :array-type (or array-type 'list)
                                       :null-object nil :false-object nil)))
         (skip-chars-forward " \t\r\n")
         (unless (eobp)
           (error "Assist Web returned an unexpected response body"))
         (if allow-status (cons (cons 'http_status status) value) value)))))
 
+(defun emacsos-assist-web--range-bytes (start end)
+  "Return the byte length of the current buffer between START and END."
+  (- (position-bytes end) (position-bytes start)))
+
+(defun emacsos-assist-web--pending-transport-bytes (process)
+  "Return opaque HTTP framing bytes retained for PROCESS's next decode step."
+  (let ((response (and process (process-buffer process))))
+    (if (not (buffer-live-p response))
+        0
+      (with-current-buffer response
+        (if (not (and (boundp 'url-http-end-of-headers)
+                      (markerp url-http-end-of-headers)))
+            0
+          (let* ((body-start (min (point-max)
+                                  (1+ (marker-position url-http-end-of-headers))))
+                 (decoded-end
+                  (if (and (boundp 'url-http-transfer-encoding)
+                           (equal url-http-transfer-encoding "chunked"))
+                      (if (and (boundp 'url-http-chunked-start)
+                               (markerp url-http-chunked-start)
+                               (boundp 'url-http-chunked-length)
+                               (integerp url-http-chunked-length))
+                          (min (point-max)
+                               (+ (marker-position url-http-chunked-start)
+                                  url-http-chunked-length))
+                        body-start)
+                    ;; A fixed-length body is decoded as it arrives.  Its
+                    ;; declared total is checked separately by the event
+                    ;; filter, so none of these bytes are pending framing.
+                    (point-max))))
+            (emacsos-assist-web--range-bytes decoded-end (point-max))))))))
+
 (defun emacsos-assist-web--guarded-filter (url-filter fail &optional streaming)
   "Wrap URL-FILTER with raw HTTP bounds, invoking FAIL with a safe message.
 
 STREAMING permits an unbounded body only for a valid 200 SSE response; it
-bounds every other response and each individual SSE record before URL-FILTER
-retains it.  Headers and encoded responses are rejected before URL-FILTER can
-redirect or decompress them."
+bounds every other response and each raw transport callback before URL-FILTER
+retains it.  Decoded SSE records are bounded by the event filter.  Headers and
+encoded responses are rejected before URL-FILTER can redirect or decompress
+them."
   (let ((received 0) (header "") (header-complete nil) (failed nil)
-        (stream-record-bytes 0) (stream-delimiter-prefix nil)
         (bounded-body (not streaming)))
-    (cl-labels
-        ((check-stream-body
-          (process body)
-          ;; Retain one possible delimiter byte between TCP callbacks.  A
-          ;; callback may contain arbitrarily many bounded SSE records, but an
-          ;; unterminated record is rejected before url-http copies it.
-          (let ((body (concat (or stream-delimiter-prefix "") body))
-                (start 0))
-            (setq stream-delimiter-prefix nil)
-            (while (and (not failed) (string-match "\n\n" body start))
-              (cl-incf stream-record-bytes
-                       (string-bytes (substring body start (match-beginning 0))))
-              (if (> stream-record-bytes emacsos-assist-web-max-event-bytes)
-                  (progn
-                    (setq failed t)
-                    (funcall fail process "Assist event is too large"))
-                (setq stream-record-bytes 0
-                      start (match-end 0))))
-            (when (not failed)
-              (let ((tail (substring body start)))
-                (when (string-suffix-p "\n" tail)
-                  (setq stream-delimiter-prefix "\n"
-                        tail (substring tail 0 -1)))
-                (cl-incf stream-record-bytes (string-bytes tail))
-                (when (> stream-record-bytes emacsos-assist-web-max-event-bytes)
-                  (setq failed t)
-                  (funcall fail process "Assist event is too large")))))))
-      (lambda (process bytes)
+    (lambda (process bytes)
+      (unless failed
+        (when (and streaming
+                   (> (string-bytes bytes)
+                      emacsos-assist-web-max-stream-chunk-bytes))
+          (setq failed t)
+          (funcall fail process "Assist stream transport chunk is too large"))
         (unless failed
-          (let ((body (and header-complete bytes)))
-            (setq received (+ received (string-bytes bytes)))
-            (when (and bounded-body
-                       (> received emacsos-assist-web-max-response-bytes))
-              (setq failed t)
-              (funcall fail process "Assist Web response is too large"))
-            (unless (or failed header-complete)
-              (setq header (concat header bytes))
-              (let ((header-end (string-match "\r?\n\r?\n" header)))
-                (cond
-                 ((and (not header-end)
-                       (> (string-bytes header) emacsos-assist-web-max-header-bytes))
-                  (setq failed t)
-                  (funcall fail process "Assist Web response headers are too large"))
-                 (header-end
-                  (let ((headers-only (substring header 0 (match-end 0))))
-                    (if (> (string-bytes headers-only)
-                           emacsos-assist-web-max-header-bytes)
-                        (progn
+          (setq received (+ received (string-bytes bytes)))
+          (when (and bounded-body
+                     (> received emacsos-assist-web-max-response-bytes))
+            (setq failed t)
+            (funcall fail process "Assist Web response is too large"))
+          (unless (or failed header-complete)
+            (setq header (concat header bytes))
+            (let ((header-end (string-match "\r?\n\r?\n" header)))
+              (cond
+               (header-end
+                (let ((headers-only (substring header 0 (match-end 0))))
+                  (cond
+                   ((> (string-bytes headers-only)
+                       emacsos-assist-web-max-header-bytes)
+                    (setq failed t)
+                    (funcall fail process
+                             "Assist Web response headers are too large"))
+                   ((string-match-p "\r?\n[ \t]" headers-only)
+                    ;; Stock `url-http' includes obsolete continuation lines
+                    ;; in its parsed field value.
+                    ;; Reject them before our line-oriented admission checks
+                    ;; can disagree with the decoder about transfer coding.
+                    (setq failed t)
+                    (funcall fail process
+                             "Assist Web folded response headers are not accepted"))
+                   (t
+                    (setq header-complete t
+                          bounded-body
+                          (not (and streaming
+                                    (string-match-p
+                                     "\\`HTTP/[0-9.]+[ \\t]+200\\(?:[ \\t]\\|\\r?\\n\\)"
+                                     headers-only)
+                                    (let ((case-fold-search t))
+                                      (string-match-p
+                                       "\\(?:\\`\\|[\r\n]\\)Content-Type[ \t]*:[ \t]*text/event-stream\\(?:[; \t\r\n]\\|\\'\\)"
+                                       headers-only)))))
+                    (let ((case-fold-search t)
+                          (position 0)
+                          (transfer-count 0))
+                      (while (and (not failed)
+                                  (string-match
+                                   "\\(?:\\`\\|[\r\n]\\)Content-Encoding[ \t]*:[ \t]*\\([^\r\n]*\\)"
+                                   headers-only position))
+                        (unless (equal (downcase
+                                        (string-trim
+                                         (match-string 1 headers-only)))
+                                       "identity")
                           (setq failed t)
-                          (funcall fail process "Assist Web response headers are too large"))
-                      (setq header-complete t
-                            body (substring header (match-end 0))
-                            bounded-body
-                            (not (and streaming
-                                      (not (null (string-match-p
-                                       "\\`HTTP/[0-9.]+[ \\t]+200\\(?:[ \\t]\\|\\r?\\n\\)"
-                                       headers-only)))
-                                      (let ((case-fold-search t))
-                                        (string-match-p
-                                         "\\(?:\\`\\|[\r\n]\\)Content-Type[ \t]*:[ \t]*text/event-stream\\(?:[; \t\r\n]\\|\\'\\)"
-                                         headers-only)))))
-                      (let ((case-fold-search t)
-                            (position 0))
-                        (while (and (not failed)
-                                    (string-match
-                                     "\\(?:\\`\\|[\r\n]\\)Content-Encoding[ \t]*:[ \t]*\\([^\r\n]*\\)"
-                                     headers-only position))
-                          (unless (equal (downcase (string-trim
-                                                    (match-string 1 headers-only)))
-                                         "identity")
+                          (funcall fail process
+                                   "Assist Web encoded responses are not accepted"))
+                        (setq position (match-end 0)))
+                      (setq position 0)
+                      (while (and (not failed)
+                                  (string-match
+                                   "\\(?:\\`\\|[\r\n]\\)Transfer-Encoding[ \t]*:[ \t]*\\([^\r\n]*\\)"
+                                   headers-only position))
+                        (cl-incf transfer-count)
+                        (unless (and (= transfer-count 1)
+                                     (equal (downcase
+                                             (string-trim
+                                              (match-string 1 headers-only)))
+                                            "chunked"))
+                          (setq failed t)
+                          (funcall fail process
+                                   "Assist Web transfer encoding is not accepted"))
+                        (setq position (match-end 0))))))
+                  (setq header nil)
+                  (when (and (not failed) bounded-body
+                             (> received emacsos-assist-web-max-response-bytes))
+                    (setq failed t)
+                    (funcall fail process "Assist Web response is too large"))))
+               ((> (string-bytes header) emacsos-assist-web-max-header-bytes)
+                (setq failed t)
+                (funcall fail process
+                         "Assist Web response headers are too large")))))
+          (when (and (not failed) (functionp url-filter))
+            (if (and streaming (not bounded-body))
+                ;; Feed stock `url-http' bounded opaque slices.  Between
+                ;; slices, cap bytes it has retained as incomplete transport
+                ;; framing; this never parses chunk syntax outside url-http.
+                (let ((offset 0)
+                      (total (length bytes)))
+                  (while (and (not failed) (< offset total))
+                    (let* ((pending
+                            (emacsos-assist-web--pending-transport-bytes process))
+                           (allowance
+                            (- emacsos-assist-web-max-header-bytes pending)))
+                      (if (<= allowance 0)
+                          (progn
                             (setq failed t)
                             (funcall fail process
-                                     "Assist Web encoded responses are not accepted"))
-                          (setq position (match-end 0))))
-                    (setq header nil)
-                    (when (and (not failed) bounded-body
-                               (> received emacsos-assist-web-max-response-bytes))
-                      (setq failed t)
-                      (funcall fail process "Assist Web response is too large"))))))))
-            (when (and (not failed) streaming header-complete (not bounded-body))
-              (check-stream-body process body))
-            (when (and (not failed) (functionp url-filter))
+                                     "Assist stream transport framing is too large"))
+                        (let ((end (min total (+ offset allowance))))
+                          (funcall url-filter process (substring bytes offset end))
+                          (setq offset end))))))
               (funcall url-filter process bytes))))))))
 
-(defun emacsos-assist-web--request (method path payload callback &optional headers allow-status)
+(defun emacsos-assist-web--request
+    (method path payload callback &optional headers allow-status array-type object-type)
   "Send METHOD to PATH with optional JSON PAYLOAD and HEADERS.
 
 Invoke CALLBACK with (VALUE ERROR).  Report network and parsing failures as
 ERROR rather than raising them from url-http's asynchronous callback.  Pass
-ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
+ALLOW-STATUS only for a bounded structured non-2xx response the caller owns.
+ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
   (let (token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
@@ -557,7 +767,8 @@ ALLOW-STATUS only for a bounded structured non-2xx response the caller owns."
                                    (condition-case parse-error
                                        (setq value
                                              (emacsos-assist-web--response-json
-                                              (current-buffer) allow-status))
+                                             (current-buffer) allow-status
+                                              array-type object-type))
                                      (error
                                       (setq problem
                                             (error-message-string parse-error))))
@@ -693,11 +904,15 @@ observes its durable state."
       (emacsos-assist-web--save-draft)
     (emacsos-assist-web--stream-cleanup t t)))
 
-(defun emacsos-assist-web--stream-finish (buffer)
-  "Finish BUFFER's event observation and request its canonical transcript."
+(defun emacsos-assist-web--stream-finish (buffer &optional run-still-active)
+  "Finish BUFFER's event observation and request its canonical transcript.
+
+When RUN-STILL-ACTIVE is non-nil, do not label the accepted Run as completed;
+the canonical snapshot must retain its durable identity."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((completed-run-id emacsos-assist-web--run-id))
+      (let ((completed-run-id
+             (unless run-still-active emacsos-assist-web--run-id)))
         ;; A terminal SSE is not the answer.  Keep the marker-scoped text raw
         ;; until the canonical snapshot has replaced this provisional region.
         (emacsos-assist-web--stream-cleanup t t)
@@ -790,10 +1005,16 @@ observes its durable state."
       (cond
        ((equal event "status")
         (condition-case nil
-            (let ((status (json-parse-string data :object-type 'alist)))
-              (emacsos-assist-web--set-status
-               (or (alist-get 'status status) "working")))
-          (error nil)))
+            (let* ((status (json-parse-string data :object-type 'alist))
+                   (text (alist-get 'status status)))
+              (if (and (listp status)
+                       (= (cl-count 'status status :key #'car) 1)
+                       (emacsos-conversation-valid-status-p text))
+                  (emacsos-assist-web--set-status text)
+                (emacsos-assist-web--stream-interrupted
+                 target "invalid Assist status")))
+          (error (emacsos-assist-web--stream-interrupted
+                  target "invalid Assist status"))))
        ((equal event "assistant-reset")
         (condition-case nil
             (let ((value (json-parse-string data :object-type 'alist)))
@@ -829,7 +1050,8 @@ observes its durable state."
   "Clear only the provisional assistant body for ATTEMPT."
   (unless (integerp attempt) (error "invalid stream attempt"))
   (setq emacsos-assist-web--stream-attempt attempt
-        emacsos-assist-web--stream-index 0)
+        emacsos-assist-web--stream-index 0
+        emacsos-assist-web--stream-assistant-bytes 0)
   (when (and (markerp emacsos-assist-web--assistant-start)
              (markerp emacsos-assist-web--assistant-end))
     (set-marker emacsos-assist-web--assistant-end
@@ -839,7 +1061,8 @@ observes its durable state."
 (defun emacsos-assist-web--append-delta (attempt index text)
   "Append the next bounded delta for ATTEMPT/INDEX to this buffer only."
   (unless (and (integerp attempt) (integerp index) (stringp text)
-               (<= (string-bytes text) (* 16 1024)))
+               (<= (string-bytes text) (* 16 1024))
+               (emacsos-conversation-valid-text-p text t))
     (error "invalid Assist delta"))
   (cond
    ((not (integerp emacsos-assist-web--stream-attempt))
@@ -852,78 +1075,131 @@ observes its durable state."
      (current-buffer) "Assist stream has a gap; refresh to reconcile"))
    ((and (markerp emacsos-assist-web--assistant-end)
          (marker-buffer emacsos-assist-web--assistant-end))
-    (set-marker emacsos-assist-web--assistant-end
-                (emacsos-conversation-append-delta
-                 emacsos-assist-web--assistant-end text))
-      (setq emacsos-assist-web--stream-index index)
-      (emacsos-assist-web--set-status "working"))))
+    (let* ((prior-bytes
+            (if (local-variable-p
+                 'emacsos-assist-web--stream-assistant-bytes (current-buffer))
+                emacsos-assist-web--stream-assistant-bytes
+              (unless (and (markerp emacsos-assist-web--assistant-start)
+                           (eq (marker-buffer emacsos-assist-web--assistant-start)
+                               (current-buffer)))
+                (error "invalid Assist delta"))
+              (string-bytes
+               (buffer-substring-no-properties
+                emacsos-assist-web--assistant-start
+                emacsos-assist-web--assistant-end))))
+           (total (+ prior-bytes
+                    (string-bytes text))))
+      (when (> total emacsos-assist-web--max-message-bytes)
+        (error "invalid Assist delta"))
+      (set-marker emacsos-assist-web--assistant-end
+                  (emacsos-conversation-append-delta
+                   emacsos-assist-web--assistant-end text))
+      (setq emacsos-assist-web--stream-index index
+            emacsos-assist-web--stream-assistant-bytes total)
+      (emacsos-assist-web--set-status "working")))))
 
-(defun emacsos-assist-web--drain-events (target generation &optional received-bytes)
-  "Consume new complete SSE records for TARGET without rescanning a suffix.
-RECEIVED-BYTES is the raw size newly appended after the first parsed response."
-  (unless (markerp emacsos-assist-web--stream-body-marker)
-    (setq-local emacsos-assist-web--stream-body-marker
-                (copy-marker (marker-position url-http-end-of-headers) nil)
-                emacsos-assist-web--stream-scan-marker
-                (copy-marker (marker-position url-http-end-of-headers) nil)))
-  (let* ((marker emacsos-assist-web--stream-body-marker)
-         (scan-marker emacsos-assist-web--stream-scan-marker)
-         (start (marker-position marker))
-         (too-large nil))
-    ;; The first callback includes headers.  Thereafter the process filter's
-    ;; byte count lets us enforce the incomplete-record cap without copying or
-    ;; rescanning the whole retained suffix for every tiny callback.
-    (if (integerp emacsos-assist-web--stream-unconsumed-bytes)
-        (cl-incf emacsos-assist-web--stream-unconsumed-bytes (or received-bytes 0))
-      (setq-local emacsos-assist-web--stream-unconsumed-bytes
-                  (string-bytes (buffer-substring-no-properties start (point-max)))))
-    ;; url-http can split any byte sequence across callbacks.  Resume at the
-    ;; final possible delimiter start, so each retained character is scanned
-    ;; at most once (apart from that one boundary character).
-    (goto-char (marker-position scan-marker))
-    (while (and (not too-large) (search-forward "\n\n" nil t))
-      (let* ((record-end (point))
-             (event nil) (data nil)
-             (record (buffer-substring-no-properties start (- record-end 2))))
-        (if (> (string-bytes record) emacsos-assist-web-max-event-bytes)
-            (progn
+(defun emacsos-assist-web--decoded-end ()
+  "Return the response-buffer end known to contain decoded entity bytes."
+  (if (and (boundp 'url-http-transfer-encoding)
+           (equal url-http-transfer-encoding "chunked"))
+      (when (and (boundp 'url-http-chunked-start)
+                 (markerp url-http-chunked-start)
+                 (boundp 'url-http-chunked-length)
+                 (integerp url-http-chunked-length))
+        (min (point-max)
+             (+ (marker-position url-http-chunked-start)
+                url-http-chunked-length)))
+    (point-max)))
+
+(defun emacsos-assist-web--drain-events (target generation decoded-end)
+  "Consume decoded SSE through DECODED-END and dispatch it to TARGET.
+
+The current response buffer remains owned by `url-http'.  Parsing stops at its
+decoder-confirmed entity boundary, and pruning preserves every byte still
+addressed by the stock chunk decoder."
+  (let* ((header-end (marker-position url-http-end-of-headers))
+         (body-start (min (point-max) (1+ header-end))))
+    (unless (and (markerp emacsos-assist-web--stream-body-marker)
+                 (eq (marker-buffer emacsos-assist-web--stream-body-marker)
+                     (current-buffer))
+                 (markerp emacsos-assist-web--stream-scan-marker)
+                 (eq (marker-buffer emacsos-assist-web--stream-scan-marker)
+                     (current-buffer)))
+      (let ((legacy-start
+             (and (markerp emacsos-assist-web--stream-body-marker)
+                  (eq (marker-buffer emacsos-assist-web--stream-body-marker)
+                      (current-buffer))
+                  (marker-position emacsos-assist-web--stream-body-marker))))
+        (setq-local emacsos-assist-web--stream-body-marker
+                    (copy-marker (max body-start (or legacy-start body-start)) nil)
+                    emacsos-assist-web--stream-scan-marker
+                    (copy-marker (max body-start (or legacy-start body-start)) nil)
+                    emacsos-assist-web--stream-unconsumed-bytes 0)))
+    (let* ((marker emacsos-assist-web--stream-body-marker)
+           (scan-marker emacsos-assist-web--stream-scan-marker)
+           (start (marker-position marker))
+           (end (max start (or decoded-end start)))
+           (too-large nil))
+      (goto-char (min end (marker-position scan-marker)))
+      (while (and (not too-large)
+                  (re-search-forward "\r?\n\r?\n" end t))
+        (let* ((record-end (point))
+               (delimiter-start (match-beginning 0))
+               (event nil)
+               (data nil))
+          (if (> (emacsos-assist-web--range-bytes start delimiter-start)
+                 emacsos-assist-web-max-event-bytes)
               (setq too-large t)
-              (when (and (buffer-live-p target)
+            (let ((record
+                   (buffer-substring-no-properties start delimiter-start)))
+              (dolist (line (split-string record "\r?\n" t))
+                (cond
+                 ((string-prefix-p "event: " line) (setq event (substring line 7)))
+                 ((string-prefix-p "data: " line) (setq data (substring line 6)))))
+              (when (and event (buffer-live-p target)
                          (with-current-buffer target
                            (= generation emacsos-assist-web--stream-generation)))
-                (emacsos-assist-web--stream-interrupted
-                 target "Assist event is too large")))
-          (dolist (line (split-string record "\n" t))
-            (cond
-             ((string-prefix-p "event: " line) (setq event (substring line 7)))
-             ((string-prefix-p "data: " line) (setq data (substring line 6)))))
-          (when (and event (buffer-live-p target)
-                     (with-current-buffer target
-                       (= generation emacsos-assist-web--stream-generation)))
-            (emacsos-assist-web--dispatch-event target event (or data "")))
-          (cl-decf emacsos-assist-web--stream-unconsumed-bytes
-                   (+ (string-bytes record) 2))
-          (delete-region start record-end)
-          (set-marker marker start)
-          (set-marker scan-marker start)
-          (goto-char start))))
-    (when too-large
-      (delete-region start (point-max))
-      (set-marker scan-marker start)
-      (setq-local emacsos-assist-web--stream-unconsumed-bytes 0))
-    (unless too-large
-      ;; Retain only an incomplete final record.  Otherwise a long healthy
-      ;; stream would still accumulate every already-consumed event.
-      (set-marker scan-marker (max start (1- (point-max)))))
-    (when (> emacsos-assist-web--stream-unconsumed-bytes
-             emacsos-assist-web-max-event-bytes)
-      (delete-region start (point-max))
-      (set-marker scan-marker start)
-      (setq-local emacsos-assist-web--stream-unconsumed-bytes 0)
-      (when (and (buffer-live-p target)
-                 (with-current-buffer target
-                   (= generation emacsos-assist-web--stream-generation)))
-        (emacsos-assist-web--stream-interrupted target "Assist event is too large")))))
+                (emacsos-assist-web--dispatch-event target event (or data "")))
+              (setq start record-end)
+              (set-marker marker start)
+              (set-marker scan-marker start)))))
+      (setq emacsos-assist-web--stream-unconsumed-bytes
+            (emacsos-assist-web--range-bytes start end))
+      (when (> emacsos-assist-web--stream-unconsumed-bytes
+               emacsos-assist-web-max-event-bytes)
+        (setq too-large t))
+      (if too-large
+          (progn
+            (set-marker marker end)
+            (set-marker scan-marker end)
+            (setq emacsos-assist-web--stream-unconsumed-bytes 0)
+            (when (and (buffer-live-p target)
+                       (with-current-buffer target
+                         (= generation emacsos-assist-web--stream-generation)))
+              (emacsos-assist-web--stream-interrupted
+               target "Assist event is too large")))
+        ;; A delimiter can span callbacks.  Rescan only its final three bytes.
+        (set-marker scan-marker (max start (- end 3))))
+      ;; Discard only bytes neither the parser nor stock decoder can address.
+      ;; An incomplete event may span chunks, and the active chunk plus a
+      ;; split final terminator must remain at their exact stock positions.
+      (let ((prune-end
+             (cond
+              ((and (boundp 'url-http-transfer-encoding)
+                    (equal url-http-transfer-encoding "chunked"))
+               (if (and (not (and (boundp 'url-http-chunked-last-crlf-missing)
+                                  url-http-chunked-last-crlf-missing))
+                        (boundp 'url-http-chunked-start)
+                        (markerp url-http-chunked-start))
+                   (min (marker-position marker)
+                        (marker-position url-http-chunked-start))
+                 body-start))
+              ((and (boundp 'url-http-content-length)
+                    (integerp url-http-content-length))
+               body-start)
+              (t (marker-position marker)))))
+        (when (> prune-end body-start)
+          (delete-region body-start prune-end))))))
 
 (defun emacsos-assist-web--event-filter (url-filter target generation)
   "Wrap URL-FILTER and dispatch SSE records to TARGET for GENERATION."
@@ -957,8 +1233,35 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
                   (when (timerp emacsos-assist-web--stream-header-timer)
                     (cancel-timer emacsos-assist-web--stream-header-timer)
                     (setq emacsos-assist-web--stream-header-timer nil))))
-              (emacsos-assist-web--drain-events
-               target generation (string-bytes bytes)))))))))
+              (let* ((decoded-end (emacsos-assist-web--decoded-end))
+                     (body-start
+                      (min (point-max)
+                           (1+ (marker-position url-http-end-of-headers))))
+                     (pending-bytes
+                      (emacsos-assist-web--range-bytes
+                       (or decoded-end body-start) (point-max))))
+                (cond
+                 ((and (boundp 'url-http-content-length)
+                       (integerp url-http-content-length)
+                       (or (< url-http-content-length 0)
+                           (> url-http-content-length
+                              emacsos-assist-web-max-response-bytes)))
+                  (emacsos-assist-web--stream-interrupted
+                   target "Assist stream response is too large"))
+                 ((and (boundp 'url-http-transfer-encoding)
+                       (equal url-http-transfer-encoding "chunked")
+                       (boundp 'url-http-chunked-length)
+                       (integerp url-http-chunked-length)
+                       (> url-http-chunked-length
+                          emacsos-assist-web-max-stream-chunk-bytes))
+                  (emacsos-assist-web--stream-interrupted
+                   target "Assist stream transport chunk is too large"))
+                 ((> pending-bytes emacsos-assist-web-max-header-bytes)
+                  (emacsos-assist-web--stream-interrupted
+                   target "Assist stream transport framing is too large"))
+                 (t
+                  (emacsos-assist-web--drain-events
+                   target generation decoded-end)))))))))))
 
 (defun emacsos-assist-web--observe-run (buffer)
   "Open BUFFER's authenticated status stream for its current run.
@@ -1046,35 +1349,38 @@ interrupted."
   "Display THREAD in the requested thread-buffer format with optional SUFFIX."
   (format "*assist %s - %s%s*"
           (alist-get 'description thread)
-          (or (alist-get 'repo_label thread) "No repository")
+          (alist-get 'repo_label thread)
           (or suffix "")))
+
+(defun emacsos-assist-web--catalog-threads ()
+  "Return the threads from the authoritative in-memory catalog."
+  (alist-get 'threads emacsos-assist-web--catalog))
 
 (defun emacsos-assist-web--completion-records ()
   "Return completion records with identity kept separate from display text."
-  (let ((counts (make-hash-table :test #'equal)))
-    (dolist (thread emacsos-assist-web--catalog)
-      (let ((label (emacsos-assist-web--thread-label thread)))
-        (puthash label (1+ (gethash label counts 0)) counts)))
+  (let* ((threads (emacsos-assist-web--catalog-threads))
+         (ids (sort (mapcar (lambda (thread) (alist-get 'id thread)) threads)
+                    #'string<)))
     (mapcar
      (lambda (thread)
-       (let* ((label (emacsos-assist-web--thread-label thread))
-              (identity-label
-               (if (> (gethash label counts) 1)
-                   (emacsos-assist-web--thread-label
-                    thread
-                    (format " [%s]"
-                            (emacsos-assist-web--require-id
-                             (alist-get 'id thread))))
-                 label))
-              (state (or (alist-get 'status thread) "unknown"))
-              (display (format "%s [%s%s]" identity-label state
-                               (if emacsos-assist-web--catalog-stale ", cached" ""))))
-         (list :display display :thread thread
-               :search (downcase (concat (or (alist-get 'search_description thread) "")
+       (let* ((state (alist-get 'status thread))
+              (base (format "%s [%s%s]"
+                            (emacsos-assist-web--thread-label thread)
+                            state
+                            (if (memq emacsos-assist-web--catalog-state
+                                      '(cached refresh-failed))
+                                ", cached" "")))
+              (ordinal (1+ (cl-position (alist-get 'id thread) ids
+                                        :test #'equal))))
+         (list :display
+               (format "#%d  %s" ordinal
+                       (emacsos-assist-web--isolate-display-text base))
+               :thread thread
+               :search (downcase (concat (alist-get 'search_description thread)
                                          " " (alist-get 'description thread)
-                                         " " (or (alist-get 'repo_label thread) "")
+                                         " " (alist-get 'repo_label thread)
                                          " " state)))))
-     emacsos-assist-web--catalog)))
+     threads)))
 
 (defun emacsos-assist-web--completion-table (records)
   "Build a completion table from RECORDS with server search-text matching."
@@ -1105,24 +1411,18 @@ interrupted."
   (seq-find (lambda (record) (equal display (plist-get record :display))) records))
 
 (defun emacsos-assist-web--labeled-records (items identity-key)
-  "Return completion records for ITEMS, disambiguated by IDENTITY-KEY.
-
-The human label remains primary.  Only duplicate labels expose their full
-opaque identity, so selecting a display string always selects one exact item."
-  (let ((counts (make-hash-table :test #'equal)))
-    (dolist (item items)
-      (let ((label (alist-get 'label item)))
-        (puthash label (1+ (gethash label counts 0)) counts)))
+  "Return unambiguous completion records for ITEMS using IDENTITY-KEY."
+  (let ((identities
+         (sort (mapcar (lambda (item) (alist-get identity-key item)) items)
+               #'string<)))
     (mapcar
      (lambda (item)
        (let* ((label (alist-get 'label item))
-              (identity (alist-get identity-key item)))
-         (unless (and (stringp label) (stringp identity)
-                      (not (string-empty-p identity)))
-           (error "Assist Web returned an invalid catalog choice"))
-         (list :display (if (> (gethash label counts) 1)
-                            (format "%s [%s]" label identity)
-                          label)
+              (identity (alist-get identity-key item))
+              (ordinal (1+ (cl-position identity identities :test #'equal))))
+         (list :display
+               (format "#%d  %s" ordinal
+                       (emacsos-assist-web--isolate-display-text label))
                :item item)))
      items)))
 
@@ -1157,17 +1457,6 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
             (and (derived-mode-p 'emacsos-assist-web-mode)
                  (equal emacsos-assist-web--thread-id thread-id)))))
    (buffer-list)))
-
-(defun emacsos-assist-web--show-notice (name text)
-  "Show a small visible non-blocking notice buffer named NAME with TEXT."
-  (let ((buffer (get-buffer-create name)))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (special-mode)
-        (erase-buffer)
-        (insert text "\n")))
-    (switch-to-buffer buffer)
-    buffer))
 
 (defun emacsos-assist-web--prompt-start ()
   "Return the editable region's start in the current web-thread buffer."
@@ -1302,23 +1591,50 @@ matching ids; older records no longer present in that bounded page stay ahead
 of it, together with the oldest pagination cursor already reached."
   (if (not previous)
       fresh
-    (let ((fresh-by-id (make-hash-table :test #'equal))
+    (let* ((fresh-by-id (make-hash-table :test #'equal))
           (older nil)
-          (has-old-only nil)
+          (old-only-p nil)
+          (dropped nil)
+          (fresh-messages (alist-get 'messages fresh))
+          (remaining-count (- emacsos-assist-web--max-rendered-messages
+                              (length fresh-messages)))
+          (remaining-bytes
+           (- emacsos-assist-web--max-rendered-transcript-bytes
+              (cl-loop for message in fresh-messages
+                       sum (string-bytes (alist-get 'text message)))))
+          (retained nil)
           (result (copy-tree fresh)))
-      (dolist (message (alist-get 'messages fresh))
+      (dolist (message fresh-messages)
         (puthash (alist-get 'id message) message fresh-by-id))
       (dolist (message (alist-get 'messages previous))
         (unless (gethash (alist-get 'id message) fresh-by-id)
-          (setq has-old-only t)
+          (setq old-only-p t)
           (push message older)))
+      ;; OLDER is newest-first here.  Keep the newest contiguous suffix that
+      ;; fits before FRESH, so a growing thread evicts the oldest loaded rows.
+      (while older
+        (let* ((message (pop older))
+               (bytes (string-bytes (alist-get 'text message))))
+          (if (and (> remaining-count 0) (>= remaining-bytes bytes))
+              (progn
+                (push message retained)
+                (setq remaining-count (1- remaining-count)
+                      remaining-bytes (- remaining-bytes bytes)))
+            ;; Older rows cannot be retained across this gap.
+            (setq dropped t
+                  older nil))))
       (setf (alist-get 'messages result)
-            (append (nreverse older) (alist-get 'messages fresh)))
-      (when has-old-only
+            (append retained fresh-messages))
+      (when old-only-p
         (setf (alist-get 'has_older_messages result)
               (alist-get 'has_older_messages previous)
               (alist-get 'next_before result)
               (alist-get 'next_before previous)))
+      (when (or dropped
+                (zerop remaining-count)
+                (zerop remaining-bytes))
+        (setf (alist-get 'has_older_messages result) nil
+              (alist-get 'next_before result) nil))
       result)))
 
 (defun emacsos-assist-web--render (snapshot &optional stale)
@@ -1327,10 +1643,24 @@ of it, together with the oldest pagination cursor already reached."
         (inhibit-modification-hooks t)
         (draft (emacsos-assist-web--input))
         (render-state (emacsos-assist-web--capture-render-state)))
-    (emacsos-assist-web--require-snapshot snapshot emacsos-assist-web--thread-id)
-    (setq snapshot
-          (emacsos-assist-web--retain-loaded-history
-           snapshot emacsos-assist-web--snapshot))
+    (emacsos-assist-web--require-snapshot
+     snapshot emacsos-assist-web--thread-id
+     emacsos-assist-web--max-rendered-messages
+     emacsos-assist-web--max-rendered-transcript-bytes)
+    (let ((previous emacsos-assist-web--snapshot))
+      (when previous
+        (condition-case nil
+            (emacsos-assist-web--require-snapshot
+             previous emacsos-assist-web--thread-id
+             emacsos-assist-web--max-rendered-messages
+             emacsos-assist-web--max-rendered-transcript-bytes)
+          (error (setq previous nil))))
+      (setq snapshot
+            (emacsos-assist-web--retain-loaded-history snapshot previous)))
+    (emacsos-assist-web--require-transcript-limits
+     (alist-get 'messages snapshot)
+     emacsos-assist-web--max-rendered-messages
+     emacsos-assist-web--max-rendered-transcript-bytes)
     (let ((thread (alist-get 'thread snapshot))
           (presentation-bytes
            (cl-loop for message in (alist-get 'messages snapshot)
@@ -1516,7 +1846,7 @@ suppressing a genuine repeated submission."
                       ((equal status "awaiting_approval")
                        ;; It ends this observer but remains a durable Run until
                        ;; the canonical refresh has made its approval state visible.
-                       (emacsos-assist-web--stream-finish buffer))
+                       (emacsos-assist-web--stream-finish buffer t))
                       ((member status '("success" "error" "timeout" "interrupted"
                                        "cancelled"))
                        (setq emacsos-assist-web--pending-key nil
@@ -1580,6 +1910,203 @@ suppressing a genuine repeated submission."
               (insert text)))
         (when (stringp text) (insert text))))))
 
+(defun emacsos-assist-web--thread-for-id (id)
+  "Return the current catalog thread identified by ID."
+  (seq-find (lambda (thread) (equal (alist-get 'id thread) id))
+            (emacsos-assist-web--catalog-threads)))
+
+(defun emacsos-assist-web--list-records (width)
+  "Return list records fitted to WIDTH with deterministic collision ordinals."
+  (let* ((groups (make-hash-table :test #'equal))
+         (records
+          (mapcar
+           (lambda (thread)
+             (let* ((description (emacsos-assist-web--fit-list-line
+                                  (alist-get 'description thread) width))
+                    (metadata-source (format "%s · %s"
+                                             (alist-get 'repo_label thread)
+                                             (alist-get 'status thread)))
+                    (metadata (emacsos-assist-web--fit-list-line
+                               metadata-source
+                               (max 0 (- width
+                                         emacsos-assist-web--list-ordinal-width))))
+                    (key (list
+                          (emacsos-assist-web--fit-list-line
+                           (emacsos-assist-web--collision-key-text
+                            (alist-get 'description thread)) width)
+                          (emacsos-assist-web--fit-list-line
+                           (emacsos-assist-web--collision-key-text metadata-source)
+                           (max 0 (- width
+                                     emacsos-assist-web--list-ordinal-width))))))
+               (list :thread thread :description description
+                     :metadata metadata :key key)))
+           (emacsos-assist-web--catalog-threads))))
+    (dolist (record records)
+      (let ((key (plist-get record :key))
+            (id (alist-get 'id (plist-get record :thread))))
+        (puthash key (cons id (gethash key groups)) groups)))
+    (mapcar
+     (lambda (record)
+       (let* ((ids (sort (copy-sequence
+                          (gethash (plist-get record :key) groups))
+                         #'string<))
+              (ordinal (and (cdr ids)
+                            (1+ (cl-position
+                                 (alist-get 'id (plist-get record :thread)) ids
+                                            :test #'equal)))))
+         (plist-put record :ordinal ordinal)))
+     records)))
+
+(defun emacsos-assist-web--list-width ()
+  "Return a usable text width for the native thread list."
+  (max 12
+       (if-let ((window (get-buffer-window (current-buffer) t)))
+           (window-body-width window)
+         40)))
+
+(defun emacsos-assist-web--fit-list-line (text width)
+  "Fit TEXT into WIDTH columns with a visible truncation marker."
+  (truncate-string-to-width text width nil nil "…"))
+
+(defun emacsos-assist-web--thread-row-position (id)
+  "Return the first native list position whose stored thread ID equals ID."
+  (let ((position (point-min))
+        found)
+    (while (and (< position (point-max)) (not found))
+      (if (equal (get-text-property
+                  position 'emacsos-assist-web-thread-id)
+                 id)
+          (setq found position)
+        (setq position
+              (next-single-property-change
+               position 'emacsos-assist-web-thread-id nil (point-max)))))
+    found))
+
+(defvar emacsos-assist-web--thread-row-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'emacsos-assist-web-list-activate)
+    map)
+  "Keymap on one trusted native thread-list row.")
+
+(defvar emacsos-assist-web--thread-refresh-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'emacsos-assist-web-refresh-threads)
+    (define-key map (kbd "RET") #'emacsos-assist-web-refresh-threads)
+    map)
+  "Keymap on the native thread-list refresh row.")
+
+(defun emacsos-assist-web--insert-refresh-row (label)
+  "Insert a touch-sized catalog refresh row displaying LABEL."
+  (let ((start (point)))
+    (insert (format "  %s  \n\n" label))
+    (add-text-properties
+     start (point)
+     (list 'emacsos-assist-web-list-action 'refresh
+           'keymap emacsos-assist-web--thread-refresh-map
+           'mouse-face 'highlight
+           'face 'button
+           'help-echo "Refresh Assist threads"
+           'rear-nonsticky t))))
+
+(defun emacsos-assist-web--insert-thread-row (record)
+  "Insert one fitted, touch-sized thread-list RECORD."
+  (let* ((thread (plist-get record :thread))
+         (ordinal (plist-get record :ordinal))
+         (suffix (format " %4s" (if ordinal (format "#%d" ordinal) "")))
+         (start (point)))
+    (insert (emacsos-assist-web--isolate-display-text
+             (plist-get record :description))
+            "\n"
+            (emacsos-assist-web--isolate-display-text
+             (plist-get record :metadata))
+            suffix "\n")
+    (add-text-properties
+     start (point)
+     (list 'emacsos-assist-web-thread-id (alist-get 'id thread)
+           'keymap emacsos-assist-web--thread-row-map
+           'mouse-face 'highlight
+           'help-echo "Open this Assist thread"
+           'rear-nonsticky t))))
+
+(defun emacsos-assist-web--render-thread-list ()
+  "Render the authoritative catalog in the native thread-list buffer."
+  (when-let ((buffer (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+    (with-current-buffer buffer
+      (let ((selected (get-text-property (point) 'emacsos-assist-web-thread-id))
+            (inhibit-read-only t)
+            (width (emacsos-assist-web--list-width)))
+        (erase-buffer)
+        (cond
+         ((null emacsos-assist-web--catalog)
+          (insert (if (eq emacsos-assist-web--catalog-state 'refresh-failed)
+                      "Assist threads could not be loaded.\n\n"
+                    "Loading Assist threads…\n\n"))
+          (emacsos-assist-web--insert-refresh-row
+           (if (eq emacsos-assist-web--catalog-state 'refresh-failed)
+               "Retry" "Refreshing…")))
+         (t
+          (insert (cond
+                   (emacsos-assist-web--catalog-refreshing-p
+                    "Assist threads: refreshing…\n\n")
+                   ((eq emacsos-assist-web--catalog-state 'refresh-failed)
+                    "Assist threads: refresh failed\n\n")
+                   ((eq emacsos-assist-web--catalog-state 'cache-write-failed)
+                    "Assist threads: current; cache write failed\n\n")
+                   ((eq emacsos-assist-web--catalog-state 'cached)
+                    "Assist threads: cached\n\n")
+                   (t "Assist threads\n\n")))
+          (emacsos-assist-web--insert-refresh-row
+           (if (memq emacsos-assist-web--catalog-state
+                     '(refresh-failed cache-write-failed))
+               "Retry" "Refresh"))
+          (if-let ((records (emacsos-assist-web--list-records width)))
+              (dolist (record records)
+                (emacsos-assist-web--insert-thread-row record))
+            (insert "No Assist threads yet. Use C-c e n to create one.\n"))))
+        (goto-char
+         (or (and selected
+                  (emacsos-assist-web--thread-row-position selected))
+             (text-property-not-all (point-min) (point-max)
+                                    'emacsos-assist-web-thread-id nil)
+             (text-property-not-all (point-min) (point-max)
+                                    'emacsos-assist-web-list-action nil)
+             (point-min)))))))
+
+(defun emacsos-assist-web-list-activate (&optional event)
+  "Open the exact native thread-list row at point or EVENT."
+  (interactive (list last-input-event))
+  (when (mouse-event-p event) (mouse-set-point event))
+  (if-let* ((id (get-text-property (point) 'emacsos-assist-web-thread-id))
+            (thread (emacsos-assist-web--thread-for-id id)))
+      (emacsos-assist-web--show-thread thread)
+    (message "No Assist thread at point")))
+
+(defvar emacsos-assist-web-thread-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'emacsos-assist-web-list-activate)
+    (define-key map (kbd "g") #'emacsos-assist-web-refresh-threads)
+    (define-key map (kbd "C-c C-a r") #'emacsos-assist-web-refresh-threads)
+    map)
+  "Keymap for `emacsos-assist-web-thread-list-mode'.")
+
+(define-derived-mode emacsos-assist-web-thread-list-mode special-mode "Assist Threads"
+  "Major mode for the native Assist thread list."
+  (setq-local truncate-lines t
+              bidi-paragraph-direction 'left-to-right))
+
+(defun emacsos-assist-web-show-thread-list ()
+  "Show the native Assist thread list and refresh it asynchronously."
+  (interactive)
+  (let ((buffer (get-buffer-create emacsos-assist-web--thread-list-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'emacsos-assist-web-thread-list-mode)
+        (emacsos-assist-web-thread-list-mode)))
+    (switch-to-buffer buffer)
+    (if emacsos-assist-web--catalog-refreshing-p
+        (emacsos-assist-web--render-thread-list)
+      (emacsos-assist-web-refresh-threads))))
+
 (defun emacsos-assist-web--show-thread (thread)
   "Select THREAD's dedicated buffer and refresh it unless a send is active."
   (let* ((name (emacsos-assist-web--thread-label thread))
@@ -1613,85 +2140,136 @@ suppressing a genuine repeated submission."
       (emacsos-assist-web-refresh-thread buffer)))))
 
 (defun emacsos-assist-web-open-thread ()
-  "Choose and open one cached Assist Web thread without a network wait."
+  "Choose and open one cataloged Assist Web thread without a network wait."
   (interactive)
-  (emacsos-assist-web--load-catalog)
-  (if (not emacsos-assist-web--catalog-loaded-p)
-      (progn
-        (emacsos-assist-web--show-notice
-         "*assist Threads*" "Loading Assist threads…")
-        (emacsos-assist-web-refresh-threads))
-    (if (null emacsos-assist-web--catalog)
-        (emacsos-assist-web--show-notice
-         "*assist Threads*"
-         "No Assist threads yet. C-c e n creates one; C-c e t opens one; C-c e r retries.")
-      (let* ((records (emacsos-assist-web--completion-records))
-           (choice (completing-read "Assist thread: "
-                                    (emacsos-assist-web--completion-table records)
-                                    nil t))
-           (record (emacsos-assist-web--record-for-display choice records)))
-        (when record (emacsos-assist-web--show-thread (plist-get record :thread)))))))
+  (let ((records (and emacsos-assist-web--catalog
+                      (emacsos-assist-web--completion-records))))
+    (if (null records)
+      (emacsos-assist-web-show-thread-list)
+      (emacsos-assist-web-refresh-threads)
+      (let* ((choice (completing-read
+                      "Assist thread: "
+                      (emacsos-assist-web--completion-table records) nil t))
+             (record (emacsos-assist-web--record-for-display choice records))
+             (id (and record
+                      (alist-get 'id (plist-get record :thread))))
+             (thread (and id (emacsos-assist-web--thread-for-id id))))
+        (when record
+          (if thread
+              (emacsos-assist-web--show-thread thread)
+            (message "That Assist thread is no longer available")))))))
+
+(defun emacsos-assist-web--catalog-refresh-failed (problem rejected)
+  "Finish a failed catalog refresh with PROBLEM.
+REJECTED is non-nil when a response failed validation."
+  (setq emacsos-assist-web--catalog-refreshing-p nil
+        emacsos-assist-web--catalog-state 'refresh-failed)
+  (emacsos-assist-web--cancel-pending-new-thread)
+  (emacsos-assist-web--render-thread-list)
+  (force-mode-line-update t)
+  (message (if rejected "Thread refresh rejected: %s"
+             "Thread refresh failed: %s")
+           problem))
+
+(defun emacsos-assist-web--cancel-pending-new-thread ()
+  "Clear pending new-thread intent and its active minibuffer exit hook."
+  (setq emacsos-assist-web--new-thread-pending-p nil)
+  (when-let ((window (active-minibuffer-window)))
+    (with-current-buffer (window-buffer window)
+      (remove-hook 'minibuffer-exit-hook
+                   #'emacsos-assist-web--resume-new-thread-after-minibuffer t))))
+
+(defun emacsos-assist-web--resume-new-thread-after-minibuffer ()
+  "Resume one pending new-thread chooser after the minibuffer exits."
+  (remove-hook 'minibuffer-exit-hook
+               #'emacsos-assist-web--resume-new-thread-after-minibuffer t)
+  (run-at-time 0 nil #'emacsos-assist-web--open-pending-new-thread))
+
+(defun emacsos-assist-web--open-pending-new-thread ()
+  "Open the coalesced new-thread chooser when no minibuffer is active."
+  (when (and emacsos-assist-web--new-thread-pending-p
+             emacsos-assist-web--catalog)
+    (let ((repositories (alist-get 'repositories emacsos-assist-web--catalog))
+          (harnesses (alist-get 'harnesses emacsos-assist-web--catalog)))
+      (cond
+       ((null repositories)
+        (emacsos-assist-web--cancel-pending-new-thread)
+        (message "No Assist repositories are available"))
+       ((null harnesses)
+        (emacsos-assist-web--cancel-pending-new-thread)
+        (message "No Assist harnesses are available"))
+       ((active-minibuffer-window)
+        (let ((window (active-minibuffer-window)))
+          (with-current-buffer (window-buffer window)
+            (add-hook 'minibuffer-exit-hook
+                      #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                      nil t))))
+       (t
+        (setq emacsos-assist-web--new-thread-pending-p nil)
+        (condition-case problem
+            (emacsos-assist-web--new-thread-from-catalog
+             emacsos-assist-web--catalog)
+          (error
+           (message "Cannot create a thread from the catalog: %s"
+                    (error-message-string problem)))))))))
 
 (defun emacsos-assist-web-refresh-threads ()
-  "Refresh the thread chooser cache asynchronously."
+  "Refresh the one shared Assist catalog asynchronously."
   (interactive)
-  (let ((notice (get-buffer "*assist Threads*"))
-        (generation (cl-incf emacsos-assist-web--catalog-generation)))
-    (emacsos-assist-web--request
-     "GET" "threads" nil
-     (lambda (value error)
-       (when (= generation emacsos-assist-web--catalog-generation)
-         (if error
-           (progn
-             (when emacsos-assist-web--catalog-loaded-p
-               (setq emacsos-assist-web--catalog-stale t))
-             (when (buffer-live-p notice)
-               (with-current-buffer notice
-                 (let ((inhibit-read-only t))
-                   (erase-buffer)
-                   (insert "Assist threads could not be loaded.\n"
-                           "Reconnect, then use C-c e r to retry.\n"))))
-             (message "Thread refresh failed: %s" error))
-         (condition-case problem
+  (unless emacsos-assist-web--catalog-refreshing-p
+    (let ((generation emacsos-assist-web--catalog-generation))
+      (setq emacsos-assist-web--catalog-refreshing-p t)
+      (emacsos-assist-web--render-thread-list)
+      (force-mode-line-update t)
+      (emacsos-assist-web--request
+       "GET" "threads" nil
+       (lambda (value error)
+         (if (/= generation emacsos-assist-web--catalog-generation)
              (progn
-               (emacsos-assist-web--require-catalog value)
-               (setq emacsos-assist-web--catalog (alist-get 'threads value)
-                     emacsos-assist-web--catalog-loaded-p t
-                     emacsos-assist-web--catalog-stale nil)
-               (emacsos-assist-web--try-write-cache
-                emacsos-assist-web--catalog-file value)
-               (when (buffer-live-p notice)
-                 (with-current-buffer notice
-                   (let ((inhibit-read-only t))
-                     (erase-buffer)
-                     (insert "Assist threads are ready.\n"
-                             "Use C-c e t to choose one. C-c e r refreshes.\n"))))
-               (message "Threads updated. Open Threads to choose one."))
-           (error
-            (when (buffer-live-p notice)
-              (with-current-buffer notice
-                (let ((inhibit-read-only t))
-                  (erase-buffer)
-                  (insert "Assist threads returned invalid data.\n"
-                          "Use C-c e r to retry.\n"))))
-            (message "Thread refresh rejected: %s"
-                     (error-message-string problem))))))))))
+               (setq emacsos-assist-web--catalog-refreshing-p nil)
+               (emacsos-assist-web--render-thread-list)
+               (force-mode-line-update t))
+           (if error
+               (emacsos-assist-web--catalog-refresh-failed error nil)
+             (condition-case problem
+                 (let* ((catalog (emacsos-assist-web--require-catalog value))
+                        (cached
+                         ;; VALUE retains vector array identity so empty arrays
+                         ;; are serialized as [] rather than JSON null.
+                         (emacsos-assist-web--try-write-cache
+                          emacsos-assist-web--catalog-file value)))
+                   (setq emacsos-assist-web--catalog catalog
+                         emacsos-assist-web--catalog-refreshing-p nil
+                         emacsos-assist-web--catalog-state
+                         (if cached 'current 'cache-write-failed))
+                   (emacsos-assist-web--render-thread-list)
+                   (force-mode-line-update t)
+                   (message (if cached "Threads updated"
+                              "Threads updated; local cache write failed"))
+                   (emacsos-assist-web--open-pending-new-thread))
+               (error
+                (emacsos-assist-web--catalog-refresh-failed
+                 (error-message-string problem) t))))))
+       nil nil 'array 'hash-table))))
 
 (defun emacsos-assist-web--read-catalog-cache ()
   "Return the validated local catalog cache, or nil when absent or invalid."
   (when-let ((cached
-              (emacsos-assist-web--read-cache emacsos-assist-web--catalog-file)))
+              (emacsos-assist-web--read-cache
+               emacsos-assist-web--catalog-file 'array 'hash-table)))
     (condition-case nil
         (emacsos-assist-web--require-catalog cached)
       (error nil))))
 
 (defun emacsos-assist-web--load-catalog ()
-  "Load the catalog cache once, at package load or first use."
-  (unless emacsos-assist-web--catalog-loaded-p
+  "Load the catalog cache at package initialization or repair a legacy shape."
+  (unless (and (listp emacsos-assist-web--catalog)
+               (assq 'threads emacsos-assist-web--catalog))
+    (setq emacsos-assist-web--catalog nil
+          emacsos-assist-web--catalog-state nil)
     (when-let ((cached (emacsos-assist-web--read-catalog-cache)))
-      (setq emacsos-assist-web--catalog (alist-get 'threads cached)
-            emacsos-assist-web--catalog-loaded-p t
-            emacsos-assist-web--catalog-stale t))))
+      (setq emacsos-assist-web--catalog cached
+            emacsos-assist-web--catalog-state 'cached))))
 
 (defun emacsos-assist-web-refresh-thread (&optional buffer completed-run-id)
   "Fetch and render BUFFER's canonical thread snapshot asynchronously.
@@ -1729,11 +2307,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                            (progn
                              (emacsos-assist-web--require-snapshot value tid)
                              (let ((busy
-                                    (member
-                                     (alist-get 'status (alist-get 'thread value))
-                                     '("queued" "processing" "paused"
-                                       "initializing" "cloning"
-                                       "starting_sandbox"))))
+                                    (emacsos-assist-web--snapshot-active-p value)))
                                (emacsos-assist-web--try-write-cache
                                 (emacsos-assist-web--snapshot-cache-name tid) value)
                                (when (or (and completed-run-id
@@ -1772,11 +2346,22 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
       (message "This draft has no history")
     (let* ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
            (name (emacsos-assist-web--snapshot-cache-name tid))
-           (cached (or emacsos-assist-web--snapshot
-                       (emacsos-assist-web--read-cache name)))
+           (raw-cached (or emacsos-assist-web--snapshot
+                           (emacsos-assist-web--read-cache name)))
+           (cached
+            (condition-case nil
+                (when raw-cached
+                  (emacsos-assist-web--require-snapshot
+                   raw-cached tid
+                   emacsos-assist-web--max-rendered-messages
+                   emacsos-assist-web--max-rendered-transcript-bytes))
+              (error nil)))
            (before (and cached (alist-get 'next_before cached)))
            (buffer (current-buffer))
            (generation (cl-incf emacsos-assist-web--refresh-generation)))
+      (when (and raw-cached (not cached)
+                 (eq raw-cached emacsos-assist-web--snapshot))
+        (setq emacsos-assist-web--snapshot nil))
       (if (not before)
           (message "No older messages are available")
         (emacsos-assist-web--request
@@ -1795,13 +2380,33 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                (or emacsos-assist-web--snapshot cached))))
                          (emacsos-assist-web--require-history-page
                           page tid updated before)
-                         (setf (alist-get 'messages updated)
-                               (append (alist-get 'messages page)
-                                       (alist-get 'messages updated))
+                         (let* ((messages
+                                 (append (alist-get 'messages page)
+                                         (alist-get 'messages updated)))
+                                (count (length messages))
+                                (bytes
+                                 (cl-loop for message in messages
+                                          sum (string-bytes
+                                               (alist-get 'text message))))
+                                (over-cap
+                                 (or (> count
+                                        emacsos-assist-web--max-rendered-messages)
+                                     (> bytes
+                                        emacsos-assist-web--max-rendered-transcript-bytes)))
+                                (at-cap
+                                 (or (>= count
+                                         emacsos-assist-web--max-rendered-messages)
+                                     (>= bytes
+                                         emacsos-assist-web--max-rendered-transcript-bytes))))
+                           (unless over-cap
+                             (setf (alist-get 'messages updated) messages))
+                           (setf
                                (alist-get 'has_older_messages updated)
-                               (alist-get 'has_older_messages page)
+                               (and (not over-cap) (not at-cap)
+                                    (alist-get 'has_older_messages page))
                                (alist-get 'next_before updated)
-                               (alist-get 'next_before page))
+                               (and (not over-cap) (not at-cap)
+                                    (alist-get 'next_before page))))
                          (emacsos-assist-web--render updated))
                      (error
                       (message "Older history rejected: %s"
@@ -2104,70 +2709,96 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                  (emacsos-assist-web--save-draft)))))
          nil t)))))
 
-(defun emacsos-assist-web--new-thread-from-catalog (cache)
-  "Open the existing new-thread draft, or choose its workspace from CACHE."
+(defun emacsos-assist-web--new-thread-from-catalog (catalog)
+  "Open the existing draft, or choose from CATALOG and revalidate current IDs."
   (if-let ((existing (get-buffer "*assist New thread*")))
       (switch-to-buffer existing)
-    (let* ((repositories (alist-get 'repositories cache))
-         (saved (emacsos-assist-web--read-cache "drafts/new-thread.json"))
-         (saved-repo-key (alist-get 'repo_key saved))
-         (saved-harness-key (alist-get 'harness saved))
-         (repo-record (emacsos-assist-web--select-labeled-item
-                       "Repository: " repositories 'repo_key saved-repo-key))
-         (repo (and repo-record (plist-get repo-record :item)))
-         (selected (and repo-record (plist-get repo-record :display)))
-         (harnesses (alist-get 'harnesses cache))
-         (harness-record (emacsos-assist-web--select-labeled-item
-                          "Harness: " harnesses 'key saved-harness-key))
-         (harness (and harness-record (plist-get harness-record :item)))
-         (selected-harness (and harness-record
-                                (plist-get harness-record :display)))
-         (buffer (get-buffer-create "*assist New thread*")))
-    (if (not (and repo harness))
-        (progn (kill-buffer buffer)
-               (message "Refresh thread catalog before creating a thread"))
-      (with-current-buffer buffer
-        (emacsos-assist-web-mode)
-        (setq emacsos-assist-web--draft-id "new-thread"
-              emacsos-assist-web--draft-repository (alist-get 'repo_key repo)
-              emacsos-assist-web--draft-harness (alist-get 'key harness))
-        (let ((inhibit-read-only t) (inhibit-modification-hooks t))
-          (insert (format "*assist New thread - %s*\n" selected))
-          (setq emacsos-assist-web--status-start (copy-marker (point) nil))
-          (insert (format "[%s local draft]" selected-harness))
-          (setq emacsos-assist-web--status-end (copy-marker (point) nil))
-          (insert "\n\n")
-          (emacsos-assist-web--write-prompt)
-          (emacsos-assist-web--restore-draft)))
-      (switch-to-buffer buffer)))))
+    (let ((repositories (alist-get 'repositories catalog))
+          (harnesses (alist-get 'harnesses catalog)))
+      (cond
+       ((null repositories) (user-error "No Assist repositories are available"))
+       ((null harnesses) (user-error "No Assist harnesses are available")))
+      (let* ((saved (emacsos-assist-web--read-cache "drafts/new-thread.json"))
+             (saved-repo-key (alist-get 'repo_key saved))
+             (saved-harness-key (alist-get 'harness saved))
+             (repo-record (emacsos-assist-web--select-labeled-item
+                           "Repository: " repositories 'repo_key saved-repo-key))
+             (harness-record (emacsos-assist-web--select-labeled-item
+                              "Harness: " harnesses 'key saved-harness-key))
+             (repo-key (and repo-record
+                            (alist-get 'repo_key (plist-get repo-record :item))))
+             (harness-key (and harness-record
+                               (alist-get 'key (plist-get harness-record :item))))
+             (current-repositories
+              (alist-get 'repositories emacsos-assist-web--catalog))
+             (current-harnesses (alist-get 'harnesses emacsos-assist-web--catalog))
+             (current-repo-record
+              (and repo-key
+                   (seq-find
+                    (lambda (record)
+                      (equal repo-key
+                             (alist-get 'repo_key (plist-get record :item))))
+                    (emacsos-assist-web--labeled-records
+                     current-repositories 'repo_key))))
+             (current-harness-record
+              (and harness-key
+                   (seq-find
+                    (lambda (record)
+                      (equal harness-key
+                             (alist-get 'key (plist-get record :item))))
+                    (emacsos-assist-web--labeled-records current-harnesses 'key)))))
+        (cond
+         ((null current-repositories)
+          (message "No Assist repositories are available"))
+         ((null current-harnesses)
+          (message "No Assist harnesses are available"))
+         ((not (and current-repo-record current-harness-record))
+          (message "Selected Assist workspace is no longer available"))
+         (t
+          (let* ((repo (plist-get current-repo-record :item))
+                 (harness (plist-get current-harness-record :item))
+                 (selected (plist-get current-repo-record :display))
+                 (selected-harness (plist-get current-harness-record :display))
+                 (buffer (get-buffer-create "*assist New thread*")))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--draft-id "new-thread"
+                    emacsos-assist-web--draft-repository (alist-get 'repo_key repo)
+                    emacsos-assist-web--draft-harness (alist-get 'key harness))
+              (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+                (insert (format "*assist New thread - %s*\n" selected))
+                (setq emacsos-assist-web--status-start (copy-marker (point) nil))
+                (insert (format "[%s local draft]" selected-harness))
+                (setq emacsos-assist-web--status-end (copy-marker (point) nil))
+                (insert "\n\n")
+                (emacsos-assist-web--write-prompt)
+                (emacsos-assist-web--restore-draft)))
+            (switch-to-buffer buffer))))))))
 
 (defun emacsos-assist-web-new-thread ()
-  "Create a local draft, fetching repository choices on first use if needed."
+  "Refresh the catalog and open a draft now or when usable choices arrive."
   (interactive)
-  (let ((cache (emacsos-assist-web--read-catalog-cache)))
-    (if (and (alist-get 'repositories cache) (alist-get 'harnesses cache))
-        (emacsos-assist-web--new-thread-from-catalog cache)
-      (message "Fetching repositories for a new Assist thread…")
-      (let ((generation (cl-incf emacsos-assist-web--catalog-generation)))
-        (emacsos-assist-web--request
-         "GET" "threads" nil
-         (lambda (value error)
-           (when (= generation emacsos-assist-web--catalog-generation)
-             (if error
-                 (message "Cannot create a thread until repository choices load: %s"
-                          error)
-               (condition-case problem
-                   (progn
-                     (emacsos-assist-web--require-catalog value)
-                     (setq emacsos-assist-web--catalog (alist-get 'threads value)
-                           emacsos-assist-web--catalog-loaded-p t
-                           emacsos-assist-web--catalog-stale nil)
-                     (emacsos-assist-web--try-write-cache
-                      emacsos-assist-web--catalog-file value)
-                     (emacsos-assist-web--new-thread-from-catalog value))
-                 (error
-                  (message "Cannot create a thread from invalid catalog data: %s"
-                           (error-message-string problem))))))))))))
+  (setq emacsos-assist-web--new-thread-pending-p t)
+  (cond
+   ((and (alist-get 'repositories emacsos-assist-web--catalog)
+         (alist-get 'harnesses emacsos-assist-web--catalog))
+    (emacsos-assist-web-refresh-threads)
+    ;; A request setup error can fail synchronously and clear the intent before
+    ;; the still-usable cached chooser opens.  A synchronous success already
+    ;; opened or deferred it, or confirmed that no current choices remain.
+    (when (and (not emacsos-assist-web--new-thread-pending-p)
+               (not (active-minibuffer-window))
+               (eq emacsos-assist-web--catalog-state 'refresh-failed))
+      (setq emacsos-assist-web--new-thread-pending-p t))
+    (emacsos-assist-web--open-pending-new-thread))
+   ((and emacsos-assist-web--catalog
+         (not (memq emacsos-assist-web--catalog-state
+                    '(cached refresh-failed))))
+    (emacsos-assist-web-refresh-threads)
+    (emacsos-assist-web--open-pending-new-thread))
+   (t
+    (message "Fetching repositories for a new Assist thread…")
+    (emacsos-assist-web-refresh-threads))))
 
 (define-derived-mode emacsos-assist-web-mode text-mode "Assist Web"
   "Major mode for a canonical Assist Web thread or unsent local draft."
@@ -2185,6 +2816,23 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 (define-key emacsos-assist-web-mode-map (kbd "RET")
             #'emacsos-conversation-activate-or-newline)
 
+(defun emacsos-assist-web--retire-active-streams-after-reload ()
+  "Retire observations whose process callbacks predate this file load."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (and (derived-mode-p 'emacsos-assist-web-mode)
+                      emacsos-assist-web--stream-process)))
+      (emacsos-assist-web--stream-interrupted
+       buffer "Assist code reloaded; refresh observation"))))
+
+;; Reloading this file invalidates callbacks created by its previous function
+;; definitions.  Retire active stream callbacks before advancing the catalog
+;; generation; ordinary in-flight request callbacks release their refresh claim
+;; when they observe that generation change.
+(emacsos-assist-web--retire-active-streams-after-reload)
+(cl-incf emacsos-assist-web--catalog-generation)
+(emacsos-assist-web--cancel-pending-new-thread)
 (emacsos-assist-web--load-catalog)
 
 (provide 'assist-web)

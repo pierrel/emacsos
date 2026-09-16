@@ -1,0 +1,22 @@
+#+title: Cellular modem probe format amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment replaces only the modem-object listing form in
+[[file:2026-09-15-cellular-modem-probe-grammar-amendment.org][Cellular modem probe grammar amendment]], section /Correction/.  That record
+remains the historical source for the every-line and nonempty-list rules.
+
+* Correction
+
+Every successful =mmcli -L= line must contain a numeric ModemManager object
+path, a nonempty bracketed vendor, and a nonempty printable model, separated by
+whitespace.  A bare object path followed by arbitrary same-line text is not a
+listing.  Empty, mixed, malformed, and otherwise unrecognized output fails
+without cellular activation or a ModemManager restart.
+
+* Verification
+
+The focused root-helper regression supplies a syntactically valid modem object
+path followed by an arbitrary suffix and requires =not-connected:failed=
+without service restart.  The existing valid Quectel listing remains accepted.

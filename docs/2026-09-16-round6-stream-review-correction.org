@@ -1,0 +1,31 @@
+#+title: Round-six stream review correction
+#+date: 2026-09-16
+
+* Corrections
+
+A canonical Assist thread refresh also treats =awaiting_approval= as active.
+Only =ready= and =error= prove settlement during a manual refresh.  An exact
+terminal =completed-run-id= remains authoritative and can settle its local Run
+if the thread has since become active again, but an approval-wait observation
+does not claim that the Run completed.
+
+The legacy =/chat= client bounds the raw HTTP response before =url-http= copies
+the crossing chunk into its response buffer.  Its allowance covers a 2 MiB body
+encoded by the deployed server as one-byte HTTP/1.1 chunks, the terminal chunk,
+and bounded response headers.  Body and event limits apply before JSON dispatch
+or rendering; the token-text limit applies after JSON parsing but before
+rendering.  An unfinished event is counted incrementally, including when its
+cursor survives a live code reload.
+
+* Verification
+
+ERT covers approval-wait recovery through canonical refresh, body-valid streams
+with heavy chunk framing, the raw pre-filter cutoff, an oversized unfinished
+event following a complete event in the same callback, incremental fragments,
+and reconstruction of a pre-reload unfinished tail.
+
+* Historical supersessions
+
+This document supersedes only the =Corrections= and =Verification= sections of
+[[file:2026-09-16-round6-chat-stream-bounds-amendment.org][Round-six chat stream and thread-status bounds amendment]] by recording the
+reviewed approval-wait, raw-transport, incremental-event, and reload boundaries.

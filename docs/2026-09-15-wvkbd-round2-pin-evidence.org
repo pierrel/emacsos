@@ -1,0 +1,26 @@
+#+title: wvkbd round-two review pin evidence amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment supersedes only =Current exact source= and =Current validation=
+in =2026-09-15-wvkbd-review-fix-pin-evidence.org=.  That document remains the
+point-in-time record for wvkbd commit
+=3ef20a5539dc560bed28fa4b251614aaabdbb136= and its validation.
+
+* Current exact source
+
+The EmacsOS keyboard pin is wvkbd commit
+=1af8dee4ae32a15b2c8903f290895a149d0621e7=, tree
+=41c82240105573ddd02e21f9a4346967712c6e68=.  Its reproducible AArch64 artifact
+SHA-256 is
+=dff553b3f90384a55813e4c213cad9db15c005ac06d52a1abcba3fd035675db2=.
+
+* Current validation
+
+The exact source passed the complete native and sanitizer suites, dictionary
+validation, focused compose-lifecycle and incremental-build regressions, and
+the affected seven-lens local review loop.  The EmacsOS clean-archive AArch64
+build and atomic side-by-side install suite passed against the exact pin, as did
+the full PinePhone/OpenRC script suite with 76 Emacs Lisp tests and the complete
+554-test Emacs Lisp suite.

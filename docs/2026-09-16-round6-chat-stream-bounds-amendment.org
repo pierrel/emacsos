@@ -1,0 +1,31 @@
+#+title: Round-six chat stream and thread-status bounds amendment
+#+date: 2026-09-16
+
+* Corrections
+
+A canonical Assist thread refresh treats =pending=, =running=, and
+=transitioning= as active alongside the existing thread setup and processing
+stages.  Only =ready= and =error= prove the snapshot is settled.  Any other
+bounded status fails closed without releasing the accepted Run identity.
+
+The legacy =/chat= client admits at most 16 KiB of UTF-8 text in one token,
+256 KiB in one complete or unfinished NDJSON event, and 2 MiB across one
+response body.  It terminates the stream before parsing or rendering a value
+that crosses those limits.  Server-supplied error reasons and configuration
+details must also pass the existing 512-byte single-line display-safety policy;
+invalid values are replaced with fixed local text.
+
+* Verification
+
+ERT covers every recognized active snapshot status and an unknown status that
+cannot settle local Run ownership.  Chat tests cover hostile and oversized
+error/detail text, an oversized token, an unfinished oversized event, and a
+cumulative response-body overflow made from individually bounded events.
+
+* Historical supersessions
+
+This document supersedes only the client-reception, error-rendering, and
+refresh-settlement boundaries in
+[[file:2026-09-08-conversation-interface-streaming.org][Conversation-interface streaming]], sections /Canonical Assist thread, before
+and after/, /Shared native buffer contract/, and /Numbered implementation plan/,
+by adding the finite stream, display-text, and status classifications above.

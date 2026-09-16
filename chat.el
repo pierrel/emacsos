@@ -126,6 +126,15 @@ the first `emacsos--chat-drain-body' call against this buffer.
 Insertion-type nil so url-http's filter appends BEYOND it
 rather than pushing it forward.")
 
+(defvar-local emacsos--chat-body-seen-marker nil
+  "Cursor after the last response-body bytes counted against the stream cap.")
+
+(defvar-local emacsos--chat-body-bytes-received 0
+  "Cumulative UTF-8 response-body bytes received by this stream buffer.")
+
+(defvar-local emacsos--chat-pending-event-bytes 0
+  "UTF-8 bytes after the last newline in the response body.")
+
 (defconst emacsos--chat-prompt "\n> "
   "Marker between the transcript (read-only) and the editable input.")
 
@@ -135,6 +144,30 @@ rather than pushing it forward.")
 
 (defconst emacsos--chat-presentation-max-bytes (* 256 1024)
   "Largest single message body formatted synchronously on the phone.")
+
+(defconst emacsos--chat-max-event-bytes (* 256 1024)
+  "Maximum UTF-8 bytes accepted in one complete or unfinished NDJSON event.")
+
+(defconst emacsos--chat-max-token-bytes (* 16 1024)
+  "Maximum UTF-8 bytes accepted in one streamed assistant token event.")
+
+(defconst emacsos--chat-max-body-bytes (* 2 1024 1024)
+  "Maximum cumulative UTF-8 bytes accepted from one /chat response body.")
+
+(defconst emacsos--chat-max-response-header-bytes (* 64 1024)
+  "Maximum raw HTTP response-header allowance for one /chat request.")
+
+(defconst emacsos--chat-max-transport-bytes
+  (+ (* 6 emacsos--chat-max-body-bytes)
+     emacsos--chat-max-response-header-bytes
+     5)
+  "Maximum raw HTTP response bytes admitted to url-http for one /chat request.
+
+Six raw bytes per body byte covers the deployed encoder's worst-case HTTP/1.1
+framing: a one-byte chunk plus its five fixed framing bytes.  Five more bytes
+cover the terminal zero chunk, and the remaining allowance covers response
+headers.  This limit is enforced before url-http copies a response chunk into
+its buffer.")
 
 (defface emacsos-chat-user-role-face
   '((t :inherit font-lock-keyword-face :weight bold))
@@ -493,6 +526,26 @@ and preserves point in the editable draft."
                              '(read-only t front-sticky t rear-nonsticky t))
         (point)))))
 
+(defun emacsos-conversation-insert-inert-message (role body)
+  "Insert one read-only ROLE-prefixed BODY without interpreting its text.
+ROLE is `user' or `assistant'.  BODY is already the caller's display form;
+unlike the Assist presenter, this primitive never parses Markdown or installs
+object keymaps.  Return the exclusive end position."
+  (unless (memq role '(user assistant))
+    (error "Unknown conversation role: %S" role))
+  (let* ((prefix (if (eq role 'user) "you> " "bot> "))
+         (start (point))
+         (prefix-end (+ start (length prefix))))
+    (insert prefix body)
+    (add-text-properties
+     start prefix-end
+     `(font-lock-face ,(if (eq role 'user)
+                           'emacsos-chat-user-role-face
+                         'emacsos-chat-assistant-role-face)))
+    (add-text-properties start (point)
+                         '(read-only t front-sticky t rear-nonsticky t))
+    (point)))
+
 (defun emacsos-conversation-set-status (start end status &optional trailing-space)
   "Replace the status marker region START..END with visible STATUS.
 When TRAILING-SPACE is non-nil, retain the local stream's token separator."
@@ -506,6 +559,47 @@ When TRAILING-SPACE is non-nil, retain the local stream's token separator."
 (defun emacsos-conversation-append-delta (end text)
   "Append read-only TEXT at provisional assistant marker END and return its end."
   (emacsos-conversation-replace-marked end end text))
+
+(defun emacsos-conversation--unsafe-display-character-p
+    (character &optional multiline)
+  "Return non-nil when CHARACTER can spoof display text.
+When MULTILINE is non-nil, admit ordinary newline and tab layout."
+  (or (and (memq (get-char-code-property character 'general-category)
+                 '(Cc Cf Zl Zp))
+           (not (and multiline (memq character '(?\n ?\t))))
+           (/= character #x200d))
+      ;; Non-format default-ignorable characters can make distinct server
+      ;; strings render identically.  VS16 and ZWJ are the only admitted emoji
+      ;; format points.
+      (= character #x034f)
+      (<= #x115f character #x1160)
+      (<= #x17b4 character #x17b5)
+      (<= #x180b character #x180d)
+      (= character #x180f)
+      (<= #x2060 character #x206f)
+      (= character #x3164)
+      (and (<= #xfe00 character #xfe0f) (/= character #xfe0f))
+      (= character #xffa0)
+      (<= #xfff0 character #xfff8)
+      (<= #x1bca0 character #x1bca3)
+      (<= #x1d173 character #x1d17a)
+      (<= #xe0000 character #xe0fff)))
+
+(defun emacsos-conversation-valid-text-p (value &optional multiline max-bytes)
+  "Return non-nil when VALUE contains no display-spoofing characters.
+When MULTILINE is non-nil, admit ordinary newline and tab layout.
+When MAX-BYTES is non-nil, also require VALUE to fit that UTF-8 byte bound."
+  (and (stringp value)
+       (or (null max-bytes) (<= (string-bytes value) max-bytes))
+       (cl-loop for character across value
+                never (emacsos-conversation--unsafe-display-character-p
+                       character multiline))))
+
+(defun emacsos-conversation-valid-status-p (value)
+  "Return non-nil for one bounded, non-spoofing status VALUE."
+  (and (stringp value)
+       (<= (string-bytes value) 512)
+       (emacsos-conversation-valid-text-p value)))
 
 (defun emacsos-conversation-finish-assistant (body-start body-end)
   "Present the completed assistant body delimited by BODY-START and BODY-END."
@@ -701,15 +795,17 @@ Caller must `inhibit-read-only`."
   "Replace the status bracket with `[<event.text>] '."
   (let ((text (plist-get event :text))
         (buf (emacsos--chat-render-buffer)))
-    (when (and text buf (buffer-live-p buf)
-               (markerp emacsos--chat-status-start))
+    (if (not (emacsos-conversation-valid-status-p text))
+        (emacsos--chat-terminate-stream "invalid assistant status")
+      (when (and buf (buffer-live-p buf)
+                 (markerp emacsos--chat-status-start))
       (with-current-buffer buf
         (let ((inhibit-read-only t))
           (save-excursion
             (emacsos--chat-clear-status-bracket)
             (set-marker emacsos--chat-status-end
                         (emacsos-conversation-set-status
-                         emacsos--chat-status-start emacsos--chat-status-end text t))))))))
+                         emacsos--chat-status-start emacsos--chat-status-end text t)))))))))
 
 (defun emacsos--chat-handle-token (event)
   "Append the token text after `status-end'.  First token also
@@ -717,8 +813,12 @@ clears any lingering status bracket (the agent is now talking, not
 working silently)."
   (let ((text (plist-get event :text))
         (buf (emacsos--chat-render-buffer)))
-    (when (and text buf (buffer-live-p buf)
-               (markerp emacsos--chat-stream-insert-marker))
+    (cond
+     ((not (emacsos-conversation-valid-text-p
+            text t emacsos--chat-max-token-bytes))
+      (emacsos--chat-terminate-stream "invalid assistant text"))
+     ((and buf (buffer-live-p buf)
+           (markerp emacsos--chat-stream-insert-marker))
       (with-current-buffer buf
         (cl-incf emacsos--chat-tokens-seen)
         (let ((inhibit-read-only t))
@@ -727,7 +827,7 @@ working silently)."
               (emacsos--chat-clear-status-bracket))
             (set-marker emacsos--chat-stream-insert-marker
                         (emacsos-conversation-append-delta
-                         emacsos--chat-stream-insert-marker text))))))))
+                         emacsos--chat-stream-insert-marker text)))))))))
 
 (defun emacsos--chat-handle-heartbeat (_event)
   "Heartbeat is purely transport-level — no UI change."
@@ -767,7 +867,10 @@ also presents the complete Markdown body; a nil watchdog event leaves it raw."
 If start has already run (markers present), insert at the marker.
 Otherwise (error before any server response), synthesize a fresh
 `\\nbot> [error: ...]' above the prompt so the user sees something."
-  (let ((reason (or (plist-get event :reason) "unknown"))
+  (let* ((remote-reason (plist-get event :reason))
+         (reason (if (emacsos-conversation-valid-status-p remote-reason)
+                     remote-reason
+                   "server error"))
         (buf (emacsos--chat-render-buffer)))
     (when (and buf (buffer-live-p buf))
       (with-current-buffer buf
@@ -837,7 +940,10 @@ stream that started meanwhile."
 Note it in the transcript and enable the rollback command.  `:broken' t
 means it was committed but loading or platform finalization errored (a JSON
 false parses as the symbol `:false', so test for `t' explicitly)."
-  (let ((detail (or (plist-get event :detail) "config applied"))
+  (let* ((remote-detail (plist-get event :detail))
+         (detail (if (emacsos-conversation-valid-status-p remote-detail)
+                     remote-detail
+                   "config applied"))
         (broken (eq (plist-get event :broken) t)))
     (emacsos--chat-note
      (if broken
@@ -964,7 +1070,11 @@ when AUTH is non-nil, else {}."
 ;;; Process filter (NDJSON parser)
 
 (defun emacsos--chat-make-filter (url-filter)
-  "Build a wrapping process-filter that calls URL-FILTER first
+  "Build a bounded wrapping process-filter around URL-FILTER.
+
+Reject a raw HTTP response before URL-FILTER can copy more than
+`emacsos--chat-max-transport-bytes' into its response buffer.  Otherwise call
+URL-FILTER first
 \(so url-http's state machine processes headers + appends to the
 response buffer) then drains any new body bytes through our NDJSON
 parser.  Captures URL-FILTER in a closure rather than calling
@@ -972,18 +1082,27 @@ parser.  Captures URL-FILTER in a closure rather than calling
 several different filter functions depending on the request mode
 \(generic, chunked, content-length); whichever was installed at
 url-retrieve time is what we must preserve."
-  (lambda (proc bytes)
-    (when (functionp url-filter)
-      (funcall url-filter proc bytes))
-    ;; url-http may drain an aborted process after another request starts.
-    ;; Only the process currently owning the phone-wide chat state may dispatch.
-    (when (eq proc emacsos--chat-process)
-      (let ((buf (process-buffer proc)))
-        (when (and buf (buffer-live-p buf))
-          (with-current-buffer buf
-            (when (and (boundp 'url-http-end-of-headers)
-                       url-http-end-of-headers)
-              (emacsos--chat-drain-body))))))))
+  (let ((transport-bytes 0))
+    (lambda (proc bytes)
+      (cl-incf transport-bytes (string-bytes bytes))
+      (if (> transport-bytes emacsos--chat-max-transport-bytes)
+          (if (eq proc emacsos--chat-process)
+              (emacsos--chat-terminate-stream "assistant response too large")
+            ;; An obsolete response cannot report into the current stream, but
+            ;; it must not keep consuming input after crossing the same bound.
+            (when (and (processp proc) (process-live-p proc))
+              (delete-process proc)))
+        (when (functionp url-filter)
+          (funcall url-filter proc bytes))
+        ;; url-http may drain an aborted process after another request starts.
+        ;; Only the process currently owning the phone-wide chat state may dispatch.
+        (when (eq proc emacsos--chat-process)
+          (let ((buf (process-buffer proc)))
+            (when (and buf (buffer-live-p buf))
+              (with-current-buffer buf
+                (when (and (boundp 'url-http-end-of-headers)
+                           url-http-end-of-headers)
+                  (emacsos--chat-drain-body))))))))))
 
 ;; Note: we used to wrap the process-sentinel for client-side
 ;; connection-lost detection, but url-http SWAPS its sentinel as the
@@ -1002,26 +1121,90 @@ tracks how much body has already been processed via a buffer-local
 marker.  The marker has insertion-type nil (stationary on insert)
 so it stays at the read/unread boundary as the URL filter
 continues appending bytes after it."
-  (unless (and (local-variable-p 'emacsos--chat-body-read-marker)
-               (markerp emacsos--chat-body-read-marker))
-    ;; url-http-end-of-headers is a marker pointing at the first
-    ;; byte of the body (right after the \r\n\r\n separator).
-    ;; Position our read-cursor there; nil insertion-type so url's
-    ;; filter inserts BEYOND us rather than pushing us forward.
-    (setq-local emacsos--chat-body-read-marker
-                (copy-marker (marker-position url-http-end-of-headers)
-                             nil)))
-  (let ((from (marker-position emacsos--chat-body-read-marker))
-        (to (point-max)))
-    (when (< from to)
-      (let* ((raw (buffer-substring-no-properties from to))
-             (last-nl (cl-position ?\n raw :from-end t)))
-        (when last-nl
-          (let ((complete (substring raw 0 (1+ last-nl))))
+  (let* ((existing-read
+          (and (local-variable-p 'emacsos--chat-body-read-marker)
+               (markerp emacsos--chat-body-read-marker)))
+         (missing-seen
+          (not (and (local-variable-p 'emacsos--chat-body-seen-marker)
+                    (markerp emacsos--chat-body-seen-marker))))
+         (missing-pending
+          (not (local-variable-p 'emacsos--chat-pending-event-bytes)))
+         (reloaded-unread
+          (and existing-read (or missing-seen missing-pending)
+               (buffer-substring-no-properties
+                (marker-position emacsos--chat-body-read-marker)
+                (if missing-seen
+                    (point-max)
+                  (marker-position emacsos--chat-body-seen-marker)))))
+         (reloaded-last-newline
+          (and reloaded-unread
+               (cl-position ?\n reloaded-unread :from-end t))))
+    (unless existing-read
+      ;; url-http-end-of-headers is a marker pointing at the first
+      ;; byte of the body (right after the \r\n\r\n separator).
+      ;; Position our read-cursor there; nil insertion-type so url's
+      ;; filter inserts BEYOND us rather than pushing us forward.
+      (setq-local emacsos--chat-body-read-marker
+                  (copy-marker (marker-position url-http-end-of-headers)
+                               nil)))
+    (when missing-seen
+      ;; A stream that crosses a live code reload can already have a valid
+      ;; read cursor.  Reconstruct its cumulative total without redispatching
+      ;; consumed events; a fresh response starts counting at the body edge.
+      (setq-local emacsos--chat-body-seen-marker
+                  (copy-marker (if existing-read
+                                   (point-max)
+                                 (marker-position url-http-end-of-headers))
+                               nil)
+                  emacsos--chat-body-bytes-received
+                  (if existing-read
+                      (string-bytes
+                       (buffer-substring-no-properties
+                        (marker-position url-http-end-of-headers) (point-max)))
+                    0)))
+    (when missing-pending
+      (setq-local emacsos--chat-pending-event-bytes
+                  (if existing-read
+                      (string-bytes
+                       (if reloaded-last-newline
+                           (substring reloaded-unread
+                                      (1+ reloaded-last-newline))
+                         reloaded-unread))
+                    0)))
+    (let* ((from (marker-position emacsos--chat-body-read-marker))
+           (seen (marker-position emacsos--chat-body-seen-marker))
+           (to (point-max))
+           (new (and (< seen to)
+                     (buffer-substring-no-properties seen to)))
+           (new-last-newline
+            (and new (cl-position ?\n new :from-end t))))
+      (when new
+        (let ((new-bytes (string-bytes new)))
+          (cl-incf emacsos--chat-body-bytes-received new-bytes)
+          (setq emacsos--chat-pending-event-bytes
+                (if new-last-newline
+                    (string-bytes (substring new (1+ new-last-newline)))
+                  (+ emacsos--chat-pending-event-bytes new-bytes))))
+        (set-marker emacsos--chat-body-seen-marker to))
+      (cond
+       ((> emacsos--chat-body-bytes-received emacsos--chat-max-body-bytes)
+        (emacsos--chat-terminate-stream "assistant response too large"))
+       ((> emacsos--chat-pending-event-bytes emacsos--chat-max-event-bytes)
+        (emacsos--chat-terminate-stream "assistant event too large"))
+       ((and (< from to) (or reloaded-last-newline new-last-newline))
+        (let* ((raw (buffer-substring-no-properties from to))
+               (last-nl (cl-position ?\n raw :from-end t))
+               (complete (substring raw 0 (1+ last-nl)))
+               (lines (split-string complete "\n" t)))
+          (if (seq-some
+               (lambda (line)
+                 (> (string-bytes line) emacsos--chat-max-event-bytes))
+               lines)
+              (emacsos--chat-terminate-stream "assistant event too large")
             (set-marker emacsos--chat-body-read-marker
                         (+ from (length complete)))
-            (dolist (line (split-string complete "\n" t))
-              (emacsos--chat-dispatch-line line))))))))
+            (dolist (line lines)
+              (emacsos--chat-dispatch-line line)))))))))
 
 (defun emacsos--chat-dispatch-line (line)
   "Parse one NDJSON line as a JSON object, dispatch to handler.

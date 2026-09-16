@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy install-local phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-install-local test-local-deploy-restart test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install wvkbd-phone-bench test-wvkbd-build
+.PHONY: start start-server local-connect-server local-deploy install-local phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-swipe-learning test-install-local test-local-deploy-restart test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install wvkbd-phone-bench test-wvkbd-build
 
 PINEPHONE_HOST ?= phone
 export PINEPHONE_HOST
@@ -38,6 +38,7 @@ test-pinephone-scripts:
 	tests/test-pinephone-openrc-call.sh
 	tests/test-pinephone-openrc-network.sh
 	tests/test-pinephone-openrc-wifi-connect.sh
+	tests/test-pinephone-openrc-device.sh
 	tests/test-pinephone-openrc-power.sh
 	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
 
@@ -97,7 +98,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp EMACSOS-COMMANDS.org $(PINEPHONE_HOST):~/EMACSOS-COMMANDS.org
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
@@ -212,7 +213,10 @@ test-local-deploy-restart:
 	tests/test-local-deploy-restart.sh
 
 test-elisp: test-install-local
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
+
+test-swipe-learning:
+	python3 -m unittest -v tests/test-swipe-learning-collector.py tests/test-emacsos-wvkbd-launch.py
 
 start:
 	emacs -Q --load "$(CURDIR)/os.el" \

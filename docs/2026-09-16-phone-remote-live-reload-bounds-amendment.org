@@ -1,0 +1,25 @@
+#+title: Phone remote live-reload bounds amendment
+#+date: 2026-09-16
+
+* Historical supersessions
+
+This amendment replaces only the render-time retained-history condition in
+[[file:2026-09-15-phone-remote-message-shape-amendment.org][Phone remote message-shape amendment]], section /Correction/.  That record
+remains the historical source for canonical retained message fields.
+
+* Correction
+
+Before a fresh canonical page retains already loaded history, the client
+boundedly validates and canonicalizes the prior buffer-local snapshot using the
+final render limits.  A valid prior snapshot is retained.  An oversized,
+malformed, or pre-upgrade snapshot is dropped, and the fresh bounded page is
+rendered alone.  Counting stops immediately after the first record beyond the
+limit, so hot reloading the client cannot first traverse and copy all history
+accumulated by an older unbounded implementation.
+
+* Verification
+
+ERT hot-reloads a fresh page over a prior snapshot beyond the configured render
+limit and proves that only the fresh page remains.  A circular record list also
+proves that validation stops at the first excess record instead of requiring an
+unbounded proper-list traversal.

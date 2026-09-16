@@ -11,6 +11,7 @@ export LC_ALL=C
 
 lock=/run/emacsos-openrc-network.lock
 output=
+modem_restart_pending=0
 
 fail() {
     printf '%s\n' "$1"
@@ -18,6 +19,11 @@ fail() {
 }
 
 cleanup() {
+    if [ "$modem_restart_pending" -eq 1 ]; then
+        modem_restart_pending=0
+        timeout -s TERM -k 2 15 /sbin/rc-service modemmanager start \
+            9>&- >/dev/null 2>&1 || :
+    fi
     [ -z "$output" ] || rm -f -- "$output"
 }
 trap cleanup EXIT
@@ -43,6 +49,69 @@ run_nmcli() {
         case $status in 124|137) fail 'unknown:time-limit' ;; esac
         fail 'not-connected:failed'
     fi
+}
+
+probe_modem() {
+    limit=$1
+    grace=$2
+    [ -z "$output" ] || rm -f -- "$output"
+    output=$(mktemp /run/emacsos-modem.XXXXXX)
+    if timeout -s TERM -k "$grace" "$limit" /usr/bin/mmcli -L \
+        9>&- >"$output" 2>&1; then
+        :
+    else
+        status=$?
+        case $status in 124|137) return 3 ;; *) return 2 ;; esac
+    fi
+    if awk '
+        BEGIN { valid = 1; found = 0 }
+        /^[[:space:]]*\/org\/freedesktop\/ModemManager1\/Modem\/[0-9]+[[:space:]]+\[[^][]+\][[:space:]]+[^[:space:]][^[:cntrl:]]*$/ && $0 !~ /[^[:print:]]/ {
+            found = 1
+            next
+        }
+        { valid = 0 }
+        END { exit (valid && found) ? 0 : 1 }
+    ' "$output"; then
+        return 0
+    elif printf '%s\n' 'No modems were found' | cmp -s - "$output"; then
+        return 1
+    fi
+    return 2
+}
+
+recover_modem() {
+    [ -x /usr/bin/mmcli ] || fail 'not-connected:unavailable'
+    if probe_modem 3 1; then
+        return 0
+    else
+        status=$?
+    fi
+    case $status in
+        1) ;;
+        3) fail 'unknown:time-limit' ;;
+        *) fail 'not-connected:failed' ;;
+    esac
+    [ -x /sbin/rc-service ] || fail 'not-connected:unavailable'
+    [ -z "$output" ] || rm -f -- "$output"
+    output=$(mktemp /run/emacsos-modem-restart.XXXXXX)
+    modem_restart_pending=1
+    if timeout -s TERM -k 2 30 /sbin/rc-service modemmanager restart \
+        9>&- >"$output" 2>&1; then
+        :
+    else
+        status=$?
+        case $status in 124|137) fail 'unknown:time-limit' ;; esac
+        fail 'not-connected:failed'
+    fi
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        if probe_modem 0.8 0.2; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -eq 10 ] || sleep 1
+    done
+    fail 'not-connected:failed'
 }
 
 validate_ssid() {
@@ -89,7 +158,9 @@ case $operation in
     cell)
         [ "$#" -eq 1 ] || fail 'not-connected:invalid-input'
         case $1 in up|down) ;; *) fail 'not-connected:invalid-input' ;; esac
+        [ "$1" = down ] || recover_modem
         run_nmcli con "$1" emacsos-cellular
+        modem_restart_pending=0
         ;;
     saved)
         [ "$#" -eq 1 ] || fail 'not-connected:invalid-input'

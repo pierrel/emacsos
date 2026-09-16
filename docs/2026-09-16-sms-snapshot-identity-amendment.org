@@ -1,0 +1,32 @@
+#+title: SMS snapshot identity amendment
+#+date: 2026-09-16
+
+* Correction
+
+An unmatched outgoing modem snapshot may attach only when exactly one matching
+local =sending= or =sent= record exists, and that local record has no modem path.
+The two states form one candidate set: state preference cannot disambiguate
+identical sends.  An already attached local record is reconciled only through
+its same-path branch, so a later identical modem object cannot replace its
+identity.
+
+When one snapshot job belongs to a complete refresh and is also promoted by a
+live Added event, the snapshot is applied only by the refresh transaction with
+that refresh's cutoff.  This prevents the live path from mutating state before
+the transaction commits.  The promoted incoming snapshot retains its unread
+meaning when the transaction applies it.  A pure live job still applies
+immediately.
+
+* Verification
+
+ERT covers distinct B-then-A modem objects with identical message content,
+ambiguous pathless local =sent= and =sending= records, a post-cutoff local send
+whose refresh job is promoted live, and unread preservation for a coalesced
+incoming Added event.
+
+* Historical supersessions
+
+This document supersedes only the SMS attachment and refresh-transaction
+statements in [[file:2026-09-16-streaming-transcript-and-sms-cutoff-amendment.org][Streaming transcript and SMS refresh-cutoff amendment]], sections
+/Correction/ and /Verification/, with the identity and coalescing requirements
+above.

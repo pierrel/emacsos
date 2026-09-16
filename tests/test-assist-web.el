@@ -12,40 +12,126 @@
     (has_older_messages . t)
     (next_before . "cursor-1")))
 
+(defun test-assist-web--catalog (&rest threads)
+  "Return a complete catalog containing THREADS."
+  `((threads
+     . ,(mapcar
+         (lambda (thread)
+           (let ((copy (copy-tree thread)))
+             (unless (assq 'search_description copy)
+               (setf (alist-get 'search_description copy)
+                     (alist-get 'description copy)))
+             copy))
+         threads))
+    (repositories . nil) (harnesses . nil)))
+
+(defun test-assist-web--wire-object (fields)
+  "Return a string-keyed JSON object hash table for FIELDS."
+  (let ((object (make-hash-table :test #'equal)))
+    (dolist (field fields object)
+      (puthash (symbol-name (car field)) (cdr field) object))))
+
+(defun test-assist-web--wire-catalog (threads repositories harnesses)
+  "Return a string-keyed wire catalog with array identity preserved."
+  (let ((catalog (make-hash-table :test #'equal)))
+    (puthash "threads"
+             (vconcat (mapcar #'test-assist-web--wire-object threads)) catalog)
+    (puthash "repositories"
+             (vconcat (mapcar #'test-assist-web--wire-object repositories)) catalog)
+    (puthash "harnesses"
+             (vconcat (mapcar #'test-assist-web--wire-object harnesses)) catalog)
+    catalog))
+
+(defun test-assist-web--initialize-url-http-response (buffer process)
+  "Initialize BUFFER and PROCESS for stock `url-http-generic-filter' tests."
+  (with-current-buffer buffer
+    (mm-disable-multibyte)
+    (setq-local url-http-after-change-function
+                'url-http-wait-for-headers-change-function
+                url-http-end-of-headers nil
+                url-http-chunked-counter 0
+                url-http-chunked-last-crlf-missing nil
+                url-http-chunked-length nil
+                url-http-chunked-start nil
+                url-http-response-status nil
+                url-http-content-type nil
+                url-http-transfer-encoding nil
+                url-http-content-length nil
+                url-http-process process
+                url-http-no-retry t
+                url-http-connection-opened t
+                url-http-method "GET"
+                url-http-extra-headers nil
+                url-http-noninteractive t
+                url-http-data nil
+                url-http-response-version nil
+                url-callback-function nil
+                url-callback-arguments nil
+                url-current-object
+                (url-generic-parse-url "https://assist.invalid/")
+                url-http-target-url url-current-object)))
+
 (ert-deftest test-assist-web-completion-matches-server-search-text-and-keeps-identity ()
   (let* ((emacsos-assist-web--catalog
-          '(((id . "thread-1") (description . "🧪")
+          (test-assist-web--catalog
+           '((id . "thread-1") (description . "🧪")
              (search_description . "Release check")
              (repo_label . "Assist") (status . "ready"))))
          (records (emacsos-assist-web--completion-records))
          (table (emacsos-assist-web--completion-table records)))
     (should (equal (all-completions "release" table)
-                   '("*assist 🧪 - Assist* [ready]")))
+                   (list
+                    (concat
+                     "#1  "
+                     (emacsos-assist-web--isolate-display-text
+                      "*assist 🧪 - Assist* [ready]")))))
     (should (equal (alist-get 'id (plist-get (car records) :thread)) "thread-1"))))
 
-(ert-deftest test-assist-web-duplicate-thread-labels-show-full-identity ()
+(ert-deftest test-assist-web-duplicate-thread-labels-show-leading-ordinals ()
   (let* ((emacsos-assist-web--catalog
-          '(((id . "thread-a-shared") (description . "Same")
+          (test-assist-web--catalog
+           '((id . "thread-a-shared") (description . "Same")
              (repo_label . "Assist") (status . "ready"))
-            ((id . "thread-b-shared") (description . "Same")
+           '((id . "thread-b-shared") (description . "Same")
              (repo_label . "Assist") (status . "ready"))))
          (records (emacsos-assist-web--completion-records))
          (displays (mapcar (lambda (record) (plist-get record :display)) records)))
     (should (= (length (delete-dups (copy-sequence displays))) 2))
-    (should (string-match-p "thread-a-shared" (car displays)))
-    (should (string-match-p "thread-b-shared" (cadr displays)))))
+    (should (string-prefix-p "#1  " (car displays)))
+    (should (string-prefix-p "#2  " (cadr displays)))))
 
 (ert-deftest test-assist-web-completion-returns-all-substring-matches ()
   (let* ((emacsos-assist-web--catalog
-          '(((id . "thread-1") (description . "Release one")
+          (test-assist-web--catalog
+           '((id . "thread-1") (description . "Release one")
              (repo_label . "Assist") (status . "ready"))
-            ((id . "thread-2") (description . "Release two")
+           '((id . "thread-2") (description . "Release two")
              (repo_label . "EmacsOS") (status . "ready"))))
          (table (emacsos-assist-web--completion-table
                  (emacsos-assist-web--completion-records))))
     (should (= (length (all-completions "release" table)) 2))
     (should (equal (try-completion "release" table) "release"))
     (should (test-completion (car (all-completions "release" table)) table))))
+
+(ert-deftest test-assist-web-completion-rejects-thread-removed-during-selection ()
+  (let* ((thread '((id . "thread-1") (description . "Release")
+                   (search_description . "release")
+                   (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog (test-assist-web--catalog thread))
+         notice)
+    (cl-letf (((symbol-function 'emacsos-assist-web-refresh-threads) #'ignore)
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (prog1 (car (all-completions "" table))
+                   (setq emacsos-assist-web--catalog
+                         (test-assist-web--catalog)))))
+              ((symbol-function 'emacsos-assist-web--show-thread)
+               (lambda (&rest _) (ert-fail "removed thread must not open")))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (emacsos-assist-web-open-thread))
+    (should (string-match-p "no longer available" notice))))
 
 (ert-deftest test-assist-web-endpoint-requires-https ()
   (let ((emacsos-assist-web-api-url "http://10.0.0.1:5050/api/v1/phone"))
@@ -140,6 +226,20 @@
     (setf (alist-get 'error (alist-get 'thread snapshot)) '((detail . "bad")))
     (should-error (emacsos-assist-web--require-snapshot snapshot "thread-1"))))
 
+(ert-deftest test-assist-web-rejects-unbounded-or-spoofable-snapshot-metadata ()
+  (dolist (case `((description . ,(concat "false" (string #x202e) "title"))
+                  (status . "ready\nfalse status")
+                  (error . ,(make-string 513 ?x))
+                  (repo_label . ,(concat "same" (string #x034f)))))
+    (let* ((snapshot (copy-tree test-assist-web--snapshot))
+           (thread (alist-get 'thread snapshot)))
+      (if (eq (car case) 'repo_label)
+          (setf (alist-get 'repo_label (alist-get 'workspace thread)) (cdr case))
+        (setf (alist-get (car case) thread) (cdr case)))
+      (setf (alist-get 'thread snapshot) thread)
+      (should-error
+       (emacsos-assist-web--require-snapshot snapshot "thread-1")))))
+
 (ert-deftest test-assist-web-json-response-requires-json-content-type ()
   (with-temp-buffer
     (insert "{}")
@@ -153,6 +253,20 @@
                 url-http-content-type "application/json; charset=utf-8"
                 url-http-end-of-headers (copy-marker (point-min)))
     (should (equal (emacsos-assist-web--response-json (current-buffer)) nil))))
+
+(ert-deftest test-assist-web-catalog-json-does-not-intern-untrusted-keys ()
+  (let ((key "assist-web-untrusted-key-7d52a9"))
+    (should-not (intern-soft key))
+    (with-temp-buffer
+      (insert (format "{\"threads\":[],\"repositories\":[],\"harnesses\":[],\"%s\":1}"
+                      key))
+      (setq-local url-http-response-status 200
+                  url-http-content-type "application/json"
+                  url-http-end-of-headers (copy-marker (point-min)))
+      (let ((value (emacsos-assist-web--response-json
+                    (current-buffer) nil 'array 'hash-table)))
+        (should (= (gethash key value) 1))))
+    (should-not (intern-soft key))))
 
 (ert-deftest test-assist-web-recognizes-only-the-sanitized-run-store-response ()
   (with-temp-buffer
@@ -190,19 +304,36 @@
                    '((http_status . 409))))))
 
 (ert-deftest test-assist-web-completion-marks-cached-source-and-state ()
-  (let* ((emacsos-assist-web--catalog-stale t)
+  (let* ((emacsos-assist-web--catalog-state 'cached)
          (emacsos-assist-web--catalog
-          '(((id . "thread-1") (description . "Thread")
+          (test-assist-web--catalog
+           '((id . "thread-1") (description . "Thread")
              (repo_label . "Assist") (status . "running"))))
          (record (car (emacsos-assist-web--completion-records))))
     (should (equal (plist-get record :display)
-                   "*assist Thread - Assist* [running, cached]"))))
+                   (concat
+                    "#1  "
+                    (emacsos-assist-web--isolate-display-text
+                     "*assist Thread - Assist* [running, cached]"))))))
 
 (ert-deftest test-assist-web-cache-rejects-an-oversized-record ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-cache-" t))
         (emacsos-assist-web-max-cache-bytes 8))
     (unwind-protect
         (should-error (emacsos-assist-web--write-cache "threads.json" '((x . "too long"))))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-empty-wire-catalog-cache-round-trips-as-arrays ()
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-web-cache-" t))
+        (wire (test-assist-web--wire-catalog nil nil nil)))
+    (unwind-protect
+        (progn
+          (emacsos-assist-web--write-cache emacsos-assist-web--catalog-file wire)
+          (should (equal (emacsos-assist-web--read-catalog-cache)
+                         '((threads . nil)
+                           (repositories . nil)
+                           (harnesses . nil)))))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-cache-path-does-not-create-the-cache-directory ()
@@ -246,12 +377,12 @@
         seen)
     (unwind-protect
         (with-current-buffer source
-          (insert "event: terminal\ndata: {}\n\n")
+          (insert "\nevent: terminal\ndata: {}\n\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
                      (lambda (actual-target event data)
                        (setq seen (list actual-target event data)))))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (equal seen (list target "terminal" "{}"))))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -265,9 +396,9 @@
             (emacsos-assist-web-mode)
             (setq-local emacsos-assist-web--stream-response source))
           (with-current-buffer source
-            (insert "event: terminal\ndata: {}\n\n")
+            (insert "\nevent: terminal\ndata: {}\n\n")
             (setq-local url-http-end-of-headers (copy-marker (point-min)))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (buffer-live-p source)))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
@@ -288,7 +419,7 @@
                   (lambda (active _bytes)
                     (with-current-buffer source
                       (erase-buffer)
-                      (insert "event: terminal\ndata: {}\n\n")
+                      (insert "\nevent: terminal\ndata: {}\n\n")
                       (setq-local url-http-response-status 200
                                   url-http-content-type "text/event-stream"
                                   url-http-end-of-headers (copy-marker (point-min))))
@@ -328,7 +459,7 @@
                         (lambda (_active _bytes)
                           (with-current-buffer source
                             (erase-buffer)
-                            (insert "event: terminal\ndata: {}\n\n")
+                            (insert "\nevent: terminal\ndata: {}\n\n")
                             (setq-local url-http-response-status 200
                                         url-http-content-type "text/event-stream"
                                         url-http-end-of-headers
@@ -376,14 +507,49 @@
         seen)
     (unwind-protect
         (with-current-buffer source
-          (insert "event: status\ndata: {}\n\nevent: status\ndata: {}\n\n")
+          (insert "\nevent: status\ndata: {}\n\nevent: status\ndata: {}\n\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
                      (lambda (_target event _data) (push event seen))))
-            (emacsos-assist-web--drain-events target 0))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
           (should (equal seen '("status" "status"))))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-event-parser-accepts-decoded-crlf-records ()
+  "Decoded SSE CRLF framing dispatches the same event as LF framing."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        seen)
+    (unwind-protect
+        (with-current-buffer source
+          (insert "\nevent: status\r\ndata: {\"status\":\"working\"}\r\n\r\n")
+          (setq-local url-http-end-of-headers (copy-marker (point-min)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                     (lambda (_target event data) (setq seen (list event data)))))
+            (emacsos-assist-web--drain-events target 0 (point-max)))
+          (should (equal seen '("status" "{\"status\":\"working\"}"))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-live-status-rejects-spoofing-and-oversized-text ()
+  (dolist (data
+           (list (json-serialize
+                  `((status . ,(concat "spoof" (string #x202e)))))
+                 (json-serialize `((status . ,(make-string 513 ?x))))
+                 "{}"
+                 "null"
+                 "{\"status\":\"working\",\"status\":null}"
+                 "not json"))
+    (let (interrupted)
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                   (lambda (buffer reason)
+                     (setq interrupted (list buffer reason)))))
+          (emacsos-assist-web--dispatch-event
+           (current-buffer) "status" data)
+          (should (equal interrupted
+                         (list (current-buffer) "invalid Assist status"))))))))
 
 (ert-deftest test-assist-web-event-parser-tiny-fragments-scan-only-new-suffix ()
   "A fragmented record is dispatched once without quadratic retained-buffer copies."
@@ -393,6 +559,7 @@
         (copied 0) seen)
     (unwind-protect
         (with-current-buffer source
+          (insert "\n")
           (setq-local url-http-end-of-headers (copy-marker (point-min)))
           (let ((original (symbol-function 'buffer-substring-no-properties)))
             (cl-letf (((symbol-function 'buffer-substring-no-properties)
@@ -404,9 +571,9 @@
               (dolist (byte (string-to-list payload))
                 (goto-char (point-max))
                 (insert-char byte)
-                (emacsos-assist-web--drain-events target 0 1))))
+                (emacsos-assist-web--drain-events target 0 (point-max)))))
           ;; The old parser copied the whole unfinished record per callback.
-          ;; This implementation copies it once, after the delimiter arrives.
+          ;; This implementation copies only a completed record for dispatch.
           (should (< copied (* 3 (length payload))))
           (should (equal seen '("status"))))
       (when (buffer-live-p target) (kill-buffer target))
@@ -565,19 +732,313 @@
     (should forwarded)
     (should-not rejected)))
 
-(ert-deftest test-assist-web-raw-filter-rejects-one-oversized-sse-record-before-forwarding ()
-  "A bad incomplete record never reaches url-http's retained response buffer."
-  (let ((emacsos-assist-web-max-event-bytes 32) forwarded rejected)
+(ert-deftest test-assist-web-raw-filter-bounds-one-transport-callback ()
+  "A raw callback is bounded without interpreting HTTP bytes as SSE records."
+  (let ((emacsos-assist-web-max-stream-chunk-bytes 32) forwarded rejected)
     (funcall
      (emacsos-assist-web--guarded-filter
       (lambda (&rest _) (setq forwarded t))
       (lambda (_process problem) (setq rejected problem))
       t)
      nil
-     (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-             (make-string 33 ?x)))
+     (make-string 33 ?x))
     (should-not forwarded)
-    (should (equal rejected "Assist event is too large"))))
+    (should (equal rejected "Assist stream transport chunk is too large"))))
+
+(ert-deftest test-assist-web-raw-filter-rejects-transfer-encoding-chains ()
+  "Only the exact transfer coding decoded by stock `url-http' is admitted."
+  (let (forwarded rejected)
+    (funcall
+     (emacsos-assist-web--guarded-filter
+      (lambda (&rest _) (setq forwarded t))
+      (lambda (_process problem) (setq rejected problem))
+      t)
+     nil
+     (concat "HTTP/1.1 200 OK\r\n"
+             "Content-Type: text/event-stream\r\n"
+             "Transfer-Encoding: identity, chunked\r\n\r\n"))
+    (should-not forwarded)
+    (should (equal rejected "Assist Web transfer encoding is not accepted"))))
+
+(ert-deftest test-assist-web-stock-filter-rejects-folded-transfer-encoding ()
+  "A folded transfer field cannot make raw chunk bytes look decoded."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        process rejected seen filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-folded-transfer"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                     (lambda (_target event data)
+                       (push (list event data) seen))))
+            (funcall filter process
+                     (concat "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Transfer-Encoding: chunked\r\n"
+                             "\t, gzip\r\n\r\n"
+                             "1d\r\nevent: terminal\ndata: {}\n\n\r\n"
+                             "0\r\n\r\n")))
+          (should (equal rejected
+                         "Assist Web folded response headers are not accepted"))
+          (should-not seen))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-chunked-crlf-stream-uses-decoded-event-accounting ()
+  "Stock `url-http' chunk framing never becomes decoded SSE data."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-event-bytes 52)
+        (emacsos-assist-web-max-stream-chunk-bytes 512)
+        process seen rejected filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-chunked-crlf"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (let ((first "event: status\r\n")
+                (second "data: {\"status\":\"working\"}\r\n\r\n"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                       (lambda (_target event data)
+                         (push (list event data) seen))))
+              (funcall
+               filter process
+               (concat "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: text/event-stream\r\n"
+                       "Transfer-Encoding: chunked\r\n\r\n"
+                       (format "%x\r\n" (string-bytes first)) first "\r\n"))
+              ;; The raw transport terminator after an incomplete decoded
+              ;; record must not complete or dispatch that record.
+              (should-not seen)
+              (funcall filter process
+                       (concat (format "%x\r\n" (string-bytes second))
+                               second "\r\n")))
+            (should-not rejected)
+            (should (equal (nreverse seen)
+                           '(("status" "{\"status\":\"working\"}"))))
+            (with-current-buffer source
+              (should (= url-http-chunked-counter 2)))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stream-parser-hot-reload-ignores-old-raw-count ()
+  "A legacy response migrates its decoded tail without retaining raw accounting."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        seen)
+    (unwind-protect
+        (progn
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (with-current-buffer source
+            (insert "HTTP/1.1 200 OK\r\n\r\nevent: terminal\r\n\r\n")
+            (setq-local url-http-end-of-headers (copy-marker 19)
+                        url-http-transfer-encoding nil
+                        url-http-content-length nil
+                        emacsos-assist-web--stream-body-marker (copy-marker 20)
+                        emacsos-assist-web--stream-unconsumed-bytes
+                        emacsos-assist-web-max-event-bytes)
+            (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                       (lambda (_target event data)
+                         (setq seen (list event data)))))
+              (emacsos-assist-web--drain-events target 0 (point-max))))
+          (should (equal seen '("terminal" ""))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-hot-reload-retires-an-installed-stream-filter ()
+  "Reload cleanup cannot leave a pre-reload process-filter closure active."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        process)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-old-filter"
+                                           :buffer source :noquery t
+                                           :filter (lambda (&rest _))))
+          (with-current-buffer target
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--stream-process process
+                        emacsos-assist-web--stream-response source))
+          (emacsos-assist-web--retire-active-streams-after-reload)
+          (should-not (process-live-p process))
+          (with-current-buffer target
+            (should-not emacsos-assist-web--stream-process)
+            (should-not emacsos-assist-web--stream-response)))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-bounds-an-incomplete-chunk-header ()
+  "Opaque chunk framing is bounded before stock regex matching can grow."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-header-bytes 128)
+        process rejected filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-incomplete-chunk"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (funcall filter process
+                   (concat "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/event-stream\r\n"
+                           "Transfer-Encoding: chunked\r\n\r\n"
+                           "a"))
+          (funcall filter process (make-string 64 ?a))
+          (funcall filter process (make-string 64 ?a))
+          (should (equal rejected
+                         "Assist stream transport framing is too large"))
+          (with-current-buffer source
+            (should (<= (emacsos-assist-web--pending-transport-bytes process)
+                        emacsos-assist-web-max-header-bytes))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-rejects-an-oversized-content-length ()
+  "A fixed-length SSE response cannot retain an attacker-sized body."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-response-bytes 128)
+        process interrupted filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-content-length"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 #'ignore t))
+          (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                     (lambda (_target problem) (setq interrupted problem))))
+            (funcall filter process
+                     (concat "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Content-Length: 129\r\n\r\n")))
+          (should (equal interrupted "Assist stream response is too large")))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-rejects-an-oversized-decoded-chunk ()
+  "Stock decoding cannot retain a declared entity chunk above its bound."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-stream-chunk-bytes 128)
+        process rejected interrupted filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-decoded-chunk"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                     (lambda (_target problem) (setq interrupted problem))))
+            (funcall filter process
+                     (concat "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Transfer-Encoding: chunked\r\n\r\n"
+                             "81\r\n")))
+          (should-not rejected)
+          (should (equal interrupted
+                         "Assist stream transport chunk is too large")))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-preserves-split-final-chunk-crlf ()
+  "Parser pruning preserves stock `url-http' final-chunk positions."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        process activated seen filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-final-crlf"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (with-current-buffer source
+            (setq-local url-callback-function (lambda (&rest _) (setq activated t))))
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 #'ignore t))
+          (let ((event "event: terminal\r\ndata: {}\r\n\r\n"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                       (lambda (_target name _data) (setq seen name))))
+              (funcall filter process
+                       (concat "HTTP/1.1 200 OK\r\n"
+                               "Content-Type: text/event-stream\r\n"
+                               "Transfer-Encoding: chunked\r\n\r\n"
+                               (format "%x\r\n" (string-bytes event))
+                               event "\r\n0\r\n"))
+              (should (equal seen "terminal"))
+              (with-current-buffer source
+                (should (integerp url-http-chunked-last-crlf-missing)))
+              (funcall filter process "\r\n")))
+          (should activated)
+          (with-current-buffer source
+            (should (= url-http-chunked-counter 2))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-event-parser-rejects-an-oversized-tail-in-place ()
+  "An unfinished event is rejected without an oversized parser copy."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-event-bytes 32)
+        interrupted)
+    (unwind-protect
+        (progn
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (with-current-buffer source
+            (insert "\n" (make-string 33 ?x))
+            (setq-local url-http-end-of-headers (copy-marker (point-min))
+                        url-http-transfer-encoding nil
+                        url-http-content-length nil)
+            (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                       (lambda (_target problem) (setq interrupted problem))))
+              (emacsos-assist-web--drain-events target 0 (point-max)))
+            (should (= (buffer-size) 1)))
+          (should (equal interrupted "Assist event is too large")))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
 
 (ert-deftest test-assist-web-render-preserves-draft-and-updates-status-in-place ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-render-" t)))
@@ -829,18 +1290,175 @@
 
 (ert-deftest test-assist-web-malformed-and-oversized-deltas-keep-the-real-partial ()
   "The event adapter, not only its shared failure helper, retains prior text."
-  (dolist (data (list "{not json}"
-                      (json-encode `((attempt . 1) (index . 2)
-                                     (text . ,(make-string (1+ (* 16 1024)) ?x))))))
+  (let ((oversized (json-encode `((attempt . 1) (index . 2)
+                                   (text . ,(make-string
+                                             (1+ (* 16 1024)) ?x)))))
+        (hostile (json-encode `((attempt . 1) (index . 2)
+                                 (text . ,(concat "spoof"
+                                                  (string #x202e)))))))
+    (dolist (data (list "{not json}" oversized hostile))
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (emacsos-assist-web--write-prompt)
+        (emacsos-assist-web--append-pending "hello")
+        (emacsos-assist-web--reset-assistant 1)
+        (emacsos-assist-web--append-delta 1 1 "partial")
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta" data)
+        (should (string-match-p "partial" (buffer-string)))
+        (should (equal emacsos-assist-web--stream-status
+                       "invalid Assist delta"))))))
+
+(ert-deftest test-assist-web-cumulative-deltas-stop-before-message-cap ()
+  "Individually bounded deltas cannot build an oversized provisional message."
+  (let ((emacsos-assist-web--max-message-bytes 7))
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (emacsos-assist-web--write-prompt)
       (emacsos-assist-web--append-pending "hello")
       (emacsos-assist-web--reset-assistant 1)
       (emacsos-assist-web--append-delta 1 1 "partial")
-      (emacsos-assist-web--dispatch-event (current-buffer) "assistant-delta" data)
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       (json-encode '((attempt . 1) (index . 2) (text . "x"))))
       (should (string-match-p "partial" (buffer-string)))
-      (should (equal emacsos-assist-web--stream-status "invalid Assist delta")))))
+      (should-not (string-match-p "partialx" (buffer-string)))
+      (should (= emacsos-assist-web--stream-assistant-bytes 7))
+      (should (= emacsos-assist-web--stream-index 1))
+      (should (equal emacsos-assist-web--stream-status
+                     "invalid Assist delta")))))
+
+(ert-deftest test-assist-web-hot-reload-recovers-provisional-byte-count ()
+  (let ((emacsos-assist-web--max-message-bytes 7))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (emacsos-assist-web--append-pending "hello")
+      (emacsos-assist-web--reset-assistant 1)
+      (emacsos-assist-web--append-delta 1 1 "partial")
+      ;; A newly introduced `defvar-local' has only its default value in an
+      ;; already-streaming buffer after code reload.
+      (kill-local-variable 'emacsos-assist-web--stream-assistant-bytes)
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       (json-encode '((attempt . 1) (index . 2) (text . "x"))))
+      (should (string-match-p "partial" (buffer-string)))
+      (should-not (string-match-p "partialx" (buffer-string)))
+      (should (= emacsos-assist-web--stream-index 1))
+      (should (equal emacsos-assist-web--stream-status
+                     "invalid Assist delta")))))
+
+(ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (emacsos-assist-web--append-pending "hello")
+    (emacsos-assist-web--reset-assistant 1)
+    (let ((text (concat "first\n\tsecond "
+                        (string #x2764 #xfe0f #x200d #x1f525))))
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       (json-encode `((attempt . 1) (index . 1) (text . ,text))))
+      (should (string-match-p (regexp-quote text) (buffer-string)))
+      (should (= emacsos-assist-web--stream-index 1)))))
+
+(ert-deftest test-assist-web-snapshot-bounds-message-and-cumulative-text ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (let ((emacsos-assist-web--max-message-bytes 2))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))
+    (let ((emacsos-assist-web--max-snapshot-messages 0))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))
+    (let ((emacsos-assist-web--max-snapshot-transcript-bytes 2))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-snapshot-rejects-transcript-spoofing-controls ()
+  (dolist (character '(#x0000 #x007f #x2028 #x2029 #x202e #x034f #x2060
+                       #x3164 #xe0001))
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'text (car (alist-get 'messages snapshot)))
+            (concat "visible" (string character) "hidden"))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-snapshot-admits-layout-and-emoji-format-points ()
+  (let* ((snapshot (copy-tree test-assist-web--snapshot))
+         (text (concat "first\n\tsecond "
+                       (string #x2764 #xfe0f #x200d #x1f525))))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot))) text)
+    (should (equal (alist-get 'text
+                              (car (alist-get
+                                    'messages
+                                    (emacsos-assist-web--require-snapshot
+                                     snapshot))))
+                   text))))
+
+(ert-deftest test-assist-web-snapshot-discards-unconsumed-message-extensions ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'remote_extension
+                     (car (alist-get 'messages snapshot)))
+          (make-string (* 512 1024) ?x))
+    (emacsos-assist-web--require-snapshot snapshot)
+    (should-not (assq 'remote_extension
+                      (car (alist-get 'messages snapshot))))
+    (should (equal (mapcar #'car (car (alist-get 'messages snapshot)))
+                   '(id role text state)))))
+
+(ert-deftest test-assist-web-history-page-validates-before-union-policy ()
+  (let ((current (copy-tree test-assist-web--snapshot))
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . nil) (next_before . nil)))
+        (emacsos-assist-web--max-rendered-messages 1))
+    (should (eq
+             (emacsos-assist-web--require-history-page
+              page "thread-1" current "cursor-1")
+             page))))
+
+(ert-deftest test-assist-web-history-combines-wire-pages-to-rendered-limit ()
+  (let ((current (copy-tree test-assist-web--snapshot))
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . nil) (next_before . nil)))
+        (emacsos-assist-web--max-snapshot-messages 1)
+        (emacsos-assist-web--max-rendered-messages 2))
+    (should (eq (emacsos-assist-web--require-history-page
+                 page "thread-1" current "cursor-1")
+                page))))
+
+(ert-deftest test-assist-web-render-drops-oversized-live-reload-history ()
+  (let ((fresh (copy-tree test-assist-web--snapshot))
+        (older (copy-tree test-assist-web--snapshot))
+        (emacsos-assist-web--max-rendered-messages 1))
+    (setf (alist-get 'messages older)
+          '(((id . "m-0") (role . "user") (text . "older")
+             (state . "final"))
+            ((id . "m-minus-1") (role . "assistant") (text . "oldest")
+             (state . "final"))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--snapshot older)
+      (emacsos-assist-web--render fresh)
+      (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                             (alist-get 'messages
+                                        emacsos-assist-web--snapshot))
+                     '("m-1"))))))
+
+(ert-deftest test-assist-web-transcript-count-stops-at-the-first-excess-record ()
+  (let* ((first '((id . "m-1") (role . "assistant") (text . "one")
+                  (state . "final")))
+         (second '((id . "m-2") (role . "assistant") (text . "two")
+                   (state . "final")))
+         (messages (list first second)))
+    (setcdr (cdr messages) messages)
+    (should-error
+     (emacsos-assist-web--require-transcript-limits messages 1 1024))))
+
 
 (ert-deftest test-assist-web-history-merges-chronologically-and-keeps-page-cursor ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
@@ -873,6 +1491,111 @@
                          '("m-0" "m-1")))
           (should (equal (alist-get 'next_before rendered) "cursor-0")))
       (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-history-at-rendered-cap-clears-older-cursor ()
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
+        (emacsos-assist-web--max-rendered-messages 2)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . t) (next_before . "cursor-0"))))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                     (lambda (&rest _) snapshot))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback page nil))))
+            (emacsos-assist-web-load-older))
+          (should (= (length (alist-get 'messages
+                                        emacsos-assist-web--snapshot)) 2))
+          (should-not (alist-get 'has_older_messages
+                                 emacsos-assist-web--snapshot))
+          (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-history-at-rendered-byte-cap-clears-older-cursor ()
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
+        (emacsos-assist-web--max-rendered-transcript-bytes 8)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        rendered
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . t) (next_before . "cursor-0"))))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                     (lambda (&rest _) snapshot))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback page nil)))
+                    ((symbol-function 'emacsos-assist-web--render)
+                     (lambda (value &rest _) (setq rendered value))))
+            (emacsos-assist-web-load-older))
+          (should (= (length (alist-get 'messages rendered)) 2))
+          (should-not (alist-get 'has_older_messages rendered))
+          (should-not (alist-get 'next_before rendered)))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-history-over-rendered-cap-keeps-current-and-stops ()
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
+        (emacsos-assist-web--max-rendered-messages 1)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        requested
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "older")
+                              (state . "final"))))
+                (has_older_messages . t) (next_before . "cursor-0"))))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                     (lambda (&rest _) snapshot))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (setq requested t)
+                       (funcall callback page nil))))
+            (emacsos-assist-web-load-older))
+          (should requested)
+          (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                                 (alist-get 'messages
+                                            emacsos-assist-web--snapshot))
+                         '("m-1")))
+          (should-not (alist-get 'has_older_messages
+                                 emacsos-assist-web--snapshot))
+          (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-load-older-drops-oversized-legacy-state-before-copy ()
+  (let ((emacsos-assist-web--max-rendered-messages 1)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        requested)
+    (setf (alist-get 'messages snapshot)
+          '(((id . "m-0") (role . "user") (text . "older") (state . "final"))
+            ((id . "m-1") (role . "assistant") (text . "newer")
+             (state . "final"))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--snapshot snapshot)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web-load-older))
+      (should-not requested)
+      (should-not emacsos-assist-web--snapshot))))
 
 (ert-deftest test-assist-web-history-rejects-a-mismatched-thread-page ()
   (let ((snapshot (copy-tree test-assist-web--snapshot)) rendered)
@@ -969,6 +1692,65 @@
       (should-not rendered)
       (should emacsos-assist-web--in-flight)
       (should (equal emacsos-assist-web--run-id "run-1")))))
+
+(ert-deftest test-assist-web-refresh-keeps-every-recognized-active-status ()
+  "A manual refresh cannot settle local ownership from an active status alone."
+  (dolist (status emacsos-assist-web--active-snapshot-statuses)
+    (let ((snapshot
+           `((thread . ((id . "thread-1") (description . "Thread")
+                        (status . ,status)
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . nil)))
+          rendered)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1"
+              emacsos-assist-web--run-id "run-1"
+              emacsos-assist-web--pending-key "retry-key"
+              emacsos-assist-web--submitted-text "hello"
+              emacsos-assist-web--pending-accepted-p t
+              emacsos-assist-web--in-flight t)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (funcall callback snapshot nil)))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--render)
+                   (lambda (&rest _) (setq rendered t))))
+          (emacsos-assist-web-refresh-thread))
+        (should-not rendered)
+        (should emacsos-assist-web--in-flight)
+        (should (equal emacsos-assist-web--run-id "run-1"))
+        (should (equal emacsos-assist-web--pending-key "retry-key"))))))
+
+(ert-deftest test-assist-web-refresh-unknown-status-fails-closed ()
+  "A bounded future status is not proof that an accepted Run settled."
+  (let ((snapshot
+         '((thread . ((id . "thread-1") (description . "Thread")
+                      (status . "future-state")
+                      (workspace . ((repo_label . "Assist")))))
+           (messages . nil)))
+        rendered cached)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--run-id "run-1"
+            emacsos-assist-web--pending-key "retry-key"
+            emacsos-assist-web--submitted-text "hello"
+            emacsos-assist-web--pending-accepted-p t
+            emacsos-assist-web--in-flight t)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil)))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) (setq cached t)))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (&rest _) (setq rendered t))))
+        (emacsos-assist-web-refresh-thread))
+      (should-not cached)
+      (should-not rendered)
+      (should emacsos-assist-web--in-flight)
+      (should (equal emacsos-assist-web--run-id "run-1"))
+      (should (equal emacsos-assist-web--pending-key "retry-key")))))
 
 (ert-deftest test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key ()
   (with-temp-buffer
@@ -1103,15 +1885,21 @@
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest test-assist-web-new-draft-has-no-server-thread-before-send ()
-  (let ((cache '((threads . nil)
-                 (repositories . (((repo_key . "repo-key")
-                                   (label . "Assist"))))
-                 (harnesses . (((key . "deepagents")
-				(label . "Deep Agents")))))))
-    (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) cache))
-              ((symbol-function 'completing-read)
+  (let* ((cache '((threads . nil)
+                  (repositories . (((repo_key . "repo-key")
+                                    (label . "Assist"))))
+                  (harnesses . (((key . "deepagents")
+				 (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog cache))
+    (cl-letf (((symbol-function 'completing-read)
                (lambda (prompt &rest _) (if (string-prefix-p "Harness" prompt)
-                                            "Deep Agents" "Assist")))
+                                            (concat "#1  "
+                                                    (emacsos-assist-web--isolate-display-text
+                                                     "Deep Agents"))
+                                          (concat "#1  "
+                                                  (emacsos-assist-web--isolate-display-text
+                                                   "Assist")))))
+              ((symbol-function 'emacsos-assist-web-refresh-threads) #'ignore)
               ((symbol-function 'switch-to-buffer) (lambda (&rest _) nil)))
       (emacsos-assist-web-new-thread)
       (let ((buffer (get-buffer "*assist New thread*")))
@@ -1143,17 +1931,21 @@
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest test-assist-web-duplicate-repository-label-selects-exact-identity ()
-  (let ((cache '((repositories . (((repo_key . "repo-a") (label . "Same"))
-                                   ((repo_key . "repo-b") (label . "Same"))))
-                 (harnesses . (((key . "deepagents")
-                                (label . "Deep Agents")))))))
+  (let* ((cache '((repositories . (((repo_key . "repo-a") (label . "Same"))
+                                    ((repo_key . "repo-b") (label . "Same"))))
+                  (harnesses . (((key . "deepagents")
+                                 (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog cache))
     (when (get-buffer "*assist New thread*") (kill-buffer "*assist New thread*"))
     (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
               ((symbol-function 'completing-read)
                (lambda (prompt &rest _)
                  (if (string-prefix-p "Harness" prompt)
-                     "Deep Agents"
-                   "Same [repo-b]")))
+                     (concat "#1  "
+                             (emacsos-assist-web--isolate-display-text
+                              "Deep Agents"))
+                   (concat "#2  "
+                           (emacsos-assist-web--isolate-display-text "Same")))))
               ((symbol-function 'switch-to-buffer) #'ignore))
       (emacsos-assist-web--new-thread-from-catalog cache))
     (let ((buffer (get-buffer "*assist New thread*")))
@@ -1162,10 +1954,31 @@
             (should (equal emacsos-assist-web--draft-repository "repo-b")))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest test-assist-web-labeled-records-cannot-collide-with-label-text ()
+  (let* ((items '(((repo_key . "attacker") (label . "Prod"))
+                  ((repo_key . "victim") (label . "Prod"))
+                  ((repo_key . "literal") (label . "Prod  #1"))))
+         (records (emacsos-assist-web--labeled-records items 'repo_key))
+         (displays (mapcar (lambda (record) (plist-get record :display))
+                           records)))
+    (should (= (length displays)
+               (length (delete-dups (copy-sequence displays)))))
+    (should (equal
+             (alist-get 'repo_key
+                        (plist-get
+                         (emacsos-assist-web--record-for-display
+                          (concat "#3  "
+                                  (emacsos-assist-web--isolate-display-text
+                                   "Prod"))
+                          records)
+                         :item))
+             "victim"))))
+
 (ert-deftest test-assist-web-new-draft-reopens-without-reselecting-workspace ()
-  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-draft-" t))
-        (cache '((repositories . (((repo_key . "repo-key") (label . "Assist"))))
-                 (harnesses . (((key . "deepagents") (label . "Deep Agents")))))))
+  (let* ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-draft-" t))
+         (cache '((repositories . (((repo_key . "repo-key") (label . "Assist"))))
+                  (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog cache))
     (unwind-protect
         (progn
           (with-temp-buffer
@@ -1187,24 +2000,66 @@
       (when (get-buffer "*assist New thread*") (kill-buffer "*assist New thread*"))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
+(ert-deftest test-assist-web-new-draft-rejects-choices-removed-during-selection ()
+  (let* ((catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog catalog)
+         notice)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) #'ignore)
+              ((symbol-function 'completing-read)
+               (lambda (_prompt choices &rest _)
+                 (prog1 (car choices)
+                   (setq emacsos-assist-web--catalog
+                         '((threads . nil)
+                           (repositories . nil)
+                           (harnesses . nil))))))
+              ((symbol-function 'switch-to-buffer)
+               (lambda (&rest _) (ert-fail "stale workspace must not open")))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (emacsos-assist-web--new-thread-from-catalog catalog))
+    (should-not (get-buffer "*assist New thread*"))
+    (should (string-match-p "No Assist repositories are available" notice))))
+
 (ert-deftest test-assist-web-new-thread-fetches-catalog-with-no-existing-thread ()
-  (let ((catalog '((threads . nil)
-                   (repositories . (((repo_key . "repo-key")
-                                     (label . "Assist"))))
-                   (harnesses . (((key . "deepagents")
-                                  (label . "Deep Agents")))))))
+  (let ((catalog (test-assist-web--wire-catalog
+                  nil
+                  '(((repo_key . "repo-key") (label . "Assist")))
+                  '(((key . "deepagents") (label . "Deep Agents")))))
+        (emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-state nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos-assist-web--new-thread-pending-p nil)
+        (requests 0))
     (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
               ((symbol-function 'emacsos-assist-web--request)
                (lambda (method path _payload callback &rest _)
+                 (setq requests (1+ requests))
                  (should (equal method "GET"))
                  (should (equal path "threads"))
                  (funcall callback catalog nil)))
               ((symbol-function 'emacsos-assist-web--write-cache) (lambda (&rest _) nil))
               ((symbol-function 'completing-read)
                (lambda (prompt &rest _) (if (string-prefix-p "Harness" prompt)
-                                            "Deep Agents" "Assist")))
+                                            (concat "#1  "
+                                                    (emacsos-assist-web--isolate-display-text
+                                                     "Deep Agents"))
+                                          (concat "#1  "
+                                                  (emacsos-assist-web--isolate-display-text
+                                                   "Assist")))))
               ((symbol-function 'switch-to-buffer) (lambda (&rest _) nil)))
       (emacsos-assist-web-new-thread)
+      (should (= requests 1))
+      (should (equal emacsos-assist-web--catalog
+                     '((threads . nil)
+                       (repositories . (((repo_key . "repo-key")
+                                         (label . "Assist"))))
+                       (harnesses . (((key . "deepagents")
+                                      (label . "Deep Agents")))))))
+      (should-not emacsos-assist-web--new-thread-pending-p)
       (let ((buffer (get-buffer "*assist New thread*")))
         (unwind-protect
             (with-current-buffer buffer
@@ -1213,7 +2068,9 @@
           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (ert-deftest test-assist-web-first-open-shows-visible-retryable-loading-failure ()
-  (let ((emacsos-assist-web--catalog nil))
+  (let ((emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-state nil)
+        (emacsos-assist-web--catalog-refreshing-p nil))
     (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
               ((symbol-function 'emacsos-assist-web--request)
                (lambda (_method _path _payload callback &rest _)
@@ -1223,83 +2080,605 @@
         (unwind-protect
             (with-current-buffer buffer
               (should (string-match-p "could not be loaded" (buffer-string)))
-              (should (string-match-p "C-c e r" (buffer-string))))
+              (should (string-match-p "Retry" (buffer-string)))
+              (should (eq (key-binding (kbd "g"))
+                          #'emacsos-assist-web-refresh-threads))
+              (should buffer-read-only))
           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (ert-deftest test-assist-web-empty-loaded-catalog-offers-new-thread ()
-  (let ((emacsos-assist-web--catalog nil)
-        (emacsos-assist-web--catalog-loaded-p t)
-        shown)
-    (cl-letf (((symbol-function 'emacsos-assist-web--load-catalog) #'ignore)
-              ((symbol-function 'emacsos-assist-web--show-notice)
-               (lambda (_name text) (setq shown text))))
-      (emacsos-assist-web-open-thread))
-    (should (string-match-p "C-c e n" shown))))
+  (let ((emacsos-assist-web--catalog (test-assist-web--catalog))
+        (emacsos-assist-web--catalog-refreshing-p t))
+    (cl-letf (((symbol-function 'emacsos-assist-web-refresh-threads) #'ignore)
+              ((symbol-function 'switch-to-buffer) #'ignore))
+      (unwind-protect
+          (progn
+            (emacsos-assist-web-show-thread-list)
+            (with-current-buffer "*assist Threads*"
+              (should (string-match-p "No Assist threads yet" (buffer-string)))
+              (should (string-match-p "C-c e n" (buffer-string)))))
+        (when (get-buffer "*assist Threads*") (kill-buffer "*assist Threads*"))))))
 
-(ert-deftest test-assist-web-newer-catalog-response-wins ()
-  (let ((emacsos-assist-web--catalog nil)
-        (emacsos-assist-web--catalog-loaded-p nil)
-        (emacsos-assist-web--catalog-generation 0)
-        callbacks)
+(ert-deftest test-assist-web-loaded-catalog-without-repository-does-not-prompt ()
+  (let ((emacsos-assist-web--catalog
+         '((threads . nil)
+           (repositories . nil)
+           (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+        (emacsos-assist-web--catalog-state 'current)
+        (emacsos-assist-web--new-thread-pending-p nil)
+        notice)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (ert-fail "empty choices must not prompt")))
+              ((symbol-function 'emacsos-assist-web-refresh-threads) #'ignore)
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq notice (apply #'format format-string args)))))
+      (emacsos-assist-web-new-thread))
+    (should (string-match-p "No Assist repositories are available" notice))
+    (should-not emacsos-assist-web--new-thread-pending-p)))
+
+(ert-deftest test-assist-web-new-thread-starts-refresh-before-cached-chooser ()
+  (let ((emacsos-assist-web--catalog
+         '((threads . nil)
+           (repositories . (((repo_key . "repo") (label . "Assist"))))
+           (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+        calls)
+    (cl-letf (((symbol-function 'emacsos-assist-web-refresh-threads)
+               (lambda () (push 'refresh calls)))
+              ((symbol-function 'emacsos-assist-web--open-pending-new-thread)
+               (lambda () (push 'chooser calls))))
+      (emacsos-assist-web-new-thread))
+    (should (equal (nreverse calls) '(refresh chooser)))))
+
+(ert-deftest test-assist-web-synchronous-refresh-failure-still-opens-cached-chooser ()
+  (let* ((catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog catalog)
+         (emacsos-assist-web--catalog-state 'cached)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p nil))
     (cl-letf (((symbol-function 'emacsos-assist-web--request)
                (lambda (_method _path _payload callback &rest _)
-                 (push callback callbacks)))
-              ((symbol-function 'emacsos-assist-web--write-cache) #'ignore))
-      (emacsos-assist-web-refresh-threads)
-      (emacsos-assist-web-refresh-threads)
-      (let ((newer (pop callbacks))
-            (older (pop callbacks)))
-        (funcall newer
-                 '((threads . (((id . "new") (description . "New")
-                                (search_description . "new")
-                                (repo_label . "Assist") (status . "ready"))))
-                   (repositories . nil) (harnesses . nil)) nil)
-        (funcall older
-                 '((threads . (((id . "old") (description . "Old")
-                                (search_description . "old")
-                                (repo_label . "Assist") (status . "ready"))))
-                   (repositories . nil) (harnesses . nil)) nil)))
-    (should (equal (alist-get 'id (car emacsos-assist-web--catalog)) "new"))))
+                 (funcall callback nil "missing token")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt choices &rest _) (car choices)))
+              ((symbol-function 'emacsos-assist-web--read-cache) #'ignore)
+              ((symbol-function 'switch-to-buffer) #'ignore))
+      (unwind-protect
+          (progn
+            (emacsos-assist-web-new-thread)
+            (with-current-buffer "*assist New thread*"
+              (should (equal emacsos-assist-web--draft-repository "repo"))
+              (should (equal emacsos-assist-web--draft-harness "deepagents")))
+            (should-not emacsos-assist-web--new-thread-pending-p))
+        (when (get-buffer "*assist New thread*")
+          (kill-buffer "*assist New thread*"))))))
 
-(ert-deftest test-assist-web-new-thread-fetch-cannot-overwrite-a-newer-catalog ()
+(ert-deftest test-assist-web-synchronous-refresh-failure-cancels-deferred-cached-chooser ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-sync-failed-minibuffer*"))
+         (emacsos-assist-web--catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog-state 'cached)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p nil))
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () window))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback nil "missing token")))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _) (ert-fail "failed refresh must not defer"))))
+            (emacsos-assist-web-new-thread)
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (with-current-buffer minibuffer
+              (should-not (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                                minibuffer-exit-hook)))))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
+(ert-deftest test-assist-web-catalog-consumers-coalesce-one-refresh ()
   (let ((emacsos-assist-web--catalog nil)
-        (emacsos-assist-web--catalog-loaded-p nil)
-        (emacsos-assist-web--catalog-generation 0)
-        callbacks)
-    (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
+        (emacsos-assist-web--catalog-state nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos-assist-web--new-thread-pending-p nil)
+        callback (requests 0) (new-thread-opens 0)
+        (catalog (test-assist-web--wire-catalog
+                  '(((id . "thread-1") (description . "Thread")
+                     (search_description . "thread")
+                     (repo_label . "Assist") (status . "ready")))
+                  '(((repo_key . "repo") (label . "Assist")))
+                  '(((key . "deepagents") (label . "Deep Agents"))))))
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) #'ignore)
               ((symbol-function 'emacsos-assist-web--request)
-               (lambda (_method _path _payload callback &rest _)
-                 (setq callbacks (append callbacks (list callback)))))
+               (lambda (_method _path _payload cb &rest _)
+                 (setq requests (1+ requests) callback cb)))
               ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
-              ((symbol-function 'emacsos-assist-web--new-thread-from-catalog) #'ignore))
+              ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
+               (lambda (_catalog) (setq new-thread-opens (1+ new-thread-opens)))))
+      (unwind-protect
+          (progn
+            (emacsos-assist-web-open-thread)
+            (emacsos-assist-web-show-thread-list)
+            (emacsos-assist-web-new-thread)
+            (should (= requests 1))
+            (should emacsos-assist-web--new-thread-pending-p)
+            (funcall callback catalog nil)
+            (should (equal (alist-get 'id
+                                      (car (alist-get
+                                            'threads
+                                            emacsos-assist-web--catalog)))
+                           "thread-1"))
+            (should (= new-thread-opens 1))
+            (should-not emacsos-assist-web--catalog-refreshing-p))
+        (when (get-buffer "*assist Threads*") (kill-buffer "*assist Threads*"))))))
+
+(ert-deftest test-assist-web-empty-cached-choices-resume-after-refresh ()
+  (let ((emacsos-assist-web--catalog (test-assist-web--catalog))
+        (emacsos-assist-web--catalog-state 'cached)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos-assist-web--new-thread-pending-p nil)
+        callback (opened 0))
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (_method _path _payload cb &rest _)
+                 (setq callback cb)))
+              ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
+              ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
+               (lambda (_catalog) (setq opened (1+ opened)))))
       (emacsos-assist-web-new-thread)
+      (should emacsos-assist-web--new-thread-pending-p)
+      (funcall callback
+               (test-assist-web--wire-catalog
+                nil
+                '(((repo_key . "repo") (label . "Assist")))
+                '(((key . "deepagents") (label . "Deep Agents"))))
+               nil)
+      (should (= opened 1))
+      (should-not emacsos-assist-web--new-thread-pending-p))))
+
+(ert-deftest test-assist-web-new-thread-waits-for-active-minibuffer-exit ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-active-minibuffer*"))
+         (emacsos-assist-web--catalog nil)
+         (emacsos-assist-web--catalog-state nil)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p t)
+         (active t)
+         (opened 0))
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () (and active window)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_time _repeat function &rest arguments)
+                       (apply function arguments)))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback
+                                (test-assist-web--wire-catalog
+                                 nil
+                                 '(((repo_key . "repo") (label . "Assist")))
+                                 '(((key . "deepagents")
+                                    (label . "Deep Agents"))))
+                                nil)))
+                    ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
+                     (lambda (_catalog) (setq opened (1+ opened)))))
+            (emacsos-assist-web-refresh-threads)
+            (should emacsos-assist-web--new-thread-pending-p)
+            (should (= opened 0))
+            (setq active nil)
+            (with-current-buffer minibuffer
+              (run-hooks 'minibuffer-exit-hook))
+            (should (= opened 1))
+            (should-not emacsos-assist-web--new-thread-pending-p)))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
+(ert-deftest test-assist-web-confirmed-empty-refresh-cancels-deferred-new-thread ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-empty-minibuffer*"))
+         (emacsos-assist-web--catalog nil)
+         (emacsos-assist-web--catalog-state nil)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p t)
+         notice)
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () window))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback
+                                (test-assist-web--wire-catalog nil nil nil)
+                                nil)))
+                    ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
+                     (lambda (&rest _) (ert-fail "empty choices must not open")))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (setq notice (apply #'format format-string args)))))
+            (emacsos-assist-web-refresh-threads)
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (should (string-match-p "No Assist repositories are available" notice))
+            (with-current-buffer minibuffer
+              (should-not (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                                minibuffer-exit-hook)))))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
+(ert-deftest test-assist-web-load-catalog-repairs-a-hot-reloaded-legacy-shape ()
+  (let* ((legacy '(((id . "old") (description . "Old"))))
+         (cached (test-assist-web--catalog
+                  '((id . "current") (description . "Current")
+                    (search_description . "current")
+                    (repo_label . "Assist") (status . "ready"))))
+         (emacsos-assist-web--catalog legacy))
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-catalog-cache)
+               (lambda () cached)))
+      (emacsos-assist-web--load-catalog))
+    (should (eq emacsos-assist-web--catalog cached))
+    (should (eq emacsos-assist-web--catalog-state 'cached))))
+
+(ert-deftest test-assist-web-refresh-failure-preserves-catalog-and-discards-new-intent ()
+  (let* ((catalog (test-assist-web--catalog
+                   '((id . "existing") (description . "Existing")
+                     (search_description . "existing")
+                     (repo_label . "Assist") (status . "ready"))))
+         (emacsos-assist-web--catalog catalog)
+         (emacsos-assist-web--catalog-state 'current)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p t))
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (_method _path _payload callback &rest _)
+                 (funcall callback nil "offline"))))
+      (emacsos-assist-web-refresh-threads))
+    (should (eq emacsos-assist-web--catalog catalog))
+    (should (eq emacsos-assist-web--catalog-state 'refresh-failed))
+    (should-not emacsos-assist-web--new-thread-pending-p)))
+
+(ert-deftest test-assist-web-refresh-failure-cancels-deferred-new-thread ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-failed-minibuffer*"))
+         (emacsos-assist-web--catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--catalog-state 'current)
+         (emacsos-assist-web--new-thread-pending-p t)
+         (active t)
+         (opened 0))
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () (and active window)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_time _repeat function &rest arguments)
+                       (apply function arguments)))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback nil "offline")))
+                    ((symbol-function 'emacsos-assist-web--new-thread-from-catalog)
+                     (lambda (_catalog) (setq opened (1+ opened)))))
+            (emacsos-assist-web-refresh-threads)
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (setq active nil)
+            (with-current-buffer minibuffer
+              (run-hooks 'minibuffer-exit-hook))
+            (should (= opened 0))))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
+(ert-deftest test-assist-web-async-refresh-failure-removes-armed-minibuffer-hook ()
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (minibuffer (generate-new-buffer " *assist-async-failed-minibuffer*"))
+         (emacsos-assist-web--catalog
+          '((threads . nil)
+            (repositories . (((repo_key . "repo") (label . "Assist"))))
+            (harnesses . (((key . "deepagents") (label . "Deep Agents"))))))
+         (emacsos-assist-web--catalog-state 'cached)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         (emacsos-assist-web--new-thread-pending-p nil)
+         callback)
+    (unwind-protect
+        (progn
+          (set-window-buffer window minibuffer)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () window))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload cb &rest _)
+                       (setq callback cb))))
+            (emacsos-assist-web-new-thread)
+            (with-current-buffer minibuffer
+              (should (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                            minibuffer-exit-hook)))
+            (funcall callback nil "offline")
+            (should-not emacsos-assist-web--new-thread-pending-p)
+            (with-current-buffer minibuffer
+              (should-not (memq #'emacsos-assist-web--resume-new-thread-after-minibuffer
+                                minibuffer-exit-hook)))))
+      (set-window-buffer window original-buffer)
+      (kill-buffer minibuffer))))
+
+(ert-deftest test-assist-web-cache-write-failure-remains-visible-after-live-refresh ()
+  (let ((emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos-assist-web--catalog-state nil)
+        (reply (test-assist-web--wire-catalog nil nil nil)))
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (_method _path _payload callback &rest _)
+                 (if (stringp reply)
+                     (funcall callback nil reply)
+                   (funcall callback reply nil))))
+              ((symbol-function 'emacsos-assist-web--try-write-cache)
+               (lambda (&rest _) nil)))
       (emacsos-assist-web-refresh-threads)
-      (funcall
-       (cadr callbacks)
-       '((threads . (((id . "new") (description . "New")
-                      (search_description . "new")
-                      (repo_label . "Assist") (status . "ready"))))
-         (repositories . nil) (harnesses . nil)) nil)
-      (funcall
-       (car callbacks)
-       '((threads . (((id . "old") (description . "Old")
-                      (search_description . "old")
-                      (repo_label . "Assist") (status . "ready"))))
-         (repositories . nil) (harnesses . nil)) nil))
-    (should (equal (alist-get 'id (car emacsos-assist-web--catalog)) "new"))))
+      (should (eq emacsos-assist-web--catalog-state 'cache-write-failed))
+      (setq reply "offline")
+      (emacsos-assist-web-refresh-threads))
+    (should emacsos-assist-web--catalog)
+    (should (eq emacsos-assist-web--catalog-state 'refresh-failed))))
+
+(ert-deftest test-assist-web-reload-keeps-one-refresh-until-old-callback-finishes ()
+  (let* ((old (test-assist-web--catalog
+               '((id . "old") (description . "Old")
+                 (repo_label . "Assist") (status . "ready"))))
+         (replacement (test-assist-web--catalog
+                       '((id . "replacement") (description . "Replacement")
+                         (repo_label . "Assist") (status . "ready"))))
+         (wire (test-assist-web--wire-catalog
+                '(((id . "late") (description . "Late")
+                   (search_description . "late")
+                   (repo_label . "Assist") (status . "ready")))
+                nil nil))
+         (emacsos-assist-web--catalog old)
+         (emacsos-assist-web--catalog-generation 7)
+         (emacsos-assist-web--catalog-state 'current)
+         (emacsos-assist-web--catalog-refreshing-p nil)
+         callback (requests 0))
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (_method _path _payload cb &rest _)
+                 (setq requests (1+ requests) callback cb))))
+      (emacsos-assist-web-refresh-threads)
+      ;; Package reload invalidates old callbacks but retains their refresh
+      ;; claim until they finish, so another consumer cannot start a second GET.
+      (setq emacsos-assist-web--catalog-generation 8
+            emacsos-assist-web--new-thread-pending-p nil
+            emacsos-assist-web--catalog replacement)
+      (emacsos-assist-web-refresh-threads)
+      (should (= requests 1))
+      (funcall callback wire nil)
+      (should-not emacsos-assist-web--catalog-refreshing-p)
+      (emacsos-assist-web-refresh-threads)
+      (should (= requests 2)))
+    (should (eq emacsos-assist-web--catalog replacement))
+    (should emacsos-assist-web--catalog-refreshing-p)))
 
 (ert-deftest test-assist-web-malformed-catalog-does-not-replace-valid-state ()
-  (let ((emacsos-assist-web--catalog
-         '(((id . "existing") (description . "Existing")
-            (search_description . "existing")
-            (repo_label . "Assist") (status . "ready"))))
-        (emacsos-assist-web--catalog-loaded-p t))
+  (let* ((catalog (test-assist-web--catalog
+                   '((id . "existing") (description . "Existing")
+                     (search_description . "existing")
+                     (repo_label . "Assist") (status . "ready"))))
+         (emacsos-assist-web--catalog catalog)
+         (emacsos-assist-web--catalog-state 'current)
+         (emacsos-assist-web--catalog-refreshing-p nil))
     (cl-letf (((symbol-function 'emacsos-assist-web--request)
                (lambda (_method _path _payload callback &rest _)
                  (funcall callback "not an object" nil))))
       (emacsos-assist-web-refresh-threads))
-    (should (equal (alist-get 'id (car emacsos-assist-web--catalog))
-                   "existing"))))
+    (should (eq emacsos-assist-web--catalog catalog))
+    (should (eq emacsos-assist-web--catalog-state 'refresh-failed))))
+
+(ert-deftest test-assist-web-catalog-rejects-unbounded-or-spoofable-display-data ()
+  (let ((valid-thread '((id . "thread-1") (description . "Thread")
+                        (search_description . "thread")
+                        (repo_label . "Assist") (status . "ready"))))
+    (should
+     (equal (emacsos-assist-web--require-catalog
+             (test-assist-web--wire-catalog (list valid-thread) nil nil))
+            `((threads . (,valid-thread))
+              (repositories . nil) (harnesses . nil))))
+    (should-error
+     (emacsos-assist-web--require-catalog
+      (test-assist-web--wire-catalog (make-list 501 valid-thread) nil nil)))
+    (let ((wrong-array (test-assist-web--wire-catalog nil nil nil)))
+      (puthash "threads" nil wrong-array)
+      (should-error (emacsos-assist-web--require-catalog wrong-array)))
+    (dolist (description (list (make-string 513 ?x)
+                               "false\nrow"
+                               (concat "false" (string #x0085) "row")
+                               (concat "false" (string #x2028) "row")
+                               (concat "false" (string #x2029) "row")
+                               (concat "ready" (string #x202e) "not")
+                               (concat "same" (string #x034f))
+                               (concat "same" (string #xfe0e))))
+      (let ((thread (copy-tree valid-thread)))
+        (setf (alist-get 'description thread) description)
+        (should-error
+         (emacsos-assist-web--require-catalog
+          (test-assist-web--wire-catalog (list thread) nil nil)))))
+    (should-error
+     (emacsos-assist-web--require-catalog
+      (test-assist-web--wire-catalog
+       (list valid-thread (copy-tree valid-thread)) nil nil)))))
+
+(ert-deftest test-assist-web-catalog-accepts-production-emoji-zwj-and-vs16 ()
+  (let* ((joined (concat "Coding " (string #x1f469 #x200d #x1f4bb)))
+         (emoji (concat "Weather " (string #x2600 #xfe0f)))
+         (threads
+          (cl-loop
+           for index from 1 to 148
+           collect
+           `((id . ,(format "thread-%d" index))
+             (description . ,(cond ((= index 7) joined)
+                                    ((= index 60) emoji)
+                                    (t (format "Thread %d" index))))
+             (search_description . ,(if (= index 48) joined
+                                      (format "thread %d" index)))
+             (repo_label . "Assist") (status . "ready"))))
+         (catalog
+          (emacsos-assist-web--require-catalog
+           (test-assist-web--wire-catalog threads nil nil))))
+    (should (= (length (alist-get 'threads catalog)) 148))
+    (should (equal (alist-get 'threads catalog) threads))))
+
+(ert-deftest test-assist-web-catalog-rejects-other-hostile-format-text ()
+  (let ((valid-thread '((id . "thread-1") (description . "Thread")
+                        (search_description . "thread")
+                        (repo_label . "Assist") (status . "ready"))))
+    (dolist (character '(#x00ad #x200b #x200c #x200e
+                         #x2066 #xfe0e #xe0100))
+      (dolist (field '(description search_description))
+        (let ((thread (copy-tree valid-thread)))
+          (setf (alist-get field thread)
+                (concat "hostile" (string character) "text"))
+          (should-error
+           (emacsos-assist-web--require-catalog
+            (test-assist-web--wire-catalog (list thread) nil nil))))))
+    (dolist (character '(#x200d #xfe0f))
+      (let ((key (concat "key" (string character))))
+        (should-error
+         (emacsos-assist-web--require-catalog
+          (test-assist-web--wire-catalog
+           nil `(((repo_key . ,key) (label . "Repository"))) nil)))
+        (should-error
+         (emacsos-assist-web--require-catalog
+          (test-assist-web--wire-catalog
+           nil nil `(((key . ,key) (label . "Harness"))))))))))
+
+(ert-deftest test-assist-web-native-list-renders-stable-collision-ordinals ()
+  (let* ((a '((id . "a") (description . "Same description alpha")
+              (search_description . "same description alpha")
+              (repo_label . "Very long repository label") (status . "ready")))
+         (z '((id . "z") (description . "Same description beta")
+              (search_description . "same description beta")
+              (repo_label . "Very long repository label") (status . "ready")))
+         (emacsos-assist-web--catalog (test-assist-web--catalog z a)))
+    (unwind-protect
+        (progn
+          (with-current-buffer
+              (get-buffer-create emacsos-assist-web--thread-list-buffer-name)
+            (emacsos-assist-web-thread-list-mode)
+            (should (eq bidi-paragraph-direction 'left-to-right)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--list-width)
+                     (lambda () 16)))
+            (emacsos-assist-web--render-thread-list))
+          (with-current-buffer emacsos-assist-web--thread-list-buffer-name
+            (should (string-match-p "#1" (buffer-string)))
+            (should (string-match-p "#2" (buffer-string))))
+          (setq emacsos-assist-web--catalog (test-assist-web--catalog a z))
+          (let ((ordinals
+                 (mapcar (lambda (record)
+                         (cons (alist-get 'id (plist-get record :thread))
+                                 (plist-get record :ordinal)))
+                         (emacsos-assist-web--list-records 16))))
+            (should (equal ordinals '(("a" . 1) ("z" . 2))))))
+      (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
+        (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
+
+(ert-deftest test-assist-web-native-list-ordinals-cover-admitted-emoji-marks ()
+  (let* ((plain '((id . "a") (description . "Same")
+                  (search_description . "same")
+                  (repo_label . "Assist") (status . "ready")))
+         (vs16 `((id . "b") (description . ,(concat "Same" (string #xfe0f)))
+                 (search_description . "same")
+                 (repo_label . "Assist") (status . "ready")))
+         (zwj `((id . "c") (description . ,(concat "Sa" (string #x200d) "me"))
+                (search_description . "same")
+                (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog (test-assist-web--catalog plain vs16 zwj)))
+    (should
+     (equal (mapcar (lambda (record)
+                      (cons (alist-get 'id (plist-get record :thread))
+                            (plist-get record :ordinal)))
+                    (emacsos-assist-web--list-records 40))
+            '(("a" . 1) ("b" . 2) ("c" . 3))))))
+
+(ert-deftest test-assist-web-native-list-groups-canonically-equivalent-rows ()
+  (let* ((composed '((id . "a") (description . "é")
+                     (search_description . "é")
+                     (repo_label . "Assist") (status . "ready")))
+         (decomposed '((id . "b") (description . "é")
+                       (search_description . "é")
+                       (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog
+          (test-assist-web--catalog composed decomposed)))
+    (should (equal (mapcar (lambda (record) (plist-get record :ordinal))
+                           (emacsos-assist-web--list-records 16))
+                   '(1 2)))))
+
+(ert-deftest test-assist-web-native-list-reserves-ordinal-column-from-server-text ()
+  (let* ((first '((id . "a") (description . "Same")
+                  (search_description . "same")
+                  (repo_label . "R") (status . "abcdefghijklmnopqrst")))
+         (second '((id . "b") (description . "Same")
+                   (search_description . "same")
+                   (repo_label . "R") (status . "abcdefghijklmnopqrstu")))
+         (spoof '((id . "c") (description . "Same")
+                  (search_description . "same")
+                  (repo_label . "R") (status . "abcdefg…  #1")))
+         (emacsos-assist-web--catalog
+          (test-assist-web--catalog first second spoof))
+         rows)
+    (dolist (record (emacsos-assist-web--list-records 16))
+      (with-temp-buffer
+        (emacsos-assist-web--insert-thread-row record)
+        (push (buffer-string) rows)))
+    (should (= 3 (length (delete-dups rows))))))
+
+(ert-deftest test-assist-web-native-list-isolates-natural-rtl-from-trusted-ordinal ()
+  (let ((record (list :thread '((id . "rtl"))
+                      :description "مرحبا #1"
+                      :metadata "مستودع · ready"
+                      :ordinal 2)))
+    (with-temp-buffer
+      (emacsos-assist-web--insert-thread-row record)
+      (should
+       (equal (buffer-string)
+              (concat
+               (emacsos-assist-web--isolate-display-text "مرحبا #1") "\n"
+               (emacsos-assist-web--isolate-display-text "مستودع · ready")
+               "   #2\n"))))))
+
+(ert-deftest test-assist-web-native-list-opens-the-exact-id-at-point ()
+  (let* ((a '((id . "thread-a") (description . "Same")
+              (search_description . "same")
+              (repo_label . "Assist") (status . "ready")))
+         (b '((id . "thread-b") (description . "Same")
+              (search_description . "same")
+              (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog (test-assist-web--catalog a b))
+         opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer
+              (get-buffer-create emacsos-assist-web--thread-list-buffer-name)
+            (emacsos-assist-web-thread-list-mode))
+          (emacsos-assist-web--render-thread-list)
+          (with-current-buffer emacsos-assist-web--thread-list-buffer-name
+            (goto-char (emacsos-assist-web--thread-row-position "thread-b"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--show-thread)
+                       (lambda (thread) (setq opened (alist-get 'id thread)))))
+              (emacsos-assist-web-list-activate)))
+          (should (equal opened "thread-b")))
+      (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
+        (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
 
 (ert-deftest test-assist-web-has-contextual-conversation-command-prefix ()
   (with-temp-buffer
@@ -1661,7 +3040,10 @@
 
 (ert-deftest test-assist-web-awaiting-approval-recovery-keeps-the-exact-run ()
   "A nonterminal approval wait survives until its canonical refresh succeeds."
-  (let ((emacsos--assist-active-surface nil) callback refreshed)
+  (let ((emacsos--assist-active-surface nil)
+        callback
+        (snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'status (alist-get 'thread snapshot)) "awaiting_approval")
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1"
@@ -1674,14 +3056,16 @@
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                 ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
-                ((symbol-function 'emacsos-assist-web-refresh-thread)
-                 (lambda (buffer completed-run-id)
-                   (setq refreshed (list buffer completed-run-id)))))
+                ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore))
         (emacsos-assist-web--resume-accepted-run)
-        (funcall callback '((status . "awaiting_approval")) nil))
+        (funcall callback '((status . "awaiting_approval")) nil)
+        (funcall callback snapshot nil))
       (should (equal emacsos-assist-web--run-id "run-1"))
       (should emacsos-assist-web--pending-accepted-p)
-      (should (equal refreshed (list (current-buffer) "run-1"))))))
+      (should (equal (alist-get 'status
+                                (alist-get 'thread
+                                           emacsos-assist-web--snapshot))
+                     "awaiting_approval")))))
 
 (ert-deftest test-assist-web-unknown-run-status-keeps-the-exact-retry-tuple ()
   "An unrecognized projection cannot discard accepted durable work."
@@ -2107,6 +3491,72 @@
       (should (string-match-p "recent final" (buffer-string)))
       (should (equal (alist-get 'next_before emacsos-assist-web--snapshot)
                      "cursor-old")))))
+
+(ert-deftest test-assist-web-refresh-evicts-oldest-loaded-history-at-cap ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((emacsos-assist-web--max-rendered-messages 2)
+          (old
+           '((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-old") (role . "assistant")
+                           (text . "older") (state . "final"))
+                          ((id . "m-1") (role . "assistant")
+                           (text . "recent") (state . "final"))))
+             (has_older_messages . t) (next_before . "cursor-old")))
+          (fresh
+           '((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-1") (role . "assistant")
+                           (text . "recent final") (state . "final"))
+                          ((id . "m-2") (role . "assistant")
+                           (text . "new") (state . "final"))))
+             (has_older_messages . t) (next_before . "cursor-new"))))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) #'ignore))
+        (emacsos-assist-web--render old)
+        (emacsos-assist-web--render fresh))
+      (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                             (alist-get 'messages
+                                        emacsos-assist-web--snapshot))
+                     '("m-1" "m-2")))
+      (should-not (alist-get 'has_older_messages
+                             emacsos-assist-web--snapshot))
+      (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))))
+
+(ert-deftest test-assist-web-refresh-retains-no-history-across-byte-gap ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((emacsos-assist-web--max-rendered-transcript-bytes 30)
+          (old
+           `((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-old") (role . "assistant")
+                           (text . "small") (state . "final"))
+                          ((id . "m-large") (role . "assistant")
+                           (text . ,(make-string 15 ?x)) (state . "final"))
+                          ((id . "m-1") (role . "assistant")
+                           (text . "newer") (state . "final"))))
+             (has_older_messages . t) (next_before . "cursor-old")))
+          (fresh
+           `((thread . ((id . "thread-1") (description . "Thread")
+                        (status . "ready")
+                        (workspace . ((repo_label . "Assist")))))
+             (messages . (((id . "m-1") (role . "assistant")
+                           (text . "newer") (state . "final"))
+                          ((id . "m-2") (role . "assistant")
+                           (text . ,(make-string 15 ?y)) (state . "final"))))
+             (has_older_messages . t) (next_before . "cursor-new"))))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) #'ignore))
+        (emacsos-assist-web--render old)
+        (emacsos-assist-web--render fresh))
+      (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                             (alist-get 'messages
+                                        emacsos-assist-web--snapshot))
+                     '("m-1" "m-2")))
+      (should-not (alist-get 'next_before emacsos-assist-web--snapshot)))))
 
 (ert-deftest test-assist-web-render-keeps-phone-viewport-on-message-anchor ()
   (let ((buffer (generate-new-buffer " *assist-anchor-test*"))

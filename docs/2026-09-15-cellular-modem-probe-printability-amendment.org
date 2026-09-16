@@ -1,0 +1,22 @@
+#+title: Cellular modem probe printability amendment
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This amendment replaces only the printable vendor/model condition in
+[[file:2026-09-15-cellular-modem-probe-format-amendment.org][Cellular modem probe format amendment]], section /Correction/.  That record
+remains the historical source for the exact listing shape.
+
+* Correction
+
+Under the helper's fixed C locale, every byte of an accepted modem listing must
+belong to the printable character class.  Control bytes and high bytes are not
+valid vendor/model text, even when the surrounding path, brackets, and spacing
+match the listing shape.  Such output fails without cellular activation or a
+ModemManager restart.
+
+* Verification
+
+The focused root-helper regression supplies otherwise valid listing shapes
+whose model is an ASCII control byte or a high byte and requires the finite
+=not-connected:failed= result without service restart.

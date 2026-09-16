@@ -1,0 +1,42 @@
+#+title: Round-five bounds review correction
+#+date: 2026-09-16
+
+* Corrections
+
+An Assist stream that survives a live code reload reconstructs its cumulative
+provisional-message byte count from the existing marked assistant body before
+accepting another delta.  Reload therefore cannot reset the bound while
+retaining already rendered text.
+
+The render path accepts the bounded 1,000-message, 2 MiB union produced by
+explicit history loading.  When a fresh recent page would make retained
+history exceed either rendered limit, the client evicts the oldest loaded rows
+and clears the older-history cursor.  When an entire requested older page
+would cross a rendered limit, the client keeps the current valid state and
+clears that cursor rather than repeatedly requesting the same unusable page.
+Legacy buffer-local history is validated at rendered limits before copying or
+merging it.
+
+Live reload terminates every tracked or pre-upgrade network-action process
+without removing its existing sentinel.  The sentinel therefore retains sole
+ownership of exactly-once failure completion and pending-state release.  A
+timed-out or overflowing action reports its canonical bounded failure even if
+it emitted partial diagnostics first.
+
+* Verification
+
+ERT covers a reload in the middle of provisional Assist output, actual render
+of a loaded union at the cap, oldest-row eviction after a newer canonical
+message, over-cap page refusal with cursor removal, pre-copy rejection of
+oversized legacy history, timeout and overflow after partial diagnostics, and
+reload teardown of tracked and pre-upgrade action processes.
+
+* Historical supersessions
+
+This document supersedes only the reload, history-union, network-action, and
+verification statements in
+[[file:2026-09-16-live-assistant-history-and-network-bounds-amendment.org][Live assistant, loaded-history, and network-action bounds amendment]], sections
+/Corrections/, /Verification/, and /Historical supersessions/, with the
+construction above.  The network-action statement directly affects
+[[file:2026-09-12-phone-control-panel.org][Phone control panel]], section /Interfaces/; the earlier amendment's reference
+to a nonexistent section is not authoritative.

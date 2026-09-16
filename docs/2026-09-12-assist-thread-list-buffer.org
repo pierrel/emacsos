@@ -1,0 +1,109 @@
+#+title: Native Assist thread list
+#+date: 2026-09-12
+
+* Objective
+
+Make existing Assist threads directly browsable on the 320 by 240 phone.  A
+persistent =Threads= modeline entry opens a native Emacs list whose rows can be
+activated by touch or physical RET.  The existing =C-c C-a t= completion flow
+remains available and uses the same catalog state.
+
+* User flow
+
+Tapping =Threads= opens =*assist Threads*= immediately.  If a validated cache
+exists, the list renders it before starting one asynchronous refresh.  Each
+thread occupies two touch-sized lines: description, then repository and status.
+RET or mouse-1 anywhere on the row opens the exact stored thread identifier.
+
+The first open without a cache shows loading in the list.  A loaded list keeps
+one refresh action, labeled =Refresh= normally and =Retry= after a refresh or
+cache-write failure.  Physical =g= and =C-c C-a r= invoke the same command.
+The modeline text is =Threads…= while a refresh is active and =Threads!= after
+either failure.
+
+Visually identical rows receive stable =#N= ordinals computed from sorted
+thread identifiers.  The ordinal occupies a trusted fixed-width column and is
+preserved when metadata must be truncated to the phone width.  Opaque
+identifiers are not displayed in the native list.  The completion chooser puts
+a stable ordinal before every candidate so long common prefixes cannot hide
+the distinguishing text below the fold.
+
+* State and interface
+
+=emacsos-assist-web--catalog= owns one complete catalog object containing
+threads, repositories, and harnesses.  Disk is only its startup seed.  The
+native list, completion chooser, and new-thread repository/harness selection
+all consume that object.  Refresh is coalesced by one process-wide in-flight
+flag, so simultaneous consumers issue one GET and all live list/modeline views
+rerender from the result.
+
+A first-use new-thread request sets one pending boolean and joins that refresh.
+Repeated taps coalesce.  Success opens the chooser exactly once; failure clears
+the intent so a later retry cannot unexpectedly open it.  No general callback
+queue or second catalog fetch path is introduced.
+
+Touch RET now invokes the target buffer's effective physical RET binding after
+preserving the minibuffer acceptance special case.  This makes the native list
+row map and existing conversation row maps work through the same deterministic
+keyboard primitive.
+
+The fixed modeline priority is EmacsOS, Threads, call, SMS, platform segments,
+then network.  This keeps navigation and urgent state ahead of lower-priority
+status when the display truncates.
+
+* Trust and resource bounds
+
+The authenticated HTTPS endpoint and existing one MiB response cap remain the
+network boundary.  Before a catalog can replace trusted memory or disk state,
+the client requires all three arrays, limits each to 500 entries, limits every
+display field to 512 UTF-8 bytes, rejects control, line/paragraph separator,
+format, and default-ignorable characters, validates identifiers, and rejects
+duplicate thread identifiers.  Catalog JSON is decoded with non-interning
+string keys.  Malformed refreshes preserve the prior validated catalog and
+expose failure.
+
+The list fixes paragraph direction to left-to-right and wraps each displayed
+server field in trusted bidirectional isolates, containing natural RTL text
+instead of allowing it to move the trusted ordinal column.  Completion labels
+use the same boundary.  Server-supplied bidirectional formatting controls
+remain rejected.
+
+The rendered list contains at most 500 bounded rows.  Text properties carry
+only identifiers recovered from the validated catalog, and activation resolves
+the identifier against the current catalog before opening a thread.  The list
+does not evaluate server text, construct filesystem paths, or add destructive
+actions.
+
+* Design review
+
+Six =gpt-5.6-terra= lenses reviewed the Sol architecture.  Simplicity and clean
+interfaces replaced separate thread/new-thread caches with the single complete
+catalog and reduced refresh joining to one pending new-thread bit.  Framework
+fit required physical touch RET to dispatch the target buffer's real RET
+binding.  User experience added the native retry row, narrow-screen truncation,
+stable collision ordinals, and explicit modeline priority.  Threat review added
+entry counts, per-field byte bounds, control and format-character rejection,
+and duplicate-ID rejection.  The user-intention lens accepted the original
+scope.  All six lenses accepted the revised design before implementation.
+
+* Deterministic acceptance
+
+ERT covers shared-request coalescing, first-use new-thread continuation,
+failure preservation, adversarial catalog bounds, stable collision ordinals,
+exact row identity, modeline states and action, navigation/urgent modeline
+ordering, physical RET dispatch, and the end-to-end touchscreen RET path
+through a native row.
+
+* Historical supersessions
+
+This document supersedes the completion-list-first entry point, command-surface
+description, and candidate format in the =User flow= and =Thread selection and
+naming= sections of =2026-09-03-assist-web-thread-flow.org=.  The native list is
+now the persistent phone browsing surface, while the catalog completion chooser
+remains available through =C-c C-a t= and uses leading stable ordinals.
+
+It also supersedes the touchscreen RET mechanism in =Shared native buffer
+contract= and the thread-chooser exclusion in =Non-goals= of
+=2026-09-08-conversation-interface-streaming.org=.  Touch RET now dispatches the
+target buffer's effective physical RET binding, and this feature adds the native
+thread-list surface without changing conversation rendering.
