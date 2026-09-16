@@ -25,9 +25,11 @@ adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session openrc-session-power openrc-process-group emacsos-wvkbd-launch \
+    swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
-    openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-chat-url openrc-assist-web-url \
+    openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
+    openrc-chat-url openrc-assist-web-url \
     openrc-emacs-server.nft \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
@@ -35,7 +37,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -218,6 +220,35 @@ awk '
     /^    bootstrap_tmp=\$\(mktemp / { print "    exec 6>&- 7>&- 8>&- 9>&-; sleep 30" }
 ' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-signal
 chmod 0755 /tmp/openrc-update-bootstrap-signal
+awk '
+    { print }
+    /^    if ! mv -f -- \"\$bootstrap_tmp\" \"\$destination\"; then$/ { moved = 1 }
+    moved && /^    fi$/ {
+        print "    exec 6>&- 7>&- 8>&- 9>&-; sleep 30"
+        moved = 0
+    }
+' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-replaced-signal
+chmod 0755 /tmp/openrc-update-bootstrap-replaced-signal
+awk '
+    /^restore_bootstrap_helper\(\) \{$/ {
+        print
+        print "    return 1"
+        failed_restore = 1
+        next
+    }
+    failed_restore && /^\}$/ {
+        failed_restore = 0
+        print
+        next
+    }
+    !failed_restore {
+        if (/^    if ! mv -f -- \"\$bootstrap_tmp\" \"\$destination\"; then$/)
+            print "    if ! false; then"
+        else
+            print
+    }
+' /tmp/openrc-update-root >/tmp/openrc-update-bootstrap-mv-failure
+chmod 0755 /tmp/openrc-update-bootstrap-mv-failure
 
 for group in seat video audio; do
     getent group "$group" >/dev/null || addgroup -S "$group"
@@ -311,6 +342,7 @@ fi
 [ ! -e /usr/local/sbin/emacsos-wvkbd-transaction ]
 [ ! -e /var/lib/emacsos-wvkbd-transaction ]
 [ ! -e /usr/local/sbin/emacsos-openrc-wifi-connect ]
+[ ! -e /usr/local/sbin/emacsos-openrc-device ]
 [ ! -e /etc/emacsos-openrc ]
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ]
 [ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
@@ -347,6 +379,7 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -x /usr/local/sbin/emacsos-openrc-network ]
 [ -x /usr/local/sbin/emacsos-wvkbd-transaction ]
 [ -x /usr/local/sbin/emacsos-openrc-wifi-connect ]
+[ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
 [ -f /usr/local/share/emacsos-openrc/os.el ]
@@ -371,8 +404,10 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/sbin/emacsos-openrc-wifi-connect \
+    /usr/local/sbin/emacsos-openrc-device \
     /usr/local/sbin/emacsos-openrc-boot-mode \
     /usr/local/sbin/emacsos-wvkbd-transaction \
+    /usr/local/libexec/emacsos-wvkbd-launch \
     /usr/local/bin/wvkbd-emacsos \
     /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
     /etc/nftables.d/49-emacsos-callback.nft \
@@ -428,6 +463,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
 [ -x /usr/local/bin/wvkbd-emacsos ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]
+[ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
 grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
@@ -451,13 +487,7 @@ fi
 [ -f /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
 [ -f /etc/dbus-1/system.d/99-emacsos-waydroid.conf ]
 [ -x /usr/local/libexec/emacsos-waydroid-container ]
-[ "$(cat /etc/doas.d/95-emacsos-ui.conf)" = \
-    "$(printf '%s\n' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
-        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
-        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-        'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
-        'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args')" ]
+cmp -s /source/openrc-doas.conf /etc/doas.d/95-emacsos-ui.conf
 [ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
     'root:root:600:1:regular file' ]
 [ "$(cat /etc/emacsos-openrc/chat-url)" = \
@@ -528,12 +558,14 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/network.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/share/emacsos-openrc/phone-sms.el \
+    /usr/local/share/emacsos-openrc/phone-sms-chat.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
     /usr/local/bin/wvkbd-emacsos \
     /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
-    /usr/local/sbin/emacsos-openrc-wifi-connect
+    /usr/local/sbin/emacsos-openrc-wifi-connect \
+    /usr/local/sbin/emacsos-openrc-device
 rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
 install -d -o root -g root -m 0755 /usr/local/share/licenses/wvkbd-emacos
 printf '%s\n' legacy-keyboard >/usr/local/bin/wvkbd-emacos
@@ -550,8 +582,63 @@ printf '%s\n' '#!/bin/sh' \
     >/usr/local/sbin/emacsos-wvkbd-transaction
 chown root:root /usr/local/sbin/emacsos-wvkbd-transaction
 chmod 0755 /usr/local/sbin/emacsos-wvkbd-transaction
+legacy_helper_hash=$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction)
+legacy_helper_hash=${legacy_helper_hash%% *}
 printf '%s\n' legacy-session >/usr/local/share/emacsos-openrc/session
 chmod 0755 /usr/local/share/emacsos-openrc/session
+
+# A failed compatibility-helper rename must leave the exact prior helper even
+# when the ensuing best-effort restore also fails.
+: >/tmp/rc-service-log
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-bootstrap-mv-failure \
+    >/tmp/update-bootstrap-mv-failure.out 2>&1; then
+    printf '%s\n' 'injected compatibility-helper rename failure was accepted' >&2
+    exit 1
+fi
+[ "$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction | cut -d' ' -f1)" = \
+    "$legacy_helper_hash" ]
+grep -F 'rollback backup retained at ' \
+    /tmp/update-bootstrap-mv-failure.out >/dev/null
+if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
+    printf '%s\n' 'failed compatibility-helper rename stopped the UI' >&2
+    exit 1
+fi
+
+# A signal after the compatibility helper rename but before the main payload
+# mutation phase must restore the exact prior helper.
+: >/tmp/rc-service-log
+DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /tmp/openrc-update-bootstrap-replaced-signal \
+    >/tmp/update-bootstrap-replaced-signal.out 2>&1 &
+bootstrap_pid=$!
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    if cmp -s /source/wvkbd-transaction-root \
+        /usr/local/sbin/emacsos-wvkbd-transaction; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+if [ "$attempt" -eq 50 ]; then
+    kill -TERM "$bootstrap_pid" 2>/dev/null || true
+    wait "$bootstrap_pid" 2>/dev/null || true
+    printf '%s\n' 'post-rename signal fixture did not replace the helper' >&2
+    exit 1
+fi
+kill -TERM "$bootstrap_pid"
+if wait "$bootstrap_pid"; then
+    printf '%s\n' 'interrupted post-rename bootstrap unexpectedly succeeded' >&2
+    exit 1
+fi
+[ "$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction | cut -d' ' -f1)" = \
+    "$legacy_helper_hash" ]
+if grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null; then
+    printf '%s\n' 'interrupted post-rename bootstrap stopped the UI' >&2
+    exit 1
+fi
+
 touch /tmp/fail-ui-once
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root >/dev/null 2>&1; then
@@ -566,7 +653,8 @@ fi
 [ "$(cat /usr/local/share/licenses/wvkbd-emacos/wordninja.txt)" = legacy-notice ]
 [ "$(cat /usr/local/share/emacsos-openrc/emacos-assist.el)" = legacy-assist ]
 [ "$(cat /usr/local/share/emacsos-openrc/session)" = legacy-session ]
-grep -F 'verify-current) exit 0' /usr/local/sbin/emacsos-wvkbd-transaction >/dev/null
+[ "$(sha256sum /usr/local/sbin/emacsos-wvkbd-transaction | cut -d' ' -f1)" = \
+    "$legacy_helper_hash" ]
 [ ! -e /usr/local/bin/wvkbd-emacsos ]
 [ ! -e /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt ]
 
@@ -577,6 +665,8 @@ DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
 [ -f /run/emacsos-ui/ready ]
 [ -x /usr/local/bin/wvkbd-emacsos ]
 [ "$(cat /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt)" = new-notice ]
+cmp -s /source/wvkbd-transaction-root \
+    /usr/local/sbin/emacsos-wvkbd-transaction
 grep -Fx -- '--mod-swipe -H 300 -L 300' /tmp/wvkbd-command-log >/dev/null
 [ ! -e /usr/local/bin/wvkbd-emacos ]
 [ ! -e /usr/local/share/licenses/wvkbd-emacos/wordninja.txt ]
@@ -679,7 +769,7 @@ if ! (
 fi
 
 # Every existing file that the update might later snapshot is checked before
-# the forward-only compatibility-helper replacement or any UI stop.  Exercise
+# the pre-commit compatibility-helper replacement or any UI stop.  Exercise
 # the per-user token and reference as well as an ordinary root backup source.
 assert_preflight_rejection() {
     label=$1

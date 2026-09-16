@@ -11,17 +11,19 @@ snapshot=
 backup=
 boot_tmp=
 doas_tmp=
+device_tmp=
 reference_tmp=
 bootstrap_tmp=
 lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=cb8a13c38c688f1f15149346dff00613cecdfbc62e576a36b59b2b25eff9d4d9
+manifest_hash=00dc9784ba4357004093ac415ca4a5045d8f3374fc8c28610c4af76c87475f98
 mutating=0
 committed=0
 restart_only=0
 reference_restore_failed=0
+helper_restore_failed=0
 config_dir_created=0
 token_parent_dir_created=0
 token_config_dir_created=0
@@ -48,6 +50,10 @@ current-wvkbd:/usr/local/bin/wvkbd-emacsos
 current-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
 legacy-wvkbd:/usr/local/bin/wvkbd-emacos
 legacy-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
+phone-sms-chat.el:/usr/local/share/emacsos-openrc/phone-sms-chat.el
+swipe-learning.el:/usr/local/share/emacsos-openrc/swipe-learning.el
+swipe-learning-collector.py:/usr/local/share/emacsos-openrc/swipe-learning-collector.py
+emacsos-wvkbd-launch:/usr/local/libexec/emacsos-wvkbd-launch
 openrc-suspend-root:/usr/local/sbin/emacsos-openrc-suspend
 wvkbd-transaction-root:/usr/local/sbin/emacsos-wvkbd-transaction
 emacsos-ui.initd:/etc/init.d/emacsos-ui
@@ -56,6 +62,7 @@ openrc-call-root:/usr/local/sbin/emacsos-openrc-call
 openrc-sms-root:/usr/local/sbin/emacsos-openrc-sms
 openrc-network-root:/usr/local/sbin/emacsos-openrc-network
 openrc-wifi-connect-root:/usr/local/sbin/emacsos-openrc-wifi-connect
+openrc-device-root:/usr/local/sbin/emacsos-openrc-device
 openrc-chat-url:/etc/emacsos-openrc/chat-url
 openrc-assist-web-url:/etc/emacsos-openrc/assist-web-url
 assist-web-ca.pem:/etc/emacsos-openrc/assist-web-ca.pem
@@ -201,14 +208,18 @@ bootstrap_compat_helper() {
     if ! install -o root -g root -m 0755 "$snapshot/wvkbd-transaction-root" "$bootstrap_tmp" ||
        ! cmp -s "$snapshot/wvkbd-transaction-root" "$bootstrap_tmp" ||
        [ "$(stat -c '%U:%G:%a:%h:%F' "$bootstrap_tmp")" != 'root:root:755:1:regular file' ] ||
-       ! sync_file_and_parent "$bootstrap_tmp" /usr/local/sbin ||
-       ! mv -f -- "$bootstrap_tmp" "$destination"; then
+       ! sync_file_and_parent "$bootstrap_tmp" /usr/local/sbin; then
+        rm -f -- "$bootstrap_tmp" || return 1
+        bootstrap_tmp=
+        return 1
+    fi
+    bootstrap_helper_replaced=1
+    if ! mv -f -- "$bootstrap_tmp" "$destination"; then
         rm -f -- "$bootstrap_tmp" || return 1
         bootstrap_tmp=
         return 1
     fi
     bootstrap_tmp=
-    bootstrap_helper_replaced=1
     sync_file_and_parent "$destination" /usr/local/sbin || return 1
 }
 
@@ -257,7 +268,7 @@ preflight_backup_sources() {
 }
 
 preflight_destination_directories() {
-    for directory in /usr/local/bin /usr/local/share \
+    for directory in /usr/local/bin /usr/local/libexec /usr/local/share \
         /usr/local/share/emacsos-openrc /usr/local/sbin /etc/init.d \
         /etc/nftables.d; do
         [ -d "$directory" ] && [ ! -L "$directory" ] &&
@@ -448,6 +459,52 @@ restore_file() {
     fi
 }
 
+restore_bootstrap_helper() {
+    target=/usr/local/sbin/emacsos-wvkbd-transaction
+    source=$backup/wvkbd-transaction-root
+    if [ ! -f "$source" ]; then
+        rm -f -- "$target" || return 1
+        sync_file_and_parent /usr/local/sbin /usr/local/sbin || return 1
+        return
+    fi
+    bootstrap_tmp=$(mktemp /usr/local/sbin/.emacsos-wvkbd-transaction.XXXXXX) ||
+        return 1
+    if ! install -o root -g root -m 0755 "$source" "$bootstrap_tmp" ||
+       ! cmp -s "$source" "$bootstrap_tmp" ||
+       [ "$(stat -c '%U:%G:%a:%h:%F' "$bootstrap_tmp")" != \
+           'root:root:755:1:regular file' ] ||
+       ! sync_file_and_parent "$bootstrap_tmp" /usr/local/sbin; then
+        rm -f -- "$bootstrap_tmp" || return 1
+        bootstrap_tmp=
+        return 1
+    fi
+    if ! mv -f -- "$bootstrap_tmp" "$target"; then
+        rm -f -- "$bootstrap_tmp" || return 1
+        bootstrap_tmp=
+        return 1
+    fi
+    bootstrap_tmp=
+    sync_file_and_parent "$target" /usr/local/sbin
+}
+
+restored_device_authority_safe() {
+    target=/usr/local/sbin/emacsos-openrc-device
+    if [ -f "$backup/openrc-device-root" ]; then
+        [ -f "$target" ] && [ ! -L "$target" ] &&
+            [ "$(stat -c '%U:%G:%a:%h:%F' "$target")" = \
+                'root:root:755:1:regular file' ] &&
+            cmp -s "$backup/openrc-device-root" "$target" || return 1
+    else
+        [ ! -e "$target" ] && [ ! -L "$target" ] || return 1
+    fi
+    target=/etc/doas.d/95-emacsos-ui.conf
+    [ -f "$backup/95-emacsos-ui.conf" ] &&
+        [ -f "$target" ] && [ ! -L "$target" ] &&
+        [ "$(stat -c '%U:%G:%a:%h:%F' "$target")" = \
+            'root:root:600:1:regular file' ] &&
+        cmp -s "$backup/95-emacsos-ui.conf" "$target"
+}
+
 restore_reference() {
     target=/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
     if [ -f "$backup/EMACSOS-COMMANDS.org" ]; then
@@ -506,6 +563,12 @@ cleanup() {
             restore_file network.el /usr/local/share/emacsos-openrc/network.el 0644
             restore_file phone-call.el /usr/local/share/emacsos-openrc/phone-call.el 0644
             restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
+            restore_file phone-sms-chat.el /usr/local/share/emacsos-openrc/phone-sms-chat.el 0644
+            restore_file swipe-learning.el /usr/local/share/emacsos-openrc/swipe-learning.el 0644
+            restore_file swipe-learning-collector.py \
+                /usr/local/share/emacsos-openrc/swipe-learning-collector.py 0755
+            restore_file emacsos-wvkbd-launch \
+                /usr/local/libexec/emacsos-wvkbd-launch 0755
             restore_file legacy-emacos-assist.el \
                 /usr/local/share/emacsos-openrc/emacos-assist.el 0644
             restore_file current-wvkbd /usr/local/bin/wvkbd-emacsos 0755
@@ -516,8 +579,7 @@ cleanup() {
                 /usr/local/share/licenses/wvkbd-emacos/wordninja.txt 0644
             restore_file openrc-suspend-root \
                 /usr/local/sbin/emacsos-openrc-suspend 0755
-            restore_file wvkbd-transaction-root \
-                /usr/local/sbin/emacsos-wvkbd-transaction 0755
+            restore_bootstrap_helper || helper_restore_failed=1
             restore_file emacsos-ui.initd /etc/init.d/emacsos-ui 0755
             restore_file openrc-boot-mode \
                 /usr/local/sbin/emacsos-openrc-boot-mode 0755
@@ -527,6 +589,8 @@ cleanup() {
                 /usr/local/sbin/emacsos-openrc-network 0755
             restore_file openrc-wifi-connect-root \
                 /usr/local/sbin/emacsos-openrc-wifi-connect 0755
+            restore_file openrc-device-root \
+                /usr/local/sbin/emacsos-openrc-device 0755
             restore_file openrc-chat-url /etc/emacsos-openrc/chat-url 0644
             restore_file openrc-assist-web-url /etc/emacsos-openrc/assist-web-url 0644
             restore_file assist-web-ca.pem /etc/emacsos-openrc/assist-web-ca.pem 0644
@@ -552,22 +616,26 @@ cleanup() {
             [ "$keyboard_notice_dir_created" -eq 0 ] || \
                 rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
             /usr/sbin/nft -f /etc/nftables.nft >/dev/null 2>&1 || true
-            if ! start_ui >/dev/null 2>&1; then
+            if ! restored_device_authority_safe; then
+                printf '%s\n' \
+                    'emacsos-openrc-update: rollback authority verification failed' >&2
+                retain_backup
+            elif ! start_ui >/dev/null 2>&1; then
                 printf '%s\n' \
                     'emacsos-openrc-update: rollback UI failed to start' >&2
                 retain_backup
             fi
-            if [ "$reference_restore_failed" -eq 1 ] && [ -n "$backup" ]; then
+            if { [ "$reference_restore_failed" -eq 1 ] ||
+                 [ "$helper_restore_failed" -eq 1 ]; } && [ -n "$backup" ]; then
                 retain_backup
             fi
         fi
-    elif [ "$bootstrap_helper_replaced" -eq 1 ] && [ "$restart_only" -eq 0 ]; then
-        restore_file wvkbd-transaction-root \
-            /usr/local/sbin/emacsos-wvkbd-transaction 0755
+    elif [ "$bootstrap_helper_replaced" -eq 1 ] &&
+         [ "$restart_only" -eq 0 ] && [ "$committed" -eq 0 ]; then
+        restore_bootstrap_helper || retain_backup
     elif [ "$restart_only" -eq 1 ] && [ "$committed" -eq 0 ]; then
         [ "$bootstrap_helper_replaced" -eq 0 ] ||
-            restore_file wvkbd-transaction-root \
-                /usr/local/sbin/emacsos-wvkbd-transaction 0755
+            restore_bootstrap_helper || retain_backup
         if stop_ui >/dev/null 2>&1; then
             start_ui >/dev/null 2>&1 ||
                 printf '%s\n' \
@@ -581,6 +649,7 @@ cleanup() {
     [ -z "$backup" ] || rm -rf -- "$backup"
     [ -z "$boot_tmp" ] || rm -f -- "$boot_tmp"
     [ -z "$doas_tmp" ] || rm -f -- "$doas_tmp"
+    [ -z "$device_tmp" ] || rm -f -- "$device_tmp"
     [ -z "$reference_tmp" ] || rm -f -- "$reference_tmp"
     [ -z "$bootstrap_tmp" ] || rm -f -- "$bootstrap_tmp"
 }
@@ -629,7 +698,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -643,7 +712,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 34 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 40 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
@@ -655,13 +724,15 @@ snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group openrc-suspend-root \
+    openrc-session openrc-session-power openrc-process-group emacsos-wvkbd-launch \
+    swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el chat.el assist-web.el \
-    emacsos-assist.el network.el phone-call.el phone-sms.el EMACSOS-COMMANDS.org \
+    emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
-    openrc-network-root openrc-wifi-connect-root openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
+    openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
+    openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem; do
     install -o root -g root -m 0600 /dev/null "$snapshot/$name"
     timeout -s TERM -k 1 10 su user -s /bin/sh -c \
@@ -786,16 +857,15 @@ mutating=1
 restart_only=0
 boot_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-boot-mode.XXXXXX)
 doas_tmp=$(mktemp /etc/doas.d/.95-emacsos-ui.XXXXXX)
+device_tmp=$(mktemp /usr/local/sbin/.emacsos-openrc-device.XXXXXX)
 install -o root -g root -m 0755 "$snapshot/openrc-boot-mode" "$boot_tmp"
-printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
-    'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-wifi-connect args' \
-    >"$doas_tmp"
-chown root:root "$doas_tmp"
-chmod 0600 "$doas_tmp"
+install -o root -g root -m 0755 "$snapshot/openrc-device-root" "$device_tmp"
+cmp -s "$snapshot/openrc-device-root" "$device_tmp"
+[ "$(stat -c '%U:%G:%a:%h:%F' "$device_tmp")" = \
+    'root:root:755:1:regular file' ]
+sync_file_and_parent "$device_tmp" /usr/local/sbin
+install -o root -g root -m 0600 "$snapshot/openrc-doas.conf" "$doas_tmp"
+cmp -s "$snapshot/openrc-doas.conf" "$doas_tmp"
 /usr/bin/doas -C "$doas_tmp" >/dev/null
 install -o root -g root -m 0755 "$snapshot/openrc-suspend-root" \
     /usr/local/sbin/emacsos-openrc-suspend
@@ -815,12 +885,21 @@ cmp -s "$snapshot/wvkbd-notice" "$current_notice" &&
         'root:root:755:1:regular file' ] ||
     fail 'could not install the new keyboard payload'
 install -o root -g root -m 0755 "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
+mv -f -- "$device_tmp" /usr/local/sbin/emacsos-openrc-device
+device_tmp=
+sync_file_and_parent /usr/local/sbin/emacsos-openrc-device /usr/local/sbin
+cmp -s "$snapshot/openrc-device-root" /usr/local/sbin/emacsos-openrc-device
+[ "$(stat -c '%U:%G:%a:%h:%F' /usr/local/sbin/emacsos-openrc-device)" = \
+    'root:root:755:1:regular file' ]
 mv -f -- "$doas_tmp" /etc/doas.d/95-emacsos-ui.conf
 doas_tmp=
+[ "$(stat -c '%U:%G:%a:%h:%F' /etc/doas.d/95-emacsos-ui.conf)" = \
+    'root:root:600:1:regular file' ]
+cmp -s "$snapshot/openrc-doas.conf" /etc/doas.d/95-emacsos-ui.conf
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -835,6 +914,10 @@ install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
     /usr/local/share/emacsos-openrc/process-group
+install -o root -g root -m 0755 "$snapshot/emacsos-wvkbd-launch" \
+    /usr/local/libexec/emacsos-wvkbd-launch
+install -o root -g root -m 0755 "$snapshot/swipe-learning-collector.py" \
+    /usr/local/share/emacsos-openrc/swipe-learning-collector.py
 install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
 install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \
@@ -885,6 +968,10 @@ cmp -s "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 cmp -s "$snapshot/openrc-process-group" \
     /usr/local/share/emacsos-openrc/process-group
+cmp -s "$snapshot/emacsos-wvkbd-launch" \
+    /usr/local/libexec/emacsos-wvkbd-launch
+cmp -s "$snapshot/swipe-learning-collector.py" \
+    /usr/local/share/emacsos-openrc/swipe-learning-collector.py
 cmp -s "$snapshot/openrc-suspend-root" /usr/local/sbin/emacsos-openrc-suspend
 cmp -s "$snapshot/wvkbd-transaction-root" /usr/local/sbin/emacsos-wvkbd-transaction
 cmp -s "$snapshot/wvkbd-emacsos" "$current_wvkbd"
@@ -899,6 +986,7 @@ cmp -s "$snapshot/openrc-sms-root" /usr/local/sbin/emacsos-openrc-sms
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
 cmp -s "$snapshot/openrc-wifi-connect-root" \
     /usr/local/sbin/emacsos-openrc-wifi-connect
+cmp -s "$snapshot/openrc-device-root" /usr/local/sbin/emacsos-openrc-device
 cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
 cmp -s "$snapshot/openrc-chat-url" /etc/emacsos-openrc/chat-url
 cmp -s "$snapshot/openrc-assist-web-url" /etc/emacsos-openrc/assist-web-url
@@ -913,7 +1001,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el \
+for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done

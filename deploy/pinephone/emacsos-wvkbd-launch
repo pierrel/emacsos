@@ -1,0 +1,227 @@
+#!/usr/bin/python3
+"""Launch the reviewed keyboard, optionally with one private learning sink."""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import os
+import re
+import select
+import signal
+import socket
+import stat
+import time
+
+KEYBOARD = "/usr/local/bin/wvkbd-emacsos"
+COLLECTOR = "/usr/local/share/emacsos-openrc/swipe-learning-collector.py"
+MARKER = "/var/lib/emacsos-lab/.local/state/emacsos/swipe-learning/enabled"
+BASELINE = [KEYBOARD, "--mod-swipe", "-H", "300", "-L", "300"]
+EPOCH = re.compile(rb"[0-9a-f]{32}\Z")
+STATUS_TIMEOUT = 1.0
+TERM_GRACE = 0.5
+KILL_GRACE = 1.0
+
+
+def _ensure_standard_fds() -> None:
+    for target in range(3):
+        try:
+            os.fstat(target)
+            continue
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        opened = os.open("/dev/null", os.O_RDWR | os.O_CLOEXEC)
+        if opened != target:
+            os.dup2(opened, target, inheritable=True)
+            os.close(opened)
+        else:
+            os.set_inheritable(target, True)
+
+
+def _close_inherited() -> None:
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            fd = int(name)
+        except ValueError:
+            continue
+        if fd >= 3:
+            try:
+                os.close(fd)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+
+
+def _normalize_signals() -> None:
+    signal.pthread_sigmask(signal.SIG_SETMASK, set())
+    for number in (signal.SIGCHLD, signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, signal.SIG_DFL)
+
+
+def _read_epoch() -> str | None:
+    try:
+        fd = os.open(
+            MARKER, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        )
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            return None
+        data = os.read(fd, 33)
+        if len(data) != 32 or os.read(fd, 1) or not EPOCH.fullmatch(data):
+            return None
+        return data.decode("ascii")
+    finally:
+        os.close(fd)
+
+
+def _child_fail(code: bytes) -> None:
+    try:
+        os.write(6, code)
+    except OSError:
+        pass
+    os._exit(125)
+
+
+def _collector_child(parent_pid: int, collector_fd: int, epoch: str) -> None:
+    try:
+        os.close(3)
+        os.close(5)
+        os.dup2(collector_fd, 3, inheritable=True)
+        if collector_fd != 3:
+            os.close(collector_fd)
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+            _child_fail(b"pdeathsig")
+        if os.getppid() != parent_pid:
+            _child_fail(b"parent-race")
+        os.set_inheritable(6, True)
+        os.execv(
+            COLLECTOR,
+            [
+                COLLECTOR,
+                "--fd",
+                "3",
+                "--ready-fd",
+                "6",
+                "--epoch",
+                epoch,
+                "collect",
+            ],
+        )
+    except BaseException:
+        _child_fail(b"collector-exec")
+
+
+def _wait_gone(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        if waited == pid:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
+def _terminate_child(pid: int) -> bool:
+    if _wait_gone(pid, 0):
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return _wait_gone(pid, 0)
+    if _wait_gone(pid, TERM_GRACE):
+        return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return _wait_gone(pid, 0)
+    return _wait_gone(pid, KILL_GRACE)
+
+
+def _baseline() -> None:
+    os.execv(KEYBOARD, BASELINE)
+
+
+def main() -> None:
+    """Replace this launcher with the exact baseline or armed keyboard."""
+    _ensure_standard_fds()
+    _close_inherited()
+    _normalize_signals()
+    epoch = _read_epoch()
+    if epoch is None:
+        _baseline()
+
+    sender = collector = None
+    status_reader = status_writer = None
+    try:
+        sender, collector = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        status_reader, status_writer = os.pipe2(os.O_CLOEXEC)
+        if (sender.fileno(), collector.fileno(), status_reader, status_writer) != (
+            3,
+            4,
+            5,
+            6,
+        ):
+            raise OSError("unexpected learning descriptor map")
+        sender.set_inheritable(False)
+        collector.set_inheritable(False)
+        parent_pid = os.getpid()
+        child_pid = os.fork()
+    except OSError:
+        for value in (sender, collector):
+            if value is not None:
+                value.close()
+        for value in (status_reader, status_writer):
+            if value is not None:
+                try:
+                    os.close(value)
+                except OSError:
+                    pass
+        _baseline()
+
+    if child_pid == 0:
+        _collector_child(parent_pid, collector.fileno(), epoch)
+
+    collector.close()
+    os.close(status_writer)
+    ready, _, _ = select.select([status_reader], [], [], STATUS_TIMEOUT)
+    code = os.read(status_reader, 64) if ready else b"collector-timeout"
+    try:
+        waited, _ = os.waitpid(child_pid, os.WNOHANG)
+    except ChildProcessError:
+        waited = child_pid
+    if waited == child_pid:
+        code = b"collector-exit"
+    elif code == b"ready":
+        code = b""
+    elif not code:
+        code = b"collector-exit"
+
+    if code:
+        sender.close()
+        os.close(status_reader)
+        if not _terminate_child(child_pid):
+            raise SystemExit(1)
+        _baseline()
+
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    os.close(status_reader)
+    sender.set_inheritable(True)
+    os.execv(KEYBOARD, [*BASELINE, "--glide-learning-fd", "3"])
+
+
+if __name__ == "__main__":
+    main()

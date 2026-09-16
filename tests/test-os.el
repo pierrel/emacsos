@@ -7,10 +7,26 @@
 (require 'cl-lib)
 (require 'os)
 
-(ert-deftest test-os-default-modeline-includes-sms-status ()
-  "Every ordinary EmacsOS buffer exposes pending SMS status."
-  (should (member '(:eval (emacsos-sms-mode-line-string))
-                  (default-value 'mode-line-format))))
+(ert-deftest test-os-default-modeline-keeps-urgent-status-and-primary-control ()
+  "Urgent badges precede the lower-priority platform control."
+  (should
+   (equal (default-value 'mode-line-format)
+          '((:propertize " EmacsOS  " face (:height 0.8))
+            (:eval (emacsos-call-mode-line-string))
+            (:eval (emacsos-sms-mode-line-string))
+            (:eval (emacsos-net-mode-line-string))))))
+
+(ert-deftest test-os-platform-primary-replaces-network-status-only ()
+  "A platform primary entry replaces Network while call/SMS badges remain."
+  (let ((emacsos-platform-primary-mode-line-segment
+         '(:eval (platform-controls-string)))
+        (emacsos-platform-mode-line-segments '((:eval (platform-extra-string)))))
+    (let ((format (emacsos--mode-line-format)))
+      (should (member '(:eval (platform-controls-string)) format))
+      (should (member '(:eval (platform-extra-string)) format))
+      (should-not (member '(:eval (emacsos-net-mode-line-string)) format))
+      (should (member '(:eval (emacsos-call-mode-line-string)) format))
+      (should (member '(:eval (emacsos-sms-mode-line-string)) format)))))
 
 (ert-deftest test-os-command-list-surface-is-absent ()
   (dolist (symbol '(emacsos--render-commands emacsos--top-commands
@@ -36,6 +52,17 @@
             (should (equal opened path))))
       (delete-directory home t))))
 
+(ert-deftest test-os-thread-command-opens-native-thread-list ()
+  "The global phone command bypasses the minibuffer thread chooser."
+  (let (opened)
+    (cl-letf (((symbol-function 'emacsos-assist-web-show-thread-list)
+               (lambda () (interactive) (setq opened t)))
+              ((symbol-function 'emacsos-assist-web-open-thread)
+               (lambda () (interactive)
+                 (ert-fail "phone command must open the native list"))))
+      (emacsos-command-open-thread))
+    (should opened)))
+
 (ert-deftest test-os-global-command-prefix-owns-portable-actions ()
   (should emacsos-command-mode)
   (dolist (binding '(("C-c e c" . emacsos--chat-show-top-buffer)
@@ -45,6 +72,7 @@
                      ("C-c e f" . emacsos-assist-new-file)
                      ("C-c e d" . emacsos-call)
                      ("C-c e m" . emacsos-send-message)
+                     ("C-c e s" . emacsos-sms-chat-catalog)
                      ("C-c e w" . emacsos-net-show)
                      ("C-c e h" . emacsos-open-command-reference)
                      ("C-c C-a n" . emacsos-command-new-thread)
@@ -226,9 +254,11 @@ cancels the confirm."
 (ert-deftest test-os-follower-noop-when-plane-unchanged ()
   (let ((rendered nil)
         (emacsos--in-render nil)
-        (emacsos--last-plane nil))
+        (emacsos--last-plane nil)
+        (emacsos--last-utility-row nil))
     (cl-letf (((symbol-function 'emacsos--render-page) (lambda () (setq rendered t)))
-              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+              ((symbol-function 'emacsos--top-keyboard-utility-row) (lambda () nil)))
       (emacsos--on-window-buffer-change nil)
       (should-not rendered))))
 
@@ -241,6 +271,44 @@ cancels the confirm."
               ((symbol-function 'emacsos--top-keyboard-plane) (lambda () #'ignore)))
       (emacsos--on-window-buffer-change nil)
       (should rendered))))
+
+(ert-deftest test-os-follower-rerenders-on-utility-row-change ()
+  "A utility-row change refreshes the persistent control window."
+  (let ((rendered nil)
+        (emacsos--in-render nil)
+        (emacsos--last-plane nil)
+        (emacsos--last-utility-row nil))
+    (cl-letf (((symbol-function 'emacsos--render-page)
+               (lambda () (setq rendered t)))
+              ((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+              ((symbol-function 'emacsos--top-keyboard-utility-row)
+               (lambda () #'ignore)))
+      (emacsos--on-window-buffer-change nil)
+      (should rendered))))
+
+(ert-deftest test-os-follower-rerenders-utility-row-for-new-buffer ()
+  "The same renderer is repainted when its buffer-owned state changes source."
+  (let ((first (generate-new-buffer " *utility-first*"))
+        (second (generate-new-buffer " *utility-second*"))
+        (renderer #'ignore)
+        rendered)
+    (unwind-protect
+        (let ((emacsos--in-render nil)
+              (emacsos--last-plane nil)
+              (emacsos--last-utility-row renderer)
+              (emacsos--last-utility-row-buffer first))
+          (cl-letf (((symbol-function 'emacsos--render-page)
+                     (lambda () (setq rendered t)))
+                    ((symbol-function 'emacsos--top-keyboard-plane)
+                     (lambda () nil))
+                    ((symbol-function 'emacsos--top-keyboard-utility-row)
+                     (lambda () renderer))
+                    ((symbol-function 'emacsos--top-buffer)
+                     (lambda () second)))
+            (emacsos--on-window-buffer-change nil)
+            (should rendered)))
+      (kill-buffer first)
+      (kill-buffer second))))
 
 (ert-deftest test-os-follower-noop-during-render ()
   "Re-entry guard (the brick-insurance): the follower bails when a render
@@ -278,6 +346,20 @@ is already in progress, even if the plane differs."
             (should-not (string-match-p "PLANE-SENTINEL" s)))))
     (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
 
+(ert-deftest test-os-render-page-uses-custom-utility-row ()
+  "A custom utility replaces only the final row under the T9 bands."
+  (unwind-protect
+      (cl-letf (((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+                ((symbol-function 'emacsos--top-keyboard-utility-row)
+                 (lambda () (lambda () (insert "CUSTOM-UTILITY\n")))))
+        (emacsos--render-page)
+        (with-current-buffer "*keyboard*"
+          (let ((text (buffer-string)))
+            (should (string-match-p "CUSTOM-UTILITY" text))
+            (should-not (string-match-p "M-x" text))
+            (should (string-match-p "DEL" text)))))
+    (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*"))))
+
 (ert-deftest test-os-render-page-external-keyboard-removes-control-window ()
   "An external keyboard leaves ordinary Emacs content unsplit."
   (let ((emacsos-use-internal-keyboard nil)
@@ -303,6 +385,27 @@ is already in progress, even if the plane differs."
           (should (get-buffer-window "*keyboard*"))
           (with-current-buffer "*keyboard*"
             (should (equal (buffer-string) "SAFETY"))))
+      (when (get-buffer-window "*keyboard*")
+        (delete-window (get-buffer-window "*keyboard*")))
+      (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
+
+(ert-deftest test-os-render-page-external-keyboard-keeps-only-custom-utility ()
+  "The deployed external keyboard retains buffer-owned touch controls only."
+  (let ((emacsos-use-internal-keyboard nil)
+        (text-rows 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos--top-keyboard-plane) (lambda () nil))
+                  ((symbol-function 'emacsos--top-keyboard-utility-row)
+                   (lambda () (lambda () (insert "SMS-CONTROLS\n"))))
+                  ((symbol-function 'emacsos--render-keyboard)
+                   (lambda () (cl-incf text-rows)))
+                  ((symbol-function 'emacsos--render-action-row)
+                   (lambda () (cl-incf text-rows))))
+          (emacsos--render-page)
+          (should (= text-rows 0))
+          (should (get-buffer-window "*keyboard*"))
+          (with-current-buffer "*keyboard*"
+            (should (equal (buffer-string) "SMS-CONTROLS\n"))))
       (when (get-buffer-window "*keyboard*")
         (delete-window (get-buffer-window "*keyboard*")))
       (when (get-buffer "*keyboard*") (kill-buffer "*keyboard*")))))
@@ -426,29 +529,76 @@ collapse popup windows (harmless no-op when there are none)."
       (emacsos--tap-tab)
       (should (eq called 'complete)))))
 
-(ert-deftest test-os-tap-return-uses-conversation-activation-or-newline-and-minibuffer-ret ()
-  "Touch RET shares physical conversation activation but never steals minibuffer RET."
+(ert-deftest test-os-tap-return-runs-target-ret-and-preserves-minibuffer-ret ()
+  "Touch RET runs physical RET at the target without stealing minibuffer RET."
   (let (activated accepted)
-    (with-temp-buffer
-      (let ((target-buffer (window-buffer (selected-window))))
-        (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
-                  ((symbol-function 'emacsos--target) (lambda () (selected-window)))
-                  ((symbol-function 'emacsos--refocus) (lambda () nil))
-                  ((symbol-function 'active-minibuffer-window) (lambda () nil))
-                  ((symbol-function 'emacsos-conversation-activate-or-newline)
-                   (lambda () (setq activated (current-buffer)))))
-          (emacsos--tap-return)
-          (should (eq activated target-buffer)))))
+    (let* ((window (selected-window))
+           (original-buffer (window-buffer window))
+           (target-buffer (generate-new-buffer " *emacsos-ret-target*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer target-buffer
+              (use-local-map (let ((map (make-sparse-keymap)))
+                               (define-key map (kbd "RET")
+                                 (lambda () (interactive)
+                                   (setq activated
+                                         (cons (current-buffer)
+                                               last-input-event))))
+                               map)))
+            (set-window-buffer window target-buffer)
+            (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
+                      ((symbol-function 'emacsos--target) (lambda () window))
+                      ((symbol-function 'emacsos--refocus) (lambda () nil))
+                      ((symbol-function 'active-minibuffer-window) (lambda () nil)))
+              (emacsos--tap-return)
+              (should (eq (car activated) target-buffer))
+              (should (eq (cdr activated) ?\r))))
+        (set-window-buffer window original-buffer)
+        (kill-buffer target-buffer)))
     (with-temp-buffer
       (cl-letf (((symbol-function 'emacsos--commit) (lambda () nil))
                 ((symbol-function 'emacsos--target) (lambda () (selected-window)))
                 ((symbol-function 'emacsos--refocus) (lambda () nil))
                 ((symbol-function 'active-minibuffer-window) (lambda () 'minibuffer))
-                ((symbol-function 'exit-minibuffer) (lambda () (setq accepted t)))
-                ((symbol-function 'emacsos-conversation-activate-or-newline)
-                 (lambda () (ert-fail "minibuffer RET must not activate chat"))))
+                ((symbol-function 'exit-minibuffer) (lambda () (setq accepted t))))
         (emacsos--tap-return)
         (should accepted)))))
+
+(ert-deftest test-os-touch-ret-opens-exact-native-thread-row ()
+  "The touchscreen RET path honors the list row's exact stored identity."
+  (let* ((window (selected-window))
+         (original-buffer (window-buffer window))
+         (thread '((id . "thread-b") (description . "Same")
+                   (search_description . "same")
+                   (repo_label . "Assist") (status . "ready")))
+         (emacsos-assist-web--catalog
+          `((threads . (,thread)) (repositories . nil) (harnesses . nil)))
+         opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer
+              (get-buffer-create emacsos-assist-web--thread-list-buffer-name)
+            (emacsos-assist-web-thread-list-mode))
+          (emacsos-assist-web--render-thread-list)
+          (set-window-buffer window emacsos-assist-web--thread-list-buffer-name)
+          (with-selected-window window
+            (goto-char (emacsos-assist-web--thread-row-position "thread-b")))
+          (let ((last-input-event '(mouse-1 nil)))
+            (cl-letf (((symbol-function 'emacsos--commit) #'ignore)
+                      ((symbol-function 'emacsos--target) (lambda () window))
+                      ((symbol-function 'emacsos--refocus) #'ignore)
+                      ((symbol-function 'active-minibuffer-window) #'ignore)
+                      ((symbol-function 'mouse-set-point)
+                       (lambda (_event)
+                         (ert-fail "touch RET must present a RET event")))
+                      ((symbol-function 'emacsos-assist-web--show-thread)
+                       (lambda (selected)
+                         (setq opened (alist-get 'id selected)))))
+              (emacsos--tap-return)))
+          (should (equal opened "thread-b")))
+      (set-window-buffer window original-buffer)
+      (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
+        (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
 
 ;;; Modifier keys (Ctrl / Meta / Ctrl-Meta) — see
 ;;; docs/2026-05-27-modifier-keys.org.  Pure helpers tested directly;

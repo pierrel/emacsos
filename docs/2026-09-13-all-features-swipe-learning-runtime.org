@@ -1,0 +1,259 @@
+#+title: Cumulative phone generation and swipe-learning runtime
+#+date: 2026-09-13
+
+* State
+
+Stage A froze the reviewed controls, SMS, Assist thread list, Wi-Fi, ranked
+suggestions, and modifier gestures at EmacsOS commit =1fb413f= and wvkbd commit
+=a5e44d0=.  This record now designs the Stage B successor: the smallest useful
+private swipe-learning runtime.  Its code and live deployment evidence remain
+pending.
+
+* Lineage
+
+This design follows =2026-09-12-swipe-learning-capture.org= and cumulative
+EmacsOS commit =1fb413f=.  It narrows live management to a session-scoped first
+release and does not restate the feature designs carried by that commit.
+
+* Historical supersessions
+
+This record replaces its EmacsOS predecessor
+=docs/2026-09-12-swipe-learning-capture.org= sections =Boundary=, =Collector
+and retention=, =User controls=, and =Phasing and verification=.  It also
+replaces the paired wvkbd predecessor's =Record schema= and =Final EmacsOS
+integration= sections as the sole current wire and EmacsOS integration
+authority.  The durable live management queue,
+bidirectional pause/enable generations, 125 ms keyboard poll backoff, and
+local-emission-rejected records are removed.  Launch admission is
+session-scoped; an active collector still rechecks its sampled marker epoch
+before every write.
+The first runtime uses a one-way observation socket only when armed and fails
+observation permanently off on peer loss.  Capture-active no-candidate feedback
+now has exactly two explicit actions: =Missing= for a lookup failure and
+=Misswipe= for a user mistake.  The removed =Dismiss= action is replaced by the
+next ordinary action leaving the episode unattributed.  Only the predecessor's
+private retention policy remains authoritative; this record restates and owns
+the complete current schema and no-application-text boundary.
+
+* 1. Exact inputs and composition
+
+The EmacsOS candidate starts with exact Stage A commit =1fb413f= and applies learning
+delta =a210fd6..e4fe73d=.  Its only conflict is =Makefile=; the resolution is
+the union of cumulative phone suites and learning suites.  The Wi-Fi correction
+and replacement-ref-safe exact keyboard builder are already part of Stage A.
+The cumulative manifest and two embedded manifest hashes are regenerated after
+all Stage B payloads are final.
+
+The wvkbd candidate starts with merged target
+=57d1c25eb3f32da7a5b0d1bed9efa201c906b020=, whose exact tree is reviewed tree
+=8ab8133e0326d7abe3f1b6602adf3fc6f3f68b3e=, and applies learning delta
+=f2a9c77..e0c7f00=.  Its only known conflict is =Makefile=; the resolution
+retains corrected pointer/sanitizer suites and adds learning suites.  After the
+wvkbd candidate is committed and tested, EmacsOS =wvkbd-revision= pins it.
+Any changed input reopens its dependent pin, tests, and review.
+
+* 2. Launcher and lifetime
+
+OpenRC invokes exact argv =/usr/local/libexec/emacsos-wvkbd-launch= with no
+arguments.  This fixed root-owned Python launcher validates a fresh 128-bit
+lowercase-hex epoch in the private enable marker.  When absent or invalid it
+executes the unchanged keyboard argv:
+
+#+begin_example
+/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300
+#+end_example
+
+Before either branch, the single-threaded launcher makes descriptors 0, 1, and
+2 valid by opening =/dev/null= into any closed slot.  It enumerates
+=/proc/self/fd= once and closes every inherited descriptor at or above 3,
+ignoring only the already-closed enumeration descriptor.  It resets
+=SIGCHLD=, =SIGTERM=, =SIGINT=, and =SIGHUP= to their default dispositions and
+empties the inherited mask of every blockable signal before forking.  It then
+creates one
+unnamed connected =AF_UNIX/SOCK_DGRAM= pair with sender fd 3 and collector fd
+4, followed by one =pipe2(O_CLOEXEC)= with reader fd 5 and writer fd 6.  Any
+different allocation fails to the baseline path before fork.  The socket pair
+is CLOEXEC until each final endpoint is deliberately cleared.
+
+After the one fork, the collector child closes sender fd 3 and status reader fd
+5, maps collector fd 4 onto fd 3, clears CLOEXEC only there, closes fd 4, and
+retains status writer fd 6 until exec or fixed failure reporting.  It then sets
+Linux =PR_SET_PDEATHSIG= to =SIGKILL=, verifies its parent is still the original
+launcher PID, then executes:
+
+#+begin_example
+/usr/local/share/emacsos-openrc/swipe-learning-collector.py --fd 3 --epoch EPOCH collect
+#+end_example
+
+The status-pipe writer stays CLOEXEC.  A child setup or exec failure writes one
+fixed bounded code and exits; successful exec closes it in the kernel.  The
+parent closes collector fd 4 and writer fd 6, then waits on reader fd 5 for code
+or EOF with a fixed timeout while the child remains normally waitable.  Code,
+timeout, or an early child exit closes all learning descriptors, sends
+=SIGTERM= only to that still-waitable direct child, and polls =waitpid(WNOHANG)=
+for one fixed grace period.  A survivor receives =SIGKILL= and one second
+bounded reap.  The parent publishes only the fixed epoch-bound code best effort
+and executes baseline argv only after =waitpid= proves that exact child is gone.
+If bounded reap cannot prove that, the launcher exits and lets the existing
+OpenRC cgroup recovery clear the session; it never starts a baseline keyboard
+beside an unowned collector.
+
+On successful EOF the parent first uses =waitpid(WNOHANG)= to reject an already
+exited collector.  While it is still the sole thread, it then sets =SIGCHLD= to
+=SIG_IGN=; setting that disposition also reaps a child exiting in the intervening
+window.  Later collector exit is auto-reaped.  The parent closes status reader
+fd 5, clears CLOEXEC only on sender fd 3, and executes:
+
+#+begin_example
+/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 --glide-learning-fd 3
+#+end_example
+
+Both exec vectors include =argv[0]= exactly as shown.  The launcher PID becomes
+the directly supervised wvkbd PID.  Parent-death
+signaling and the parent-race check terminate an idle collector with wvkbd;
+OpenRC's existing cgroup stop proves emptiness before restart.  Every
+learning-specific setup failure follows the status-pipe fallback.  Only failure
+of the unchanged baseline exec may fail the UI.
+
+=openrc-session= recorded-PID and fallback paths validate service UID,
+=/proc/PID/exe=, and one of these exact argv-element tables:
+
+#+begin_example
+index      0                              1            2   3    4   5    6                    7
+baseline   /usr/local/bin/wvkbd-emacsos   --mod-swipe  -H  300  -L  300
+armed      /usr/local/bin/wvkbd-emacsos   --mod-swipe  -H  300  -L  300  --glide-learning-fd  3
+#+end_example
+
+=/proc/PID/cmdline= must contain those bytes with one NUL after every table
+element, including the final element.  Both tables include =argv[0]=.
+
+The transaction helper and tests move atomically to exact launcher argv and
+both post-exec vectors.  No negative-PGID signal path is added.
+
+* 3. User control and truthful state
+
+Capture defaults off, so an ordinary session creates no collector or learning
+fd.  Enable atomically replaces the marker with a fresh epoch and says =Armed
+for next UI session=.  Its buffer explains that local trace geometry and
+candidate words may reveal typed words, surrounding/manual application text is
+excluded, data stays local, and capture never changes live suggestions.
+
+Disable removes the marker under the append lock and says =Persistence off now;
+keyboard observation stops next UI session=.  The collector compares the marker
+to its sampled epoch inside the lock before every write; on absence or mismatch
+it discards that record and exits.  Disable followed by re-enable cannot revive
+an old collector.  The next wvkbd send failure closes its fd and permanently
+disables observation for that process.
+
+=M-x emacsos-pinephone-restart-ui-session= is the exact phone-runnable session
+transition.  It refuses while any file-visiting buffer has unsaved edits,
+validates Emacs's direct parent as the exact =emacsos-lab= OpenRC session
+command, then signals that parent.  Existing cleanup/cgroup/supervise handling
+restarts the UI.  The command warns that transient buffers close while the
+screen restarts.  Enable links to it.  Erase links to and requires the exact
+=Disable, restart UI, then erase= sequence so the collector lifetime lock is
+released.  Before arming, Erase refuses unless the marker is absent and the
+collector lifetime lock is free, displaying =Disable, restart UI, then erase=.
+Once eligible it uses the existing non-modal in-buffer two-tap confirmation
+before deletion.  Restart alone never disables capture.  All five learning
+commands and restart are listed in =EMACSOS-COMMANDS.org=.
+
+Show is bounded and read-only.  Export creates a bounded private snapshot and
+does not change capture state.  Every status is exactly =capturing EPOCH= or
+=failure EPOCH CODE=.  Enable replaces the marker and clears old status under
+the append lock.  Before publishing either form, launcher or collector takes
+that lock and rechecks the exact marker epoch; mismatch discards the status.
+Show reads marker and status together under the same lock and ignores a status
+whose epoch differs.  Its precedence is: absent marker reports =off= even if an
+old idle collector lives until restart; invalid marker reports =not capturing:
+invalid-marker=; valid epoch with matching =capturing= and a held collector lock
+reports =capturing=; matching =failure= reports =not capturing: CODE=; every
+other valid marker reports =armed for next UI session=.  If matching
+=capturing= has no held collector lock, Show synthesizes =not capturing:
+collector-stopped= for display only; it remains read-only and does not rewrite
+status.  Status publication never delays baseline keyboard exec.
+
+* 4. Pinned keyboard contract
+
+The paired wvkbd =2026-09-13-swipe-learning-runtime-integration.org= owns its
+CLI, serializer, decoder/dictionary identities, observer calls, suggestion and
+no-candidate UI transitions, entropy behavior, and tests.  Its resulting commit
+is the sole implementation and final EmacsOS pins it exactly.  The wvkbd design
+pins this immutable EmacsOS contract first; this contract does not reverse-pin
+that still-changing design commit because mutual commit identities cannot be
+constructed.  The final EmacsOS implementation commit supplies the reverse
+runtime pin after wvkbd is frozen.
+
+EmacsOS owns the complete collector-facing schema and privacy boundary.  Each
+datagram is ASCII JSON without NUL, at most 4096 bytes, and has exactly the
+fields named below; member names must be unique at every object level before
+object construction.  Missing or unknown fields, floats, and out-of-range
+values are rejected.  Integer tokens use base-10 integer lexemes only, without
+fraction, exponent, or a leading zero except the single token =0=; coordinates
+alone may have one leading minus.  Every record has =version= exactly 1,
+=session= exactly 32 lowercase hexadecimal characters, and integer =gesture=
+from 1 through 2^64-1.  =(session, gesture)= is its identity.  Coordinates are
+signed 32-bit integers and scores are unsigned 64-bit integers.
+
+A gesture has exactly =type="gesture"=, =version=, =session=, =gesture=,
+=algorithm=, =dictionary=, =trace=, =points=, =geometry=, =key_height=,
+=candidates=, and =presentation=.  =algorithm= matches =[a-z0-9-]{1,24}=;
+=dictionary= is 64 lowercase hexadecimal characters; =trace= matches
+=[a-z]{2,64}=; and =points= has one =[x,y]= pair per trace character.
+=geometry= has exactly 26 =[x,y]= pairs in =a= through =z= order, and
+=key_height= is an integer from 1 through 2^32-1.  =candidates= has zero
+through three exact objects ={word,score,rank}=; each word matches
+=[a-z]{2,24}= and the ranks are a one-to-one set exactly equal to
+=1..len(candidates)=.  Zero candidates require
+=presentation="no-candidate"=.  A nonempty list requires
+=presentation="top-queued"= after the top word and separator have been queued.
+Pre-emission validation failure emits no gesture record.
+
+A resolution has exactly =type="resolution"=, =version=, =session=,
+=gesture=, and =outcome=, plus =selected_rank= if and only if the outcome is
+=alternate-selected=.  The only outcomes are =top-committed=,
+=alternate-selected=, =explicit-lookup-failure=, =explicit-user-misswipe=,
+=retracted-then-reswiped=, and =manual-correction-ambiguous=.
+=selected_rank= is an integer from 2 through the paired gesture's candidate
+count.  The two explicit outcomes require a zero-candidate gesture; every other
+outcome requires a nonempty gesture.  An ordinary next action after a
+no-candidate gesture leaves it unresolved and emits no resolution.
+
+Unresolved is not a wire outcome.  Export alone may represent a pending record
+with exactly ={type:"pending",version:1,session,gesture,state:"unresolved"}=.
+Records contain no surrounding or manually typed application text, timestamp,
+focused app, contact, URL, or process metadata.
+
+wvkbd samples one random session identity at startup and allocates gesture IDs
+monotonically from 1 for each qualified glide before serialization.  Counter
+overflow permanently fails observation off.  The collector accepts the first
+gesture per identity and at most one following resolution.  An exact repeated
+datagram is dropped idempotently; a conflicting duplicate, orphan resolution,
+or second resolution is rejected, so pairing remains unambiguous.
+
+The collector receives with zero ancillary-data capacity.  Linux discards any
+attached rights and sets =MSG_CTRUNC=; it rejects both =MSG_CTRUNC= and
+=MSG_TRUNC= before parsing.  Repeated rights-bearing datagrams therefore cannot
+add collector descriptors.
+
+* 5. Installation, rollback, and proof
+
+Install/update add launcher, collector, and =swipe-learning.el= to explicit
+staging, ownership/mode validation, backup pairs, snapshots, install checks,
+rollback, cleanup, and manifest.  Private learning state survives code updates
+and is never rollback material.  =openrc-init.el= loads learning only from the
+trusted phone load path; generic/local EmacsOS stays independent.
+
+EmacsOS tests prove both launcher exec branches, inherited-fd closure and exact
+fd/CLOEXEC maps including source fd 3, bounded child-exec failure/timeout
+TERM/KILL/reap behavior, inherited signal reset/unblocking, PDEATHSIG parent
+race, epoch re-enable isolation and stale failure suppression,
+collector marker fence/status, default-off boot, safe restart refusal and
+transition, honest controls, manifest/install/update/rollback, and command
+matching.  Schema tests cover duplicate JSON members, numeric token grammar,
+duplicate/orphan identity handling, and repeated rights-bearing datagrams with
+constant descriptor count.  Full ERT, server, PinePhone/OpenRC, wvkbd-build,
+and smoke suites run.
+The wvkbd design owns its detailed test list.  Seven local code-review lenses
+run after deterministic green and affected lenses repeat after every fix.  Root
+may deploy only the exact two resulting trees together.

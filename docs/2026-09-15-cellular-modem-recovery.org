@@ -1,0 +1,52 @@
+#+title: Cellular-on recovery for a missing ModemManager object
+#+date: 2026-09-15
+
+* Historical supersessions
+
+This replaces the unconditional no-service-restart statement in
+=2026-09-12-phone-control-panel.org=, section "User flow", only for the
+observed stale zero-modem state.  Healthy cellular profile toggles still do not
+restart ModemManager or disrupt call and SMS registration.
+
+* Observed failure
+
+On 2026-09-14 ModemManager removed its EG25 modem object and never recreated
+one.  The kernel USB, QMI control, serial, and network devices remained present,
+but =mmcli -L= returned no modems and NetworkManager exposed no GSM device.
+The ordinary =cell up= helper could therefore never activate
+=emacsos-cellular=.  A bounded ModemManager restart recreated the modem object,
+registered it, and restored the data profile.
+
+* Recovery contract
+
+The existing root network helper keeps the same closed =cell up|down= grammar.
+Before =cell up=, it performs a bounded =mmcli -L= probe.  If any ModemManager
+modem object exists, activation proceeds unchanged.  If none exists, the
+authorized cellular-on action, whether invoked from Controls, the minibuffer,
+a key binding, or Assist, permits one bounded restart of the fixed
+=modemmanager= OpenRC service.  The helper then waits at most twenty seconds
+for one modem object before attempting the fixed profile activation.  Failure
+returns the existing bounded =not-connected= or time-limit result to the UI.
+A failed, timed-out, or unrecognized initial probe returns that error without a
+restart.  Only a successful probe whose complete result explicitly says that
+no modems were found authorizes recovery.
+
+Once restart begins, every failed, timed-out, or interrupted exit first makes
+one bounded attempt to start the same fixed service.  Thus a failed recovery
+cannot leave ModemManager stopped merely because the restart command ended
+between its stop and start phases.
+
+=cell down= never probes or restarts the service.  A healthy modem is never
+restarted.  Therefore an ordinary call, SMS session, or registered-but-data-off
+state retains the original non-disruptive behavior.  The root surface gains no
+new argument, environment-selected service, path, or unbounded output.
+
+* Verification
+
+The helper test covers healthy activation without restart, missing-modem
+recovery followed by activation, no restart on =cell down=, and a failed
+probe or restart that cannot be reported as success or restart a possibly
+healthy service.  A killed restart must invoke the fixed bounded start
+recovery before exit.  Live acceptance requires a
+healthy modem/status snapshot after deployment; destructive simulation of a
+missing modem is not performed while the phone is in ordinary use.

@@ -33,7 +33,7 @@ cat >"$fake_bin/openrc-update" <<'EOF'
 set -eu
 
 for source in os.el chat.el assist-web.el emacsos-assist.el network.el \
-    phone-call.el phone-sms.el; do
+    phone-call.el phone-sms.el phone-sms-chat.el; do
     cp -- "$EMACSOS_TEST_REPO_DIR/$source" "$EMACSOS_TEST_DEPLOY_DIR/"
 done
 emacsclient -s "$EMACSOS_TEST_DAEMON" --eval '(kill-emacs)' >/dev/null

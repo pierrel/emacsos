@@ -493,6 +493,26 @@ and preserves point in the editable draft."
                              '(read-only t front-sticky t rear-nonsticky t))
         (point)))))
 
+(defun emacsos-conversation-insert-inert-message (role body)
+  "Insert one read-only ROLE-prefixed BODY without interpreting its text.
+ROLE is `user' or `assistant'.  BODY is already the caller's display form;
+unlike the Assist presenter, this primitive never parses Markdown or installs
+object keymaps.  Return the exclusive end position."
+  (unless (memq role '(user assistant))
+    (error "Unknown conversation role: %S" role))
+  (let* ((prefix (if (eq role 'user) "you> " "bot> "))
+         (start (point))
+         (prefix-end (+ start (length prefix))))
+    (insert prefix body)
+    (add-text-properties
+     start prefix-end
+     `(font-lock-face ,(if (eq role 'user)
+                           'emacsos-chat-user-role-face
+                         'emacsos-chat-assistant-role-face)))
+    (add-text-properties start (point)
+                         '(read-only t front-sticky t rear-nonsticky t))
+    (point)))
+
 (defun emacsos-conversation-set-status (start end status &optional trailing-space)
   "Replace the status marker region START..END with visible STATUS.
 When TRAILING-SPACE is non-nil, retain the local stream's token separator."

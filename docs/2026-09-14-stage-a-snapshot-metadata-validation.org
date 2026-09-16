@@ -1,0 +1,32 @@
+#+title: Stage A snapshot metadata validation
+#+date: 2026-09-14
+
+* State
+
+The native Assist thread buffer rendered server and cached snapshot metadata
+after checking only that each value was a string.  A bounded snapshot could
+therefore put a multiline, oversized, bidirectional-control, or other prohibited
+default-ignorable value into the thread header or status line.
+
+* Historical supersession
+
+This amendment supersedes only the snapshot-validation claim in
+=2026-09-03-assist-web-thread-flow.org=, section =Step 2 implementation=.
+Snapshot records remain bounded as that record describes, and their displayed
+metadata now receives the same field-level trust validation as catalog display
+text before the snapshot can be rendered or cached.
+
+* Corrected behavior
+
+Snapshot =description=, =status=, optional =error=, and
+=workspace.repo_label= must each be bounded single-line display text.  U+200D
+ZERO WIDTH JOINER and U+FE0F VARIATION SELECTOR-16 remain admitted for emoji;
+bidirectional controls and every other prohibited default-ignorable character
+remain rejected.  Message bodies retain their separate transcript contract.
+
+* Acceptance
+
+ERT rejects hostile values independently in all four snapshot metadata fields,
+including a bidirectional override, newline, oversized error, and invisible
+grapheme joiner.  The complete Emacs Lisp, server, PinePhone/OpenRC, exact wvkbd,
+and simulator smoke gates must remain green.

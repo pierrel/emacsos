@@ -22,8 +22,10 @@
 
 ;; Defined in os.el (which `require's this file).  Resolved at call time.
 (declare-function emacsos--btn "os")
+(declare-function emacsos--center "os")
 (declare-function emacsos--target "os")
 (defvar emacsos--btn-label-scale)  ; label font :height; owned by os.el (vpad gives the button its tap-target height separately)
+(defvar emacsos--btn-vpad)         ; vertical button padding; owned by os.el
 
 (defcustom emacsos-net-refresh-interval 30
   "Seconds between background network-status refreshes.
@@ -81,10 +83,37 @@ token requires no completion.  PASSWORD is non-nil only for secured networks."
   (cell-provisioned nil)    ; t once the named GSM connection exists
   (cell-on nil)             ; t while that NetworkManager profile is active
   (cell-state "")           ; mmcli modem state: "registered" / "searching" / "" ...
-  (stamp 0.0))              ; float-time of the snapshot
+  (stamp 0.0)               ; float-time of the snapshot
+  (valid nil)               ; t only after a complete successful reader pass
+  error                     ; bounded reader launch/exit/parse failure, or nil
+  wifi-error                ; Wi-Fi radio action launch/terminal failure, or nil
+  wifi-pending              ; 'on / 'off while a Wi-Fi radio setter is pending
+  cell-error                ; cellular action launch/terminal failure, or nil
+  cell-pending)             ; 'on / 'off while a cellular setter is pending
 
 (defvar emacsos-net--state (make-emacsos-net-state)
-  "The latest `emacsos-net-state', updated by the refresh sentinel.")
+  "The latest `emacsos-net-state', updated by network readers and actions.")
+
+(defvar emacsos-net-state-change-functions nil
+  "Functions called after cached network state changes.")
+
+(defvar emacsos-net--cell-operation nil
+  "Current cellular setter completion identity, or nil.")
+
+(defvar emacsos-net--wifi-operation nil
+  "Current Wi-Fi radio setter completion identity, or nil.")
+
+(defvar emacsos-net--settle-generation 0
+  "Monotonic identity for delayed post-action status refreshes.")
+
+(defvar emacsos-net--settle-pending nil
+  "Generation awaiting its delayed post-action status refresh, or nil.")
+
+(defun emacsos-net--notify-state-change ()
+  "Refresh consumers after cached network state changes."
+  (force-mode-line-update t)
+  (emacsos-net--render-if-shown)
+  (run-hooks 'emacsos-net-state-change-functions))
 
 (defvar emacsos-net--proc nil
   "Live status-reader process, or nil.  Single-flight guard: a refresh
@@ -102,7 +131,10 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
 (defun emacsos-net--ensure-state-shape ()
   "Reset cached network state when hot reload changes its struct layout."
   (unless (condition-case nil
-              (progn (emacsos-net-state-stamp emacsos-net--state) t)
+              (progn
+                (emacsos-net-state-cell-pending emacsos-net--state)
+                (emacsos-net-state-wifi-pending emacsos-net--state)
+                t)
             (error nil))
     (setq emacsos-net--state (make-emacsos-net-state))))
 
@@ -127,8 +159,8 @@ no-ops while this is live, so concurrent reads cannot stack on the phone.")
 (emacsos-net--discard-reader)
 
 (defvar emacsos-net--timer nil
-  "Repeat timer driving background refresh.
-Guarded so manually re-evaluating this file doesn't stack timers.")
+  "Repeat timer driving background refresh.  Guarded so a hot-reload of
+this file (the agent-customization workflow) doesn't stack timers.")
 
 (defvar emacsos-net--connection-attempt-id 0
   "Monotonic owner ID for wifi connection presentation state.")
@@ -141,6 +173,14 @@ Guarded so manually re-evaluating this file doesn't stack timers.")
 
 (defvar emacsos-net--connection-result-timer nil
   "Timer which expires `emacsos-net--connection-result'.")
+
+(defvar emacsos-net-return-function nil
+  "Optional command used by the bounded phone chooser's Done action.")
+
+(defvar emacsos-net--page 0
+  "Zero-based page displayed by the bounded phone network chooser.")
+
+(defconst emacsos-net--page-size 4)
 
 ;;; Terse-output parsing (pure)
 
@@ -227,14 +267,15 @@ modes fail closed as unsupported unless a saved UUID supplies the target."
 
 (defun emacsos-net--parse (blob)
   "Parse the reader's delimited BLOB into a fresh `emacsos-net-state'.
-Robust to missing/empty sections (no modem, no service, wifi off).  Duplicate
-scan records collapse by SSID; conflicting security modes fail closed unless a
-saved UUID supplies the connection target."
+The radio and NetworkManager records must use the complete finite grammar;
+optional modem status may be absent.  Duplicate scan records collapse by SSID;
+conflicting security modes fail closed unless a saved UUID supplies the
+connection target."
   (let* ((radio (car (emacsos-net--section blob "RADIO")))
          (rfields (and radio (emacsos-net--split-terse radio)))
-         (wifi-on (cond ((null rfields) 'unknown)
-                        ((string= (car rfields) "enabled") t)
-                        (t nil)))
+         (wifi-on (cond ((equal rfields '("enabled")) t)
+                        ((equal rfields '("disabled")) nil)
+                        (t (error "invalid Wi-Fi radio snapshot"))))
          ;; default route device: wl* -> wifi, ww* -> cell
          (route (car (emacsos-net--section blob "ROUTE")))
          (active-iface (cond ((null route) 'none)
@@ -263,6 +304,8 @@ saved UUID supplies the connection target."
       (let* ((f (emacsos-net--split-terse l))
              (type (nth 0 f))
              (device (nth 1 f)))
+        (unless (= (length f) 2)
+          (error "invalid NetworkManager connection snapshot"))
         (when (string= type "gsm")
           (setq cell-provisioned t
                 cell-on (and device
@@ -272,26 +315,34 @@ saved UUID supplies the connection target."
     (let (wifi-list cur-ssid cur-signal)
       (dolist (l (emacsos-net--section blob "WIFI"))
         (let* ((f (emacsos-net--split-terse l))
-               (in-use (string= (nth 0 f) "yes"))
-               (ssid (emacsos-net--decode-ssid-hex (nth 1 f)))
-               (sig (and (nth 2 f) (string-to-number (nth 2 f))))
-               (sec (or (nth 3 f) "")))
-          (when (and (= (length f) 4) ssid)
-            (when in-use (setq cur-ssid ssid cur-signal sig))
-            (let* ((candidate
-                    (list :ssid ssid :signal sig :security sec
-                          :in-use in-use
-                          :saved-uuid
-                          (emacsos-net--unique-saved-uuid ssid saved)))
-                   (current
-                    (seq-find (lambda (item)
-                                (string= (plist-get item :ssid) ssid))
-                              wifi-list)))
-              (if current
-                  (setcar (memq current wifi-list)
-                          (emacsos-net--coalesce-visible-network
-                           current candidate))
-                (push candidate wifi-list))))))
+               (active (nth 0 f))
+               (signal-text (nth 2 f)))
+          (unless (and (= (length f) 4)
+                       (member active '("yes" "no"))
+                       (stringp signal-text)
+                       (string-match-p "\\`[0-9]+\\'" signal-text)
+                       (<= (string-to-number signal-text) 100))
+            (error "invalid NetworkManager Wi-Fi snapshot"))
+          (let ((in-use (string= active "yes"))
+                (ssid (emacsos-net--decode-ssid-hex (nth 1 f)))
+                (sig (string-to-number signal-text))
+                (sec (or (nth 3 f) "")))
+            (when ssid
+              (when in-use (setq cur-ssid ssid cur-signal sig))
+              (let* ((candidate
+                      (list :ssid ssid :signal sig :security sec
+                            :in-use in-use
+                            :saved-uuid
+                            (emacsos-net--unique-saved-uuid ssid saved)))
+                     (current
+                      (seq-find (lambda (item)
+                                  (string= (plist-get item :ssid) ssid))
+                                wifi-list)))
+                (if current
+                    (setcar (memq current wifi-list)
+                            (emacsos-net--coalesce-visible-network
+                             current candidate))
+                  (push candidate wifi-list)))))))
       ;; cell registration/signal from mmcli key=value
       (let (cell-state cell-signal)
         (dolist (l (emacsos-net--section blob "CELL"))
@@ -300,8 +351,12 @@ saved UUID supplies the connection target."
               (cond
                ((string-match-p "\\.state$" (car f)) (setq cell-state (cdr f)))
                ((string-match-p "signal-quality\\.value$" (car f))
-                (unless (string-empty-p (cdr f))
-                  (setq cell-signal (string-to-number (cdr f)))))))))
+                (let ((signal-text (cdr f)))
+                  (unless (string-empty-p signal-text)
+                    (unless (and (string-match-p "\\`[0-9]+\\'" signal-text)
+                                 (<= (string-to-number signal-text) 100))
+                      (error "invalid ModemManager signal snapshot"))
+                    (setq cell-signal (string-to-number signal-text)))))))))
         (make-emacsos-net-state
          :wifi-on wifi-on
          :active-iface active-iface
@@ -314,7 +369,8 @@ saved UUID supplies the connection target."
          :cell-provisioned cell-provisioned
          :cell-on cell-on
          :cell-state (or cell-state "")
-         :stamp (float-time))))))
+         :stamp (float-time)
+         :valid t)))))
 
 ;;; Modeline segment (pure: state -> propertized string)
 
@@ -408,10 +464,38 @@ bytes are hex-encoded before entering the line protocol."
    "echo @@CELL;  read_command mmcli -m any --output-keyvalue 2>/dev/null || :; "
    "echo @@END"))
 
+(defun emacsos-net--bounded-detail (text fallback)
+  "Return one bounded display line from TEXT, or FALLBACK when it is empty."
+  (let ((detail (string-trim
+                 (replace-regexp-in-string "[\n\r\t]+" " " (or text "")))))
+    (if (string-empty-p detail)
+        fallback
+      (substring detail 0 (min 256 (length detail))))))
+
+(defun emacsos-net--record-reader-error (detail)
+  "Mark the cached network snapshot invalid with bounded DETAIL."
+  (let ((state (copy-emacsos-net-state emacsos-net--state)))
+    (setf (emacsos-net-state-valid state) nil
+          (emacsos-net-state-error state)
+          (emacsos-net--bounded-detail detail "network status failed"))
+    (setq emacsos-net--state state)
+    (emacsos-net--notify-state-change)))
+
+(defun emacsos-net--retry ()
+  "Clear a cached reader error and retry its asynchronous snapshot."
+  (let ((state (copy-emacsos-net-state emacsos-net--state)))
+    (setf (emacsos-net-state-valid state) nil
+          (emacsos-net-state-error state) nil)
+    (setq emacsos-net--state state))
+  (emacsos-net--notify-state-change)
+  (emacsos-net--refresh))
+
 (defun emacsos-net--refresh ()
-  "Kick off a background status read (no-op if one is already running)."
+  "Kick off a background status read when no reader or action settle is active."
   (interactive)
-  (when (or (null emacsos-net--proc) (not (process-live-p emacsos-net--proc)))
+  (when (and (not emacsos-net--settle-pending)
+             (or (null emacsos-net--proc)
+                 (not (process-live-p emacsos-net--proc))))
     (let ((buf (generate-new-buffer " *emacsos-net-read*"))
           reader-directory)
       (condition-case err
@@ -435,76 +519,232 @@ bytes are hex-encoded before entering the line protocol."
          (when reader-directory
            (ignore-errors (delete-directory reader-directory t)))
          (kill-buffer buf)
-         (message "emacsos-net: cannot read network status: %s"
-                  (error-message-string err)))))))
+         (let ((detail (error-message-string err)))
+           (emacsos-net--record-reader-error detail)
+           (message "emacsos-net: cannot read network status: %s" detail)))))))
 
 (defun emacsos-net--reader-sentinel (proc _event)
-  "On a complete successful reader exit, parse and refresh the UI.
+  "On reader exit, accept only a successful, complete snapshot.
 Clear the single-flight guard after every terminal state while retaining the
 last valid snapshot after failure or timeout."
   (when (memq (process-status proc) '(exit signal))
     (let ((buf (process-buffer proc)))
       (unwind-protect
           (when (eq proc emacsos-net--proc)
-            (setq emacsos-net--proc nil)
-            (when (and (zerop (process-exit-status proc))
-                       (buffer-live-p buf))
-              (let ((blob (with-current-buffer buf (buffer-string))))
-                (when (string-suffix-p "@@END\n" blob)
-                  (setq emacsos-net--state (emacsos-net--parse blob)))))
-            (force-mode-line-update t)
-            (emacsos-net--render-if-shown))
+            (let ((blob (if (buffer-live-p buf)
+                            (with-current-buffer buf (buffer-string))
+                          "")))
+              (if (and (eq (process-status proc) 'exit)
+                       (zerop (process-exit-status proc))
+                       (string-suffix-p "@@END\n" blob))
+                  (condition-case err
+                      (let ((state (emacsos-net--parse blob)))
+                        (setf (emacsos-net-state-cell-error state)
+                              (emacsos-net-state-cell-error emacsos-net--state)
+                              (emacsos-net-state-cell-pending state)
+                              (emacsos-net-state-cell-pending emacsos-net--state)
+                              (emacsos-net-state-wifi-error state)
+                              (emacsos-net-state-wifi-error emacsos-net--state)
+                              (emacsos-net-state-wifi-pending state)
+                              (emacsos-net-state-wifi-pending emacsos-net--state))
+                        (setq emacsos-net--state state)
+                        (emacsos-net--notify-state-change))
+                    (error
+                     (emacsos-net--record-reader-error
+                      (error-message-string err))))
+                (emacsos-net--record-reader-error
+                 (format "network reader exited %s"
+                         (process-exit-status proc))))))
         (emacsos-net--cleanup-reader-temp proc)
+        (when (eq proc emacsos-net--proc)
+          (setq emacsos-net--proc nil))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 ;;; Control actions
 
-(defun emacsos-net--action (args)
-  "Run an `nmcli' command (ARGS, a list of strings) async, then refresh.
+(defun emacsos-net--action (args &optional completion)
+  "Run an `nmcli' command ARGS asynchronously.
+Call COMPLETION once as (SUCCESS DETAIL) after destroying the process buffer.
 The post-action refresh is delayed ~1.5s so nmcli has time to settle."
-  (let (buffer)
+  (let (buffer (completed nil))
     (condition-case err
         (let ((command (if emacsos-net-command-function
                            (funcall emacsos-net-command-function args)
                          (cons "nmcli" args))))
           (setq buffer (generate-new-buffer " *emacsos-net-act*"))
-        (make-process
-         :name "emacsos-net-act"
-         :buffer buffer
-         :command command
-         :noquery t
-         :sentinel (lambda (p _e)
-                     (when (memq (process-status p) '(exit signal))
-                       (when (buffer-live-p (process-buffer p))
-                         (kill-buffer (process-buffer p)))
-                       (run-with-timer 1.5 nil #'emacsos-net--refresh-after-action)))))
+          (make-process
+           :name "emacsos-net-act"
+           :buffer buffer
+           :command command
+           :noquery t
+           :sentinel
+           (lambda (process _event)
+             (when (and (not completed)
+                        (memq (process-status process) '(exit signal)))
+               (setq completed t)
+               (let* ((status (process-exit-status process))
+                      (success (and (eq (process-status process) 'exit)
+                                    (zerop status)))
+                      (process-buffer (process-buffer process))
+                      (output (if (buffer-live-p process-buffer)
+                                  (with-current-buffer process-buffer
+                                    (buffer-string))
+                                ""))
+                      (detail (emacsos-net--bounded-detail
+                               output
+                               (if success "ok"
+                                 (format "network action exited %s" status)))))
+                 (when (buffer-live-p process-buffer)
+                   (kill-buffer process-buffer))
+                 (emacsos-net--discard-reader)
+                 (setq emacsos-net--settle-generation
+                       (1+ emacsos-net--settle-generation)
+                       emacsos-net--settle-pending emacsos-net--settle-generation)
+                 (unwind-protect
+                     (when completion (funcall completion success detail))
+                   (run-with-timer
+                    1.5 nil #'emacsos-net--refresh-after-action
+                    emacsos-net--settle-generation)))))))
       (error
        (when (buffer-live-p buffer) (kill-buffer buffer))
-       (message "emacsos-net: cannot change network: %s"
-                (error-message-string err))))))
+       (let ((detail (emacsos-net--bounded-detail
+                      (error-message-string err)
+                      "network action could not start")))
+         (when completion (funcall completion nil detail))
+         (message "emacsos-net: cannot change network: %s" detail)
+         nil)))))
 
-(defun emacsos-net--refresh-after-action ()
-  "Replace any pre-action status read with a fresh one."
-  (emacsos-net--discard-reader)
-  (emacsos-net--refresh))
+(defun emacsos-net--refresh-after-action (generation)
+  "Refresh after action settle when GENERATION is still current."
+  (when (eq generation emacsos-net--settle-pending)
+    (setq emacsos-net--settle-pending nil)
+    (emacsos-net--discard-reader)
+    (emacsos-net--refresh)))
 
 (defun emacsos-net-toggle-wifi ()
-  "Toggle the wifi radio."
+  "Toggle the Wi-Fi radio through its explicit setter."
   (interactive)
-  (emacsos-net--action
-   (list "radio" "wifi"
-         (if (eq (emacsos-net-state-wifi-on emacsos-net--state) t) "off" "on"))))
+  (emacsos-net-set-wifi
+   (not (eq (emacsos-net-state-wifi-on emacsos-net--state) t))))
+
+(defun emacsos-net-set-wifi (enabled &optional completion)
+  "Set the Wi-Fi radio to ENABLED asynchronously.
+COMPLETION, when non-nil, receives (SUCCESS DETAIL) exactly once."
+  (interactive
+   (list (string= (completing-read "Wi-Fi: " '("on" "off") nil t) "on")))
+  (unless (memq enabled '(nil t))
+    (user-error "Wi-Fi state must be t or nil"))
+  (cond
+   ((not (emacsos-net-state-valid emacsos-net--state))
+    (let ((detail "Wi-Fi status is unavailable"))
+      (when completion (funcall completion nil detail))
+      (concat "error: " detail)))
+   (emacsos-net--wifi-operation
+    (let ((detail "Wi-Fi operation is already running"))
+      (when completion (funcall completion nil detail))
+      (concat "error: " detail)))
+   (t
+    (let ((prior-wifi-on (emacsos-net-state-wifi-on emacsos-net--state))
+          finished)
+      (setq finished
+            (lambda (success detail)
+              (when (eq finished emacsos-net--wifi-operation)
+                (setq emacsos-net--wifi-operation nil)
+                (let ((state (copy-emacsos-net-state emacsos-net--state)))
+                  (setf (emacsos-net-state-wifi-pending state) nil)
+                  (if success
+                      (setf (emacsos-net-state-wifi-on state) enabled
+                            (emacsos-net-state-wifi-error state) nil)
+                    (setf (emacsos-net-state-wifi-on state) prior-wifi-on
+                          (emacsos-net-state-wifi-error state)
+                          (emacsos-net--bounded-detail detail "Wi-Fi action failed")))
+                  (setq emacsos-net--state state)
+                  (emacsos-net--notify-state-change)))
+              (when completion (funcall completion success detail))))
+      (setq emacsos-net--wifi-operation finished)
+      (let ((state (copy-emacsos-net-state emacsos-net--state)))
+        (setf (emacsos-net-state-wifi-pending state) (if enabled 'on 'off)
+              (emacsos-net-state-wifi-error state) nil)
+        (setq emacsos-net--state state)
+        (emacsos-net--notify-state-change))
+      (if (emacsos-net--action
+           (list "radio" "wifi" (if enabled "on" "off")) finished)
+          (format "pending: Wi-Fi turning %s" (if enabled "on" "off"))
+        (when (eq finished emacsos-net--wifi-operation)
+          (setq emacsos-net--wifi-operation nil)
+          (let ((state (copy-emacsos-net-state emacsos-net--state)))
+            (setf (emacsos-net-state-wifi-pending state) nil
+                  (emacsos-net-state-wifi-error state)
+                  "network action could not start")
+            (setq emacsos-net--state state)
+            (emacsos-net--notify-state-change)))
+        "error: network action could not start")))))
 
 (defun emacsos-net-toggle-cell ()
   "Bring the cellular connection up or down.
 Only meaningful once `make cellular-bringup' has created the connection."
   (interactive)
-  (if (emacsos-net-state-cell-provisioned emacsos-net--state)
-      (emacsos-net--action
-       (list "con" (if (emacsos-net-state-cell-on emacsos-net--state)
-                       "down" "up")
-             emacsos-net-cell-connection))
-    (message "Cellular not set up yet — run `make cellular-bringup APN=...'")))
+  (emacsos-net-set-cell (not (emacsos-net-state-cell-on emacsos-net--state))))
+
+(defun emacsos-net-set-cell (enabled &optional completion)
+  "Set the named cellular data profile to ENABLED asynchronously.
+COMPLETION, when non-nil, receives (SUCCESS DETAIL) exactly once."
+  (interactive
+   (list (string= (completing-read "Cellular data: " '("on" "off") nil t)
+                  "on")))
+  (unless (memq enabled '(nil t))
+    (user-error "Cellular data state must be t or nil"))
+  (cond
+   ((not (emacsos-net-state-valid emacsos-net--state))
+    (let ((detail "cellular status is unavailable"))
+      (when completion (funcall completion nil detail))
+      (concat "error: " detail)))
+   ((not (emacsos-net-state-cell-provisioned emacsos-net--state))
+    (let ((detail "cellular data is not set up"))
+      (when completion (funcall completion nil detail))
+      (concat "error: " detail)))
+   (emacsos-net--cell-operation
+    (let ((detail "cellular operation is already running"))
+      (when completion (funcall completion nil detail))
+      (concat "error: " detail)))
+   (t
+    (let ((prior-cell-on (emacsos-net-state-cell-on emacsos-net--state))
+          finished)
+      (setq finished
+            (lambda (success detail)
+              (when (eq finished emacsos-net--cell-operation)
+                (setq emacsos-net--cell-operation nil)
+                (let ((state (copy-emacsos-net-state emacsos-net--state)))
+                  (setf (emacsos-net-state-cell-pending state) nil)
+                  (if success
+                      (setf (emacsos-net-state-cell-on state) enabled
+                            (emacsos-net-state-cell-error state) nil)
+                    (setf (emacsos-net-state-cell-on state) prior-cell-on
+                          (emacsos-net-state-cell-error state)
+                          (emacsos-net--bounded-detail
+                           detail "cellular action failed")))
+                  (setq emacsos-net--state state)
+                  (emacsos-net--notify-state-change)))
+              (when completion (funcall completion success detail))))
+      (setq emacsos-net--cell-operation finished)
+      (let ((state (copy-emacsos-net-state emacsos-net--state)))
+        (setf (emacsos-net-state-cell-pending state) (if enabled 'on 'off)
+              (emacsos-net-state-cell-error state) nil)
+        (setq emacsos-net--state state)
+        (emacsos-net--notify-state-change))
+      (if (emacsos-net--action
+           (list "con" (if enabled "up" "down") emacsos-net-cell-connection)
+           finished)
+          (format "pending: cellular data turning %s" (if enabled "on" "off"))
+        (when (eq finished emacsos-net--cell-operation)
+          (setq emacsos-net--cell-operation nil)
+          (let ((state (copy-emacsos-net-state emacsos-net--state)))
+            (setf (emacsos-net-state-cell-pending state) nil
+                  (emacsos-net-state-cell-error state)
+                  "network action could not start")
+            (setq emacsos-net--state state)
+            (emacsos-net--notify-state-change)))
+        "error: network action could not start")))))
 
 (defun emacsos-net--display-ssid (ssid)
   "Return SSID as one safe display line with controls visibly escaped."
@@ -558,14 +798,19 @@ Only meaningful once `make cellular-bringup' has created the connection."
 (defun emacsos-net--finish-connection (attempt-id result)
   "Finish ATTEMPT-ID once with normalized terminal RESULT."
   (when (eq attempt-id (plist-get emacsos-net--connection-pending :id))
-    (let ((ssid (plist-get emacsos-net--connection-pending :ssid)))
+    (let ((ssid (plist-get emacsos-net--connection-pending :ssid))
+          generation)
       (setq emacsos-net--connection-pending nil
             emacsos-net--connection-result
             (list :id attempt-id :text (emacsos-net--result-text ssid result))
             emacsos-net--connection-result-timer
             (run-with-timer 8 nil #'emacsos-net--expire-result attempt-id))
       (emacsos-net--render-if-shown)
-      (run-with-timer 1.5 nil #'emacsos-net--refresh-after-action))))
+      (emacsos-net--discard-reader)
+      (setq generation (1+ emacsos-net--settle-generation)
+            emacsos-net--settle-generation generation
+            emacsos-net--settle-pending generation)
+      (run-with-timer 1.5 nil #'emacsos-net--refresh-after-action generation))))
 
 (defun emacsos-net--release-connection (attempt-id)
   "Release ATTEMPT-ID without publishing a result."
@@ -662,7 +907,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
 
 ;;; The *network* control page
 
-(defun emacsos-net--render ()
+(defun emacsos-net--render-full ()
   "Render the `*network*' control page from `emacsos-net--state'."
   (let ((buf (get-buffer-create emacsos-net--buffer-name))
         (st emacsos-net--state))
@@ -684,7 +929,9 @@ Only meaningful once `make cellular-bringup' has created the connection."
                      #'emacsos-net-toggle-wifi nil emacsos--btn-label-scale)
         (insert "\n\n")
         ;; Cell
-        (if (emacsos-net-state-cell-provisioned st)
+        (if (not (emacsos-net-state-valid st))
+            (insert "Cell: Checking...")
+          (if (emacsos-net-state-cell-provisioned st)
             (progn
               (insert (format "Cell: %s%s\n"
                               (if (emacsos-net-state-cell-on st) "on" "off")
@@ -693,7 +940,7 @@ Only meaningful once `make cellular-bringup' has created the connection."
               (emacsos--btn (if (emacsos-net-state-cell-on st)
                                " Cell off " " Cell on ")
                            #'emacsos-net-toggle-cell nil emacsos--btn-label-scale))
-          (insert "Cell: not set up (run cellular bring-up)"))
+            (insert "Cell: not set up (run cellular bring-up)")))
         (insert "\n\n")
         ;; Wifi networks
         (insert "Networks:\n")
@@ -730,8 +977,128 @@ Only meaningful once `make cellular-bringup' has created the connection."
               (insert "\n")))))
       (setq buffer-read-only t)
       (setq-local cursor-type nil)
+      (kill-local-variable 'truncate-lines)
+      (kill-local-variable 'mode-line-format)
       (goto-char (point-min)))
     buf))
+
+(defun emacsos-net--phone-line-width ()
+  "Return the usable width for one bounded chooser row."
+  (let ((window (get-buffer-window emacsos-net--buffer-name)))
+    (max 7 (1- (if window (window-body-width window) 40)))))
+
+(defun emacsos-net--phone-button (label action &optional argument width)
+  "Insert one phone chooser button for LABEL, ACTION, and ARGUMENT.
+WIDTH defaults to the full bounded chooser row."
+  (let* ((button-width (or width (emacsos-net--phone-line-width)))
+         (clipped (truncate-string-to-width label button-width nil nil "…")))
+    (emacsos--btn (emacsos--center clipped button-width)
+                  action argument emacsos--btn-label-scale)))
+
+(defun emacsos-net--phone-empty-line (&optional text)
+  "Insert a reserved phone chooser row containing optional TEXT."
+  (insert (propertize (or text " ")
+                      'line-height
+                      (+ (frame-char-height) (* 2 emacsos--btn-vpad)))
+          "\n"))
+
+(defun emacsos-net--page-count ()
+  "Return the bounded chooser's nonzero page count."
+  (max 1 (ceiling (/ (float (length
+                              (and (emacsos-net-state-valid emacsos-net--state)
+                                   (emacsos-net-state-wifi-list
+                                    emacsos-net--state))))
+                     emacsos-net--page-size))))
+
+(defun emacsos-net--change-page (delta)
+  "Move DELTA pages within the bounded chooser."
+  (setq emacsos-net--page
+        (max 0 (min (+ emacsos-net--page delta)
+                    (1- (emacsos-net--page-count)))))
+  (emacsos-net--render))
+
+(defun emacsos-net-done ()
+  "Leave the bounded network chooser through its configured return command."
+  (interactive)
+  (let ((return-function emacsos-net-return-function))
+    (setq emacsos-net-return-function nil
+          emacsos-net--page 0)
+    (when (functionp return-function)
+      (funcall return-function))))
+
+(defun emacsos-net--render-phone ()
+  "Render the fixed seven-line phone network chooser."
+  (let* ((buffer (get-buffer-create emacsos-net--buffer-name))
+         (state emacsos-net--state)
+         (networks (and (emacsos-net-state-valid state)
+                        (emacsos-net-state-wifi-list state)))
+         (pages (emacsos-net--page-count)))
+    (setq emacsos-net--page (min emacsos-net--page (1- pages)))
+    (with-current-buffer buffer
+      (let* ((inhibit-read-only t)
+             (start (* emacsos-net--page emacsos-net--page-size))
+             (end (min (length networks) (+ start emacsos-net--page-size)))
+             (visible (cl-subseq networks start end)))
+        (erase-buffer)
+        (insert (truncate-string-to-width
+                 (cond
+                  ((not (emacsos-net-state-valid state)) "Networks unavailable")
+                  (emacsos-net--connection-pending
+                   (format "Connecting to %s…"
+                           (emacsos-net--display-ssid
+                            (plist-get emacsos-net--connection-pending :ssid))))
+                  (emacsos-net--connection-result
+                   (plist-get emacsos-net--connection-result :text))
+                  (t "Networks"))
+                 (emacsos-net--phone-line-width) nil nil "…")
+                "\n")
+        (emacsos-net--phone-button "Done" #'emacsos-net-done)
+        (insert "\n")
+        (dotimes (index emacsos-net--page-size)
+          (let ((network (nth index visible)))
+            (if (not network)
+                (emacsos-net--phone-empty-line
+                 (and (= index 0) (null networks) "(none found)"))
+              (let* ((ssid (plist-get network :ssid))
+                     (signal (or (plist-get network :signal) "?"))
+                     (kind (emacsos-net--connect-kind network))
+                     (mark (cond ((plist-get network :in-use) "* ")
+                                 ((memq kind '(needs-password unsupported-security)) "[lock] ")
+                                 (t "")))
+                     (label (format "%s%s  %s%%" mark
+                                    (emacsos-net--display-ssid ssid) signal)))
+                (if (or emacsos-net--connection-pending
+                        (not (emacsos-net-state-saved-known state)))
+                    (insert (truncate-string-to-width
+                             label (emacsos-net--phone-line-width) nil nil "…"))
+                  (emacsos-net--phone-button label #'emacsos-net-connect ssid)))
+              (insert "\n"))))
+        (if (> pages 1)
+            (let* ((previous (> emacsos-net--page 0))
+                   (next (< emacsos-net--page (1- pages)))
+                   (width (if (and previous next)
+                              (/ (1- (emacsos-net--phone-line-width)) 2)
+                            (emacsos-net--phone-line-width))))
+              (when previous
+                (emacsos-net--phone-button "Previous" #'emacsos-net--change-page -1 width))
+              (when (and previous next)
+                (insert " "))
+              (when next
+                (emacsos-net--phone-button "Next" #'emacsos-net--change-page 1 width))
+              (insert "\n"))
+          (emacsos-net--phone-empty-line)))
+      (setq buffer-read-only t)
+      (setq-local cursor-type nil)
+      (setq-local truncate-lines t)
+      (setq-local mode-line-format nil)
+      (goto-char (point-min)))
+    buffer))
+
+(defun emacsos-net--render ()
+  "Render the generic network page or configured bounded phone chooser."
+  (if emacsos-net-return-function
+      (emacsos-net--render-phone)
+    (emacsos-net--render-full)))
 
 (defun emacsos-net--shown-p ()
   "Non-nil if `*network*' is the current top (editing) buffer."
@@ -740,18 +1107,21 @@ Only meaningful once `make cellular-bringup' has created the connection."
     (and b (eq b (get-buffer emacsos-net--buffer-name)))))
 
 (defun emacsos-net--render-if-shown ()
-  "Repaint the page only when it is on top (called from the refresh sentinel)."
+  "Repaint the page only when it is on top."
   (when (emacsos-net--shown-p) (emacsos-net--render)))
 
-(defun emacsos-net-show ()
-  "Show the `*network*' control page in the top window and refresh it."
+(defun emacsos-net-show (&optional return-function)
+  "Show the network page and refresh it.
+RETURN-FUNCTION enables the bounded phone chooser and owns its Done action."
   (interactive)
+  (setq emacsos-net-return-function return-function
+        emacsos-net--page 0)
   (emacsos-net--ensure-timer)
-  (emacsos-net--render)
-  (let* ((buf (get-buffer emacsos-net--buffer-name))
+  (let* ((buf (get-buffer-create emacsos-net--buffer-name))
          (w (and (fboundp 'emacsos--target) (emacsos--target))))
     (when (and w (not (eq (window-buffer w) buf)))
       (set-window-buffer w buf)))
+  (emacsos-net--render)
   (emacsos-net--refresh))
 
 ;;; Timer lifecycle (hot-reload safe)

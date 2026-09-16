@@ -16,6 +16,7 @@ generic =phone-install= target does not define them.
 | Start or switch to Android | =emacsos-android-start= |
 | Stop Android | =emacsos-android-quit= |
 | Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
+| Restart the supervised phone UI | =emacsos-pinephone-restart-ui-session= |
 
 Use =Alt+Tab= to move between full-screen applications.  Return to ordinary
 chat with =M-x emacsos--chat-show-top-buffer=.
@@ -27,6 +28,7 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Return to ordinary chat | =emacsos--chat-show-top-buffer= |
 | Start a new ordinary chat | =emacsos--chat-new-chat= |
 | Stop the current ordinary-chat response | =emacsos--chat-abort= |
+| Browse Assist Web threads | =emacsos-assist-web-show-thread-list= |
 | Open an Assist Web thread | =emacsos-assist-web-open-thread= |
 | Start an Assist Web thread | =emacsos-assist-web-new-thread= |
 | Send from an Assist Web thread | =emacsos-assist-web-send= |
@@ -39,6 +41,9 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Reload an unchanged file-backed chat from disk without prompting | =emacsos-assist-refresh= |
 | Forget a file-backed chat checkpoint | =emacsos-assist-forget= |
 | Compose an SMS | =emacsos-send-message= |
+| Open SMS conversations | =emacsos-sms-chat-catalog= |
+| Open one SMS conversation | =emacsos-sms-chat-open= |
+| Refresh SMS history | =emacsos-sms-chat-refresh= |
 
 The global =C-c e= prefix works in every buffer.  On the touchscreen, swipe up
 from =c= on the keyboard, then tap =e=, to type it.  =C-c C-a= remains the
@@ -48,12 +53,13 @@ for canonical thread navigation.
 | Key | Action |
 |-----+--------|
 | =C-c e c= | Ordinary chat |
-| =C-c e t= | Open canonical thread |
+| =C-c e t= | Browse canonical threads |
 | =C-c e n= | New canonical thread |
 | =C-c e r= | Refresh thread list |
 | =C-c e f= | New .assist file |
 | =C-c e d= | Stage call |
 | =C-c e m= | Stage SMS |
+| =C-c e s= | Open SMS conversations |
 | =C-c e w= | Network controls |
 | =C-c e h= | This command reference |
 
@@ -72,7 +78,7 @@ the generic =phone-install= target does not define them.
 
 | Key | Action |
 |-----+--------|
-| =C-c C-a t= | Open thread |
+| =C-c C-a t= | Browse canonical threads |
 | =C-c C-a n= | New canonical Assist thread |
 | =C-c C-a g= | Refresh current conversation |
 | =C-c C-a s= | Send |
@@ -81,28 +87,65 @@ the generic =phone-install= target does not define them.
 | =C-c C-a l= | Load older canonical history |
 | =C-c C-a f= | Forget a file-backed conversation |
 
-Physical =RET= and touchscreen RET open only a literal HTTP(S) object at point;
-otherwise they insert a newline.  RET accepts an active minibuffer first.
+RET accepts an active minibuffer first.  Otherwise touchscreen RET invokes the
+target buffer's physical =RET= binding: in a conversation it opens a literal
+HTTP(S) object at point or inserts a newline, and in the native thread list it
+opens the exact row at point.
 
 * Phone and network
 
-| Action | M-x command |
-|--------+-------------|
+| Action | M-x command or =eval_elisp= form |
+|--------+-----------------------------------|
 | Stage a call for confirmation | =emacsos-call= |
 | Answer the ringing call | =emacsos-answer= |
 | Hang up | =emacsos-hang-up= |
+| Open phone controls | =emacsos-controls-show= |
+| Set cellular data explicitly | =(emacsos-net-set-cell t)= or =(emacsos-net-set-cell nil)= |
+| Set brightness to 25, 50, 75, or 100 | =(emacsos-controls-set-brightness 50)= |
+| Set flashlight on or off | =(emacsos-controls-set-flashlight 'on)= or =(emacsos-controls-set-flashlight 'off)= |
 | Open network controls | =emacsos-net-show= |
 | Connect to a visible Wi-Fi network | =emacsos-net-connect= |
+| Set Wi-Fi explicitly | =(emacsos-net-set-wifi t)= or =(emacsos-net-set-wifi nil)= |
 | Toggle Wi-Fi | =emacsos-net-toggle-wifi= |
 | Toggle cellular data | =emacsos-net-toggle-cell= |
+| Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
 
-The modeline network, call, and SMS labels are touch controls for their current
-status or action.  The PinePhone/OpenRC deployment also adds the keyboard
-label.
+Parenthesized entries are =eval_elisp= forms.  Bare command names run through
+=M-x=.
 
-Ordinary chat, editing, and Assist buffers have no separate Emacs control
-pane.  Call and SMS confirmation controls appear temporarily only while those
-safety-critical flows are active.
+The transient call and SMS modeline labels are touch controls for their current
+status or action.  The primary platform label opens Network controls on generic
+systems and the combined Controls buffer on PinePhone/OpenRC.  Assist threads
+open through =C-c e t=.  Keyboard hide/show and device state live in the
+Controls buffer.
+
+* Swipe learning (PinePhone/OpenRC only)
+
+These commands are installed by the PinePhone/OpenRC image.  Swipe learning is
+off by default and never changes the current keyboard's suggestions.  It retains
+bounded local trace geometry, candidate words, and your explicit correction
+outcomes.  It does not capture surrounding text from Emacs, Firefox, Android,
+or another application.
+
+| Action | M-x command |
+|--------+-------------|
+| Enable capture for the next UI session | =emacsos-swipe-learning-enable= |
+| Disable persistence now | =emacsos-swipe-learning-disable= |
+| Show bounded local evidence | =emacsos-swipe-learning-show= |
+| Export a private local snapshot | =emacsos-swipe-learning-export= |
+| Erase all learning evidence | =emacsos-swipe-learning-erase= |
+| Restart the supervised phone UI | =emacsos-pinephone-restart-ui-session= |
+
+After Enable, restart the UI to begin capture.  Disable fences all future
+persistence immediately; restart the UI to stop keyboard observation.  Erase
+requires =Disable → restart UI → erase= and a second tap in its confirmation
+buffer.  Restart closes transient buffers and refuses while a file-visiting
+buffer has unsaved edits.
+
+An SMS conversation uses the compositor text keyboard with QUIT, Refresh, and
+Send or ACK in its Emacs utility row.  Send still opens the separate two-tap
+confirmation screen; ACK clears an indeterminate local send status.  Other
+ordinary chat, editing, and Assist buffers have no separate Emacs control pane.
 
 * Files and terminals
 

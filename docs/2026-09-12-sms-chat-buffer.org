@@ -1,0 +1,107 @@
+#+title: Native SMS conversation buffer
+#+date: 2026-09-12
+
+* Objective
+
+Add a phone-native, one-person SMS conversation buffer.  It presents received
+and sent messages with the same compact role treatment as chat, keeps an exact
+editable draft, stages outbound text through the existing two-tap SMS
+primitive, and discovers modem history without adding a server endpoint or a
+privileged reader.
+
+* Phone flow
+
+The SMS catalog contains touch rows for validated phone numbers and a Refresh
+control.  A row opens one conversation.  The conversation retains the normal
+T9 and action rows and replaces only the utility row with QUIT, Refresh, and
+Send.  Send stages the exact draft in the existing immutable proposal screen;
+the second local tap remains the only ordinary send authorization.
+
+Received messages create a persistent modeline badge independently of screen
+wake.  The badge opens the conversation containing the newest unread message.
+Unread messages are consumed only after that conversation is installed in the
+phone target window.  A ModemManager restart preserves the conversation and
+draft, clears obsolete modem records, and shows a tappable Refresh state.
+
+An indeterminate local send remains protected and says not to resend.  The
+visible conversation replaces Send with a record-scoped ACK control.  That
+action clears only the local warning and eviction protection; it cannot send
+or mutate modem state.
+
+* State and presentation
+
+One global model owns at most 100 records and 128 KiB of exact UTF-8 message
+bodies.  A conversation renders its newest 40 records within 64 KiB.  Records
+have immutable =local= or =modem= origin and an optional ModemManager owner/path
+attachment.  Deterministic oldest-first eviction never removes the active
+proposal or an unacknowledged local unknown.  Admission fails visibly if those
+invariants leave no evictable space.
+
+Redraw preserves the exact untrimmed draft and its point offset.  Transcript
+text is read-only and inert: the shared presentation primitive styles only the
+role prefix and does not parse Markdown or create links.  Stored message text
+remains exact.  Display doubles backslashes, preserves newlines, and exposes
+all other C0, C1, and Unicode format controls as visible escape tokens.
+
+The existing =emacsos-send-message= accepts an optional opaque scalar context
+without changing its two-argument contract or result.  Isolated lifecycle
+observers receive fresh copied payloads for staged, discarded, sending,
+terminal, and local acknowledgement transitions.  The conversation adapter creates its local record only
+after sending is visible and before transport starts; it clears the draft only
+when the draft still equals the staged body.  Terminal state is joined by
+proposal identity.  A failed proposal render emits discarded before clearing
+the staged mapping.
+
+* Trusted modem boundary
+
+=phone-call.el= continues to own the one trusted ModemManager unique owner and
+generation.  Persistent wildcard signals are accepted only when immutable
+event metadata names the non-nil current owner.  SMS Added paths are rejected
+before copying unless they are at most 128 bytes and match the bounded numeric
+ModemManager SMS object-path grammar.  Owner bootstrap is generation guarded,
+and initial registration and every later transition notify isolated observers.
+
+Reads run as the unprivileged Emacs user through fixed argv only:
+
+- =/usr/bin/mmcli -s PATH --output-keyvalue=
+- =/usr/bin/mmcli -m any --messaging-list-sms --output-keyvalue=
+
+No shell is involved.  Incremental stdout caps are 16 KiB for one SMS and 64
+KiB for a list; stderr is discarded and each process has a two-second kill
+timer.  The key-value parser first splits bounded strict UTF-8 physical
+=key : value= lines at the first colon, then decodes GLib escapes.  Duplicate,
+malformed, missing, unknown, or invalid fields fail closed.
+
+One scheduler permits at most 64 owner/path jobs and four children.  Live Added
+work can promote a refresh job.  Receiving objects retry five times at one
+second; other transient live failures retry once and request one rate-limited,
+coalesced recovery refresh.  An explicit refresh gets the next free slot.
+Slots are released only by terminal sentinels after process reap.
+
+Refresh is single-flight per owner generation, not once per generation.  Each
+attempt has a new revision cutoff, at most 50 object paths, and a 35-second
+visible deadline.  Terminal completion permits a later retry.  Merge replaces
+only pre-cutoff modem records from the same owner and preserves newer live and
+local records.  An exact outgoing modem object may attach to the sole matching
+local sending record without changing its local provenance.  Owner changes
+first make dispatched old-generation local sends protected unknown, then clear
+old modem work and attachments.
+
+* Verification
+
+Deterministic tests cover proposal lifecycle ordering and isolation, drafts,
+unknown acknowledgement, inert hostile text, record bounds, trusted owner and
+path checks, bootstrap races, fixed argv and parser failure, process caps and
+reaping, scheduler retries, refresh/live races, provenance-preserving merge,
+the inbound badge, and the touch utility rows.  Final verification runs
+=make test-elisp=, =make test-server=, =make test-pinephone-scripts=, and
+=make smoke=.  Live unprivileged =mmcli= reads and phone deployment are shared
+effects owned by the workspace orchestrator.
+
+* Historical supersessions
+
+This design supersedes the conversation-scope and inbound-history exclusions
+in [[file:2026-09-06-outbound-sms.org][Confirmed outbound SMS]], sections /Objective/, /User flow/, and
+/Acceptance/.  The original send authorization and privileged transport remain
+unchanged; SMS now also has a native conversation surface and an unprivileged,
+bounded receive/history adapter.

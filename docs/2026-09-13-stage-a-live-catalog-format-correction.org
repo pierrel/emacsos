@@ -1,0 +1,46 @@
+#+title: Stage A live catalog format correction
+#+date: 2026-09-13
+
+* State
+
+Production returned one otherwise valid 148-thread catalog whose entries 7 and
+48 used U+200D ZERO WIDTH JOINER and whose entry 60 used U+FE0F VARIATION
+SELECTOR-16.  Rejecting either emoji-format character rejected the complete
+catalog, so the native thread list could not replace its empty state.
+
+The plain =EmacsOS= modeline label also retained full-height text after the
+adjacent Controls label was compacted.
+
+* Historical supersessions
+
+This record supersedes only the blanket format and default-ignorable rejection
+in =2026-09-12-assist-thread-list-buffer.org=, section =Trust and resource
+bounds=, by admitting U+200D and U+FE0F.  It also supersedes only the plain
+=EmacsOS= modeline literal in =2026-05-26-cellular-data-connectivity.org=,
+section =On-device status + control=, by compacting that label.  All other
+validation, isolation, identity, modeline, and touch-padding claims remain
+unchanged.
+
+* Corrected behavior
+
+Bounded catalog display fields admit exactly the two required emoji-format code
+points, U+200D and U+FE0F.  Bidirectional controls, every other Unicode format
+control, and every other explicitly prohibited default-ignorable code point
+remain rejected.  Repository and harness selection keys remain ASCII opaque
+identifiers.  Display text remains inside trusted bidirectional isolates;
+collision grouping removes the two admitted zero-width marks before deriving
+trusted client ordinals; row activation still resolves the validated opaque
+thread ID against the current catalog.
+
+The plain =EmacsOS= modeline segment renders at 0.8 of inherited text height.
+It remains plain text and changes no action or modeline ordering.
+
+* Acceptance
+
+ERT admits one response-shaped 148-thread catalog with U+200D at entries 7 and
+48 and U+FE0F at entry 60.  Separate hostile regressions reject bidi controls,
+other zero-width format controls, VS15, a supplementary variation selector,
+and either admitted mark in an action-carrying choice key.  Native-list ERT
+proves admitted zero-width marks cannot bypass trusted collision ordinals.
+Modeline ERT pins the compact =EmacsOS= segment and the unchanged following call,
+SMS, and platform segments.
