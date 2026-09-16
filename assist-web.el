@@ -66,6 +66,11 @@
   :type 'integer
   :group 'emacsos-assist-web)
 
+(defcustom emacsos-assist-web-max-stream-chunk-bytes (* 1024 1024)
+  "Maximum raw HTTP bytes accepted in one Assist stream callback."
+  :type 'integer
+  :group 'emacsos-assist-web)
+
 (defcustom emacsos-assist-web-max-header-bytes (* 64 1024)
   "Maximum HTTP response-header size accepted from Assist Web."
   :type 'integer
@@ -562,42 +567,20 @@ distinguish its bounded structured 409 outcomes.  ARRAY-TYPE defaults to
   "Wrap URL-FILTER with raw HTTP bounds, invoking FAIL with a safe message.
 
 STREAMING permits an unbounded body only for a valid 200 SSE response; it
-bounds every other response and each individual SSE record before URL-FILTER
-retains it.  Headers and encoded responses are rejected before URL-FILTER can
-redirect or decompress them."
+bounds every other response and each raw transport callback before URL-FILTER
+retains it.  Decoded SSE records are bounded by the event filter.  Headers and
+encoded responses are rejected before URL-FILTER can redirect or decompress
+them."
   (let ((received 0) (header "") (header-complete nil) (failed nil)
-        (stream-record-bytes 0) (stream-delimiter-prefix nil)
         (bounded-body (not streaming)))
-    (cl-labels
-        ((check-stream-body
-          (process body)
-          ;; Retain one possible delimiter byte between TCP callbacks.  A
-          ;; callback may contain arbitrarily many bounded SSE records, but an
-          ;; unterminated record is rejected before url-http copies it.
-          (let ((body (concat (or stream-delimiter-prefix "") body))
-                (start 0))
-            (setq stream-delimiter-prefix nil)
-            (while (and (not failed) (string-match "\n\n" body start))
-              (cl-incf stream-record-bytes
-                       (string-bytes (substring body start (match-beginning 0))))
-              (if (> stream-record-bytes emacsos-assist-web-max-event-bytes)
-                  (progn
-                    (setq failed t)
-                    (funcall fail process "Assist event is too large"))
-                (setq stream-record-bytes 0
-                      start (match-end 0))))
-            (when (not failed)
-              (let ((tail (substring body start)))
-                (when (string-suffix-p "\n" tail)
-                  (setq stream-delimiter-prefix "\n"
-                        tail (substring tail 0 -1)))
-                (cl-incf stream-record-bytes (string-bytes tail))
-                (when (> stream-record-bytes emacsos-assist-web-max-event-bytes)
-                  (setq failed t)
-                  (funcall fail process "Assist event is too large")))))))
-      (lambda (process bytes)
+    (lambda (process bytes)
+      (unless failed
+        (when (and streaming
+                   (> (string-bytes bytes)
+                      emacsos-assist-web-max-stream-chunk-bytes))
+          (setq failed t)
+          (funcall fail process "Assist stream transport chunk is too large"))
         (unless failed
-          (let ((body (and header-complete bytes)))
             (setq received (+ received (string-bytes bytes)))
             (when (and bounded-body
                        (> received emacsos-assist-web-max-response-bytes))
@@ -619,7 +602,6 @@ redirect or decompress them."
                           (setq failed t)
                           (funcall fail process "Assist Web response headers are too large"))
                       (setq header-complete t
-                            body (substring header (match-end 0))
                             bounded-body
                             (not (and streaming
                                       (not (null (string-match-p
@@ -647,10 +629,8 @@ redirect or decompress them."
                                (> received emacsos-assist-web-max-response-bytes))
                       (setq failed t)
                       (funcall fail process "Assist Web response is too large"))))))))
-            (when (and (not failed) streaming header-complete (not bounded-body))
-              (check-stream-body process body))
             (when (and (not failed) (functionp url-filter))
-              (funcall url-filter process bytes))))))))
+              (funcall url-filter process bytes)))))))
 
 (defun emacsos-assist-web--request
     (method path payload callback &optional headers allow-status array-type object-type)
@@ -1040,9 +1020,10 @@ the canonical snapshot must retain its durable identity."
             emacsos-assist-web--stream-assistant-bytes total)
       (emacsos-assist-web--set-status "working")))))
 
-(defun emacsos-assist-web--drain-events (target generation &optional received-bytes)
+(defun emacsos-assist-web--drain-events (target generation &optional decoded-bytes)
   "Consume new complete SSE records for TARGET without rescanning a suffix.
-RECEIVED-BYTES is the raw size newly appended after the first parsed response."
+DECODED-BYTES is the decoded response-buffer size appended after its first
+parsed response."
   (unless (markerp emacsos-assist-web--stream-body-marker)
     (setq-local emacsos-assist-web--stream-body-marker
                 (copy-marker (marker-position url-http-end-of-headers) nil)
@@ -1052,21 +1033,25 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
          (scan-marker emacsos-assist-web--stream-scan-marker)
          (start (marker-position marker))
          (too-large nil))
-    ;; The first callback includes headers.  Thereafter the process filter's
-    ;; byte count lets us enforce the incomplete-record cap without copying or
-    ;; rescanning the whole retained suffix for every tiny callback.
-    (if (integerp emacsos-assist-web--stream-unconsumed-bytes)
-        (cl-incf emacsos-assist-web--stream-unconsumed-bytes (or received-bytes 0))
+    ;; The first callback includes headers.  Thereafter the decoded-buffer
+    ;; delta lets us enforce the incomplete-record cap without mixing HTTP
+    ;; framing bytes into SSE accounting or rescanning every tiny callback.
+    (if (and (integerp emacsos-assist-web--stream-unconsumed-bytes)
+             (integerp decoded-bytes))
+        (cl-incf emacsos-assist-web--stream-unconsumed-bytes decoded-bytes)
       (setq-local emacsos-assist-web--stream-unconsumed-bytes
                   (string-bytes (buffer-substring-no-properties start (point-max)))))
-    ;; url-http can split any byte sequence across callbacks.  Resume at the
-    ;; final possible delimiter start, so each retained character is scanned
-    ;; at most once (apart from that one boundary character).
+    ;; url-http can split a decoded CRLF delimiter across callbacks.  Resume at
+    ;; the final possible delimiter start, so each retained character is
+    ;; scanned at most once apart from that three-character boundary.
     (goto-char (marker-position scan-marker))
-    (while (and (not too-large) (search-forward "\n\n" nil t))
+    (while (and (not too-large) (re-search-forward "\r?\n\r?\n" nil t))
       (let* ((record-end (point))
+             (delimiter-start (match-beginning 0))
+             (delimiter-bytes
+              (string-bytes (buffer-substring-no-properties delimiter-start record-end)))
              (event nil) (data nil)
-             (record (buffer-substring-no-properties start (- record-end 2))))
+             (record (buffer-substring-no-properties start delimiter-start)))
         (if (> (string-bytes record) emacsos-assist-web-max-event-bytes)
             (progn
               (setq too-large t)
@@ -1075,7 +1060,7 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
                            (= generation emacsos-assist-web--stream-generation)))
                 (emacsos-assist-web--stream-interrupted
                  target "Assist event is too large")))
-          (dolist (line (split-string record "\n" t))
+          (dolist (line (split-string record "\r?\n" t))
             (cond
              ((string-prefix-p "event: " line) (setq event (substring line 7)))
              ((string-prefix-p "data: " line) (setq data (substring line 6)))))
@@ -1084,7 +1069,7 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
                        (= generation emacsos-assist-web--stream-generation)))
             (emacsos-assist-web--dispatch-event target event (or data "")))
           (cl-decf emacsos-assist-web--stream-unconsumed-bytes
-                   (+ (string-bytes record) 2))
+                   (+ (string-bytes record) delimiter-bytes))
           (delete-region start record-end)
           (set-marker marker start)
           (set-marker scan-marker start)
@@ -1096,7 +1081,7 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
     (unless too-large
       ;; Retain only an incomplete final record.  Otherwise a long healthy
       ;; stream would still accumulate every already-consumed event.
-      (set-marker scan-marker (max start (1- (point-max)))))
+      (set-marker scan-marker (max start (- (point-max) 3))))
     (when (> emacsos-assist-web--stream-unconsumed-bytes
              emacsos-assist-web-max-event-bytes)
       (delete-region start (point-max))
@@ -1112,7 +1097,10 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
   (lambda (process bytes)
     ;; The stock filter may detach PROCESS from its buffer on the final chunk.
     ;; Retain the response first so a terminal event in that chunk is not lost.
-    (let ((response (process-buffer process)))
+    (let* ((response (process-buffer process))
+           (decoded-start
+            (and (buffer-live-p response)
+                 (with-current-buffer response (point-max)))))
       (when (functionp url-filter) (funcall url-filter process bytes))
       (when (buffer-live-p response)
         (with-current-buffer response
@@ -1139,8 +1127,14 @@ RECEIVED-BYTES is the raw size newly appended after the first parsed response."
                   (when (timerp emacsos-assist-web--stream-header-timer)
                     (cancel-timer emacsos-assist-web--stream-header-timer)
                     (setq emacsos-assist-web--stream-header-timer nil))))
-              (emacsos-assist-web--drain-events
-               target generation (string-bytes bytes)))))))))
+              (let ((decoded-bytes
+                     (and (integerp decoded-start)
+                          (<= decoded-start (point-max))
+                          (string-bytes
+                           (buffer-substring-no-properties
+                            decoded-start (point-max))))))
+                (emacsos-assist-web--drain-events
+                 target generation decoded-bytes)))))))))
 
 (defun emacsos-assist-web--observe-run (buffer)
   "Open BUFFER's authenticated status stream for its current run.

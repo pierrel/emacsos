@@ -1,0 +1,29 @@
+#+title: Assist SSE framing and accounting amendment
+#+date: 2026-09-16
+
+* Correction
+
+The Assist Web stream guard treats bytes delivered to the process filter as
+raw HTTP transport.  It bounds each raw callback to 1 MiB and forwards it
+unchanged to =url-http=; it does not interpret HTTP headers, chunk framing, or
+line endings as SSE records.
+
+Only after =url-http= decodes the response does the event reader apply the
+64 KiB complete-or-unfinished SSE record bound.  Its retained-tail accounting
+uses the decoded response-buffer delta, never the raw callback size.  It accepts
+both LF and CRLF SSE record delimiters and removes either delimiter before
+dispatching the same status, delta, error, or terminal event.
+
+* Verification
+
+ERT passes a chunk-framed HTTP/1.1 response whose decoded SSE record uses CRLF.
+The raw response is larger than the configured event cap, while the decoded
+event remains within it; the status event is dispatched exactly once.  Separate
+coverage proves a single oversized raw callback is rejected without treating
+its contents as SSE and that a decoded CRLF record is parsed directly.
+
+* Historical supersessions
+
+This document supersedes only the individual-SSE-record boundary in
+[[file:2026-09-03-assist-web-thread-flow.org][Assist Web thread flow]], section /Security and resource bounds/, by defining
+the separate raw-transport and decoded-event accounting boundaries above.

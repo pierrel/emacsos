@@ -487,6 +487,22 @@
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-event-parser-accepts-decoded-crlf-records ()
+  "Decoded SSE CRLF framing dispatches the same event as LF framing."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        seen)
+    (unwind-protect
+        (with-current-buffer source
+          (insert "event: status\r\ndata: {\"status\":\"working\"}\r\n\r\n")
+          (setq-local url-http-end-of-headers (copy-marker (point-min)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                     (lambda (_target event data) (setq seen (list event data)))))
+            (emacsos-assist-web--drain-events target 0))
+          (should (equal seen '("status" "{\"status\":\"working\"}"))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
 (ert-deftest test-assist-web-live-status-rejects-spoofing-and-oversized-text ()
   (dolist (data
            (list (json-serialize
@@ -686,19 +702,59 @@
     (should forwarded)
     (should-not rejected)))
 
-(ert-deftest test-assist-web-raw-filter-rejects-one-oversized-sse-record-before-forwarding ()
-  "A bad incomplete record never reaches url-http's retained response buffer."
-  (let ((emacsos-assist-web-max-event-bytes 32) forwarded rejected)
+(ert-deftest test-assist-web-raw-filter-bounds-one-transport-callback ()
+  "A raw callback is bounded without interpreting HTTP bytes as SSE records."
+  (let ((emacsos-assist-web-max-stream-chunk-bytes 32) forwarded rejected)
     (funcall
      (emacsos-assist-web--guarded-filter
       (lambda (&rest _) (setq forwarded t))
       (lambda (_process problem) (setq rejected problem))
       t)
      nil
-     (concat "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-             (make-string 33 ?x)))
+     (make-string 33 ?x))
     (should-not forwarded)
-    (should (equal rejected "Assist event is too large"))))
+    (should (equal rejected "Assist stream transport chunk is too large"))))
+
+(ert-deftest test-assist-web-chunked-crlf-stream-uses-decoded-event-accounting ()
+  "HTTP chunk framing is forwarded raw while only decoded SSE bytes are counted."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-event-bytes 52)
+        (emacsos-assist-web-max-stream-chunk-bytes 512)
+        process seen rejected)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-chunked-crlf"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (let* ((decoded "event: status\r\ndata: {\"status\":\"working\"}\r\n\r\n")
+                 (raw (concat "HTTP/1.1 200 OK\r\n"
+                              "Content-Type: text/event-stream\r\n"
+                              "Transfer-Encoding: chunked\r\n\r\n"
+                              (format "%x\r\n" (string-bytes decoded))
+                              decoded "\r\n0\r\n\r\n"))
+                 (url-filter
+                  (lambda (_active _bytes)
+                    (with-current-buffer source
+                      (erase-buffer)
+                      (insert decoded)
+                      (setq-local url-http-response-status 200
+                                  url-http-content-type "text/event-stream"
+                                  url-http-end-of-headers (copy-marker (point-min))))))
+                 (filter
+                  (emacsos-assist-web--guarded-filter
+                   (emacsos-assist-web--event-filter url-filter target 0)
+                   (lambda (_active problem) (setq rejected problem))
+                   t)))
+            (should (> (string-bytes raw) emacsos-assist-web-max-event-bytes))
+            (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                       (lambda (_target event data) (setq seen (list event data)))))
+              (funcall filter process raw))
+            (should-not rejected)
+            (should (equal seen '("status" "{\"status\":\"working\"}")))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
 
 (ert-deftest test-assist-web-render-preserves-draft-and-updates-status-in-place ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-render-" t)))
