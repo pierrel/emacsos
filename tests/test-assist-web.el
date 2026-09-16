@@ -760,6 +760,40 @@
     (should-not forwarded)
     (should (equal rejected "Assist Web transfer encoding is not accepted"))))
 
+(ert-deftest test-assist-web-stock-filter-rejects-folded-transfer-encoding ()
+  "A folded transfer field cannot make raw chunk bytes look decoded."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        process rejected seen filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-folded-transfer"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (cl-letf (((symbol-function 'emacsos-assist-web--dispatch-event)
+                     (lambda (_target event data)
+                       (push (list event data) seen))))
+            (funcall filter process
+                     (concat "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Transfer-Encoding: chunked\r\n"
+                             "\t, gzip\r\n\r\n"
+                             "1d\r\nevent: terminal\ndata: {}\n\n\r\n"
+                             "0\r\n\r\n")))
+          (should (equal rejected
+                         "Assist Web folded response headers are not accepted"))
+          (should-not seen))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
 (ert-deftest test-assist-web-chunked-crlf-stream-uses-decoded-event-accounting ()
   "Stock `url-http' chunk framing never becomes decoded SSE data."
   (let ((target (generate-new-buffer " *assist-web-target*"))
@@ -829,6 +863,29 @@
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-hot-reload-retires-an-installed-stream-filter ()
+  "Reload cleanup cannot leave a pre-reload process-filter closure active."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        process)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-old-filter"
+                                           :buffer source :noquery t
+                                           :filter (lambda (&rest _))))
+          (with-current-buffer target
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--stream-process process
+                        emacsos-assist-web--stream-response source))
+          (emacsos-assist-web--retire-active-streams-after-reload)
+          (should-not (process-live-p process))
+          (with-current-buffer target
+            (should-not emacsos-assist-web--stream-process)
+            (should-not emacsos-assist-web--stream-response)))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
 (ert-deftest test-assist-web-stock-filter-bounds-an-incomplete-chunk-header ()
   "Opaque chunk framing is bounded before stock regex matching can grow."
   (let ((target (generate-new-buffer " *assist-web-target*"))
@@ -887,6 +944,38 @@
                              "Content-Type: text/event-stream\r\n"
                              "Content-Length: 129\r\n\r\n")))
           (should (equal interrupted "Assist stream response is too large")))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-stock-filter-rejects-an-oversized-decoded-chunk ()
+  "Stock decoding cannot retain a declared entity chunk above its bound."
+  (let ((target (generate-new-buffer " *assist-web-target*"))
+        (source (generate-new-buffer " *assist-web-source*"))
+        (emacsos-assist-web-max-stream-chunk-bytes 128)
+        process rejected interrupted filter)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-web-decoded-chunk"
+                                           :buffer source :noquery t))
+          (with-current-buffer target (emacsos-assist-web-mode))
+          (test-assist-web--initialize-url-http-response source process)
+          (setq filter
+                (emacsos-assist-web--guarded-filter
+                 (emacsos-assist-web--event-filter
+                  #'url-http-generic-filter target 0)
+                 (lambda (_active problem) (setq rejected problem))
+                 t))
+          (cl-letf (((symbol-function 'emacsos-assist-web--stream-interrupted)
+                     (lambda (_target problem) (setq interrupted problem))))
+            (funcall filter process
+                     (concat "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Transfer-Encoding: chunked\r\n\r\n"
+                             "81\r\n")))
+          (should-not rejected)
+          (should (equal interrupted
+                         "Assist stream transport chunk is too large")))
       (when (process-live-p process) (delete-process process))
       (when (buffer-live-p target) (kill-buffer target))
       (when (buffer-live-p source) (kill-buffer source)))))

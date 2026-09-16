@@ -624,12 +624,20 @@ them."
               (cond
                (header-end
                 (let ((headers-only (substring header 0 (match-end 0))))
-                  (if (> (string-bytes headers-only)
-                         emacsos-assist-web-max-header-bytes)
-                      (progn
-                        (setq failed t)
-                        (funcall fail process
-                                 "Assist Web response headers are too large"))
+                  (cond
+                   ((> (string-bytes headers-only)
+                       emacsos-assist-web-max-header-bytes)
+                    (setq failed t)
+                    (funcall fail process
+                             "Assist Web response headers are too large"))
+                   ((string-match-p "\r?\n[ \t]" headers-only)
+                    ;; Stock `url-http' unfolds obsolete continuation lines.
+                    ;; Reject them before our line-oriented admission checks
+                    ;; can disagree with the decoder about transfer coding.
+                    (setq failed t)
+                    (funcall fail process
+                             "Assist Web folded response headers are not accepted"))
+                   (t
                     (setq header-complete t
                           bounded-body
                           (not (and streaming
@@ -669,7 +677,7 @@ them."
                           (setq failed t)
                           (funcall fail process
                                    "Assist Web transfer encoding is not accepted"))
-                        (setq position (match-end 0)))))
+                        (setq position (match-end 0))))))
                   (setq header nil)
                   (when (and (not failed) bounded-body
                              (> received emacsos-assist-web-max-response-bytes))
@@ -2807,9 +2815,21 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 (define-key emacsos-assist-web-mode-map (kbd "RET")
             #'emacsos-conversation-activate-or-newline)
 
+(defun emacsos-assist-web--retire-active-streams-after-reload ()
+  "Retire observations whose process callbacks predate this file load."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (and (derived-mode-p 'emacsos-assist-web-mode)
+                      emacsos-assist-web--stream-process)))
+      (emacsos-assist-web--stream-interrupted
+       buffer "Assist code reloaded; refresh observation"))))
+
 ;; Reloading this file invalidates callbacks created by its previous function
-;; definitions.  An in-flight callback retains the process-wide refresh claim
-;; until it observes the generation change and releases it.
+;; definitions.  Retire active stream callbacks before advancing the catalog
+;; generation; ordinary in-flight request callbacks release their refresh claim
+;; when they observe that generation change.
+(emacsos-assist-web--retire-active-streams-after-reload)
 (cl-incf emacsos-assist-web--catalog-generation)
 (emacsos-assist-web--cancel-pending-new-thread)
 (emacsos-assist-web--load-catalog)
