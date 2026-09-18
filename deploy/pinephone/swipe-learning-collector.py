@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import array
 import fcntl
 import json
 import os
@@ -327,13 +328,19 @@ class Store:
         return fd
 
     @contextmanager
-    def locked(self, wait: bool = False) -> Iterator[None]:
+    def locked(self, timeout: float = 0.0) -> Iterator[None]:
         fd = self._open("lock", os.O_RDWR)
+        deadline = time.monotonic() + timeout
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-            except BlockingIOError as error:
-                raise StoreBusy("swipe learning store is busy") from error
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as error:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise StoreBusy("swipe learning store is busy") from error
+                    select.select([], [], [], min(0.01, remaining))
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -983,7 +990,7 @@ class Store:
             self._replace("status.tmp", "status", f"capturing {epoch}".encode())
 
     def startup_failed(self, epoch: str, reason: str) -> None:
-        with self.locked(wait=True):
+        with self.locked(timeout=0.1):
             if self._epoch_unlocked() == epoch:
                 self._replace(
                     "status.tmp", "status", f"startup-failed {epoch} {reason}".encode()
@@ -1111,14 +1118,22 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
             try:
                 store.start_session(epoch)
                 snapshot = store.startup_snapshot(epoch)
+            except StoreBusy:
+                return
             except (InvalidRecord, OSError):
-                store.startup_failed(epoch, "invalid-feedback-state")
+                try:
+                    store.startup_failed(epoch, "invalid-feedback-state")
+                except StoreBusy:
+                    pass
                 return
             try:
                 if sock.send(snapshot) != len(snapshot):
                     raise OSError("short snapshot send")
             except OSError:
-                store.startup_failed(epoch, "snapshot-send-failed")
+                try:
+                    store.startup_failed(epoch, "snapshot-send-failed")
+                except StoreBusy:
+                    pass
                 return
             store.publish_capturing(epoch)
             if os.write(ready_fd, b"ready") != 5:
@@ -1127,6 +1142,7 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
             ready_fd = -1
             tokens = 16.0
             last_refill = time.monotonic()
+            received = 0
             while True:
                 now = time.monotonic()
                 tokens = min(16.0, tokens + (now - last_refill) * 8.0)
@@ -1146,7 +1162,22 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
                         return
                     if not data:
                         return
+                    for level, kind, contents in ancillary:
+                        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                            descriptors = array.array("i")
+                            descriptors.frombytes(
+                                contents[: len(contents) - len(contents) % descriptors.itemsize]
+                            )
+                            for received_fd in descriptors:
+                                os.close(received_fd)
                     tokens -= 1.0
+                    received += 1
+                    if received > COLLECTOR_DATAGRAM_BUDGET:
+                        try:
+                            store._latch_exhausted()
+                        except OSError:
+                            pass
+                        return
                     try:
                         store.admit(epoch)
                     except StoreBusy:
@@ -1157,8 +1188,11 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
                         continue
                     if not store.capture_exhausted:
                         try:
+                            record = validate_record(data)
                             store.append(data, require_epoch=epoch, admitted=True)
                         except StoreBusy:
+                            if record["type"] == "feedback":
+                                return
                             continue
                         except EpochMismatch:
                             return

@@ -1,3 +1,4 @@
+import array
 import importlib.util
 import json
 import os
@@ -624,6 +625,84 @@ class CollectorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_feedback_replace_failures_are_fatal_and_atomic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = private_state(Path(temporary))
+            store = collector.Store(state)
+            first = FEEDBACK | {"trace": "ac"}
+            second = FEEDBACK | {"trace": "ad"}
+            try:
+                store.append(encoded(first))
+                old = (state / "feedback.state").read_bytes()
+                for target in ("write", "fsync", "rename"):
+                    with mock.patch.object(collector.os, target, side_effect=OSError("fail")):
+                        with self.assertRaises(collector.FeedbackPersistenceError):
+                            store.append(encoded(second))
+                    self.assertEqual((state / "feedback.state").read_bytes(), old)
+                    (state / "feedback.tmp").unlink(missing_ok=True)
+                real_fsync = collector.os.fsync
+                calls = 0
+
+                def fail_directory_sync(fd):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise OSError("directory sync failed")
+                    real_fsync(fd)
+
+                with mock.patch.object(collector.os, "fsync", side_effect=fail_directory_sync):
+                    with self.assertRaises(collector.FeedbackPersistenceError):
+                        store.append(encoded(second))
+                new = (state / "feedback.state").read_bytes()
+                self.assertIn(new, (old, collector.Store._feedback_bytes([
+                    ("geometry-feedback-v1", DICTIONARY, "ac", "word", 1),
+                    ("geometry-feedback-v1", DICTIONARY, "ad", "word", 1),
+                ])))
+            finally:
+                store.close()
+
+    def test_truncated_and_ancillary_packets_consume_lifetime_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_ready = self._reserve_ready_fd()
+            state = private_state(Path(temporary))
+            store = collector.Store(state)
+            peer = None
+            reader = None
+            saved = None
+            descriptor = None
+            try:
+                epoch = store.set_enabled(True)
+                self.assertIsNotNone(epoch)
+                with mock.patch.object(collector, "COLLECTOR_DATAGRAM_BUDGET", 2), mock.patch.object(
+                    store,
+                    "admit",
+                    side_effect=collector.StoreBusy("swipe learning store is busy"),
+                ):
+                    worker, peer, reader, saved = self._start_collector(store, epoch or "")
+                    self.assertEqual(os.read(reader, 5), b"ready")
+                    peer.recv(collector.FEEDBACK_MAX_BYTES)
+                    peer.send(b"x" * (collector.JSON_MAX + 1))
+                    descriptor = os.open("/dev/null", os.O_RDONLY)
+                    peer.sendmsg(
+                        [b"{}"],
+                        [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [descriptor]))],
+                    )
+                    peer.send(b"{}")
+                    worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue((state / "session-budget-exhausted").exists())
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                if peer is not None:
+                    peer.close()
+                if reader is not None:
+                    os.close(reader)
+                if saved is not None:
+                    self._restore_ready_fd(saved)
+                store.close()
+                self._restore_ready_fd(original_ready)
+
     def test_feedback_persistence_failure_closes_collector_and_reports_stopped(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_ready = self._reserve_ready_fd()
@@ -659,7 +738,7 @@ class CollectorTests(unittest.TestCase):
                 store.close()
                 self._restore_ready_fd(original_ready)
 
-    def test_busy_store_lock_drops_only_the_admitted_packet(self):
+    def test_busy_feedback_append_stops_collector(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_ready = self._reserve_ready_fd()
             state = private_state(Path(temporary))
@@ -671,37 +750,25 @@ class CollectorTests(unittest.TestCase):
             try:
                 epoch = store.set_enabled(True)
                 self.assertIsNotNone(epoch)
-                original_admit = store.admit
                 original_append = store.append
-                attempts = 0
-                persisted = threading.Event()
 
-                def busy_once(value):
-                    nonlocal attempts
-                    attempts += 1
-                    if attempts == 1:
+                def busy_feedback(*arguments, **keywords):
+                    if collector.validate_record(arguments[0])["type"] == "feedback":
                         raise collector.StoreBusy("swipe learning store is busy")
-                    original_admit(value)
+                    return original_append(*arguments, **keywords)
 
-                def note_append(*arguments, **keywords):
-                    result = original_append(*arguments, **keywords)
-                    persisted.set()
-                    return result
-
-                with mock.patch.object(store, "admit", side_effect=busy_once), mock.patch.object(
-                    store, "append", side_effect=note_append
-                ):
+                with mock.patch.object(store, "append", side_effect=busy_feedback):
                     worker, peer, reader, saved = self._start_collector(store, epoch or "")
                     self.assertEqual(os.read(reader, 5), b"ready")
                     peer.recv(collector.FEEDBACK_MAX_BYTES)
                     peer.send(encoded(FEEDBACK))
-                    peer.send(encoded(FEEDBACK))
-                    self.assertTrue(persisted.wait(0.5))
-                    manager.set_enabled(False)
-                    peer.send(encoded(FEEDBACK))
                     worker.join(1)
                 self.assertFalse(worker.is_alive())
-                self.assertEqual(store._read_feedback()[-1][-1], 1)
+                with self.assertRaises(OSError):
+                    peer.send(encoded(FEEDBACK))
+                self.assertEqual(
+                    manager.capture_status(), (True, "not capturing: collector-stopped")
+                )
             finally:
                 if peer is not None:
                     peer.close()
@@ -713,7 +780,41 @@ class CollectorTests(unittest.TestCase):
                 store.close()
                 self._restore_ready_fd(original_ready)
 
-    def test_startup_failure_waits_for_ordinary_store_contention(self):
+    def test_busy_receive_still_consumes_lifetime_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_ready = self._reserve_ready_fd()
+            state = private_state(Path(temporary))
+            store = collector.Store(state)
+            peer = None
+            reader = None
+            saved = None
+            try:
+                epoch = store.set_enabled(True)
+                self.assertIsNotNone(epoch)
+                with mock.patch.object(collector, "COLLECTOR_DATAGRAM_BUDGET", 1), mock.patch.object(
+                    store,
+                    "admit",
+                    side_effect=collector.StoreBusy("swipe learning store is busy"),
+                ):
+                    worker, peer, reader, saved = self._start_collector(store, epoch or "")
+                    self.assertEqual(os.read(reader, 5), b"ready")
+                    peer.recv(collector.FEEDBACK_MAX_BYTES)
+                    peer.send(b"{}")
+                    peer.send(b"{}")
+                    worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue((state / "session-budget-exhausted").exists())
+            finally:
+                if peer is not None:
+                    peer.close()
+                if reader is not None:
+                    os.close(reader)
+                if saved is not None:
+                    self._restore_ready_fd(saved)
+                store.close()
+                self._restore_ready_fd(original_ready)
+
+    def test_startup_busy_falls_back_within_readiness_bound(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_ready = self._reserve_ready_fd()
             state = private_state(Path(temporary))
@@ -725,13 +826,83 @@ class CollectorTests(unittest.TestCase):
             try:
                 epoch = store.set_enabled(True)
                 self.assertIsNotNone(epoch)
-                with manager.locked(), mock.patch.object(
-                    store, "startup_snapshot", side_effect=collector.InvalidRecord("bad state")
+                with manager.locked():
+                    worker, peer, reader, saved = self._start_collector(store, epoch or "")
+                    worker.join(0.3)
+                    self.assertFalse(worker.is_alive())
+                self.assertEqual(os.read(reader, 5), b"")
+                self.assertEqual(
+                    manager.capture_status(), (True, "armed for next UI session")
+                )
+            finally:
+                if peer is not None:
+                    peer.close()
+                if reader is not None:
+                    os.close(reader)
+                if saved is not None:
+                    self._restore_ready_fd(saved)
+                manager.close()
+                store.close()
+                self._restore_ready_fd(original_ready)
+
+    def test_snapshot_send_failure_never_publishes_readiness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_ready = self._reserve_ready_fd()
+            state = private_state(Path(temporary))
+            store = collector.Store(state)
+            manager = collector.Store(state)
+            reader = None
+            saved = None
+            try:
+                epoch = store.set_enabled(True)
+                self.assertIsNotNone(epoch)
+                try:
+                    saved = os.dup(6)
+                except OSError:
+                    saved = -1
+                reader, writer = os.pipe()
+                os.dup2(writer, 6)
+                os.close(writer)
+                left, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+                peer.close()
+                worker = threading.Thread(
+                    target=collector.collect, args=(left.detach(), 6, epoch or "", store)
+                )
+                worker.start()
+                worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(os.read(reader, 5), b"")
+                self.assertEqual(
+                    manager.capture_status(), (True, "not capturing: snapshot-send-failed")
+                )
+            finally:
+                if reader is not None:
+                    os.close(reader)
+                if saved is not None:
+                    self._restore_ready_fd(saved)
+                manager.close()
+                store.close()
+                self._restore_ready_fd(original_ready)
+
+    def test_invalid_snapshot_never_publishes_readiness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_ready = self._reserve_ready_fd()
+            state = private_state(Path(temporary))
+            store = collector.Store(state)
+            manager = collector.Store(state)
+            peer = None
+            reader = None
+            saved = None
+            try:
+                epoch = store.set_enabled(True)
+                self.assertIsNotNone(epoch)
+                with mock.patch.object(
+                    store,
+                    "startup_snapshot",
+                    side_effect=collector.InvalidRecord("invalid state"),
                 ):
                     worker, peer, reader, saved = self._start_collector(store, epoch or "")
-                    worker.join(0.05)
-                    self.assertTrue(worker.is_alive())
-                worker.join(1)
+                    worker.join(1)
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(os.read(reader, 5), b"")
                 self.assertEqual(
