@@ -257,18 +257,26 @@ its buffer.")
 (defvar-local emacsos-conversation-actions nil
   "Alist of capabilities installed by this conversation backend.")
 
+(defconst emacsos-conversation-direct-bindings
+  '(("C-<return>" . emacsos-conversation-send)
+    ("C-c C-r" . emacsos-conversation-refresh)
+    ("C-c C-k" . emacsos-conversation-abort)
+    ("C-c C-o" . emacsos-conversation-open-object)
+    ("C-c C-l" . emacsos-conversation-load-older)
+    ("C-c C-f" . emacsos-conversation-forget))
+  "Direct conversation keys and their dispatcher commands.")
+
+(defun emacsos-conversation--bind-direct-actions (map)
+  "Install direct conversation bindings in MAP and return it."
+  (dolist (binding emacsos-conversation-direct-bindings map)
+    (define-key map (kbd (car binding)) (cdr binding))))
+
 (defun emacsos-conversation--command-mode-map ()
   "Build the conversation override after the optional OS map is loaded."
   (let ((map (make-sparse-keymap)))
     (when (boundp 'emacsos-command-mode-map)
       (set-keymap-parent map emacsos-command-mode-map))
-    (define-key map (kbd "C-<return>") #'emacsos-conversation-send)
-    (define-key map (kbd "C-c C-r") #'emacsos-conversation-refresh)
-    (define-key map (kbd "C-c C-k") #'emacsos-conversation-abort)
-    (define-key map (kbd "C-c C-o") #'emacsos-conversation-open-object)
-    (define-key map (kbd "C-c C-l") #'emacsos-conversation-load-older)
-    (define-key map (kbd "C-c C-f") #'emacsos-conversation-forget)
-    map))
+    (emacsos-conversation--bind-direct-actions map)))
 
 (defun emacsos-conversation-install-actions (actions)
   "Install backend-owned ACTIONS in the current conversation buffer.
@@ -276,6 +284,11 @@ its buffer.")
 Each entry is (CAPABILITY . COMMAND).  Transport, persistence, and lifecycle
 remain owned by the backend; this small kernel owns only discovery and binding."
   (setq-local emacsos-conversation-actions actions)
+  (use-local-map
+   (emacsos-conversation--bind-direct-actions
+    (if-let ((map (current-local-map)))
+        (copy-keymap map)
+      (make-sparse-keymap))))
   (setq-local minor-mode-overriding-map-alist
               (cons (cons 'emacsos-command-mode
                           (emacsos-conversation--command-mode-map))
