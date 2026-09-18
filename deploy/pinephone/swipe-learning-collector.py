@@ -67,6 +67,14 @@ class FeedbackPersistenceError(OSError):
     """A valid feedback record could not be atomically retained."""
 
 
+class StoreBusy(OSError):
+    """A nonblocking management lock attempt found the store in use."""
+
+
+def _collapsed_trace(trace: str) -> bool:
+    return all(left != right for left, right in zip(trace, trace[1:]))
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -135,7 +143,11 @@ def validate_record(raw: bytes) -> dict[str, Any]:
             record["dictionary"]
         ):
             raise InvalidRecord("invalid feedback dictionary")
-        if not isinstance(record["trace"], str) or not TRACE.fullmatch(record["trace"]):
+        if (
+            not isinstance(record["trace"], str)
+            or not TRACE.fullmatch(record["trace"])
+            or not _collapsed_trace(record["trace"])
+        ):
             raise InvalidRecord("invalid feedback trace")
         if not isinstance(record["word"], str) or not WORD.fullmatch(record["word"]):
             raise InvalidRecord("invalid feedback word")
@@ -243,7 +255,7 @@ def canonical(record: dict[str, Any]) -> bytes:
 
 
 class Store:
-    """Private, locked JSONL retention for collector and management commands."""
+    """Private, locked journal plus derived feedback state for local controls."""
 
     def __init__(self, path: Path, create: bool = True):
         self.dir_fd = self._open_directory(path, create)
@@ -315,13 +327,13 @@ class Store:
         return fd
 
     @contextmanager
-    def locked(self) -> Iterator[None]:
+    def locked(self, wait: bool = False) -> Iterator[None]:
         fd = self._open("lock", os.O_RDWR)
         try:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
             except BlockingIOError as error:
-                raise OSError("swipe learning store is busy") from error
+                raise StoreBusy("swipe learning store is busy") from error
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -443,14 +455,10 @@ class Store:
                 os.unlink(name, dir_fd=self.dir_fd)
                 os.fsync(self.dir_fd)
             elif name == "feedback.tmp":
-                fd = self._open(name, os.O_RDONLY)
                 try:
-                    try:
-                        self._parse_feedback(os.read(fd, FEEDBACK_MAX_BYTES + 1))
-                    except InvalidRecord:
-                        pass
-                finally:
-                    os.close(fd)
+                    self._parse_feedback(self._read_complete(name, FEEDBACK_MAX_BYTES))
+                except InvalidRecord:
+                    pass
                 os.unlink(name, dir_fd=self.dir_fd)
             else:
                 os.unlink(name, dir_fd=self.dir_fd)
@@ -556,6 +564,7 @@ class Store:
                 not ALGORITHM.fullmatch(algorithm)
                 or not HEX64.fullmatch(dictionary)
                 or not TRACE.fullmatch(trace)
+                or not _collapsed_trace(trace)
                 or not WORD.fullmatch(word)
                 or not re.fullmatch(r"[1-9][0-9]{0,4}", count_text)
                 or int(count_text) > 65535
@@ -579,15 +588,34 @@ class Store:
             raise InvalidRecord("feedback state exceeds bound")
         return data
 
-    def _read_feedback(self) -> list[tuple[str, str, str, str, int]]:
+    def _read_complete(self, name: str, maximum: int) -> bytes:
+        """Read exactly one bounded regular state file or reject a short read."""
+        fd = self._open(name, os.O_RDONLY)
         try:
-            fd = self._open("feedback.state", os.O_RDONLY)
-        except FileNotFoundError:
-            return []
-        try:
-            return self._parse_feedback(os.read(fd, FEEDBACK_MAX_BYTES + 1))
+            size = os.fstat(fd).st_size
+            if size > maximum:
+                raise InvalidRecord(f"oversized state file: {name}")
+            chunks: list[bytes] = []
+            remaining = size
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    raise InvalidRecord(f"partial state file: {name}")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(fd, 1):
+                raise InvalidRecord(f"changed state file: {name}")
+            return b"".join(chunks)
         finally:
             os.close(fd)
+
+    def _read_feedback(self) -> list[tuple[str, str, str, str, int]]:
+        try:
+            return self._parse_feedback(
+                self._read_complete("feedback.state", FEEDBACK_MAX_BYTES)
+            )
+        except FileNotFoundError:
+            return []
 
     def _append_feedback(self, record: dict[str, Any]) -> None:
         try:
@@ -606,7 +634,7 @@ class Store:
             data = self._feedback_bytes(retained)
             self._charge(len(data))
             self._replace("feedback.tmp", "feedback.state", data)
-        except (InvalidRecord, OSError) as error:
+        except (InvalidRecord, BudgetExhausted, OSError) as error:
             raise FeedbackPersistenceError(str(error)) from error
 
     def _latch_exhausted(self) -> None:
@@ -940,6 +968,7 @@ class Store:
             self.admitted = 0
             self.written = 0
             self.capture_exhausted = False
+
     def startup_snapshot(self, epoch: str) -> bytes:
         """Return one validated complete snapshot for the exact enabled epoch."""
         with self.locked():
@@ -954,7 +983,7 @@ class Store:
             self._replace("status.tmp", "status", f"capturing {epoch}".encode())
 
     def startup_failed(self, epoch: str, reason: str) -> None:
-        with self.locked():
+        with self.locked(wait=True):
             if self._epoch_unlocked() == epoch:
                 self._replace(
                     "status.tmp", "status", f"startup-failed {epoch} {reason}".encode()
@@ -1067,7 +1096,7 @@ def _valid_transport(sock: socket.socket) -> bool:
 
 
 def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
-    """Drain one validated one-way transport for exactly EPOCH."""
+    """Send one startup snapshot, then drain feedback for exactly EPOCH."""
     if not HEX32.fullmatch(epoch) or ready_fd != 6:
         raise OSError("invalid collector epoch")
     ready_info = os.fstat(ready_fd)
@@ -1120,6 +1149,8 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
                     tokens -= 1.0
                     try:
                         store.admit(epoch)
+                    except StoreBusy:
+                        continue
                     except (EpochMismatch, BudgetExhausted, OSError):
                         return
                     if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
@@ -1127,6 +1158,8 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
                     if not store.capture_exhausted:
                         try:
                             store.append(data, require_epoch=epoch, admitted=True)
+                        except StoreBusy:
+                            continue
                         except EpochMismatch:
                             return
                         except FeedbackPersistenceError:

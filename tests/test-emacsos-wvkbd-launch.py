@@ -128,6 +128,39 @@ time.sleep(60)
             },
         )
 
+    def test_armed_keyboard_reads_the_queued_fd3_snapshot(self):
+        self.marker.write_text("0123456789abcdef0123456789abcdef")
+        self.marker.chmod(0o600)
+        self._script(
+            self.collector,
+            """#!/usr/bin/python3
+import os
+os.write(3, b"feedback-v1\\n")
+os.write(6, b"ready")
+os.close(6)
+os.read(3, 1)
+""",
+        )
+        self._script(
+            self.keyboard,
+            """#!/usr/bin/python3
+import json
+import os
+import sys
+print(json.dumps({"argv": sys.argv, "snapshot": os.read(3, 5964).decode()}))
+""",
+        )
+        self.assertEqual(
+            self._run(),
+            {
+                "argv": [
+                    str(self.keyboard), "--mod-swipe", "-H", "300", "-L", "300",
+                    "--glide-learning-fd", "3",
+                ],
+                "snapshot": "feedback-v1\n",
+            },
+        )
+
     def test_unreaped_collector_never_starts_baseline_keyboard(self):
         self.marker.write_text("0123456789abcdef0123456789abcdef")
         self.marker.chmod(0o600)
