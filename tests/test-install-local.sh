@@ -41,7 +41,7 @@ INSTALL_DESTINATION="$destination" HOME="$temporary/home" \
                          (commandp 'emacsos-assist-web-open-thread)
                          (with-temp-buffer
                            (emacsos-assist-web-mode)
-                           (eq (key-binding (kbd \"C-c C-a s\"))
+                           (eq (key-binding (kbd \"C-<return>\"))
                                #'emacsos-conversation-send))
                          (equal (file-truename
                                  (symbol-file 'emacsos--chat-enable-presentation 'defun))

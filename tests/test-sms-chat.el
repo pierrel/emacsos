@@ -1023,5 +1023,24 @@
         (should (string-match-p "ACK" (car rows)))
         (should (string-match-p "Send" (cadr rows)))))))
 
+(ert-deftest emacsos-sms-chat-direct-send-cannot-open-a-synthetic-object ()
+  (test-sms-chat--with-state
+    (let ((buffer (emacsos-sms-chat-open "+14155550123")) sent browsed)
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (let ((inhibit-read-only t))
+          (put-text-property (point-min) (min (point-max) (1+ (point-min)))
+                             'emacsos-conversation-url "https://example.test"))
+        (cl-letf (((symbol-function 'emacsos-sms-chat-send)
+                   (lambda () (interactive) (setq sent (current-buffer))))
+                  ((symbol-function 'browse-url)
+                   (lambda (&rest _) (setq browsed t))))
+          (call-interactively (key-binding (kbd "C-<return>")))
+          (call-interactively (key-binding (kbd "C-c C-o")))))
+      (should (eq sent buffer))
+      (should-not browsed)
+      (with-current-buffer buffer
+        (should-not (alist-get 'open-object emacsos-conversation-actions))))))
+
 (provide 'test-sms-chat)
 ;;; test-sms-chat.el ends here

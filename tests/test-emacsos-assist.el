@@ -30,6 +30,23 @@
     (call-interactively (lookup-key (current-local-map) (kbd "RET")))
     (should (string-suffix-p "\n" (buffer-string)))))
 
+(ert-deftest test-assist-file-chat-has-send-and-object-actions ()
+  (with-temp-buffer
+    (emacsos-assist-mode)
+    (should (eq (key-binding (kbd "C-<return>"))
+                #'emacsos-conversation-send))
+    (should (eq (alist-get 'open-object emacsos-conversation-actions)
+                #'emacsos-conversation--open-object))))
+
+(ert-deftest test-assist-file-chat-control-return-sends-from-its-current-buffer ()
+  (with-temp-buffer
+    (emacsos-assist-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'emacsos-assist-send)
+                 (lambda () (interactive) (setq sent (current-buffer)))))
+        (call-interactively (key-binding (kbd "C-<return>"))))
+      (should (eq sent (current-buffer))))))
+
 (ert-deftest test-assist-send-targets-the-current-file-chat-surface ()
   "The shared action map must not fall back to the unrelated *chat* buffer."
   (with-temp-buffer

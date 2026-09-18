@@ -1,0 +1,40 @@
+#+title: Assist and EmacsOS keybindings
+
+* Outcome
+
+=C-c a= owns Assist integration: =l= opens the native Assist thread list and
+=t= invokes the existing catalog completion, with its list fallback.  =C-c e=
+owns EmacsOS: =c= opens ordinary chat, =m= opens SMS conversations, and =s=
+stages an SMS.  PinePhone-only leaves remain under =C-c e=.
+
+Every chat surface sends with =C-<return>= and retains its physical =RET=
+behavior.  Mode-local actions are direct: =C-c C-r= refreshes, =C-c C-k=
+aborts or detaches, =C-c C-o= opens a backend-owned HTTP(S) object, =C-c C-l=
+loads older canonical history, and =C-c C-f= forgets a file-backed chat.
+
+The conversation action table remains the ownership boundary.  Object opening
+is installed only for canonical Assist, ordinary chat, and file-backed chats;
+SMS reports it unavailable even when a synthetic object property is present.
+
+* Historical supersession
+
+This note supersedes only these statements:
+
+- In =2026-09-12-prefix-keybindings-and-emacsos-namespace.org=, =Commands=:
+  the clauses assigning Assist =t/n/r/f= to =C-c e=, SMS stage/catalog to
+  =C-c e m/s=, global =C-c C-a n/t=, and contextual actions to =C-c C-a=.
+- In =2026-09-13-prefix-review-corrections.org=, =Corrections=: the
+  conversation-override compatibility-leaves bullet's claims that contextual
+  actions live under =C-c C-a= and global =C-c C-a n/t= remain.
+- In =2026-09-13-stage-a-live-thread-modeline-correction.org=, =Corrected
+  behavior=: only its first sentence assigning the native list to global
+  =C-c e t= and =C-c C-a t=.
+
+The =emacsos-= namespace, =C-c e c/d/w/h=, PinePhone augmentation, upgrade
+boundary, and agent-configuration conclusions in the first predecessor remain.
+The second predecessor still establishes the buffer-local override, inheritance
+of the global EmacsOS map, =C-c e= availability, worker deadline, restore-SHA
+validation, fresh-install cleanup, its =#;= conclusion, and unrelated lineage.
+The third predecessor retains its modeline, Controls, padding/click behavior,
+and unrelated acceptance claims.  All other conclusions in those predecessors
+remain historical and unchanged.

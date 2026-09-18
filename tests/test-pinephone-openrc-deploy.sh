@@ -467,7 +467,8 @@ for command in emacsos-firefox-start emacsos-firefox-quit \
     emacsos-hang-up emacsos-net-show dtach-shell; do
     grep -F "$command" "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 done
-grep -F '=C-c C-a=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
+grep -F '=C-c a=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
+grep -F '=C-<return>=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 grep -F '=C-c d=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 grep -F '=Alt+Tab=' "$repo_dir/EMACSOS-COMMANDS.org" >/dev/null
 grep -F 'ASSIST_WEB_TOKEN_FILE:-$HOME/.config/assist/phone-api-token' \

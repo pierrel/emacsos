@@ -222,7 +222,7 @@ its buffer.")
   (interactive)
   (let ((url (get-text-property (point) 'emacsos-conversation-url)))
     (if (emacsos-conversation--safe-url-p url)
-        (browse-url url)
+        (emacsos-conversation--open-object)
       (newline))))
 
 (defun emacsos-conversation--safe-url-p (url)
@@ -238,9 +238,9 @@ its buffer.")
     (define-key map [mouse-1] #'emacsos-conversation-open-object)
     (define-key map (kbd "RET") #'emacsos-conversation-open-object)
     map)
-  "Keymap on validated, inert-until-activated native conversation objects.")
+  "Keymap on validated, backend-owned native conversation objects.")
 
-(defun emacsos-conversation-open-object (&optional event)
+(defun emacsos-conversation--open-object (&optional event)
   "Open the validated native object at point, or explain that none is present."
   (interactive (list last-input-event))
   (when (mouse-event-p event) (mouse-set-point event))
@@ -248,6 +248,11 @@ its buffer.")
     (if (emacsos-conversation--safe-url-p url)
         (browse-url url)
       (message "No HTTP(S) object at point"))))
+
+(defun emacsos-conversation-open-object ()
+  "Run the current conversation's object-opening action."
+  (interactive)
+  (emacsos-conversation--run 'open-object))
 
 (defvar-local emacsos-conversation-actions nil
   "Alist of capabilities installed by this conversation backend.")
@@ -257,7 +262,12 @@ its buffer.")
   (let ((map (make-sparse-keymap)))
     (when (boundp 'emacsos-command-mode-map)
       (set-keymap-parent map emacsos-command-mode-map))
-    (define-key map (kbd "C-c C-a") emacsos-conversation-command-map)
+    (define-key map (kbd "C-<return>") #'emacsos-conversation-send)
+    (define-key map (kbd "C-c C-r") #'emacsos-conversation-refresh)
+    (define-key map (kbd "C-c C-k") #'emacsos-conversation-abort)
+    (define-key map (kbd "C-c C-o") #'emacsos-conversation-open-object)
+    (define-key map (kbd "C-c C-l") #'emacsos-conversation-load-older)
+    (define-key map (kbd "C-c C-f") #'emacsos-conversation-forget)
     map))
 
 (defun emacsos-conversation-install-actions (actions)
@@ -266,7 +276,12 @@ its buffer.")
 Each entry is (CAPABILITY . COMMAND).  Transport, persistence, and lifecycle
 remain owned by the backend; this small kernel owns only discovery and binding."
   (setq-local emacsos-conversation-actions actions)
-  (local-set-key (kbd "C-c C-a") emacsos-conversation-command-map)
+  (local-set-key (kbd "C-<return>") #'emacsos-conversation-send)
+  (local-set-key (kbd "C-c C-r") #'emacsos-conversation-refresh)
+  (local-set-key (kbd "C-c C-k") #'emacsos-conversation-abort)
+  (local-set-key (kbd "C-c C-o") #'emacsos-conversation-open-object)
+  (local-set-key (kbd "C-c C-l") #'emacsos-conversation-load-older)
+  (local-set-key (kbd "C-c C-f") #'emacsos-conversation-forget)
   (setq-local minor-mode-overriding-map-alist
               (cons (cons 'emacsos-command-mode
                           (emacsos-conversation--command-mode-map))
@@ -300,21 +315,6 @@ remain owned by the backend; this small kernel owns only discovery and binding."
     (pcase choice
       ((and (pred stringp) action) (emacsos-conversation--run (intern action)))
       (_ (message "No conversation actions are available here")))))
-
-(defvar emacsos-conversation-command-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") #'emacsos-command-new-thread)
-    (define-key map (kbd "t") #'emacsos-command-open-thread)
-    (define-key map (kbd "s") #'emacsos-conversation-send)
-    (define-key map (kbd "a") #'emacsos-conversation-abort)
-    (define-key map (kbd "g") #'emacsos-conversation-refresh)
-    (define-key map (kbd "o") #'emacsos-conversation-open-object)
-    (define-key map (kbd "l") #'emacsos-conversation-load-older)
-    (define-key map (kbd "f") #'emacsos-conversation-forget)
-    map)
-  "Assist commands under C-c C-a.
-The n and t leaves retain global thread navigation; the others dispatch
-through the current conversation backend.")
 
 (defun emacsos--chat-add-face (beg end face)
   "Append FACE to text from BEG to END through the inert font-lock channel."
@@ -688,6 +688,7 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
     (emacsos-conversation-install-actions
      '((send . emacsos--chat-send)
        (abort . emacsos--chat-abort)
+       (open-object . emacsos-conversation--open-object)
        (new . emacsos--chat-new-chat)))
     (local-set-key (kbd "RET") #'emacsos-conversation-activate-or-newline)
     (let ((inhibit-read-only t))

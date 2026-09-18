@@ -40,22 +40,34 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
   (require 'assist-web)
   (call-interactively #'emacsos-assist-web-new-thread))
 
-(defun emacsos-command-open-thread ()
+(defun emacsos-command-list-threads ()
   "Open the native list of canonical Assist threads."
   (interactive)
   (require 'assist-web)
   (call-interactively #'emacsos-assist-web-show-thread-list))
 
-(defvar emacsos-command-map
+(defun emacsos-command-open-thread ()
+  "Select a canonical Assist thread from the current catalog."
+  (interactive)
+  (require 'assist-web)
+  (call-interactively #'emacsos-assist-web-open-thread))
+
+(defvar emacsos-assist-command-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "c") #'emacsos--chat-show-top-buffer)
+    (define-key map (kbd "l") #'emacsos-command-list-threads)
     (define-key map (kbd "t") #'emacsos-command-open-thread)
     (define-key map (kbd "n") #'emacsos-command-new-thread)
     (define-key map (kbd "r") #'emacsos-assist-web-refresh-threads)
     (define-key map (kbd "f") #'emacsos-assist-new-file)
+    map)
+  "Assist integration commands under the C-c a prefix.")
+
+(defvar emacsos-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "c") #'emacsos--chat-show-top-buffer)
     (define-key map (kbd "d") #'emacsos-call)
-    (define-key map (kbd "m") #'emacsos-send-message)
-    (define-key map (kbd "s") #'emacsos-sms-chat-catalog)
+    (define-key map (kbd "m") #'emacsos-sms-chat-catalog)
+    (define-key map (kbd "s") #'emacsos-send-message)
     (define-key map (kbd "w") #'emacsos-net-show)
     (define-key map (kbd "h") #'emacsos-open-command-reference)
     map)
@@ -63,9 +75,8 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
 
 (defvar emacsos-command-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c a") emacsos-assist-command-map)
     (define-key map (kbd "C-c e") emacsos-command-map)
-    (define-key map (kbd "C-c C-a n") #'emacsos-command-new-thread)
-    (define-key map (kbd "C-c C-a t") #'emacsos-command-open-thread)
     map)
   "Global map for portable EmacsOS commands.")
 

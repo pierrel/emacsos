@@ -930,7 +930,7 @@ the canonical snapshot must retain its durable identity."
         (emacsos-assist-web--replace-empty-assistant-status "unverified; refresh"))
       (emacsos-assist-web--set-unverified-status status)
       (emacsos-assist-web--save-draft)
-      (message "%s. C-c C-a g refreshes; Send retries the same message."
+      (message "%s. C-c C-r refreshes; Send retries the same message."
                status))))
 
 (defun emacsos-assist-web--thread-gone (buffer)
@@ -1902,7 +1902,7 @@ suppressing a genuine repeated submission."
               (unless emacsos-assist-web--pending-rendered-p
                 (emacsos-assist-web--append-pending submitted))
               (emacsos-assist-web--set-status
-               "observation interrupted; C-c C-a g refreshes"))
+               "observation interrupted; C-c C-r refreshes"))
             ;; A crash can leave the accepted submission in the saved editable
             ;; tail even though the provisional rendering is restored above.
             (when (and (stringp text)
@@ -2062,7 +2062,7 @@ suppressing a genuine repeated submission."
           (if-let ((records (emacsos-assist-web--list-records width)))
               (dolist (record records)
                 (emacsos-assist-web--insert-thread-row record))
-            (insert "No Assist threads yet. Use C-c e n to create one.\n"))))
+          (insert "No Assist threads yet. Use C-c a n to create one.\n"))))
         (goto-char
          (or (and selected
                   (emacsos-assist-web--thread-row-position selected))
@@ -2086,7 +2086,6 @@ suppressing a genuine repeated submission."
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "RET") #'emacsos-assist-web-list-activate)
     (define-key map (kbd "g") #'emacsos-assist-web-refresh-threads)
-    (define-key map (kbd "C-c C-a r") #'emacsos-assist-web-refresh-threads)
     map)
   "Keymap for `emacsos-assist-web-thread-list-mode'.")
 
@@ -2297,11 +2296,11 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                            ;; that Assist has already accepted.
                            (if emacsos-assist-web--pending-accepted-p
                                (emacsos-assist-web--set-unverified-status
-                                "refresh failed; C-c C-a g retries")
+                                "refresh failed; C-c C-r retries")
                              (emacsos-assist-web--set-status
                               (if emacsos-assist-web--snapshot
-                                  "refresh failed; cached; C-c C-a g retries"
-                                "refresh failed; C-c C-a g retries")))
+                                  "refresh failed; cached; C-c C-r retries"
+                                "refresh failed; C-c C-r retries")))
                            (message "Thread refresh failed: %s" error))
                        (condition-case problem
                            (progn
@@ -2809,6 +2808,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
      (abort . emacsos-assist-web-abort)
      (refresh . emacsos-assist-web-refresh-thread)
      (older . emacsos-assist-web-load-older)
+     (open-object . emacsos-conversation--open-object)
      (catalog . emacsos-assist-web-refresh-threads)))
   (add-hook 'after-change-functions #'emacsos-assist-web--after-change nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))

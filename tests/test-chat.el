@@ -54,7 +54,7 @@ Sets up the buffer so handlers operate against a realistic state."
                      emacsos--chat-prompt))
       (should (= (point) (point-max))))))
 
-(ert-deftest chat-test-conversation-map-wins-and-inherits-global-prefix ()
+(ert-deftest chat-test-conversation-map-keeps-global-prefixes-and-direct-actions ()
   (let (opened started required)
   (with-temp-buffer
     (org-mode)
@@ -66,25 +66,36 @@ Sets up the buffer so handlers operate against a realistic state."
                  (lambda () (interactive) (setq opened t)))
                 ((symbol-function 'emacsos-assist-web-new-thread)
                  (lambda () (interactive) (setq started t))))
-        (should (eq (key-binding (kbd "C-c C-a t"))
+        (should (eq (key-binding (kbd "C-c a t"))
                     #'emacsos-command-open-thread))
-        (should (eq (key-binding (kbd "C-c C-a n"))
+        (should (eq (key-binding (kbd "C-c a n"))
                     #'emacsos-command-new-thread))))
     (should-not required)
     (should-not opened)
     (should-not started))
   (let ((buf (emacsos--chat-buffer)))
     (with-current-buffer buf
-      (should (eq (key-binding (kbd "C-c C-a t"))
+      (should (eq (key-binding (kbd "C-c a t"))
                   #'emacsos-command-open-thread))
-      (should (eq (key-binding (kbd "C-c C-a n"))
+      (should (eq (key-binding (kbd "C-c a n"))
                   #'emacsos-command-new-thread))
-      (should (eq (key-binding (kbd "C-c C-a s"))
+      (should (eq (key-binding (kbd "C-<return>"))
                   #'emacsos-conversation-send))
-      (should (eq (key-binding (kbd "C-c C-a f"))
+      (should (eq (key-binding (kbd "C-c C-f"))
                   #'emacsos-conversation-forget))
+      (should (eq (key-binding (kbd "C-c C-o"))
+                  #'emacsos-conversation-open-object))
       (should (eq (key-binding (kbd "C-c e c"))
                   #'emacsos--chat-show-top-buffer)))))
+
+(ert-deftest chat-test-control-return-sends-from-ordinary-chat ()
+  (chat-test--reset)
+  (let ((buffer (emacsos--chat-buffer)) sent)
+    (with-current-buffer buffer
+      (cl-letf (((symbol-function 'emacsos--chat-send)
+                 (lambda (&rest _) (interactive) (setq sent (current-buffer)))))
+        (call-interactively (key-binding (kbd "C-<return>")))))
+    (should (eq sent buffer))))
 
 (ert-deftest chat-test-conversation-command-is-contextual ()
   "The shared M-x chooser exposes only actions installed by this buffer."
@@ -687,7 +698,7 @@ bot line if a stream was open (start handler had run)."
                 (should (eq fired owner))))))
       (when (buffer-live-p owner) (kill-buffer owner)))))
 
-(ert-deftest chat-test-object-mouse-activation-uses-the-event-position ()
+(ert-deftest chat-test-private-object-helper-uses-the-event-position ()
   "Mouse activation resolves the clicked object's URL, not stale point."
   (with-temp-buffer
     (insert "one two")
@@ -697,8 +708,16 @@ bot line if a stream was open (start handler had run)."
       (cl-letf (((symbol-function 'mouse-event-p) (lambda (_event) t))
                 ((symbol-function 'mouse-set-point) (lambda (_event) (goto-char 5)))
                 ((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
-        (emacsos-conversation-open-object 'fake-mouse))
+        (emacsos-conversation--open-object 'fake-mouse))
       (should (equal opened "https://example.test/two")))))
+
+(ert-deftest chat-test-public-object-command-dispatches-through-capability ()
+  (with-temp-buffer
+    (let (capability)
+      (cl-letf (((symbol-function 'emacsos-conversation--run)
+                 (lambda (value) (setq capability value))))
+        (emacsos-conversation-open-object))
+      (should (eq capability 'open-object)))))
 
 (ert-deftest chat-test-safe-url-rejects-c0-del-and-c1-controls ()
   (should (emacsos-conversation--safe-url-p "https://example.test/ok"))

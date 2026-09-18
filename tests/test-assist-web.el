@@ -2096,7 +2096,7 @@
             (emacsos-assist-web-show-thread-list)
             (with-current-buffer "*assist Threads*"
               (should (string-match-p "No Assist threads yet" (buffer-string)))
-              (should (string-match-p "C-c e n" (buffer-string)))))
+              (should (string-match-p "C-c a n" (buffer-string)))))
         (when (get-buffer "*assist Threads*") (kill-buffer "*assist Threads*"))))))
 
 (ert-deftest test-assist-web-loaded-catalog-without-repository-does-not-prompt ()
@@ -2680,15 +2680,11 @@
       (when (get-buffer emacsos-assist-web--thread-list-buffer-name)
         (kill-buffer emacsos-assist-web--thread-list-buffer-name)))))
 
-(ert-deftest test-assist-web-has-contextual-conversation-command-prefix ()
+(ert-deftest test-assist-web-has-direct-contextual-conversation-actions ()
   (with-temp-buffer
     (org-mode)
-    (should (eq (key-binding (kbd "C-c C-a t"))
-                #'emacsos-command-open-thread))
-    (should (eq (key-binding (kbd "C-c C-a n"))
-                #'emacsos-command-new-thread))
-    (dolist (key '("C-c C-a g" "C-c C-a s" "C-c C-a o"
-                   "C-c C-a l" "C-c C-a a"))
+    (dolist (key '("C-c C-a t" "C-c C-a n" "C-c C-a g" "C-c C-a s"
+                   "C-c C-a o" "C-c C-a l" "C-c C-a a"))
       (should-not (memq (key-binding (kbd key))
                          '(emacsos-conversation-refresh
                            emacsos-conversation-send
@@ -2697,16 +2693,27 @@
                            emacsos-conversation-abort)))))
   (with-temp-buffer
     (emacsos-assist-web-mode)
-    (should (eq (key-binding (kbd "C-c C-a t"))
-                #'emacsos-command-open-thread))
-    (should (eq (key-binding (kbd "C-c C-a n"))
-                #'emacsos-command-new-thread))
-    (dolist (binding '(("C-c C-a g" . emacsos-conversation-refresh)
-                       ("C-c C-a s" . emacsos-conversation-send)
-                       ("C-c C-a o" . emacsos-conversation-open-object)
-                       ("C-c C-a l" . emacsos-conversation-load-older)
-                       ("C-c C-a a" . emacsos-conversation-abort)))
+    (dolist (binding '(("C-<return>" . emacsos-conversation-send)
+                       ("C-c C-r" . emacsos-conversation-refresh)
+                       ("C-c C-k" . emacsos-conversation-abort)
+                       ("C-c C-o" . emacsos-conversation-open-object)
+                       ("C-c C-l" . emacsos-conversation-load-older)))
       (should (eq (key-binding (kbd (car binding))) (cdr binding))))))
+
+(ert-deftest test-assist-web-object-action-belongs-to-its-backend ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (should (eq (alist-get 'open-object emacsos-conversation-actions)
+                #'emacsos-conversation--open-object))))
+
+(ert-deftest test-assist-web-control-return-sends-from-its-current-buffer ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'emacsos-assist-web-send)
+                 (lambda () (interactive) (setq sent (current-buffer)))))
+        (call-interactively (key-binding (kbd "C-<return>"))))
+      (should (eq sent (current-buffer))))))
 
 (ert-deftest test-assist-web-stream-cleanup-forgets-an-interrupted-record-budget ()
   (with-temp-buffer

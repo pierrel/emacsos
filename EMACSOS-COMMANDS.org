@@ -45,21 +45,21 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Open one SMS conversation | =emacsos-sms-chat-open= |
 | Refresh SMS history | =emacsos-sms-chat-refresh= |
 
-The global =C-c e= prefix works in every buffer.  On the touchscreen, swipe up
-from =c= on the keyboard, then tap =e=, to type it.  =C-c C-a= remains the
-contextual conversation prefix; its =n= and =t= leaves are retained globally
-for canonical thread navigation.
+The global =C-c a= Assist prefix and =C-c e= EmacsOS prefix work in every
+buffer.  On the touchscreen, swipe up from =c= on the keyboard, then tap =a=
+or =e=, to type either prefix.
 
 | Key | Action |
 |-----+--------|
+| =C-c a l= | Browse canonical threads |
+| =C-c a t= | Open a canonical thread by completion |
+| =C-c a n= | New canonical thread |
+| =C-c a r= | Refresh thread list |
+| =C-c a f= | New .assist file |
 | =C-c e c= | Ordinary chat |
-| =C-c e t= | Browse canonical threads |
-| =C-c e n= | New canonical thread |
-| =C-c e r= | Refresh thread list |
-| =C-c e f= | New .assist file |
 | =C-c e d= | Stage call |
-| =C-c e m= | Stage SMS |
-| =C-c e s= | Open SMS conversations |
+| =C-c e m= | Open SMS conversations |
+| =C-c e s= | Stage SMS |
 | =C-c e w= | Network controls |
 | =C-c e h= | This command reference |
 
@@ -78,14 +78,12 @@ the generic =phone-install= target does not define them.
 
 | Key | Action |
 |-----+--------|
-| =C-c C-a t= | Browse canonical threads |
-| =C-c C-a n= | New canonical Assist thread |
-| =C-c C-a g= | Refresh current conversation |
-| =C-c C-a s= | Send |
-| =C-c C-a a= | Abort or detach |
-| =C-c C-a o= | Open the HTTP(S) object at point |
-| =C-c C-a l= | Load older canonical history |
-| =C-c C-a f= | Forget a file-backed conversation |
+| =C-<return>= | Send |
+| =C-c C-r= | Refresh current conversation |
+| =C-c C-k= | Abort or detach |
+| =C-c C-o= | Open the HTTP(S) object at point |
+| =C-c C-l= | Load older canonical history |
+| =C-c C-f= | Forget a file-backed conversation |
 
 RET accepts an active minibuffer first.  Otherwise touchscreen RET invokes the
 target buffer's physical =RET= binding: in a conversation it opens a literal
@@ -116,7 +114,7 @@ Parenthesized entries are =eval_elisp= forms.  Bare command names run through
 The transient call and SMS modeline labels are touch controls for their current
 status or action.  The primary platform label opens Network controls on generic
 systems and the combined Controls buffer on PinePhone/OpenRC.  Assist threads
-open through =C-c e t=.  Keyboard hide/show and device state live in the
+open through =C-c a l= or =C-c a t=.  Keyboard hide/show and device state live in the
 Controls buffer.
 
 * Swipe learning (PinePhone/OpenRC only)

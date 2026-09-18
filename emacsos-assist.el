@@ -252,6 +252,7 @@ agent reads/edits/runs files in this file's directory on the phone."
      (abort . emacsos--chat-abort)
      (new . emacsos-assist-new-file)
      (refresh . emacsos-assist-refresh)
+     (open-object . emacsos-conversation--open-object)
      (forget . emacsos-assist-forget)))
   (emacsos-assist--init-buffer))
 
