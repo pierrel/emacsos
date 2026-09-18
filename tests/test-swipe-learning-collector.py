@@ -494,7 +494,6 @@ class CollectorTests(unittest.TestCase):
             try:
                 first = store.set_enabled(True)
                 self.assertRegex(first or "", r"^[0-9a-f]{32}$")
-                store.start_session(first or "")
                 self.assertEqual(store.capture_status(), (True, "armed for next UI session"))
                 second = store.set_enabled(True)
                 self.assertNotEqual(first, second)

@@ -69,7 +69,7 @@ class FeedbackPersistenceError(OSError):
 
 
 class StoreBusy(OSError):
-    """A nonblocking management lock attempt found the store in use."""
+    """A bounded store lock acquisition did not complete in time."""
 
 
 def _collapsed_trace(trace: str) -> bool:
@@ -961,11 +961,6 @@ class Store:
             return ""
         return epoch if HEX32.fullmatch(epoch) else ""
 
-    def start_session(self, epoch: str) -> None:
-        """Validate EPOCH and reset bounded session counters before publication."""
-        with self.locked():
-            self._start_session_unlocked(epoch)
-
     def _start_session_unlocked(self, epoch: str) -> None:
         if self._epoch_unlocked() != epoch:
             raise EpochMismatch("collector epoch is no longer enabled")
@@ -979,19 +974,10 @@ class Store:
         self.written = 0
         self.capture_exhausted = False
 
-    def startup_snapshot(self, epoch: str) -> bytes:
-        """Return one validated complete snapshot for the exact enabled epoch."""
-        with self.locked():
-            return self._startup_snapshot_unlocked(epoch)
-
     def _startup_snapshot_unlocked(self, epoch: str) -> bytes:
         if self._epoch_unlocked() != epoch:
             raise EpochMismatch("collector epoch is no longer enabled")
         return self._feedback_bytes(self._read_feedback())
-
-    def publish_capturing(self, epoch: str) -> None:
-        with self.locked():
-            self._publish_capturing_unlocked(epoch)
 
     def _publish_capturing_unlocked(self, epoch: str) -> None:
         if self._epoch_unlocked() != epoch:
@@ -1112,7 +1098,7 @@ def _valid_transport(sock: socket.socket) -> bool:
 
 
 def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
-    """Send one records/evidence plus feedback snapshot, then drain feedback for EPOCH."""
+    """Send one feedback snapshot, then drain feedback and evidence records for EPOCH."""
     if not HEX32.fullmatch(epoch) or ready_fd != 6:
         raise OSError("invalid collector epoch")
     ready_info = os.fstat(ready_fd)
