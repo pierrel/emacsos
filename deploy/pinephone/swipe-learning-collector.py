@@ -964,37 +964,46 @@ class Store:
     def start_session(self, epoch: str) -> None:
         """Validate EPOCH and reset bounded session counters before publication."""
         with self.locked():
-            if self._epoch_unlocked() != epoch:
-                raise EpochMismatch("collector epoch is no longer enabled")
-            try:
-                os.unlink("session-budget-exhausted", dir_fd=self.dir_fd)
-            except FileNotFoundError:
-                pass
-            else:
-                os.fsync(self.dir_fd)
-            self.admitted = 0
-            self.written = 0
-            self.capture_exhausted = False
+            self._start_session_unlocked(epoch)
+
+    def _start_session_unlocked(self, epoch: str) -> None:
+        if self._epoch_unlocked() != epoch:
+            raise EpochMismatch("collector epoch is no longer enabled")
+        try:
+            os.unlink("session-budget-exhausted", dir_fd=self.dir_fd)
+        except FileNotFoundError:
+            pass
+        else:
+            os.fsync(self.dir_fd)
+        self.admitted = 0
+        self.written = 0
+        self.capture_exhausted = False
 
     def startup_snapshot(self, epoch: str) -> bytes:
         """Return one validated complete snapshot for the exact enabled epoch."""
         with self.locked():
-            if self._epoch_unlocked() != epoch:
-                raise EpochMismatch("collector epoch is no longer enabled")
-            return self._feedback_bytes(self._read_feedback())
+            return self._startup_snapshot_unlocked(epoch)
+
+    def _startup_snapshot_unlocked(self, epoch: str) -> bytes:
+        if self._epoch_unlocked() != epoch:
+            raise EpochMismatch("collector epoch is no longer enabled")
+        return self._feedback_bytes(self._read_feedback())
 
     def publish_capturing(self, epoch: str) -> None:
         with self.locked():
+            self._publish_capturing_unlocked(epoch)
+
+    def _publish_capturing_unlocked(self, epoch: str) -> None:
+        if self._epoch_unlocked() != epoch:
+            raise EpochMismatch("collector epoch is no longer enabled")
+        self._replace("status.tmp", "status", f"capturing {epoch}".encode())
+
+    def latch_exhausted(self, epoch: str) -> None:
+        """Persist exhaustion only while this collector still owns EPOCH."""
+        with self.locked():
             if self._epoch_unlocked() != epoch:
                 raise EpochMismatch("collector epoch is no longer enabled")
-            self._replace("status.tmp", "status", f"capturing {epoch}".encode())
-
-    def startup_failed(self, epoch: str, reason: str) -> None:
-        with self.locked(timeout=0.1):
-            if self._epoch_unlocked() == epoch:
-                self._replace(
-                    "status.tmp", "status", f"startup-failed {epoch} {reason}".encode()
-                )
+            self._latch_exhausted()
 
     @contextmanager
     def collector_session(self) -> Iterator[None]:
@@ -1103,7 +1112,7 @@ def _valid_transport(sock: socket.socket) -> bool:
 
 
 def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
-    """Send one startup snapshot, then drain feedback for exactly EPOCH."""
+    """Send one records/evidence plus feedback snapshot, then drain feedback for EPOCH."""
     if not HEX32.fullmatch(epoch) or ready_fd != 6:
         raise OSError("invalid collector epoch")
     ready_info = os.fstat(ready_fd)
@@ -1116,30 +1125,36 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
         sock.setblocking(False)
         with store.collector_session():
             try:
-                store.start_session(epoch)
-                snapshot = store.startup_snapshot(epoch)
+                with store.locked(timeout=0.1):
+                    store._start_session_unlocked(epoch)
+                    try:
+                        snapshot = store._startup_snapshot_unlocked(epoch)
+                    except (InvalidRecord, OSError):
+                        store._replace(
+                            "status.tmp",
+                            "status",
+                            f"startup-failed {epoch} invalid-feedback-state".encode(),
+                        )
+                        return
+                    try:
+                        if sock.send(snapshot) != len(snapshot):
+                            raise OSError("short snapshot send")
+                    except OSError:
+                        store._replace(
+                            "status.tmp",
+                            "status",
+                            f"startup-failed {epoch} snapshot-send-failed".encode(),
+                        )
+                        return
+                    store._publish_capturing_unlocked(epoch)
+                    if os.write(ready_fd, b"ready") != 5:
+                        raise OSError("collector readiness write failed")
+                    os.close(ready_fd)
+                    ready_fd = -1
             except StoreBusy:
                 return
-            except (InvalidRecord, OSError):
-                try:
-                    store.startup_failed(epoch, "invalid-feedback-state")
-                except StoreBusy:
-                    pass
+            except EpochMismatch:
                 return
-            try:
-                if sock.send(snapshot) != len(snapshot):
-                    raise OSError("short snapshot send")
-            except OSError:
-                try:
-                    store.startup_failed(epoch, "snapshot-send-failed")
-                except StoreBusy:
-                    pass
-                return
-            store.publish_capturing(epoch)
-            if os.write(ready_fd, b"ready") != 5:
-                raise OSError("collector readiness write failed")
-            os.close(ready_fd)
-            ready_fd = -1
             tokens = 16.0
             last_refill = time.monotonic()
             received = 0
@@ -1174,13 +1189,19 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
                     received += 1
                     if received > COLLECTOR_DATAGRAM_BUDGET:
                         try:
-                            store._latch_exhausted()
-                        except OSError:
+                            store.latch_exhausted(epoch)
+                        except (EpochMismatch, StoreBusy, OSError):
                             pass
                         return
                     try:
                         store.admit(epoch)
                     except StoreBusy:
+                        if not ancillary and not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+                            try:
+                                if validate_record(data)["type"] == "feedback":
+                                    return
+                            except InvalidRecord:
+                                pass
                         continue
                     except (EpochMismatch, BudgetExhausted, OSError):
                         return

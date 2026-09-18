@@ -780,6 +780,45 @@ class CollectorTests(unittest.TestCase):
                 store.close()
                 self._restore_ready_fd(original_ready)
 
+    def test_busy_admission_of_valid_feedback_stops_collector(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_ready = self._reserve_ready_fd()
+            state = private_state(Path(temporary))
+            manager = collector.Store(state)
+            store = collector.Store(state)
+            peer = None
+            reader = None
+            saved = None
+            try:
+                epoch = store.set_enabled(True)
+                self.assertIsNotNone(epoch)
+                with mock.patch.object(
+                    store,
+                    "admit",
+                    side_effect=collector.StoreBusy("swipe learning store is busy"),
+                ):
+                    worker, peer, reader, saved = self._start_collector(store, epoch or "")
+                    self.assertEqual(os.read(reader, 5), b"ready")
+                    peer.recv(collector.FEEDBACK_MAX_BYTES)
+                    peer.send(encoded(FEEDBACK))
+                    worker.join(1)
+                self.assertFalse(worker.is_alive())
+                with self.assertRaises(OSError):
+                    peer.send(encoded(FEEDBACK))
+                self.assertEqual(
+                    manager.capture_status(), (True, "not capturing: collector-stopped")
+                )
+            finally:
+                if peer is not None:
+                    peer.close()
+                if reader is not None:
+                    os.close(reader)
+                if saved is not None:
+                    self._restore_ready_fd(saved)
+                manager.close()
+                store.close()
+                self._restore_ready_fd(original_ready)
+
     def test_busy_receive_still_consumes_lifetime_budget(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_ready = self._reserve_ready_fd()
@@ -811,6 +850,51 @@ class CollectorTests(unittest.TestCase):
                     os.close(reader)
                 if saved is not None:
                     self._restore_ready_fd(saved)
+                store.close()
+                self._restore_ready_fd(original_ready)
+
+    def test_overflow_never_latches_after_disable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_ready = self._reserve_ready_fd()
+            state = private_state(Path(temporary))
+            manager = collector.Store(state)
+            store = collector.Store(state)
+            peer = None
+            reader = None
+            saved = None
+            entered = threading.Event()
+            release = threading.Event()
+            try:
+                epoch = store.set_enabled(True)
+                self.assertIsNotNone(epoch)
+                original_latch = store.latch_exhausted
+
+                def after_disable(value):
+                    entered.set()
+                    self.assertTrue(release.wait(1))
+                    original_latch(value)
+
+                with mock.patch.object(collector, "COLLECTOR_DATAGRAM_BUDGET", 0), mock.patch.object(
+                    store, "latch_exhausted", side_effect=after_disable
+                ):
+                    worker, peer, reader, saved = self._start_collector(store, epoch or "")
+                    self.assertEqual(os.read(reader, 5), b"ready")
+                    peer.recv(collector.FEEDBACK_MAX_BYTES)
+                    peer.send(b"{}")
+                    self.assertTrue(entered.wait(1))
+                    manager.set_enabled(False)
+                    release.set()
+                    worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse((state / "session-budget-exhausted").exists())
+            finally:
+                if peer is not None:
+                    peer.close()
+                if reader is not None:
+                    os.close(reader)
+                if saved is not None:
+                    self._restore_ready_fd(saved)
+                manager.close()
                 store.close()
                 self._restore_ready_fd(original_ready)
 
@@ -898,7 +982,7 @@ class CollectorTests(unittest.TestCase):
                 self.assertIsNotNone(epoch)
                 with mock.patch.object(
                     store,
-                    "startup_snapshot",
+                    "_startup_snapshot_unlocked",
                     side_effect=collector.InvalidRecord("invalid state"),
                 ):
                     worker, peer, reader, saved = self._start_collector(store, epoch or "")
