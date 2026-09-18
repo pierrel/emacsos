@@ -394,4 +394,3 @@ drafts as accepted artifacts.  They remain recovery evidence only.  This D3
 record and its paired wvkbd record are the accepted designs.  Preserve all
 tracked dated historical records.  Discard the untracked
 =llm-agentic-experiments= seed and leave that repository zero-delta.
-
