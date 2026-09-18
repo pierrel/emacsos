@@ -8,9 +8,12 @@ owns EmacsOS: =c= opens ordinary chat, =m= opens SMS conversations, and =s=
 stages an SMS.  PinePhone-only leaves remain under =C-c e=.
 
 Every chat surface sends with =C-<return>= and retains its physical =RET=
-behavior.  Mode-local actions are direct: =C-c C-r= refreshes, =C-c C-k=
-aborts or detaches, =C-c C-o= opens a backend-owned HTTP(S) object, =C-c C-l=
-loads older canonical history, and =C-c C-f= forgets a file-backed chat.
+behavior.  Mode-local actions are direct: =C-c C-r= refreshes canonical Assist,
+SMS, and file-backed chat; =C-c C-k= aborts or detaches canonical Assist,
+ordinary, and file-backed chat; =C-c C-o= opens a backend-owned HTTP(S) object
+on those same three chat types; =C-c C-l= loads older canonical history; and
+=C-c C-f= forgets a file-backed chat.  Unsupported direct bindings give the
+standard unavailable-conversation message.
 
 The conversation action table remains the ownership boundary.  Object opening
 is installed only for canonical Assist, ordinary chat, and file-backed chats;

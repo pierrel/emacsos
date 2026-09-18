@@ -97,6 +97,21 @@ Sets up the buffer so handlers operate against a realistic state."
         (call-interactively (key-binding (kbd "C-<return>")))))
     (should (eq sent buffer))))
 
+(ert-deftest chat-test-conversation-bindings-do-not-leak-into-fundamental-mode ()
+  (chat-test--reset)
+  (emacsos--chat-buffer)
+  (with-temp-buffer
+    (fundamental-mode)
+    (dolist (key '("C-<return>" "C-c C-r" "C-c C-k"
+                   "C-c C-o" "C-c C-l" "C-c C-f"))
+      (should-not (memq (key-binding (kbd key))
+                        '(emacsos-conversation-send
+                          emacsos-conversation-refresh
+                          emacsos-conversation-abort
+                          emacsos-conversation-open-object
+                          emacsos-conversation-load-older
+                          emacsos-conversation-forget))))))
+
 (ert-deftest chat-test-conversation-command-is-contextual ()
   "The shared M-x chooser exposes only actions installed by this buffer."
   (let (choices)

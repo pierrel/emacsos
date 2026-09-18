@@ -276,12 +276,6 @@ its buffer.")
 Each entry is (CAPABILITY . COMMAND).  Transport, persistence, and lifecycle
 remain owned by the backend; this small kernel owns only discovery and binding."
   (setq-local emacsos-conversation-actions actions)
-  (local-set-key (kbd "C-<return>") #'emacsos-conversation-send)
-  (local-set-key (kbd "C-c C-r") #'emacsos-conversation-refresh)
-  (local-set-key (kbd "C-c C-k") #'emacsos-conversation-abort)
-  (local-set-key (kbd "C-c C-o") #'emacsos-conversation-open-object)
-  (local-set-key (kbd "C-c C-l") #'emacsos-conversation-load-older)
-  (local-set-key (kbd "C-c C-f") #'emacsos-conversation-forget)
   (setq-local minor-mode-overriding-map-alist
               (cons (cons 'emacsos-command-mode
                           (emacsos-conversation--command-mode-map))
