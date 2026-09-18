@@ -31,6 +31,9 @@ EXPORT_WRITE_BUDGET = 64 * 1024 * 1024
 COLLECTOR_DATAGRAM_BUDGET = 8192
 COLLECTOR_WRITE_BUDGET = 64 * 1024 * 1024
 SHOW_PAGE_SIZE = 4
+FEEDBACK_HEADER = b"feedback-v1\n"
+FEEDBACK_MAX_ENTRIES = 32
+FEEDBACK_MAX_BYTES = 5964
 DEFAULT_STATE = Path("/var/lib/emacsos-lab/.local/state/emacsos/swipe-learning")
 
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
@@ -58,6 +61,10 @@ class BudgetExhausted(RuntimeError):
 
 class EpochMismatch(RuntimeError):
     """The active collector no longer owns the enabled epoch."""
+
+
+class FeedbackPersistenceError(OSError):
+    """A valid feedback record could not be atomically retained."""
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -113,12 +120,26 @@ def validate_record(raw: bytes) -> dict[str, Any]:
     if not raw or len(raw) > JSON_MAX or b"\x00" in raw:
         raise InvalidRecord("invalid datagram size")
     record = _decode_json(raw)
-    if (
-        type(record) is not dict
-        or not _integer(record.get("version"), 1, 1)
-    ):
+    if type(record) is not dict or not _integer(record.get("version"), 1, 1):
         raise InvalidRecord("invalid object or version")
     kind = record.get("type")
+    if kind == "feedback":
+        expected = {"type", "version", "algorithm", "dictionary", "trace", "word"}
+        if set(record) != expected:
+            raise InvalidRecord("invalid feedback fields")
+        if not isinstance(record["algorithm"], str) or not ALGORITHM.fullmatch(
+            record["algorithm"]
+        ):
+            raise InvalidRecord("invalid feedback algorithm")
+        if not isinstance(record["dictionary"], str) or not HEX64.fullmatch(
+            record["dictionary"]
+        ):
+            raise InvalidRecord("invalid feedback dictionary")
+        if not isinstance(record["trace"], str) or not TRACE.fullmatch(record["trace"]):
+            raise InvalidRecord("invalid feedback trace")
+        if not isinstance(record["word"], str) or not WORD.fullmatch(record["word"]):
+            raise InvalidRecord("invalid feedback word")
+        return record
     common = {"type", "version", "session", "gesture"}
     if not isinstance(record.get("session"), str) or not HEX32.fullmatch(
         record["session"]
@@ -375,7 +396,7 @@ class Store:
         changed = False
         for name in os.listdir(self.dir_fd):
             export_match = re.fullmatch(r"export-([1-9][0-9]*)\.tmp", name)
-            if name not in {"journal.tmp", "export-budget.tmp"} and not export_match:
+            if name not in {"journal.tmp", "export-budget.tmp", "feedback.tmp"} and not export_match:
                 continue
             info = os.stat(name, dir_fd=self.dir_fd, follow_symlinks=False)
             if (
@@ -421,6 +442,16 @@ class Store:
                     os.close(fd)
                 os.unlink(name, dir_fd=self.dir_fd)
                 os.fsync(self.dir_fd)
+            elif name == "feedback.tmp":
+                fd = self._open(name, os.O_RDONLY)
+                try:
+                    try:
+                        self._parse_feedback(os.read(fd, FEEDBACK_MAX_BYTES + 1))
+                    except InvalidRecord:
+                        pass
+                finally:
+                    os.close(fd)
+                os.unlink(name, dir_fd=self.dir_fd)
             else:
                 os.unlink(name, dir_fd=self.dir_fd)
             changed = True
@@ -486,6 +517,98 @@ class Store:
             raise BudgetExhausted("collector write budget exhausted")
         self.written += amount
 
+    def _admit(self, require_epoch: str | None) -> None:
+        if require_epoch is not None and self._epoch_unlocked() != require_epoch:
+            raise EpochMismatch("collector epoch is no longer enabled")
+        self.admitted += 1
+        if self.admitted > COLLECTOR_DATAGRAM_BUDGET:
+            self._latch_exhausted()
+            raise BudgetExhausted("collector datagram budget exhausted")
+
+    def admit(self, require_epoch: str) -> None:
+        """Charge one nonempty datagram before transport or schema admission."""
+        with self.locked():
+            self._admit(require_epoch)
+
+    @staticmethod
+    def _parse_feedback(data: bytes) -> list[tuple[str, str, str, str, int]]:
+        if (
+            not data
+            or len(data) > FEEDBACK_MAX_BYTES
+            or b"\x00" in data
+            or not data.startswith(FEEDBACK_HEADER)
+        ):
+            raise InvalidRecord("invalid feedback state")
+        entries: list[tuple[str, str, str, str, int]] = []
+        for line in data[len(FEEDBACK_HEADER) :].splitlines(keepends=True):
+            if not line.endswith(b"\n") or len(entries) >= FEEDBACK_MAX_ENTRIES:
+                raise InvalidRecord("invalid feedback state")
+            fields = line[:-1].split(b"\t")
+            if len(fields) != 5:
+                raise InvalidRecord("invalid feedback state")
+            try:
+                algorithm, dictionary, trace, word, count_text = (
+                    field.decode("ascii") for field in fields
+                )
+            except UnicodeDecodeError as error:
+                raise InvalidRecord("invalid feedback state") from error
+            if (
+                not ALGORITHM.fullmatch(algorithm)
+                or not HEX64.fullmatch(dictionary)
+                or not TRACE.fullmatch(trace)
+                or not WORD.fullmatch(word)
+                or not re.fullmatch(r"[1-9][0-9]{0,4}", count_text)
+                or int(count_text) > 65535
+            ):
+                raise InvalidRecord("invalid feedback state")
+            entry = (algorithm, dictionary, trace, word, int(count_text))
+            if entry[:4] in [old[:4] for old in entries]:
+                raise InvalidRecord("duplicate feedback state")
+            entries.append(entry)
+        if b"\n" not in data or not data.endswith(b"\n"):
+            raise InvalidRecord("invalid feedback state")
+        return entries
+
+    @staticmethod
+    def _feedback_bytes(entries: list[tuple[str, str, str, str, int]]) -> bytes:
+        data = FEEDBACK_HEADER + b"".join(
+            f"{algorithm}\t{dictionary}\t{trace}\t{word}\t{count}\n".encode()
+            for algorithm, dictionary, trace, word, count in entries
+        )
+        if len(entries) > FEEDBACK_MAX_ENTRIES or len(data) > FEEDBACK_MAX_BYTES:
+            raise InvalidRecord("feedback state exceeds bound")
+        return data
+
+    def _read_feedback(self) -> list[tuple[str, str, str, str, int]]:
+        try:
+            fd = self._open("feedback.state", os.O_RDONLY)
+        except FileNotFoundError:
+            return []
+        try:
+            return self._parse_feedback(os.read(fd, FEEDBACK_MAX_BYTES + 1))
+        finally:
+            os.close(fd)
+
+    def _append_feedback(self, record: dict[str, Any]) -> None:
+        try:
+            entries = self._read_feedback()
+            key = (record["algorithm"], record["dictionary"], record["trace"], record["word"])
+            count = 1
+            retained = []
+            for old in entries:
+                if old[:4] == key:
+                    count = min(65535, old[4] + 1)
+                else:
+                    retained.append(old)
+            if len(retained) == FEEDBACK_MAX_ENTRIES:
+                retained.pop(0)
+            retained.append((*key, count))
+            data = self._feedback_bytes(retained)
+            self._charge(len(data))
+            self._replace("feedback.tmp", "feedback.state", data)
+        except (InvalidRecord, OSError) as error:
+            raise FeedbackPersistenceError(str(error)) from error
+
     def _latch_exhausted(self) -> None:
         self.capture_exhausted = True
         fd = self._open("session-budget-exhausted", os.O_WRONLY | os.O_CREAT)
@@ -522,17 +645,20 @@ class Store:
                 episodes[identity] = (gesture, record)
         return episodes
 
-    def append(self, raw: bytes, require_epoch: str | None = None) -> bool:
+    def append(
+        self, raw: bytes, require_epoch: str | None = None, admitted: bool = False
+    ) -> bool:
         """Append one valid record; return False only for an exact duplicate."""
         with self.locked():
             self._recover_temporaries()
-            if require_epoch is not None and self._epoch_unlocked() != require_epoch:
+            if not admitted:
+                self._admit(require_epoch)
+            elif require_epoch is not None and self._epoch_unlocked() != require_epoch:
                 raise EpochMismatch("collector epoch is no longer enabled")
-            self.admitted += 1
-            if self.admitted > COLLECTOR_DATAGRAM_BUDGET:
-                self._latch_exhausted()
-                raise BudgetExhausted("collector datagram budget exhausted")
             record = validate_record(raw)
+            if record["type"] == "feedback":
+                self._append_feedback(record)
+                return True
             records, episodes = self._load_journal()
             identity = _identity(record)
             if identity in episodes:
@@ -801,7 +927,7 @@ class Store:
         return epoch if HEX32.fullmatch(epoch) else ""
 
     def start_session(self, epoch: str) -> None:
-        """Validate EPOCH, clear exhaustion, and publish collector admission."""
+        """Validate EPOCH and reset bounded session counters before publication."""
         with self.locked():
             if self._epoch_unlocked() != epoch:
                 raise EpochMismatch("collector epoch is no longer enabled")
@@ -814,7 +940,25 @@ class Store:
             self.admitted = 0
             self.written = 0
             self.capture_exhausted = False
+    def startup_snapshot(self, epoch: str) -> bytes:
+        """Return one validated complete snapshot for the exact enabled epoch."""
+        with self.locked():
+            if self._epoch_unlocked() != epoch:
+                raise EpochMismatch("collector epoch is no longer enabled")
+            return self._feedback_bytes(self._read_feedback())
+
+    def publish_capturing(self, epoch: str) -> None:
+        with self.locked():
+            if self._epoch_unlocked() != epoch:
+                raise EpochMismatch("collector epoch is no longer enabled")
             self._replace("status.tmp", "status", f"capturing {epoch}".encode())
+
+    def startup_failed(self, epoch: str, reason: str) -> None:
+        with self.locked():
+            if self._epoch_unlocked() == epoch:
+                self._replace(
+                    "status.tmp", "status", f"startup-failed {epoch} {reason}".encode()
+                )
 
     @contextmanager
     def collector_session(self) -> Iterator[None]:
@@ -877,6 +1021,10 @@ class Store:
             if self._collector_running():
                 return True, "capturing"
             return True, "not capturing: collector-stopped"
+        if status == f"startup-failed {epoch} invalid-feedback-state":
+            return True, "not capturing: invalid-feedback-state"
+        if status == f"startup-failed {epoch} snapshot-send-failed":
+            return True, "not capturing: snapshot-send-failed"
         return True, "armed for next UI session"
 
     def erase(self) -> None:
@@ -890,6 +1038,8 @@ class Store:
                 if name in {
                     "journal.jsonl",
                     "journal.tmp",
+                    "feedback.state",
+                    "feedback.tmp",
                     "export-budget",
                     "session-budget-exhausted",
                     "status",
@@ -929,7 +1079,19 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
             raise OSError("collector transport is not an unnamed Unix datagram pair")
         sock.setblocking(False)
         with store.collector_session():
-            store.start_session(epoch)
+            try:
+                store.start_session(epoch)
+                snapshot = store.startup_snapshot(epoch)
+            except (InvalidRecord, OSError):
+                store.startup_failed(epoch, "invalid-feedback-state")
+                return
+            try:
+                if sock.send(snapshot) != len(snapshot):
+                    raise OSError("short snapshot send")
+            except OSError:
+                store.startup_failed(epoch, "snapshot-send-failed")
+                return
+            store.publish_capturing(epoch)
             if os.write(ready_fd, b"ready") != 5:
                 raise OSError("collector readiness write failed")
             os.close(ready_fd)
@@ -948,20 +1110,26 @@ def collect(fd: int, ready_fd: int, epoch: str, store: Store) -> None:
                     continue
                 for _ in range(min(16, int(tokens))):
                     try:
-                        data, ancillary, flags, _ = sock.recvmsg(JSON_MAX, 0)
+                        data, ancillary, flags, _ = sock.recvmsg(JSON_MAX, 256)
                     except BlockingIOError:
                         break
                     except OSError:
                         return
-                    tokens -= 1.0
                     if not data:
+                        return
+                    tokens -= 1.0
+                    try:
+                        store.admit(epoch)
+                    except (EpochMismatch, BudgetExhausted, OSError):
                         return
                     if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
                         continue
                     if not store.capture_exhausted:
                         try:
-                            store.append(data, require_epoch=epoch)
+                            store.append(data, require_epoch=epoch, admitted=True)
                         except EpochMismatch:
+                            return
+                        except FeedbackPersistenceError:
                             return
                         except (InvalidRecord, BudgetExhausted, OSError):
                             continue

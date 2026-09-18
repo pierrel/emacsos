@@ -23,6 +23,14 @@ SPEC.loader.exec_module(collector)
 
 SESSION = "0123456789abcdef0123456789abcdef"
 DICTIONARY = "a" * 64
+FEEDBACK = {
+    "type": "feedback",
+    "version": 1,
+    "algorithm": "geometry-feedback-v1",
+    "dictionary": DICTIONARY,
+    "trace": "ab",
+    "word": "word",
+}
 
 
 def gesture(gesture_id=1, candidates=None, presentation=None):
@@ -449,7 +457,7 @@ class CollectorTests(unittest.TestCase):
                 first = store.set_enabled(True)
                 self.assertRegex(first or "", r"^[0-9a-f]{32}$")
                 store.start_session(first or "")
-                self.assertEqual(store.capture_status(), (True, "not capturing: collector-stopped"))
+                self.assertEqual(store.capture_status(), (True, "armed for next UI session"))
                 second = store.set_enabled(True)
                 self.assertNotEqual(first, second)
                 self.assertEqual(
@@ -471,6 +479,70 @@ class CollectorTests(unittest.TestCase):
             candidate = raw.replace(b'"gesture":1', b'"gesture":' + token)
             with self.assertRaises(collector.InvalidRecord):
                 collector.validate_record(candidate)
+
+    def test_feedback_is_strict_private_bounded_and_excluded_from_export(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = private_state(Path(temporary))
+            store = collector.Store(state)
+            try:
+                invalid = FEEDBACK | {"reason": "replacement"}
+                with self.assertRaises(collector.InvalidRecord):
+                    store.append(encoded(invalid))
+                self.assertTrue(store.append(encoded(FEEDBACK)))
+                self.assertTrue(store.append(encoded(FEEDBACK)))
+                entries = store._read_feedback()
+                self.assertEqual(entries, [("geometry-feedback-v1", DICTIONARY, "ab", "word", 2)])
+                self.assertNotIn("feedback.state", store.export()[0])
+                self.assertNotIn(b'"type":"feedback"', (state / "export-1.jsonl").read_bytes())
+                store.set_enabled(False)
+                store.erase()
+                self.assertFalse((state / "feedback.state").exists())
+            finally:
+                store.close()
+
+    def test_feedback_snapshot_has_exact_maximum_and_keeps_other_builds(self):
+        entries = [
+            (
+                "a" * 24,
+                "b" * 64,
+                "c" * 62
+                + chr(ord("a") + index // 26)
+                + chr(ord("a") + index % 26),
+                "d" * 24,
+                65535,
+            )
+            for index in range(32)
+        ]
+        state = collector.Store._feedback_bytes(entries)
+        self.assertEqual(len(state), collector.FEEDBACK_MAX_BYTES)
+        self.assertEqual(collector.Store._parse_feedback(state), entries)
+
+    def test_feedback_eviction_is_global_and_count_saturates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = collector.Store(private_state(Path(temporary)))
+            try:
+                for index in range(33):
+                    record = FEEDBACK | {
+                        "algorithm": "other-v1" if index == 0 else "geometry-feedback-v1",
+                        "trace": chr(ord("a") + index // 26)
+                        + chr(ord("a") + index % 26),
+                    }
+                    store.append(encoded(record))
+                entries = store._read_feedback()
+                self.assertEqual(len(entries), 32)
+                self.assertNotIn("aa", [entry[2] for entry in entries])
+                final = FEEDBACK | {"trace": "ab", "word": "word"}
+                store._replace(
+                    "feedback.tmp",
+                    "feedback.state",
+                    collector.Store._feedback_bytes(
+                        [(final["algorithm"], final["dictionary"], "ab", "word", 65535)]
+                    ),
+                )
+                store.append(encoded(final))
+                self.assertEqual(store._read_feedback()[-1][-1], 65535)
+            finally:
+                store.close()
 
     def test_store_lock_contention_fails_without_waiting(self):
         with tempfile.TemporaryDirectory() as temporary:

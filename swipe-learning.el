@@ -102,9 +102,9 @@ call SUCCESS with the parsed JSON value and its original text."
                                          (call-interactively
                                           #'emacsos-pinephone-restart-ui-session))
                                'follow-link t)
-           (insert "\n\nSwipe traces and candidate words stay local. "
-                   "Surrounding application text is not captured, and "
-                   "learning does not change current suggestions.\n")
+           (insert "\n\nExplicit alternate selections and exact-unit erasures "
+                   "adjust future suggestions. Swipe traces and candidate words "
+                   "stay local; surrounding application text is not captured.\n")
            (goto-char (point-min))
            (emacsos-swipe-learning-mode)))
        (pop-to-buffer buffer)))))

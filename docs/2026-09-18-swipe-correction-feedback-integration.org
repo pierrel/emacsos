@@ -1,0 +1,397 @@
+#+title: Swipe correction feedback integration
+#+date: 2026-09-18
+
+* State and design revision
+
+This is the accepted EmacsOS D3 integration design for the
+=swipe-correction-feedback= pilot.  Implementation and implementation review
+remain pending.  Its source design revision is SHA-256
+=2c3ac9ae1411089cd0347b3a7e393f74906815bbff8a21250f90af5b520c8aab=.
+
+The paired wvkbd =2026-09-18-swipe-correction-feedback.org= record owns
+keyboard correction classification, immediate ranking, startup snapshot
+consumption, and wire production.  This record owns exact wire admission,
+private aggregate persistence, startup snapshot publication, truthful status,
+controls, installation, and cross-repository verification.
+
+* Objective and user outcome
+
+Persist bounded keyboard-owned negative feedback privately and restore it at
+the next armed keyboard start without adding a listener, path supplied by the
+keyboard, or runtime socket polling.
+
+Selecting candidate rank two or three rejects the emitted word that is
+replaced.  Exact-unit Backspace rejects the emitted glide word that is erased,
+including a selected alternate.  The correction affects the next matching
+glide immediately in the same keyboard process and survives later armed
+sessions when persistence succeeds.
+
+Learning remains opt-in.  Disable plus UI restart runs the baseline keyboard
+without learned ranking.  Disable, restart, and the existing two-tap erase
+remove evidence and ranking state.  Re-enable plus restart then starts empty.
+
+* Historical supersessions
+
+This record directly supersedes
+=2026-09-13-all-features-swipe-learning-runtime.org= section =User control and
+truthful state= only where it says capture never changes live suggestions.
+Explicit candidate replacement and exact-unit erase now adjust future
+suggestions.  The existing opt-in marker, restart boundary, non-modal controls,
+truthful read-only Show, and erase flow remain authoritative.
+
+It directly supersedes that record's section =Pinned keyboard contract= only
+where the collector accepts only gesture/resolution records and the keyboard
+never reads fd 3.  The same socket now carries an exact feedback record
+outbound and one bounded aggregate snapshot to wvkbd before readiness.  The
+existing gesture/resolution schemas, evidence semantics, descriptor boundary,
+and privacy exclusions remain authoritative.
+
+It directly supersedes
+=2026-09-13-swipe-learning-runtime-review-amendments.org= section =Accepted
+changes= only where failed armed startup necessarily leaves status as =armed
+for next UI session=.  Invalid feedback state and failed or partial snapshot
+delivery now publish fixed epoch-fenced failure status before collector exit.
+All other launcher fallback, state safety, schema, and evidence amendments
+remain authoritative.
+
+No earlier dated record is rewritten.  A gesture export alone no longer
+reconstructs personalized ordering; raw geometry replay remains available.
+
+* Boundary and ownership
+
+The inherited unnamed connected =AF_UNIX/SOCK_DGRAM= pair remains the only
+transport.  It is a process capability, not cryptographic authentication.
+There is no pathname socket, listener, network path, new privilege, secret, or
+payload-bearing argument.  Same-UID descriptor or memory compromise remains
+outside the existing boundary.
+
+The keyboard owns trigger classification, current-unit state, immediate
+in-memory update, and ranking.  The collector owns strict record validation,
+the global aggregate, atomic publication, startup snapshot, bounds, failure
+status, and erase.  EmacsOS owns launcher/control/display/install integration.
+Trigger distinction remains local to wvkbd and is neither transmitted nor
+persisted.
+
+The aggregate is derived product state, not evidence.  It never enters
+=journal.jsonl=, Show record pages, or evidence exports.  Payloads are never
+logged.  Gesture and resolution evidence retains its current semantic state
+machine, including delayed interpretation of exact-unit retraction.
+
+* Exact feedback datagram admission
+
+The maximum datagram remains =JSON_MAX=, 4,096 bytes.  Every received nonempty
+datagram consumes one shared rate-limit token and one unit of the shared
+8,192-datagram collector-lifetime admission budget before transport or schema
+validity is considered.  Malformed or over-budget input may be ignored, but it
+cannot evade either bound.
+
+Reject a datagram unless all of these hold:
+
+- payload length is =1..4096= bytes, bytes are ASCII, and no NUL is present;
+- =recvmsg= reports neither =MSG_TRUNC= nor =MSG_CTRUNC= and no ancillary data;
+- JSON decoding rejects duplicate object members before object construction;
+- JSON decoding rejects floats, non-finite constants, invalid integer tokens,
+  recursion failure, and non-JSON input;
+- the top level is an object with exactly =type=, =version=, =algorithm=,
+  =dictionary=, =trace=, and =word=;
+- =type= is the string =feedback=;
+- =version= is integer 1, not a Boolean, string, float, array, or object;
+- =algorithm= is a string matching =[a-z0-9-]{1,24}=;
+- =dictionary= is a string matching =[0-9a-f]{64}=;
+- =trace= is a string matching =[a-z]{2,64}=; and
+- =word= is a string matching =[a-z]{2,24}=.
+
+Unknown, missing, duplicate, nonprimitive, or wrong-type members are invalid.
+There is no =reason= member or enum.  Invalid input changes neither aggregate
+nor journal/export and emits no payload log.
+
+Algorithm, dictionary, trace, and word use the identical grammar on wire and
+disk.  Gesture and resolution validation remains unchanged.  All three record
+types share the rate limiter, current epoch fence, 8,192-datagram lifetime
+bound, and 64 MiB collector write budget.  Only gestures and resolutions reach
+the evidence journal.
+
+* Persistent aggregate format and bound
+
+Disk and startup wire use the same exact ASCII representation:
+
+#+begin_example
+feedback-v1
+algorithm<TAB>dictionary<TAB>trace<TAB>word<TAB>count
+...
+#+end_example
+
+The header is 12 bytes.  There are zero through 32 entries, ordered from
+oldest-last-corrected to newest.  Each line has exactly five tab-separated
+fields.  Algorithm, dictionary, trace, and word use the wire grammar.  Count is
+decimal =1..65535= without sign, leading-zero variant, fraction, or exponent.
+Reject duplicate full keys, extra fields, partial lines, NULs, and trailing
+data.
+
+The exact maximum is 5,964 bytes: 12 header bytes plus 32 worst-case 186-byte
+entries.  The receiving C buffer has one additional terminator byte.  A
+4,096-byte snapshot is insufficient and is not accepted as the state bound.
+
+Store the exact bytes as private mode-0600, owner-only, regular, single-link
+=feedback.state= under the existing validated mode-0700 state directory and
+advisory lock.  Use fixed =feedback.tmp= with the existing safe open,
+same-filesystem write, file fsync, rename, and directory-fsync pattern.  A stale
+temporary is validated and removed under the existing recovery rules;
+=feedback.state= is the only committed destination.
+
+For one admitted correction under the existing collector lifetime and store
+locks:
+
+1. recheck the exact enabled epoch;
+2. validate and load the prior aggregate;
+3. remove a matching key, increment with saturation, and move it newest, or
+   append a new key at count one;
+4. evict the globally oldest-last-corrected entry before admitting a
+   thirty-third distinct key;
+5. charge the shared write budget; and
+6. publish the complete aggregate atomically.
+
+Algorithm plus dictionary plus trace plus word is the complete key.  A
+correction does not affect another key while that key is retained.  The sole
+bounded exception is global oldest-entry eviction.  Entries for another
+algorithm/dictionary build remain within and count toward the same global
+32-entry capacity for bounded rollback, but a mismatched keyboard ignores
+them.  Do not enlarge or partition capacity.
+
+* Atomic publication failure phases
+
+Publication has two distinct failure phases.
+
+Before successful rename, a write or temporary-file fsync failure, or a rename
+that reports failure, leaves exact prior =feedback.state= destination bytes.
+After rename succeeds, the destination contains the complete replacement.  If
+the following directory fsync fails, the complete replacement may already be
+visible and its crash durability is unconfirmed.
+
+Do not promise restoration of prior bytes after a successful rename.  Do not
+add rollback, backup, or transaction machinery.  Same-filesystem atomic rename
+guarantees that no reader observes a partial destination in either phase.
+
+Every persistence exception for a valid admitted feedback record is fatal.  It
+is not handled like malformed or over-budget input.  The collector does not
+retry or continue draining; it releases its lifetime lock, closes the socket,
+and exits.  Later keyboard sends follow existing permanent fail-off.  Show
+truthfully derives =not capturing: collector-stopped= from the absent lifetime
+lock.
+
+The keyboard process may retain the triggering in-memory correction.  A later
+armed restart validates whichever complete state is present.  It must not
+assume the correction is absent or present.  If that state is invalid or
+unsafe, the startup-failure contract below applies.
+
+* Startup snapshot, readiness, and fallback
+
+Split session preparation from publication of =capturing=.  Early preparation
+validates the epoch, clears the exhaustion marker, and resets in-memory session
+budgets but does not publish capture status.
+
+Successful armed startup follows this exact order under the collector lifetime
+and store locks:
+
+1. validate the current enabled epoch;
+2. validate and read =feedback.state=, or synthesize the empty
+   =feedback-v1= header when it is absent;
+3. queue exactly one complete nonblocking snapshot datagram on the connected
+   socket;
+4. atomically publish exact status =capturing EPOCH=;
+5. write exact readiness bytes =ready=; and
+6. enter the existing bounded receive loop.
+
+A short snapshot send is failure.  Neither =capturing= nor =ready= is
+observable before the complete snapshot is queued.  After readiness the
+collector only receives; wvkbd never polls the descriptor again.
+
+For invalid or unsafe aggregate state, publish this exact bounded ASCII status
+before releasing the lifetime lock and exiting:
+
+#+begin_example
+startup-failed EPOCH invalid-feedback-state
+#+end_example
+
+For failed or partial snapshot delivery, publish:
+
+#+begin_example
+startup-failed EPOCH snapshot-send-failed
+#+end_example
+
+In both cases close the socket and readiness pipe, write no =ready=, and exit.
+The launcher proves the collector gone and executes its unchanged bounded
+baseline keyboard fallback.  Launcher topology and argv do not change.  The
+launcher source need not change unless implementation demonstrates that its
+current readiness ordering cannot carry the snapshot contract.
+
+Both failure forms are epoch-fenced.  Show recognizes them only when the
+embedded 32-lowercase-hex epoch equals the current validated =enabled= marker.
+It renders respectively:
+
+- =not capturing: invalid-feedback-state=; or
+- =not capturing: snapshot-send-failed=.
+
+A stale failure from another epoch renders the existing =armed for next UI
+session=.  Exact =capturing EPOCH= renders =capturing= only while the collector
+lifetime lock is held.  A matching capturing status without the lock renders
+the existing read-only =not capturing: collector-stopped=.  Status is fixed,
+bounded, ASCII, and contains no trace, word, dictionary, or application
+context.
+
+* User controls and privacy
+
+Capture remains off by default.  Enable creates the private marker and links to
+the UI restart required to start the armed collector.  The learning buffer and
+=EMACSOS-COMMANDS.org= must state that explicit candidate replacements and
+exact-unit erasures adjust future suggestions.  They also state that
+surrounding and manually entered application text remain excluded and data
+stays local.
+
+Disable fences persistence immediately under the existing epoch check.  UI
+restart is the boundary that removes the learning fd and in-memory ranking.
+Restart alone does not disable capture.
+
+The existing non-modal =Disable, restart UI, then erase= flow and in-buffer
+two-tap confirmation remain.  Erase deletes =feedback.state= and
+=feedback.tmp= with =journal.jsonl=, managed temporaries, exports, and budget
+state, then fsyncs the directory.  No new control or modal dialog is added.
+
+Show stays bounded and read-only.  It truthfully reports startup failure,
+collector-stopped runtime failure, capture, or armed state without displaying
+aggregate entries.  Export remains bounded and excludes both feedback files.
+
+* Versioning and evidence trade-off
+
+The keyboard ranking identity changes from =geometry-v1= to
+=geometry-feedback-v1= because ordering is no longer geometry-only.  Future
+policy changes require another explicit identity bump.  Dictionary digest
+continues to separate vocabulary changes.
+
+Gesture records preserve exact candidates presented and their raw geometry
+scores.  Raw geometry eligibility and scores do not change.  A gesture alone
+no longer reconstructs personalized ordering because the aggregate is
+deliberately excluded from evidence export.  Raw geometry replay remains
+available.  Serializing per-gesture ranking state would widen the privacy and
+wire surface without serving this objective.
+
+* Affected EmacsOS artifacts
+
+Implementation is expected to affect:
+
+- =deploy/pinephone/swipe-learning-collector.py=;
+- collector and launcher tests;
+- =swipe-learning.el= and focused ERT;
+- =EMACSOS-COMMANDS.org=;
+- =deploy/pinephone/wvkbd-revision=;
+- affected explicit installation manifest hashes; and
+- this dated integration design.
+
+The launcher source is not expected to change unless verification proves its
+current readiness topology insufficient.  The pinned wvkbd revision changes
+only after accepted wvkbd implementation is frozen.
+
+The registered =llm-agentic-experiments= worktree has zero intended product or
+research changes.  Its untracked swipe-correction-feedback hypothesis seed is
+outside that repository's agent/model-behavior admission rule and is discarded,
+not rewritten.
+
+* Verification plan
+
+Collector and management coverage must prove:
+
+- the exact six-field feedback schema and rejection of =reason= or every other
+  unknown member;
+- duplicate-member, nonobject, wrong primitive type, Boolean-as-version, float,
+  constant, invalid integer token, non-ASCII, NUL, oversized, truncated,
+  ancillary-bearing, regex, and length rejection;
+- every nonempty invalid input consumes shared rate and lifetime admission
+  units but changes neither aggregate nor journal/export;
+- private file validation, including symlink, FIFO, ownership, link count,
+  regular-file type, and mode;
+- exact maximum-state parsing;
+- count saturation, move-to-newest, global eviction, other-build retention, and
+  stale-temporary recovery;
+- cross-key/build noninterference while retained and documented loss after
+  global eviction;
+- pre-rename injected write, temporary-file fsync, and rename failures leave
+  exact prior destination bytes and no partial destination;
+- injected post-rename directory-fsync failure permits only a complete old or
+  complete new destination, with durability unconfirmed and no partial bytes;
+- both persistence-failure phases terminate the collector, close the peer,
+  make Show report =collector-stopped=, and make later keyboard feedback fail
+  off;
+- restart validates whichever complete state exists and never assumes the
+  triggering correction is absent or present;
+- shared rate, epoch, 8,192-datagram lifetime, and 64 MiB write budgets;
+- erase removes feedback state and export excludes it;
+- snapshot-before-=capturing=-before-=ready= ordering;
+- exact epoch-fenced invalid-state and snapshot-send failure status, truthful
+  Show rendering, and stale-epoch nonattribution;
+- invalid state and failed or partial snapshot delivery produce no readiness
+  and exercise the baseline launcher fallback; and
+- an armed launcher fixture whose keyboard reads the queued snapshot from fd 3.
+
+Run focused swipe-learning collector tests, focused ERT, full ERT, server
+tests, PinePhone/OpenRC script suites, the exact wvkbd cross-build, and smoke.
+Startup wire and status changes require the integrated gates even if launcher
+source remains unchanged.
+
+The paired wvkbd tests additionally prove ranking arithmetic, raw score and
+eligibility preservation, trigger ordering, immediate same-process learning,
+snapshot parsing, send fail-off, fuzz bounds, sanitizers, and benchmark bounds.
+
+* Live phone acceptance
+
+With learning enabled:
+
+1. make a controlled glide, select an alternate, repeat it, and observe the
+   corrected ranking immediately;
+2. erase an emitted alternate with exact-unit Backspace and observe its
+   demotion;
+3. restart and verify successfully persisted feedback;
+4. verify unrelated retained traces are unchanged;
+5. create enough distinct corrections to demonstrate documented global oldest
+   eviction without exceeding 32 entries;
+6. disable and restart, then verify baseline ranking;
+7. complete disable, restart, and two-tap erase, re-enable and restart, then
+   verify learned ranking is empty;
+8. inspect private modes and confirm Show/export reveal no feedback payload or
+   application context; and
+9. induce a controlled startup failure and verify its fixed truthful reason
+   plus baseline keyboard fallback.
+
+Deployment remains a workspace-orchestrator effect.
+
+* Review and recovery disposition
+
+Seven independent design lenses completed.  Initial review found zero blockers,
+five distinct important defects and one nit, all fixed in D2:
+
+- remove the inadmissible research seed;
+- remove the unused reason field;
+- qualify cross-key noninterference by global eviction;
+- add truthful epoch-fenced startup failure status;
+- fully specify hostile feedback admission; and
+- terminate on valid-record aggregate persistence failure.
+
+Rereview found one additional important defect: D2 promised prior destination
+bytes even after successful rename followed by directory-fsync failure.  D3
+distinguishes the pre-rename guarantee from post-rename durability uncertainty
+without rollback machinery.  There are no deferred or rejected findings.
+Framework and protocol review were clean initially.
+
+Retain the recovery concepts of private bounded aggregate persistence, one
+startup snapshot on the inherited socket, existing opt-in/restart/erase flow,
+global 32-entry recency, saturated counts, and raw evidence scores.
+
+Change the recovery persistent filename/representation, exact size, strict
+schema, invalid-input budget accounting, readiness/status order, global
+eviction disclosure, fatal persistence behavior, and replay disclosure.
+
+Discard the current root-authored partial C bytes and both root recovery design
+drafts as accepted artifacts.  They remain recovery evidence only.  This D3
+record and its paired wvkbd record are the accepted designs.  Preserve all
+tracked dated historical records.  Discard the untracked
+=llm-agentic-experiments= seed and leave that repository zero-delta.
+
