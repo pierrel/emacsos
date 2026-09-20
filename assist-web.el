@@ -4321,14 +4321,24 @@ Nothing in SOURCE is retired until the complete destination record is durable."
            (current-buffer)))))
 
 (defun emacsos-assist-web--retire-active-streams-after-reload ()
-  "Retire observations whose process callbacks predate this file load."
+  "Retire pre-reload observers without letting queue state reach singletons."
   (dolist (buffer (buffer-list))
     (when (and (buffer-live-p buffer)
                (with-current-buffer buffer
-                 (and (derived-mode-p 'emacsos-assist-web-mode)
-                      emacsos-assist-web--stream-process)))
-      (emacsos-assist-web--stream-interrupted
-       buffer "Assist code reloaded; refresh observation"))))
+                 (derived-mode-p 'emacsos-assist-web-mode)))
+      (with-current-buffer buffer
+        (if emacsos-assist-web--queue
+            (if-let ((entry emacsos-assist-web--stream-entry))
+                (emacsos-assist-web--entry-observation-interrupted
+                 entry (plist-get entry :epoch)
+                 "Assist code reloaded; refresh observation")
+              ;; A malformed/recovered queue cannot retain a pre-header token
+              ;; after its callbacks were discarded by reload.
+              (dolist (entry emacsos-assist-web--queue)
+                (emacsos-assist-web--release-handshake entry)))
+          (when emacsos-assist-web--stream-process
+            (emacsos-assist-web--stream-interrupted
+             buffer "Assist code reloaded; refresh observation")))))))
 
 ;; Reloading this file invalidates callbacks created by its previous function
 ;; definitions.  Retire active stream callbacks before advancing the catalog

@@ -3851,6 +3851,29 @@
         (should-not emacsos-assist-web--requests)
         (should-not (plist-get entry :handshake-token))))))
 
+(ert-deftest test-assist-web-queue-reload-retires-only-the-observed-entry-token ()
+  "Reload invalidates the observed entry without releasing another entry token."
+  (let ((emacsos-assist-web--requests nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let* ((a (emacsos-assist-web--entry
+                 "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+             (b (emacsos-assist-web--entry
+                 "B" 'accepted-unobserved "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+             (a-token (list 'a)) (b-token (list 'b)))
+        (setf (plist-get a :epoch) 4
+              (plist-get a :handshake-token) a-token
+              (plist-get b :handshake-token) b-token)
+        (setq emacsos-assist-web--queue (list a b)
+              emacsos-assist-web--stream-entry a
+              emacsos-assist-web--requests (list a-token b-token))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+          (emacsos-assist-web--retire-active-streams-after-reload))
+        (should (eq (plist-get a :state) 'accepted-unobserved))
+        (should-not (plist-get a :handshake-token))
+        (should (eq (plist-get b :handshake-token) b-token))
+        (should (equal emacsos-assist-web--requests (list b-token)))))))
+
 (ert-deftest test-assist-web-queue-parser-keeps-reset-delta-and-terminal-on-one-entry ()
   "Reset, delta, and terminal mutate one entry's markers and cleanup token."
   (let ((emacsos-assist-web--requests nil)
