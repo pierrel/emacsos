@@ -49,4 +49,3 @@ that chain.
 - Supersedes =docs/2026-09-20-assist-concurrent-request-running-fix.org=,
   “Status”: that record correctly described its checkpoint as partial and
   non-candidate; this record describes the recovered full D5 implementation.
-
