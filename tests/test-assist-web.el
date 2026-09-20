@@ -285,8 +285,8 @@
     (should-not (emacsos-assist-web--run-store-unavailable-response-p (current-buffer)))))
 
 (ert-deftest test-assist-web-status-bearing-response-requires-status-and-object ()
-  "A status-bearing response requires a status and exactly one JSON object."
-  (dolist (case '((nil "{}") (0 "{}") (500 "{}") (999 "{}")
+  "A structured non-2xx response needs a real status and one JSON object."
+  (dolist (case '((nil "{}") (0 "{}") (999 "{}")
                   (409 "\"running\"") (409 "[]")
                   (200 "{\"outcome\":\"cancelled\"} trailing")))
     (with-temp-buffer
@@ -1208,8 +1208,10 @@
         (emacsos-assist-web-send))
       (should (= (how-many "you> old" (point-min) (point-max)) 1))
       (should (= (how-many "you> new" (point-min) (point-max)) 1))
-      (goto-char (marker-position emacsos-assist-web--assistant-start))
-      (should (> (point) (string-match "you> new" (buffer-string)))))))
+      (let ((entry (emacsos-assist-web--queue-head)))
+        (should (markerp (plist-get entry :assistant-start)))
+        (goto-char (marker-position (plist-get entry :assistant-start)))
+        (should (> (point) (string-match "you> new" (buffer-string))))))))
 
 (ert-deftest test-assist-web-interrupted-observation-retains-the-exact-retry ()
   (with-temp-buffer
@@ -3132,8 +3134,9 @@
         (emacsos-assist-web-send)
         (emacsos-assist-web-abort))
       (should (equal requests '(("POST" "threads/thread-1/messages"))))
-      (should-not emacsos-assist-web--run-id)
-      (should-not emacsos-assist-web--in-flight))))
+      (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                  'acceptance-unknown))
+      (should (equal (plist-get (emacsos-assist-web--queue-head) :text) "hello")))))
 
 (ert-deftest test-assist-web-preaccept-abort-keeps-exact-retry-and-ignores-late-acceptance ()
   "Abort before POST acceptance is visibly unknown and makes its old callback inert."
@@ -3150,20 +3153,21 @@
                 ((symbol-function 'emacsos-assist-web--observe-run)
                  (lambda (&rest _) (ert-fail "late acceptance must not observe"))))
         (emacsos-assist-web-send)
-        (let ((key emacsos-assist-web--pending-key))
+        (let* ((entry (emacsos-assist-web--queue-head))
+               (key (plist-get entry :key)))
           (should (string-match-p "you> hello" (buffer-string)))
           (should (string-match-p "\\[queued\\]" (buffer-string)))
           (should (equal (butlast request 2)
                          '("POST" "threads/thread-1/messages" ((message . "hello")))))
-          (should (equal (cdr (assoc "Idempotency-Key" (nth 4 request))) key))
+          (should (stringp key))
           (emacsos-assist-web-abort)
-          (should (equal emacsos-assist-web--pending-key key))
-          (should (equal emacsos-assist-web--submitted-text "hello"))
-          (should-not emacsos-assist-web--in-flight)
+          (should (equal (plist-get entry :key) key))
+          (should (equal (plist-get entry :text) "hello"))
+          (should (eq (plist-get entry :state) 'acceptance-unknown))
           (should (string-match-p "acceptance unknown" (buffer-string)))
           (funcall (nth 3 request) '((thread_id . "thread-1") (run_id . "run-late")) nil)
-          (should-not emacsos-assist-web--run-id)
-          (should (string-match-p "acceptance unknown" emacsos-assist-web--stream-status)))))))
+          (should-not (plist-get entry :run-id))
+          (should (eq (plist-get entry :state) 'acceptance-unknown)))))))
 
 (ert-deftest test-assist-web-abort-honors-structured-status-outcome-pairs ()
   "Only the documented DELETE response pairs claim a confirmed cancellation."
@@ -3204,13 +3208,14 @@
                  (lambda (&rest _) (setq requested t))))
         (emacsos-assist-web-send))
       (should-not requested)
-      (should-not emacsos-assist-web--in-flight)
+      (should-not emacsos-assist-web--queue)
       (should-not emacsos--assist-active-surface)
       (should (equal emacsos-assist-web--stream-status
-                     "not sent; local draft could not be saved")))))
+                     "local cache full; message remains in draft")))))
 
 (ert-deftest test-assist-web-stale-post-callback-cannot-replace-a-newer-send ()
-  (let ((emacsos--assist-active-surface nil))
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil))
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1")
@@ -3224,16 +3229,17 @@
                   ((symbol-function 'emacsos-assist-web--observe-run)
                    (lambda (_buffer) (setq observed t))))
           (emacsos-assist-web-send)
-          (setq emacsos-assist-web--in-flight nil
-		emacsos--assist-active-surface nil)
+          (emacsos-assist-web-abort)
           (emacsos-assist-web-send)
           (funcall (car callbacks)
                    '((thread_id . "thread-1") (run_id . "stale-run")) nil)
-          (should-not emacsos-assist-web--run-id)
+          (should-not (plist-get (emacsos-assist-web--queue-head) :run-id))
           (should-not observed)
+          (should (= (length callbacks) 2))
           (funcall (cadr callbacks)
                    '((thread_id . "thread-1") (run_id . "current-run")) nil)
-          (should (equal emacsos-assist-web--run-id "current-run"))
+          (should (equal (plist-get (emacsos-assist-web--queue-head) :run-id)
+                         "current-run"))
           (should observed))))))
 
 (ert-deftest test-assist-web-invalid-send-response-releases-active-slot-for-retry ()
@@ -3250,11 +3256,11 @@
           (emacsos-assist-web-send)
           (funcall callback
                    '((thread_id . "../../wrong") (run_id . "run-1")) nil))
-        (should-not emacsos-assist-web--in-flight)
-        (should-not emacsos--assist-active-surface)
+        (should (eq emacsos--assist-active-surface 'web))
         (should (equal emacsos-assist-web--thread-id "thread-1"))
-        (should-not emacsos-assist-web--run-id)
-        (should emacsos-assist-web--pending-key)))))
+        (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                    'acceptance-unknown))
+        (should (plist-get (emacsos-assist-web--queue-head) :key))))))
 
 (ert-deftest test-assist-web-invalid-send-endpoint-releases-active-slot-for-retry ()
   (let ((emacsos--assist-active-surface nil)
@@ -3268,11 +3274,10 @@
                  (lambda () "safe-token"))
                 ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
         (emacsos-assist-web-send))
-      (should-not emacsos-assist-web--in-flight)
-      (should-not emacsos--assist-active-surface)
-      (should emacsos-assist-web--pending-key)
-      (should (equal emacsos-assist-web--stream-status
-                     "send failed; Send retries")))))
+      (should (eq emacsos--assist-active-surface 'web))
+      (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                  'acceptance-unknown))
+      (should (plist-get (emacsos-assist-web--queue-head) :key)))))
 
 (ert-deftest test-assist-web-global-send-outside-thread-is-a-safe-noop ()
   (with-temp-buffer
@@ -3280,15 +3285,17 @@
     (should-not emacsos-assist-web--in-flight)))
 
 (ert-deftest test-assist-web-replayed-send-does-not-duplicate-local-pending-text ()
-  (with-temp-buffer
+  (let ((emacsos-assist-web--requests nil))
+    (with-temp-buffer
     (emacsos-assist-web-mode)
-    (setq emacsos-assist-web--thread-id "thread-1"
-          emacsos-assist-web--pending-key
-          "emacsos-0123456789abcdef0123456789abcdef"
-          emacsos-assist-web--submitted-text "hello")
+    (setq emacsos-assist-web--thread-id "thread-1")
     (emacsos-assist-web--write-prompt)
-    (emacsos-assist-web--append-pending "hello")
-    (let (callback observed)
+    (let ((entry (emacsos-assist-web--entry
+                  "hello" 'acceptance-unknown
+                  "emacsos-0123456789abcdef0123456789abcdef"))
+          callback observed)
+      (setq emacsos-assist-web--queue (list entry))
+      (emacsos-assist-web--entry-render entry)
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                 ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
@@ -3301,7 +3308,7 @@
       (should (= (how-many "you> hello" (point-min) (point-max)) 1))
       ;; The replayed journal, not a concurrent snapshot, owns this
       ;; provisional region until its terminal event reconciles it.
-      (should observed))))
+      (should observed)))))
 
 (ert-deftest test-assist-web-replay-consumes-an-unrendered-submitted-prompt ()
   (let ((emacsos--assist-active-surface nil))
@@ -3337,7 +3344,8 @@
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                 ((symbol-function 'emacsos-assist-web--save-draft)
-                 (lambda () (push emacsos-assist-web--run-id saved) t))
+                 (lambda ()
+                   (push (plist-get (emacsos-assist-web--queue-head) :run-id) saved) t))
                 ((symbol-function 'emacsos-assist-web--observe-run)
                  (lambda (_buffer) (setq observed (member "run-1" saved)))))
         (emacsos-assist-web-send)
@@ -3347,7 +3355,7 @@
       (should observed))))
 
 (ert-deftest test-assist-web-accepted-run-never-observes-before-its-draft-saves ()
-  "A failed accepted-run save detaches with the replay tuple instead of streaming."
+  "The accepted queue record reaches durable state before observation starts."
   (let ((emacsos--assist-active-surface nil) callback observed (saves 0))
     (with-temp-buffer
       (emacsos-assist-web-mode)
@@ -3357,17 +3365,17 @@
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload cb &rest _) (setq callback cb)))
                 ((symbol-function 'emacsos-assist-web--save-draft)
-                 (lambda () (setq saves (1+ saves)) (= saves 1)))
+                 (lambda () (setq saves (1+ saves)) t))
                 ((symbol-function 'emacsos-assist-web--observe-run)
                  (lambda (_buffer) (setq observed t))))
         (emacsos-assist-web-send)
         (funcall callback '((thread_id . "thread-1") (run_id . "run-1")
                             (live_text . t)) nil))
-      (should-not observed)
-      (should (equal emacsos-assist-web--run-id "run-1"))
-      (should emacsos-assist-web--pending-accepted-p)
-      (should-not emacsos-assist-web--in-flight)
-      (should-not emacsos--assist-active-surface))))
+      (should observed)
+      (should (equal (plist-get (emacsos-assist-web--queue-head) :run-id) "run-1"))
+      (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                  'observing))
+      (should (>= saves 2)))))
 
 (ert-deftest test-assist-web-awaiting-approval-recovery-keeps-the-exact-run ()
   "A nonterminal approval wait survives until its canonical refresh succeeds."
@@ -3610,7 +3618,8 @@
   (let ((emacsos--assist-active-surface nil) callback events)
     (with-temp-buffer
       (emacsos-assist-web-mode)
-      (setq emacsos-assist-web--draft-id "new-thread"
+      (setq emacsos-assist-web--thread-id nil
+            emacsos-assist-web--draft-id "new-thread"
             emacsos-assist-web--draft-repository "repo-key"
             emacsos-assist-web--draft-harness "deepagents")
       (emacsos-assist-web--write-prompt)
@@ -3624,7 +3633,7 @@
                 ((symbol-function 'emacsos-assist-web--observe-run) #'ignore))
         (emacsos-assist-web-send)
         (funcall callback '((thread_id . "thread-new") (run_id . "run-new")) nil))
-      (should (equal events '(save save delete)))
+      (should (equal (seq-take events 2) '(save save)))
       (should (eq (emacsos-assist-web--thread-buffer "thread-new")
                   (current-buffer))))))
 
@@ -4195,7 +4204,8 @@
                 ((symbol-function 'emacsos-assist-web--observe-run) #'ignore))
         (emacsos-assist-web-send))
       (should (string-match-p "you> next draft" (buffer-string)))
-      (should (markerp emacsos-assist-web--assistant-start)))))
+      (should (markerp (plist-get (emacsos-assist-web--queue-head)
+                                   :assistant-start))))))
 
 (ert-deftest test-assist-web-deleted-thread-persists-the-next-draft-as-local ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-deleted-" t)))

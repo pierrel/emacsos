@@ -848,8 +848,13 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
         (funcall callback nil token-error)
       (if (not (emacsos-assist-web--safe-token-p token))
         (funcall callback nil "Assist Web token is missing or invalid")
-      (if (>= (length emacsos-assist-web--requests)
-              emacsos-assist-web-max-concurrent-requests)
+      ;; Invalid endpoints are a local, deterministic rejection.  Report one
+      ;; even if unrelated requests presently consume the transport budget.
+      (if (and (>= (length emacsos-assist-web--requests)
+                  emacsos-assist-web-max-concurrent-requests)
+               (condition-case nil
+                   (progn (emacsos-assist-web--endpoint path) t)
+                 (error nil)))
           (funcall callback nil "Too many Assist Web requests are already running")
         (let* ((url-request-method method)
                (url-request-extra-headers
@@ -3363,14 +3368,15 @@ could release a pre-header SSE reservation later."
   (if (not emacsos-assist-web--queue)
       (unwind-protect
           (emacsos-assist-web--save-draft)
-        (emacsos-assist-web--legacy-stream-cleanup t t))
+        (emacsos-assist-web--stream-cleanup t t))
     (unwind-protect
         (emacsos-assist-web--save-draft)
       (dolist (entry emacsos-assist-web--queue)
         (emacsos-assist-web--release-handshake entry))
-      (setq emacsos-assist-web--stream-entry nil
-            emacsos-assist-web--post-entry nil)
-      (emacsos-assist-web--legacy-stream-cleanup t t))))
+      ;; Use the public cleanup wrapper so a killed queue owner releases the
+      ;; exact observer before the legacy transport state is discarded.
+      (emacsos-assist-web--stream-cleanup t t)
+      (setq emacsos-assist-web--post-entry nil))))
 
 (defun emacsos-assist-web--start-post (entry)
   "Asynchronously submit ENTRY, serializing only acknowledgement callbacks."
@@ -3448,7 +3454,14 @@ could release a pre-header SSE reservation later."
                                   (setq emacsos-assist-web--thread-id thread-id
                                         emacsos-assist-web--draft-id nil)
                                   (unless (emacsos-assist-web--save-draft)
-                                    (error "accepted; local recovery could not be saved")))
+                                    (error "accepted; local recovery could not be saved"))
+                                  ;; The canonical thread record is durable now;
+                                  ;; retire the unowned new-thread draft before
+                                  ;; starting an observer which might outlive it.
+                                  (when (and (not existing-thread-id)
+                                             (not (emacsos-assist-web--delete-cache
+                                                   "drafts/new-thread.json")))
+                                    (error "accepted; local draft could not be retired")))
                                 (when (buffer-live-p owner)
                                   (with-current-buffer owner
                                     (emacsos-assist-web--start-observation current)
@@ -3527,7 +3540,11 @@ could release a pre-header SSE reservation later."
           (setq emacsos-assist-web--stream-entry entry)
           (emacsos-assist-web--save-draft)
           (emacsos-assist-web--sync-active-surface)
-          (emacsos-assist-web--observe-run (current-buffer)))))))
+          ;; The transport constructor still supplies the HTTP mechanics, but
+          ;; it must receive this entry's Run rather than a selected-buffer
+          ;; singleton.  Its later SSE callbacks are guarded by ENTRY/EPOCH.
+          (let ((emacsos-assist-web--run-id (plist-get entry :run-id)))
+            (emacsos-assist-web--observe-run (current-buffer))))))))
 
 (defun emacsos-assist-web--event-filter (url-filter target generation)
   "Bind legacy SSE parsing to its captured queue entry, never selected buffer state."
@@ -3677,13 +3694,26 @@ could release a pre-header SSE reservation later."
                  (emacsos-assist-web--save-draft))))) nil t)))))
 
 (defun emacsos-assist-web-abort ()
-  "Abort or detach the exact currently observed canonical Run."
+  "Abort a posting entry or detach the exact currently observed Run."
   (interactive)
   (if-let ((entry emacsos-assist-web--stream-entry))
       (emacsos-assist-web--abort-entry (plist-get entry :key))
-    (if emacsos-assist-web--queue
-        (message "No Assist run is being observed")
-      (emacsos-assist-web--legacy-abort))))
+    (if-let ((entry emacsos-assist-web--post-entry))
+        (progn
+          ;; POST may have reached Assist even though this client will never
+          ;; inspect its callback.  Keep the immutable tuple, invalidate that
+          ;; callback, and make the next Send replay the same key.
+          (cl-incf (plist-get entry :epoch))
+          (setf (plist-get entry :state) 'acceptance-unknown)
+          (setq emacsos-assist-web--post-entry nil)
+          (emacsos-assist-web--entry-status
+           entry "stopped waiting; acceptance unknown; Send retries safely")
+          (emacsos-assist-web--save-draft)
+          (emacsos-assist-web--sync-active-surface)
+          (message "Stopped waiting for acceptance; Send reuses this exact message"))
+      (if emacsos-assist-web--queue
+          (message "No Assist run is being observed")
+        (emacsos-assist-web--legacy-abort)))))
 
 (defun emacsos-assist-web--dismiss-entry (key)
   "Dismiss only the rejected entry addressed by KEY."
@@ -3841,6 +3871,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
         (let ((entry (emacsos-assist-web--entry text)))
           (setq emacsos-assist-web--queue
                 (append emacsos-assist-web--queue (list entry)))
+          (cl-incf emacsos-assist-web--refresh-generation)
           (emacsos-assist-web--entry-render entry)
           (emacsos-assist-web--replace-input "")
           (emacsos-assist-web--save-draft)))
@@ -3853,6 +3884,9 @@ Nothing in SOURCE is retired until the complete destination record is durable."
           (let ((entry (emacsos-assist-web--entry text)))
             (setq emacsos-assist-web--queue
                   (append emacsos-assist-web--queue (list entry)))
+            ;; A snapshot begun before this locally durable turn must never
+            ;; redraw over its queue-owned markers.
+            (cl-incf emacsos-assist-web--refresh-generation)
             (emacsos-assist-web--entry-render entry)
             (emacsos-assist-web--replace-input "")
             (if (emacsos-assist-web--save-draft)
