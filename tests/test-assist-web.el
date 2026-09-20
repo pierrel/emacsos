@@ -1499,16 +1499,19 @@
     (should (equal emacsos-assist-web--stream-status "invalid Assist delta"))))
 
 (ert-deftest test-assist-web-stream-terminal-tail-reconciles-authoritatively ()
-  (with-temp-buffer
-      (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
-      (setq emacsos-assist-web--thread-id "thread-1")
-      (emacsos-assist-web--append-pending "hello") (emacsos-assist-web--reset-assistant 1)
-      (emacsos-assist-web--append-delta 1 1 "\r")
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (_m _p _v callback &rest _) (funcall callback test-assist-web--snapshot nil)))
-                ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore))
-        (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}"))
-      (should (equal (alist-get 'text (car (alist-get 'messages emacsos-assist-web--snapshot))) "old"))))
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-terminal-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (emacsos-assist-web--append-pending "hello") (emacsos-assist-web--reset-assistant 1)
+          (emacsos-assist-web--append-delta 1 1 "\r")
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_m _p _v callback &rest _) (funcall callback test-assist-web--snapshot nil)))
+                    ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore))
+            (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}"))
+          (should (equal (alist-get 'text (car (alist-get 'messages emacsos-assist-web--snapshot))) "old")))
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
   (with-temp-buffer
@@ -1815,6 +1818,7 @@
   (let ((buffer (generate-new-buffer " *assist-rejected-refresh*"))
         (window (selected-window))
         (old-buffer (window-buffer (selected-window)))
+        (emacsos-assist-web-cache-directory (make-temp-file "assist-web-rejected-" t))
         (good (copy-tree test-assist-web--snapshot))
         (bad nil))
     (setf (alist-get 'messages good)
@@ -1849,7 +1853,9 @@
             (cl-letf (((symbol-function 'emacsos-assist-web--request)
                        (lambda (_m _p _v callback &rest _) (funcall callback bad nil)))
                       ((symbol-function 'emacsos-assist-web--try-write-cache)
-                       (lambda (&rest _) (ert-fail "rejected refresh must not cache"))))
+                       (lambda (&rest _) (ert-fail "rejected refresh must not cache")))
+                      ((symbol-function 'emacsos-assist-web--render)
+                       (lambda (&rest _) (ert-fail "rejected refresh must not redraw"))))
               (emacsos-assist-web-refresh-thread))
             (should (equal emacsos-assist-web--snapshot before))
             (should (equal (mapcar (lambda (message) (alist-get 'id message))
@@ -1888,7 +1894,8 @@
             (should (equal emacsos-assist-web--stream-status
                            "older history rejected; cached; C-c C-a l retries"))))
       (set-window-buffer window old-buffer)
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-first-refresh-rejection-has-no-cache-status ()
   (let ((bad (copy-tree test-assist-web--snapshot)))
@@ -1908,6 +1915,8 @@
          (snapshot (copy-tree test-assist-web--snapshot))
          (flag (nth 0 emacsos-assist-web--subdivision-flags))
          (buffer nil)
+         (list-buffer nil)
+         (emacsos-assist-web-cache-directory (make-temp-file "assist-web-list-" t))
          (emacsos-assist-web--catalog (test-assist-web--catalog thread)))
     (setf (alist-get 'text (car (alist-get 'messages snapshot)))
           (concat "a\r\nb " flag))
@@ -1917,7 +1926,8 @@
                    (lambda (_m _p _v callback &rest _) (funcall callback snapshot nil)))
                   ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore)
                   ((symbol-function 'switch-to-buffer) #'ignore))
-          (with-current-buffer (get-buffer-create emacsos-assist-web--thread-list-buffer-name)
+          (setq list-buffer (get-buffer-create emacsos-assist-web--thread-list-buffer-name))
+          (with-current-buffer list-buffer
             (emacsos-assist-web-thread-list-mode)
             (emacsos-assist-web--render-thread-list)
             (goto-char (emacsos-assist-web--thread-row-position "thread-1"))
@@ -1927,7 +1937,9 @@
             (should (string-match-p (regexp-quote (concat "a\nb " flag)) (buffer-string)))
             (should (equal (alist-get 'text (car (alist-get 'messages emacsos-assist-web--snapshot)))
                            (concat "a\nb " flag)))))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (buffer-live-p list-buffer) (kill-buffer list-buffer))
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-terminal-refresh-releases-a-live-observer ()
   (let ((emacsos--assist-active-surface nil))
