@@ -3325,22 +3325,29 @@ could release a pre-header SSE reservation later."
                             (if (and emacsos-assist-web--thread-id
                                      (not (equal thread-id emacsos-assist-web--thread-id)))
                                 (error "Assist Web send changed thread identity")
-                              (setq emacsos-assist-web--thread-id thread-id
-                                    emacsos-assist-web--draft-id nil)
                               (setf (plist-get current :run-id) run-id
                                     (plist-get current :live-text)
                                     (and (alist-get 'live_text value) t)
                                     (plist-get current :state) 'accepted-unobserved)
-                              (unless (emacsos-assist-web--save-draft)
-                                (error "accepted; local recovery could not be saved"))
                               (let ((owner buffer))
-                                (when (and canonical (not (eq canonical buffer)))
-                                  (emacsos-assist-web--adopt-canonical-buffer buffer canonical)
-                                  (setq owner canonical))
+                                ;; The destination cache is the first durable
+                                ;; canonical owner.  Do not give the source a
+                                ;; thread id before its merge has succeeded:
+                                ;; otherwise a failed destination write leaves
+                                ;; two buffers claiming the same thread.
+                                (if (and canonical (not (eq canonical buffer)))
+                                    (progn
+                                      (emacsos-assist-web--adopt-canonical-buffer
+                                       buffer canonical)
+                                      (setq owner canonical))
+                                  (setq emacsos-assist-web--thread-id thread-id
+                                        emacsos-assist-web--draft-id nil)
+                                  (unless (emacsos-assist-web--save-draft)
+                                    (error "accepted; local recovery could not be saved")))
                                 (when (buffer-live-p owner)
                                   (with-current-buffer owner
-                                  (emacsos-assist-web--start-observation current)
-                                  (emacsos-assist-web--pump-posts)))))))
+                                    (emacsos-assist-web--start-observation current)
+                                    (emacsos-assist-web--pump-posts)))))))
                         (error
                          (setf (plist-get current :state) 'acceptance-unknown)
                          (emacsos-assist-web--entry-status
