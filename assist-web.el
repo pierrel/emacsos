@@ -1287,8 +1287,8 @@ the canonical snapshot must retain its durable identity."
                 url-http-chunked-length)))
     (point-max)))
 
-(defun emacsos-assist-web--drain-events (target generation decoded-end)
-  "Consume decoded SSE through DECODED-END and dispatch it to TARGET.
+(defun emacsos-assist-web--drain-events (target generation decoded-end &optional entry)
+  "Consume decoded SSE through DECODED-END for TARGET and optional exact ENTRY.
 
 The current response buffer remains owned by `url-http'.  Parsing stops at its
 decoder-confirmed entity boundary, and pruning preserves every byte still
@@ -1334,7 +1334,11 @@ addressed by the stock chunk decoder."
                  ((string-prefix-p "data: " line) (setq data (substring line 6)))))
               (when (and event (buffer-live-p target)
                          (with-current-buffer target
-                           (= generation emacsos-assist-web--stream-generation)))
+                           (if entry
+                               (and (eq entry emacsos-assist-web--stream-entry)
+                                    (emacsos-assist-web--entry-callback-current-p
+                                     entry generation))
+                             (= generation emacsos-assist-web--stream-generation))))
                 (emacsos-assist-web--dispatch-event target event (or data "")))
               (setq start record-end)
               (set-marker marker start)
@@ -1351,9 +1355,16 @@ addressed by the stock chunk decoder."
             (setq emacsos-assist-web--stream-unconsumed-bytes 0)
             (when (and (buffer-live-p target)
                        (with-current-buffer target
-                         (= generation emacsos-assist-web--stream-generation)))
-              (emacsos-assist-web--stream-interrupted
-               target "Assist event is too large")))
+                         (if entry
+                             (and (eq entry emacsos-assist-web--stream-entry)
+                                  (emacsos-assist-web--entry-callback-current-p
+                                   entry generation))
+                           (= generation emacsos-assist-web--stream-generation))))
+              (if entry
+                  (emacsos-assist-web--entry-observation-interrupted
+                   entry generation "Assist event is too large")
+                (emacsos-assist-web--stream-interrupted
+                 target "Assist event is too large"))))
         ;; A delimiter can span callbacks.  Rescan only its final three bytes.
         (set-marker scan-marker (max start (- end 3))))
       ;; Discard only bytes neither the parser nor stock decoder can address.
@@ -3046,6 +3057,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (list :text text :state (or state 'queued) :key key
         :epoch 0 :run-id nil :live-text nil :rendered nil
         :recovered-ready nil
+        :stream-process nil :stream-response nil :stream-header-timer nil
+        :stream-generation 0
         :user-start nil :assistant-start nil :assistant-end nil
         :stream-attempt nil :stream-index 0 :stream-assistant-bytes 0))
 
@@ -3328,6 +3341,14 @@ cannot safely claim the shared surface until its exact re-observation settles."
       (if-let ((entry emacsos-assist-web--stream-entry))
           (condition-case problem
               (cond
+             ((equal event "status")
+              (let* ((status (json-parse-string data :object-type 'alist))
+                     (text (alist-get 'status status)))
+                (unless (and (listp status)
+                             (= (cl-count 'status status :key #'car) 1)
+                             (emacsos-conversation-valid-status-p text))
+                  (error "invalid Assist status"))
+                (emacsos-assist-web--set-status text)))
              ((equal event "assistant-reset")
               (emacsos-assist-web--entry-reset-assistant
                entry (alist-get 'attempt (json-parse-string data :object-type 'alist))))
@@ -3339,15 +3360,24 @@ cannot safely claim the shared surface until its exact re-observation settles."
              ((equal event "assistant-truncated")
               (emacsos-assist-web--entry-replace-empty-assistant-status
                entry "live text truncated; waiting for final")
-              (emacsos-assist-web--set-status "live text truncated; waiting for final"))
+             (emacsos-assist-web--set-status "live text truncated; waiting for final"))
              ((equal event "terminal") (emacsos-assist-web--stream-finish target))
+             ((equal event "error")
+              (let ((detail (alist-get 'detail
+                                       (json-parse-string data :object-type 'alist))))
+                (emacsos-assist-web--entry-observation-interrupted
+                 entry (plist-get entry :epoch)
+                 (if (equal detail "run-store-unavailable")
+                     "observation unavailable; operator repair required"
+                   "observation interrupted"))))
              ;; Queue transport recognizes only entry-owned payloads here.
-             ;; A late singleton status/closure event cannot choose a region.
+             ;; A late singleton closure cannot choose a region.
              (t nil))
             (error
              (emacsos-assist-web--entry-replace-empty-assistant-status
               entry "unverified; refresh")
-             (emacsos-assist-web--set-unverified-status (error-message-string problem))))
+             (emacsos-assist-web--entry-observation-interrupted
+              entry (plist-get entry :epoch) (error-message-string problem))))
         (unless emacsos-assist-web--queue
           (emacsos-assist-web--legacy-dispatch-event target event data))))))
 
@@ -3368,11 +3398,24 @@ older observer cannot consume the token reserved by a later retry of ENTRY."
 
 (defun emacsos-assist-web--stream-cleanup (&optional keep-pending no-render)
   "Clean up the current entry's stream and its pre-header budget token."
-  (let ((entry emacsos-assist-web--stream-entry))
-    (when entry (emacsos-assist-web--release-handshake entry))
-    (prog1 (emacsos-assist-web--legacy-stream-cleanup keep-pending no-render)
-      (when (eq entry emacsos-assist-web--stream-entry)
-        (setq emacsos-assist-web--stream-entry nil)))))
+  (if (not emacsos-assist-web--queue)
+      (emacsos-assist-web--legacy-stream-cleanup keep-pending no-render)
+    (when-let ((entry emacsos-assist-web--stream-entry))
+      (let ((process (plist-get entry :stream-process))
+            (response (plist-get entry :stream-response))
+            (timer (plist-get entry :stream-header-timer)))
+        ;; Queue transport is entry-owned.  Do not let a terminal/abort path
+        ;; re-enter the legacy singleton cleanup merely because a buffer also
+        ;; has old nonqueue locals from before recovery.
+        (when (timerp timer) (cancel-timer timer))
+        (setf (plist-get entry :stream-process) nil
+              (plist-get entry :stream-response) nil
+              (plist-get entry :stream-header-timer) nil)
+        (setq emacsos-assist-web--stream-entry nil)
+        (emacsos-assist-web--release-handshake entry)
+        (when (process-live-p process) (delete-process process))
+        (when (buffer-live-p response)
+          (emacsos-assist-web--kill-buffer-later response))))))
 
 (defun emacsos-assist-web--buffer-killed ()
   "Persist recoverable queue state and release every entry-owned token.
@@ -3567,11 +3610,199 @@ could release a pre-header SSE reservation later."
           (emacsos-assist-web--sync-active-surface)
           (emacsos-assist-web--entry-add-action
            entry "Abort/Detach" #'emacsos-assist-web--abort-entry)
-          ;; The transport constructor still supplies the HTTP mechanics, but
-          ;; it must receive this entry's Run rather than a selected-buffer
-          ;; singleton.  Its later SSE callbacks are guarded by ENTRY/EPOCH.
-          (let ((emacsos-assist-web--run-id (plist-get entry :run-id)))
-            (emacsos-assist-web--observe-run (current-buffer))))))))
+          (emacsos-assist-web--observe-entry entry))))))
+
+(defun emacsos-assist-web--entry-observation-interrupted (entry epoch status)
+  "Retire ENTRY's exact observer at EPOCH without touching another entry."
+  (when (and (emacsos-assist-web--entry-callback-current-p entry epoch)
+             (eq entry emacsos-assist-web--stream-entry)
+             (eq (emacsos-assist-web--entry-state entry) 'observing))
+    (when-let ((timer (plist-get entry :stream-header-timer)))
+      (when (timerp timer) (cancel-timer timer)))
+    (let ((process (plist-get entry :stream-process))
+          (response (plist-get entry :stream-response)))
+      ;; Clear exact ownership before tearing transport down: its sentinel can
+      ;; run synchronously and must observe an inert stale callback.
+      (setf (plist-get entry :stream-process) nil
+            (plist-get entry :stream-response) nil
+            (plist-get entry :stream-header-timer) nil
+            (plist-get entry :state) 'accepted-unobserved)
+      (when (eq entry emacsos-assist-web--stream-entry)
+        (setq emacsos-assist-web--stream-entry nil))
+      (when (process-live-p process) (delete-process process))
+      ;; A filter may retire this entry from inside RESPONSE.  Let url-http
+      ;; complete its final marker update before reclaiming that buffer.
+      (when (buffer-live-p response)
+        (emacsos-assist-web--kill-buffer-later response)))
+    (emacsos-assist-web--cleanup-handshake entry epoch)
+    (emacsos-assist-web--entry-status entry status)
+    (emacsos-assist-web--save-draft)
+    (emacsos-assist-web--sync-active-surface)))
+
+(defun emacsos-assist-web--interrupt-entry-in-buffer (target entry epoch status)
+  "Apply ENTRY/EPOCH interruption only while TARGET remains its owner."
+  (when (buffer-live-p target)
+    (with-current-buffer target
+      (emacsos-assist-web--entry-observation-interrupted entry epoch status))))
+
+(defun emacsos-assist-web--entry-current-in-buffer-p (target entry epoch)
+  "Return non-nil only when TARGET still owns ENTRY at exact EPOCH."
+  (and (buffer-live-p target)
+       (with-current-buffer target
+         (and (eq entry emacsos-assist-web--stream-entry)
+              (emacsos-assist-web--entry-callback-current-p entry epoch)))))
+
+(defun emacsos-assist-web--entry-finish-observation-response (target entry epoch response)
+  "Settle exact ENTRY/EPOCH when RESPONSE ends without a terminal event."
+  (let ((unavailable (and (buffer-live-p response)
+                          (emacsos-assist-web--run-store-unavailable-response-p response))))
+    ;; url-http runs this from its final filter call.  Defer so that filter can
+    ;; still dispatch a final terminal or error event first.
+    (run-at-time
+     0 nil
+     (lambda (expected expected-epoch store-unavailable)
+       (when (emacsos-assist-web--entry-current-in-buffer-p
+              target expected expected-epoch)
+         (emacsos-assist-web--interrupt-entry-in-buffer
+          target expected expected-epoch
+          (if store-unavailable
+              "observation unavailable; operator repair required"
+            "observation disconnected"))))
+     entry epoch unavailable)))
+
+(defun emacsos-assist-web--entry-stream-sentinel (url-sentinel target entry epoch)
+  "Preserve URL-SENTINEL and retire only the captured ENTRY/EPOCH on close."
+  (lambda (ended event)
+    (when (functionp url-sentinel) (funcall url-sentinel ended event))
+    (when (and (not (process-live-p ended))
+               (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
+               (eq ended (plist-get entry :stream-process)))
+      (emacsos-assist-web--interrupt-entry-in-buffer
+       target entry epoch "observation disconnected"))))
+
+(defun emacsos-assist-web--entry-event-filter (url-filter target entry epoch)
+  "Wrap URL-FILTER and parse SSE only for captured ENTRY/EPOCH.
+
+The parser's response-local markers and ENTRY's render markers remain scoped to
+this one transport.  No late callback can select a successor from globals."
+  (lambda (process bytes)
+    (let ((response (process-buffer process)))
+      (when (functionp url-filter) (funcall url-filter process bytes))
+      (when (and (buffer-live-p response)
+                 (emacsos-assist-web--entry-current-in-buffer-p target entry epoch))
+        (with-current-buffer response
+          (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
+            (if (not (and (integerp url-http-response-status)
+                          (<= 200 url-http-response-status 299)
+                          (stringp url-http-content-type)
+                          (string-match-p "\\`text/event-stream\\(?:[ ;]\\|\\'\\)"
+                                          (downcase url-http-content-type))))
+                ;; Keep the sanitized 503 body until its URL completion
+                ;; callback classifies durable-observation unavailability.
+                (unless (= url-http-response-status 503)
+                  (emacsos-assist-web--interrupt-entry-in-buffer
+                   target entry epoch "Assist observation was rejected"))
+              (with-current-buffer target
+                (when-let ((timer (plist-get entry :stream-header-timer)))
+                  (when (timerp timer) (cancel-timer timer))
+                  (setf (plist-get entry :stream-header-timer) nil)))
+              ;; Header admission hands the slot back before parsing a long
+              ;; stream.  Releasing twice is harmless and generation-guarded.
+              (with-current-buffer target
+                (emacsos-assist-web--cleanup-handshake entry epoch))
+              (let* ((decoded-end (emacsos-assist-web--decoded-end))
+                     (body-start (min (point-max)
+                                      (1+ (marker-position url-http-end-of-headers))))
+                     (pending-bytes (emacsos-assist-web--range-bytes
+                                     (or decoded-end body-start) (point-max))))
+                (cond
+                 ((and (boundp 'url-http-content-length)
+                       (integerp url-http-content-length)
+                       (or (< url-http-content-length 0)
+                           (> url-http-content-length emacsos-assist-web-max-response-bytes)))
+                  (emacsos-assist-web--interrupt-entry-in-buffer
+                   target entry epoch "Assist stream response is too large"))
+                 ((and (boundp 'url-http-transfer-encoding)
+                       (equal url-http-transfer-encoding "chunked")
+                       (boundp 'url-http-chunked-length)
+                       (integerp url-http-chunked-length)
+                       (> url-http-chunked-length emacsos-assist-web-max-stream-chunk-bytes))
+                  (emacsos-assist-web--interrupt-entry-in-buffer
+                   target entry epoch "Assist stream transport chunk is too large"))
+                 ((> pending-bytes emacsos-assist-web-max-header-bytes)
+                  (emacsos-assist-web--interrupt-entry-in-buffer
+                   target entry epoch "Assist stream transport framing is too large"))
+                 (t (emacsos-assist-web--drain-events target epoch decoded-end entry)))))))))))
+
+(defun emacsos-assist-web--observe-entry (entry)
+  "Open ENTRY's SSE with entry-owned process, response, timer, and epoch."
+  (let ((token (emacsos-assist-web--read-token))
+        (buffer (current-buffer))
+        (epoch (plist-get entry :epoch)))
+    (if (not (emacsos-assist-web--safe-token-p token))
+        (emacsos-assist-web--entry-observation-interrupted entry epoch
+                                                            "token missing or invalid")
+      (condition-case problem
+          (let* ((url-request-method "GET")
+                 (url-request-extra-headers `(("Authorization" . ,(concat "Bearer " token))
+                                              ("Accept" . "text/event-stream")))
+                 (url (emacsos-assist-web--endpoint
+                       (format "threads/%s/runs/%s/events"
+                               (emacsos-assist-web--require-id emacsos-assist-web--thread-id)
+                               (emacsos-assist-web--require-id (plist-get entry :run-id)))))
+                 (response
+                  (let ((url-mime-encoding-string "identity")
+                        (url-debug nil)
+                        (url-automatic-caching nil)
+                        (url-http-attempt-keepalives nil)
+                        (gnutls-trustfiles (emacsos-assist-web--trustfiles)))
+                    (emacsos-assist-web--close-idle-origin-connections)
+                    (url-retrieve
+                     url
+                     (lambda (_status)
+                       (emacsos-assist-web--entry-finish-observation-response
+                        buffer entry epoch (current-buffer)))
+                     nil t t)))
+                 (process (and (buffer-live-p response) (get-buffer-process response))))
+            (unless process (error "observation unavailable"))
+            (with-current-buffer response
+              (setq-local url-max-redirections 0
+                          url-http-no-retry t
+                          url-debug nil
+                          url-automatic-caching nil))
+            (setf (plist-get entry :stream-response) response
+                  (plist-get entry :stream-process) process
+                  (plist-get entry :stream-generation) epoch)
+            ;; Keep url-http's stock decoding/filtering in front of our exact
+            ;; entry filter.  The wrapper captures ENTRY/EPOCH, so delayed
+            ;; bytes cannot select another queue record.
+            (let ((stock-filter (process-filter process)))
+              (set-process-filter
+               process
+               (emacsos-assist-web--guarded-filter
+                (emacsos-assist-web--entry-event-filter stock-filter buffer entry epoch)
+                (lambda (active problem)
+                  (if (and (emacsos-assist-web--entry-current-in-buffer-p buffer entry epoch)
+                           (eq active (plist-get entry :stream-process)))
+                      (emacsos-assist-web--interrupt-entry-in-buffer buffer entry epoch problem)
+                    (when (process-live-p active) (delete-process active))))
+                t)))
+            (set-process-sentinel
+             process
+              (emacsos-assist-web--entry-stream-sentinel
+              (process-sentinel process) buffer entry epoch))
+            (setf (plist-get entry :stream-header-timer)
+                  (run-at-time emacsos-assist-web-request-timeout nil
+                               (lambda ()
+                                 (when (and (emacsos-assist-web--entry-current-in-buffer-p buffer entry epoch)
+                                            (buffer-live-p (plist-get entry :stream-response))
+                                            (with-current-buffer (plist-get entry :stream-response)
+                                              (not (and (boundp 'url-http-end-of-headers)
+                                                        url-http-end-of-headers))))
+                                   (emacsos-assist-web--interrupt-entry-in-buffer
+                                    buffer entry epoch "Assist observation timed out"))))))
+        (error (emacsos-assist-web--entry-observation-interrupted
+                entry epoch (error-message-string problem)))))))
 
 (defun emacsos-assist-web--event-filter (url-filter target generation)
   "Bind legacy SSE parsing to its captured queue entry, never selected buffer state."
@@ -3585,24 +3816,8 @@ could release a pre-header SSE reservation later."
                  (with-current-buffer target emacsos-assist-web--queue))
             (lambda (&rest _) nil)
           (emacsos-assist-web--legacy-event-filter url-filter target generation))
-      (let ((epoch (plist-get entry :epoch))
-            (legacy (emacsos-assist-web--legacy-event-filter url-filter target generation)))
-        (lambda (process bytes)
-          (when (and (buffer-live-p target)
-                     (with-current-buffer target
-                       (and (eq entry emacsos-assist-web--stream-entry)
-                            (emacsos-assist-web--entry-callback-current-p entry epoch))))
-            (with-current-buffer target
-              (funcall legacy process bytes)
-              (when (and (buffer-live-p (process-buffer process))
-                         (with-current-buffer (process-buffer process)
-                           (and (boundp 'url-http-end-of-headers)
-                                url-http-end-of-headers)))
-                ;; Both a validated event stream and a bounded rejection have
-                ;; crossed the header boundary; neither may keep this client-side
-                ;; handshake slot while Assist owns (or refuses) the long stream.
-                (emacsos-assist-web--cleanup-handshake entry epoch))
-              )))))))
+      (emacsos-assist-web--entry-event-filter url-filter target entry
+                                               (plist-get entry :epoch)))))
 
 (defun emacsos-assist-web--stream-finish (buffer &optional run-still-active)
   "Persist terminal truth for the exact observed queue entry before advancing."
