@@ -3886,6 +3886,101 @@
         (should-not emacsos-assist-web--requests)
         (should-not (plist-get entry :handshake-token))))))
 
+(ert-deftest test-assist-web-restore-normalization-never-starts-network-before-save ()
+  "A transport-only restored state stays inert if normalized cache persistence fails."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                 (lambda (&rest _)
+                   '((text . "")
+                     (queue . (((text . "A")
+                                (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                (state . "posting")))))))
+                ((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web--restore-draft))
+      (should-not requested)
+      (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                  'acceptance-unknown)))))
+
+(ert-deftest test-assist-web-recovered-create-requires-restore-before-send ()
+  "Reset recovery keeps S2 separate until the user explicitly restores it."
+  (let (requests)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id nil
+            emacsos-assist-web--draft-id "new-thread"
+            emacsos-assist-web--draft-repository "repo"
+            emacsos-assist-web--draft-harness "deepagents")
+      (emacsos-assist-web--write-prompt)
+      (insert "later tail")
+      (let ((entry (emacsos-assist-web--entry "S2" 'recovered-head nil)))
+        (setq emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path payload _callback &rest _)
+                     (push (list method path payload) requests))))
+          (emacsos-assist-web-send)
+          (should-not requests)
+          (should (equal (emacsos-assist-web--input) "later tail"))
+          (should (eq (emacsos-assist-web--queue-entry nil) entry))
+          (should-not emacsos-assist-web--thread-id)
+          (emacsos-assist-web--restore-create-entry nil)
+          (should (plist-get entry :recovered-ready))
+          (emacsos-assist-web-send))
+        (should (equal (caar requests) "POST"))
+        (should (equal (cadar requests) "threads"))
+        (should (equal (alist-get 'message (caddar requests)) "S2"))
+        (should (equal (emacsos-assist-web--input) "later tail"))))))
+
+(ert-deftest test-assist-web-reconcile-persists-snapshot-before-retiring-entries ()
+  "Terminal queue entries stay visible unless snapshot then queue persistence succeeds."
+  (let (events rendered)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let ((entry (emacsos-assist-web--entry
+                    "A" 'terminal-unreconciled
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setf (plist-get entry :run-id) "run-a")
+        (setq emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () (push 'queue events) t))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) (push 'snapshot events) t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (funcall callback test-assist-web--snapshot nil)))
+                  ((symbol-function 'emacsos-assist-web--render)
+                   (lambda (_snapshot) (setq rendered t))))
+          (emacsos-assist-web--reconcile-when-settled))
+        (should rendered)
+        (should-not emacsos-assist-web--queue)
+        (should (equal (reverse events) '(queue snapshot queue)))))))
+
+(ert-deftest test-assist-web-abort-detach-button-appears-only-for-observed-entry ()
+  "Queued work retains SEND reachability without a premature detach affordance."
+  (let ((emacsos-assist-web--requests nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (let ((entry (emacsos-assist-web--entry
+                    "A" 'accepted-unobserved
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setf (plist-get entry :run-id) "run-a")
+        (setq emacsos-assist-web--queue (list entry))
+        (emacsos-assist-web--entry-render entry)
+        (should-not (string-match-p "Abort/Detach" (buffer-string)))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--observe-run) #'ignore))
+          (emacsos-assist-web--start-observation entry))
+        (should (string-match-p "Abort/Detach" (buffer-string)))))))
+
 (ert-deftest test-assist-web-transfer-keeps-source-until-its-old-cache-is-retired ()
   "A stale new-thread cache cannot outlive accepted canonical ownership."
   (let ((emacsos--assist-active-surface nil)
