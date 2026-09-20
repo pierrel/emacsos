@@ -436,23 +436,20 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
     (unless (null remaining)
       (error "Assist Web returned an invalid thread transcript"))))
 
-(defun emacsos-assist-web--canonicalize-transcript
-    (messages max-messages max-bytes)
-  "Return canonical copies of MESSAGES within MAX-MESSAGES and MAX-BYTES."
+(defun emacsos-assist-web--canonicalize-transcript (messages max-bytes)
+  "Return canonical copies of MESSAGES within MAX-BYTES."
   (let ((canonical nil)
-        (count 0)
         (total 0))
     (dolist (message messages (nreverse canonical))
       (let* ((text (emacsos-assist-web--canonical-message-text
                     (alist-get 'text message)))
              (bytes (string-bytes text)))
-        (setq count (1+ count))
         (unless (emacsos-assist-web--valid-message-text-p text)
           (error "Assist Web returned an invalid thread message"))
         (when (> bytes emacsos-assist-web--max-message-bytes)
           (error "Assist Web thread message is too large"))
         (setq total (+ total bytes))
-        (when (or (> count max-messages) (> total max-bytes))
+        (when (> total max-bytes)
           (error "Assist Web thread transcript is too large"))
         (let ((copy (copy-tree message)))
           (setf (alist-get 'text copy) text)
@@ -488,7 +485,7 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
       (emacsos-assist-web--require-transcript-limits messages limit-messages limit-bytes)
       (setq messages
             (emacsos-assist-web--canonicalize-transcript
-             messages limit-messages limit-bytes)))
+             messages limit-bytes)))
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
         (unless (and (emacsos-assist-web--object-p message)

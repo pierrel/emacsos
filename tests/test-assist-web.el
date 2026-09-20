@@ -1328,7 +1328,7 @@
       (should (equal emacsos-assist-web--stream-status
                      "invalid Assist delta")))))
 
-(ert-deftest test-assist-web-hot-reload-recovers-provisional-byte-count ()
+(ert-deftest test-assist-web-hot-reload-fails-closed-without-raw-state ()
   (let ((emacsos-assist-web--max-message-bytes 7))
     (with-temp-buffer
       (emacsos-assist-web-mode)
@@ -1347,7 +1347,10 @@
       (should-not (string-match-p "partialx" (buffer-string)))
       (should (= emacsos-assist-web--stream-index 1))
       (should (equal emacsos-assist-web--stream-status
-                     "Assist stream is missing its reset; refresh to reconcile")))))
+                     "Assist stream is missing its reset; refresh to reconcile"))
+      (emacsos-assist-web--reset-assistant 2)
+      (emacsos-assist-web--append-delta 2 1 "new")
+      (should (= emacsos-assist-web--stream-raw-bytes 3)))))
 
 (ert-deftest test-assist-web-canonicalizes-message-line-endings-and-flags ()
   (let* ((snapshot (copy-tree test-assist-web--snapshot))
@@ -1384,6 +1387,28 @@
                                 (car (alist-get 'messages
                                                 (emacsos-assist-web--require-snapshot snapshot))))
                      "\nx")))))
+
+(ert-deftest test-assist-web-raw-aggregate-and-exact-canonical-limits ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'messages snapshot)
+          '(((id . "m-1") (role . "assistant") (text . "\r\nx") (state . "final"))
+            ((id . "m-2") (role . "assistant") (text . "\r\ny") (state . "final"))))
+    (let ((emacsos-assist-web--max-snapshot-transcript-bytes 5))
+      (should-error (emacsos-assist-web--require-snapshot snapshot))))
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot))) "xy")
+    (let ((emacsos-assist-web--max-message-bytes 2)
+          (emacsos-assist-web--max-snapshot-transcript-bytes 2))
+      (should (emacsos-assist-web--require-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-history-page-raw-aggregate-rejects-before-normalization ()
+  (let ((current (copy-tree test-assist-web--snapshot))
+        (page '((thread . ((id . "thread-1") (description . "Thread") (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "\r\nx") (state . "final"))
+                             ((id . "m-minus") (role . "user") (text . "\r\ny") (state . "final")))))))
+    (let ((emacsos-assist-web--max-snapshot-transcript-bytes 5))
+      (should-error (emacsos-assist-web--require-history-page page "thread-1" current "cursor-1")))))
 
 (ert-deftest test-assist-web-rejected-transcript-does-not-partially-canonicalize ()
   (let ((snapshot (copy-tree test-assist-web--snapshot)))
@@ -1425,6 +1450,20 @@
     (should-not (string-match-p (regexp-quote (string #x1f3f4)) (buffer-string)))
     (should (equal emacsos-assist-web--stream-status "invalid Assist delta"))))
 
+(ert-deftest test-assist-web-stream-keeps-multiple-suffix-only-events-bounded ()
+  (let ((flag (nth 0 emacsos-assist-web--subdivision-flags)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
+      (emacsos-assist-web--append-pending "hello") (emacsos-assist-web--reset-assistant 1)
+      (dotimes (index (1- (length flag)))
+        (emacsos-assist-web--append-delta 1 (1+ index) (substring flag index (1+ index)))
+        (should-not (string-match-p (regexp-quote (string #x1f3f4)) (buffer-string))))
+      (emacsos-assist-web--append-delta 1 (length flag) (substring flag (1- (length flag))))
+      (should (string-match-p (regexp-quote flag) (buffer-string)))
+      (emacsos-assist-web--stream-cleanup t t)
+      (should-not emacsos-assist-web--stream-undecided-suffix)
+      (should-not emacsos-assist-web--stream-raw-bytes))))
+
 (ert-deftest test-assist-web-stream-terminal-flushes-only-safe-tails ()
   (dolist (tail (list "\r" (string #x1f3f4)))
     (with-temp-buffer
@@ -1445,6 +1484,18 @@
                                       (substring (nth 0 emacsos-assist-web--subdivision-flags) 0 2))
     (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}")
     (should (equal emacsos-assist-web--stream-status "invalid Assist delta"))))
+
+(ert-deftest test-assist-web-stream-terminal-tail-reconciles-authoritatively ()
+  (let (refreshed)
+    (with-temp-buffer
+      (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--append-pending "hello") (emacsos-assist-web--reset-assistant 1)
+      (emacsos-assist-web--append-delta 1 1 "\r")
+      (cl-letf (((symbol-function 'emacsos-assist-web-refresh-thread)
+                 (lambda (&rest _) (setq refreshed t))))
+        (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}"))
+      (should refreshed))))
 
 (ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
   (with-temp-buffer
@@ -1746,6 +1797,69 @@
                  (lambda (&rest _) (setq rendered t))))
         (emacsos-assist-web-load-older))
       (should-not rendered))))
+
+(ert-deftest test-assist-web-refresh-and-history-rejection-retain-the-view ()
+  (let ((good (copy-tree test-assist-web--snapshot))
+        (bad (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'text (car (alist-get 'messages bad)))
+          (concat "bad" (string #x202e)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode) (setq emacsos-assist-web--thread-id "thread-1")
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) #'ignore))
+        (emacsos-assist-web--render good))
+      (insert "draft")
+      (let ((before (copy-tree emacsos-assist-web--snapshot))
+            (text (buffer-string)))
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_m _p _v callback &rest _) (funcall callback bad nil)))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) (ert-fail "rejected refresh must not cache"))))
+          (emacsos-assist-web-refresh-thread))
+        (should (equal emacsos-assist-web--snapshot before))
+        (should (string-match-p "draft" (buffer-string)))
+        (should (equal emacsos-assist-web--stream-status
+                       "refresh rejected; cached; C-c C-a g retries"))
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_m _p _v callback &rest _) (funcall callback bad nil))))
+          (emacsos-assist-web-load-older))
+        (should (equal emacsos-assist-web--snapshot before))
+        (should (equal emacsos-assist-web--stream-status
+                       "older history rejected; cached; C-c C-a l retries"))
+        (should (string-match-p "draft" text))))))
+
+(ert-deftest test-assist-web-first-refresh-rejection-has-no-cache-status ()
+  (let ((bad (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'text (car (alist-get 'messages bad))) (concat "bad" (string #x202e)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_m _p _v callback &rest _) (funcall callback bad nil))))
+        (emacsos-assist-web-refresh-thread))
+      (should-not emacsos-assist-web--snapshot)
+      (should (equal emacsos-assist-web--stream-status "refresh rejected; C-c C-a g retries")))))
+
+(ert-deftest test-assist-web-show-thread-refreshes-crlf-and-england-flag ()
+  (let* ((thread '((id . "thread-1") (description . "Thread")
+                   (repo_label . "Assist") (status . "ready")))
+         (snapshot (copy-tree test-assist-web--snapshot))
+         (flag (nth 0 emacsos-assist-web--subdivision-flags))
+         (buffer nil))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot)))
+          (concat "a\r\nb " flag))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_m _p _v callback &rest _) (funcall callback snapshot nil)))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore)
+                  ((symbol-function 'switch-to-buffer) #'ignore))
+          (emacsos-assist-web--show-thread thread)
+          (setq buffer (emacsos-assist-web--thread-buffer "thread-1"))
+          (with-current-buffer buffer
+            (should (string-match-p (regexp-quote (concat "a\nb " flag)) (buffer-string)))
+            (should (equal (alist-get 'text (car (alist-get 'messages emacsos-assist-web--snapshot)))
+                           (concat "a\nb " flag)))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest test-assist-web-terminal-refresh-releases-a-live-observer ()
   (let ((emacsos--assist-active-surface nil))

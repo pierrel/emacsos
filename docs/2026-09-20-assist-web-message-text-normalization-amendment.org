@@ -10,10 +10,11 @@ display-spoof validator.  Other tag characters and all other rejected controls
 remain invalid.  Raw wire limits apply before normalization and the same
 canonical limits apply afterward.
 
-Streaming keeps a bounded per-attempt raw suffix for a split CRLF or one of
-those three complete flag sequences.  It accounts raw bytes before accepting a
-delta, appends only validated decidable canonical text, and discards an
-undecided suffix on interruption.  A hot-reloaded attempt without the explicitly
+Streaming keeps a bounded per-attempt raw suffix only when it is a proper
+prefix of CRLF or one of those three complete flag sequences.  Complete flags
+append immediately.  It accounts raw bytes before accepting a delta, appends
+only validated decidable canonical text, and discards an undecided suffix on
+interruption.  A hot-reloaded attempt without the explicitly
 initialized raw state fails closed and refreshes instead of deriving accounting
 from rendered text.
 
