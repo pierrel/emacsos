@@ -3283,6 +3283,54 @@
                   'acceptance-unknown))
       (should (plist-get (emacsos-assist-web--queue-head) :key)))))
 
+(ert-deftest test-assist-web-send-retries-a-proven-429-with-its-exact-key ()
+  "Public Send retains a bounded admission refusal behind its original key."
+  (let ((emacsos--assist-active-surface nil)
+        callbacks)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (insert "hello")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (push callback callbacks)))
+                ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+        (emacsos-assist-web-send)
+        (let ((key (plist-get (emacsos-assist-web--queue-head) :key)))
+          (funcall (car callbacks)
+                   '((http_status . 429) (detail . "pending run limit reached")) nil)
+          (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                      'retryable-rejected))
+          (emacsos-assist-web-send)
+          (should (= (length callbacks) 2))
+          (should (equal (plist-get (emacsos-assist-web--queue-head) :key) key)))))))
+
+(ert-deftest test-assist-web-send-exact-idempotency-conflict-fails-closed ()
+  "Public Send neither retries nor advances past a proven key/text conflict."
+  (let (callback requests)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (insert "A")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest arguments)
+                   (setq requests (1+ (or requests 0))
+                         callback (nth 3 arguments))))
+                ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+        (emacsos-assist-web-send)
+        (funcall callback
+                 '((http_status . 409)
+                   (detail . "Idempotency-Key conflicts with prior message")) nil)
+        (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                    'identity-conflict))
+        (insert "B")
+        (emacsos-assist-web-send)
+        (should (= requests 1))
+        (should (equal (emacsos-assist-web--input) "B"))
+        (should-not (string-match-p "Dismiss" (buffer-string)))))))
+
 (ert-deftest test-assist-web-global-send-outside-thread-is-a-safe-noop ()
   (with-temp-buffer
     (emacsos-assist-web-send)
@@ -3903,6 +3951,7 @@
         (setf (plist-get entry :run-id) "run-a"
               (plist-get entry :handshake-token) token)
         (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--queue-model-p t
               emacsos-assist-web--stream-entry entry
               emacsos-assist-web--requests (list token))
         (emacsos-assist-web--entry-render entry)
@@ -4313,12 +4362,34 @@
     (setq emacsos-assist-web--queue
           (list (emacsos-assist-web--entry
                  "A" 'accepted-unobserved
-                 "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+                 "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+          emacsos-assist-web--queue-model-p t)
     (cl-letf (((symbol-function 'emacsos-assist-web--legacy-dispatch-event)
                (lambda (&rest _) (ert-fail "queue callback reached legacy parser"))))
       (emacsos-assist-web--dispatch-event
        (current-buffer) "assistant-delta"
        "{\"attempt\":1,\"index\":1,\"text\":\"late\"}"))))
+
+(ert-deftest test-assist-web-drained-queue-callback-never-reaches-legacy-stream ()
+  "A callback delivered after reconciliation cannot revive singleton transport."
+  (let (legacy-dispatch legacy-filter)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      ;; Reconciliation has removed the final entry.  No old singleton process
+      ;; exists, so both old dispatch and filter chains must remain unreachable.
+      (setq emacsos-assist-web--queue-model-p t)
+      (cl-letf (((symbol-function 'emacsos-assist-web--legacy-dispatch-event)
+                 (lambda (&rest _) (setq legacy-dispatch t)))
+                ((symbol-function 'emacsos-assist-web--legacy-event-filter)
+                 (lambda (&rest _)
+                   (lambda (&rest _) (setq legacy-filter t)))))
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta"
+         "{\"attempt\":1,\"index\":1,\"text\":\"late\"}")
+        (funcall (emacsos-assist-web--event-filter nil (current-buffer) 0)
+                 nil "late"))
+      (should-not legacy-dispatch)
+      (should-not legacy-filter))))
 
 (ert-deftest test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent ()
   "Every pre-header exit releases only its captured entry generation once."

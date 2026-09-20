@@ -135,8 +135,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar emacsos-assist-web--requests nil)
 (defvar-local emacsos-assist-web--queue nil
   "Ordered resident submission records for this canonical thread buffer.")
-(defvar-local emacsos-assist-web--queue-current nil
-  "The entry whose legacy stream fields are currently materialized.")
+(defvar-local emacsos-assist-web--queue-model-p nil
+  "Non-nil once this buffer has entered the entry-owned queue model.")
 (defvar-local emacsos-assist-web--post-entry nil
   "The one entry whose POST acknowledgement is in flight in this buffer.")
 (defvar-local emacsos-assist-web--stream-entry nil
@@ -149,8 +149,6 @@ The value is nil, `current', `cached', `refresh-failed', or
   "A bounded source draft retained during canonical-buffer adoption.")
 (defvar-local emacsos-assist-web--recovery-action-marker nil
   "Marker for the one visible action that restores a retained source draft.")
-(defvar-local emacsos-assist-web--handshake-token nil
-  "This buffer's entry-owned pre-header SSE request-budget token.")
 (defvar-local emacsos-assist-web--thread-id nil)
 (defvar-local emacsos-assist-web--draft-repository nil)
 (defvar-local emacsos-assist-web--draft-harness nil)
@@ -3038,14 +3036,10 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 (define-key emacsos-assist-web-mode-map (kbd "RET")
             #'emacsos-conversation-activate-or-newline)
 
-(defalias 'emacsos-assist-web--legacy-save-draft
-  (symbol-function 'emacsos-assist-web--save-draft))
 (defalias 'emacsos-assist-web--legacy-restore-draft
   (symbol-function 'emacsos-assist-web--restore-draft))
 (defalias 'emacsos-assist-web--legacy-refresh-thread
   (symbol-function 'emacsos-assist-web-refresh-thread))
-(defalias 'emacsos-assist-web--legacy-observe-run
-  (symbol-function 'emacsos-assist-web--observe-run))
 (defalias 'emacsos-assist-web--legacy-stream-cleanup
   (symbol-function 'emacsos-assist-web--stream-cleanup))
 (defalias 'emacsos-assist-web--legacy-event-filter
@@ -3056,8 +3050,14 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (symbol-function 'emacsos-assist-web-abort))
 (defalias 'emacsos-assist-web--legacy-stream-finish
   (symbol-function 'emacsos-assist-web--stream-finish))
-(defalias 'emacsos-assist-web--legacy-after-change
-  (symbol-function 'emacsos-assist-web--after-change))
+
+(defun emacsos-assist-web--legacy-compatibility-p ()
+  "Return non-nil only before this buffer has entered queue ownership.
+
+The old no-queue renderer and refresh path remain available for a buffer opened
+under earlier code.  Once an entry is resident, delayed callbacks remain queue
+callbacks even after reconciliation leaves the resident list empty."
+  (not emacsos-assist-web--queue-model-p))
 
 ;; A submission is deliberately an ordinary plist.  It is copied into the
 ;; cache without markers or processes, so durable state cannot accidentally
@@ -3081,10 +3081,6 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 (defun emacsos-assist-web--entry-state (entry)
   "Return ENTRY's explicit resident state."
   (plist-get entry :state))
-
-(defun emacsos-assist-web--entry-put (entry property value)
-  "Set PROPERTY on ENTRY and return ENTRY."
-  (plist-put entry property value))
 
 (defun emacsos-assist-web--entry-active-p (entry)
   "Return non-nil when ENTRY owns a live local transport."
@@ -3383,7 +3379,8 @@ consulted; selected-buffer state is never a fallback owner."
           (emacsos-assist-web--set-prompt-refusal
            "local cache full; message remains in draft")
           nil)
-      (setq emacsos-assist-web--queue candidate)
+      (setq emacsos-assist-web--queue candidate
+            emacsos-assist-web--queue-model-p t)
       (cl-incf emacsos-assist-web--refresh-generation)
       (emacsos-assist-web--entry-render entry)
       (emacsos-assist-web--replace-input "")
@@ -3402,6 +3399,7 @@ consulted; selected-buffer state is never a fallback owner."
    ((equal error "Assist Web token is missing or invalid") 'retryable-rejected)
    (error 'acceptance-unknown)
    ((and (alist-get 'thread_id value) (alist-get 'run_id value)) 'accepted)
+   ((= (or (alist-get 'http_status value) 0) 429) 'retryable-rejected)
    ((and (= (or (alist-get 'http_status value) 0) 503)
          (equal (alist-get 'detail value) "run-store-unavailable"))
     'retryable-rejected)
@@ -3507,7 +3505,8 @@ consulted; selected-buffer state is never a fallback owner."
               entry "unverified; refresh")
              (emacsos-assist-web--entry-observation-interrupted
               entry (plist-get entry :epoch) (error-message-string problem))))
-        (unless emacsos-assist-web--queue
+        (when (and (not entry)
+                   (emacsos-assist-web--legacy-compatibility-p))
           (emacsos-assist-web--legacy-dispatch-event target event data))))))
 
 (defun emacsos-assist-web--release-handshake (entry)
@@ -3527,7 +3526,7 @@ older observer cannot consume the token reserved by a later retry of ENTRY."
 
 (defun emacsos-assist-web--stream-cleanup (&optional keep-pending no-render)
   "Clean up the current entry's stream and its pre-header budget token."
-  (if (not emacsos-assist-web--queue)
+  (if (emacsos-assist-web--legacy-compatibility-p)
       (emacsos-assist-web--legacy-stream-cleanup keep-pending no-render)
     (when-let ((entry emacsos-assist-web--stream-entry))
       (let ((process (plist-get entry :stream-process))
@@ -3948,9 +3947,10 @@ this one transport.  No late callback can select a successor from globals."
         ;; superseded this callback.  It must not fall back into singleton
         ;; parser state merely because bytes arrived late.
         (if (and (buffer-live-p target)
-                 (with-current-buffer target emacsos-assist-web--queue))
-            (lambda (&rest _) nil)
-          (emacsos-assist-web--legacy-event-filter url-filter target generation))
+                 (with-current-buffer target
+                   (emacsos-assist-web--legacy-compatibility-p)))
+            (emacsos-assist-web--legacy-event-filter url-filter target generation)
+          (lambda (&rest _) nil))
       (emacsos-assist-web--entry-event-filter url-filter target entry
                                                (plist-get entry :epoch)))))
 
@@ -3960,7 +3960,7 @@ this one transport.  No late callback can select a successor from globals."
     (with-current-buffer buffer
       (let ((entry emacsos-assist-web--stream-entry))
         (if (not entry)
-            (unless emacsos-assist-web--queue
+            (when (emacsos-assist-web--legacy-compatibility-p)
               (emacsos-assist-web--legacy-stream-finish buffer run-still-active))
           (progn
           (unless run-still-active
@@ -4186,9 +4186,9 @@ write leaves the provisional records available for the next exact refresh."
           (emacsos-assist-web--save-draft)
           (emacsos-assist-web--sync-active-surface)
           (message "Stopped waiting for acceptance; Send reuses this exact message"))
-      (if emacsos-assist-web--queue
-          (message "No Assist run is being observed")
-        (emacsos-assist-web--legacy-abort)))))
+      (if (emacsos-assist-web--legacy-compatibility-p)
+          (emacsos-assist-web--legacy-abort)
+        (message "No Assist run is being observed")))))
 
 (defun emacsos-assist-web--dismiss-entry (key)
   "Dismiss only the rejected entry addressed by KEY."
@@ -4300,8 +4300,7 @@ The destination stays the controller: its prompt and any live observer survive.
 Nothing in SOURCE is retired until the complete destination record is durable."
   (unless (eq source destination)
     (let ((source-queue (with-current-buffer source emacsos-assist-web--queue))
-          (source-input (with-current-buffer source (emacsos-assist-web--input)))
-          (source-current (with-current-buffer source emacsos-assist-web--queue-current)))
+          (source-input (with-current-buffer source (emacsos-assist-web--input))))
       (with-current-buffer destination
         (let* ((destination-queue emacsos-assist-web--queue)
                (destination-input (emacsos-assist-web--input))
@@ -4328,6 +4327,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
           (dolist (entry source-queue)
             (cl-incf (plist-get entry :epoch)))
           (setq emacsos-assist-web--queue merged
+                emacsos-assist-web--queue-model-p t
                 emacsos-assist-web--collision-p collision
                 emacsos-assist-web--recovery-draft
                 (unless (string-empty-p (string-trim source-input)) source-input))
@@ -4335,13 +4335,6 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                                      source-queue))
             (setf (plist-get entry :epoch) (1+ (plist-get entry :epoch))))
           (emacsos-assist-web--rerender-queue)
-          (when source-current
-            (when (memq source-current merged)
-              (setq emacsos-assist-web--queue-current source-current))
-            (unless (or (plist-get source-current :live-text)
-                        emacsos-assist-web--stream-entry)
-              (emacsos-assist-web--entry-status
-               source-current "working; live text unavailable")))
           (with-current-buffer source
             (unless (emacsos-assist-web--delete-cache "drafts/new-thread.json")
               (user-error "canonical adoption could not retire its source cache"))
@@ -4469,6 +4462,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                     (emacsos-assist-web--set-prompt-refusal
                      "local recovery record is invalid; message remains in draft"))
                 (setq emacsos-assist-web--queue restored
+                      emacsos-assist-web--queue-model-p t
                       emacsos-assist-web--collision-p collision
                       emacsos-assist-web--recovery-draft recovery-draft)
                 (when (stringp text) (insert text))
