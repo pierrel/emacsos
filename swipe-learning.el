@@ -7,21 +7,29 @@
 (require 'cl-lib)
 (require 'json)
 
-(defconst emacsos-swipe-learning--buffer "*Swipe Learning*")
+(defconst emacsos-swipe-learning--buffer-name "*Swipe Learning*")
 (defconst emacsos-swipe-learning--helper
   "/usr/local/share/emacsos-openrc/swipe-learning-collector.py")
 
 (defvar emacsos-swipe-learning--operation 0)
 (defvar emacsos-swipe-learning--process nil)
+(defvar emacsos-swipe-learning--buffer nil)
 (defvar-local emacsos-swipe-learning--erase-armed nil)
 (defvar-local emacsos-swipe-learning--skip-disarm nil)
 
 (define-derived-mode emacsos-swipe-learning-mode special-mode "Swipe-Learning"
   "Mode for inspecting and managing private swipe-learning evidence.")
 
+(defun emacsos-swipe-learning--status-buffer ()
+  "Return the live package-owned swipe-learning status buffer."
+  (unless (buffer-live-p emacsos-swipe-learning--buffer)
+    (setq emacsos-swipe-learning--buffer
+          (generate-new-buffer emacsos-swipe-learning--buffer-name)))
+  emacsos-swipe-learning--buffer)
+
 (defun emacsos-swipe-learning--display (text)
-  "Show TEXT in the ordinary swipe-learning buffer."
-  (let ((buffer (get-buffer-create emacsos-swipe-learning--buffer)))
+  "Show TEXT in the package-owned swipe-learning status buffer."
+  (let ((buffer (emacsos-swipe-learning--status-buffer)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -92,7 +100,7 @@ call SUCCESS with the parsed JSON value and its original text."
   (emacsos-swipe-learning--run
    "enable" "Enabling learning..."
    (lambda (_value _text)
-     (let ((buffer (get-buffer-create emacsos-swipe-learning--buffer)))
+     (let ((buffer (emacsos-swipe-learning--status-buffer)))
        (with-current-buffer buffer
          (let ((inhibit-read-only t))
            (erase-buffer)
@@ -102,9 +110,9 @@ call SUCCESS with the parsed JSON value and its original text."
                                          (call-interactively
                                           #'emacsos-pinephone-restart-ui-session))
                                'follow-link t)
-           (insert "\n\nSwipe traces and candidate words stay local. "
-                   "Surrounding application text is not captured, and "
-                   "learning does not change current suggestions.\n")
+           (insert "\n\nExplicit alternate selections and exact-unit erasures "
+                   "adjust future suggestions. Swipe traces and candidate words "
+                   "stay local; surrounding application text is not captured.\n")
            (goto-char (point-min))
            (emacsos-swipe-learning-mode)))
        (pop-to-buffer buffer)))))
@@ -165,24 +173,28 @@ call SUCCESS with the parsed JSON value and its original text."
 
 (defun emacsos-swipe-learning--window-buffer-changed (&rest _)
   "Disarm erase when its buffer is no longer visible."
-  (let ((buffer (get-buffer emacsos-swipe-learning--buffer)))
+  (let ((buffer (and (buffer-live-p emacsos-swipe-learning--buffer)
+                     emacsos-swipe-learning--buffer)))
     (when (and (buffer-live-p buffer) (not (get-buffer-window buffer t)))
       (with-current-buffer buffer
         (emacsos-swipe-learning--disarm-erase)))))
 
 (defun emacsos-swipe-learning--arm-erase (_button)
   "Relabel the visible erase action for its required second tap."
-  (with-current-buffer emacsos-swipe-learning--buffer
-    (setq emacsos-swipe-learning--erase-armed t
-          emacsos-swipe-learning--skip-disarm t)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert "Erase all captured swipe-learning data?\n\n")
-      (insert-text-button "Confirm erase"
-                          'action #'emacsos-swipe-learning--confirm-erase
-                          'follow-link t)
-      (insert "\n")
-      (goto-char (point-min)))))
+  (let ((buffer (and (buffer-live-p emacsos-swipe-learning--buffer)
+                     emacsos-swipe-learning--buffer)))
+    (when buffer
+      (with-current-buffer buffer
+        (setq emacsos-swipe-learning--erase-armed t
+              emacsos-swipe-learning--skip-disarm t)
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "Erase all captured swipe-learning data?\n\n")
+          (insert-text-button "Confirm erase"
+                              'action #'emacsos-swipe-learning--confirm-erase
+                              'follow-link t)
+          (insert "\n")
+          (goto-char (point-min)))))))
 
 ;;;###autoload
 (defun emacsos-swipe-learning-erase ()
@@ -191,7 +203,7 @@ call SUCCESS with the parsed JSON value and its original text."
   (emacsos-swipe-learning--run
    "erase-ready" "Checking erase eligibility..."
    (lambda (_value _text)
-     (let ((buffer (get-buffer-create emacsos-swipe-learning--buffer)))
+     (let ((buffer (emacsos-swipe-learning--status-buffer)))
        (with-current-buffer buffer
          (emacsos-swipe-learning-mode)
          (setq emacsos-swipe-learning--erase-armed nil

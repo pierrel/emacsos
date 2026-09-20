@@ -123,10 +123,11 @@ Controls buffer.
 * Swipe learning (PinePhone/OpenRC only)
 
 These commands are installed by the PinePhone/OpenRC image.  Swipe learning is
-off by default and never changes the current keyboard's suggestions.  It retains
-bounded local trace geometry, candidate words, and your explicit correction
-outcomes.  It does not capture surrounding text from Emacs, Firefox, Android,
-or another application.
+off by default.  It retains bounded local trace geometry, candidate words, and
+your explicit correction outcomes.  Selecting the second or third candidate,
+or using exact-unit Backspace to erase an emitted glide word, adjusts later
+suggestions.  It does not capture surrounding text from Emacs, Firefox,
+Android, or another application.
 
 | Action | M-x command |
 |--------+-------------|

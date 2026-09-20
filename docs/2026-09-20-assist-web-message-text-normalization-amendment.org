@@ -1,0 +1,35 @@
+#+title: Assist Web message-text normalization amendment
+#+date: 2026-09-20
+
+* Correction
+
+Assist Web canonicalizes CRLF and lone CR to LF at its transcript boundary.
+It preserves exactly the England, Scotland, and Wales RGI subdivision-flag
+sequences while validating a temporary masked copy through the unchanged shared
+display-spoof validator.  Other tag characters and all other rejected controls
+remain invalid.  Raw wire limits apply before normalization and the same
+canonical limits apply afterward.
+
+Streaming keeps a bounded per-attempt raw suffix only when it is a proper
+prefix of CRLF or one of those three complete flag sequences.  Complete flags
+append immediately.  It accounts raw bytes before accepting a delta, appends
+only validated decidable canonical text, and discards an undecided suffix on
+interruption.  A hot-reloaded attempt without the explicitly
+initialized raw state fails closed and refreshes instead of deriving accounting
+from rendered text.
+
+Rejected snapshots and history pages retain the accepted view, draft, and
+history.  Their persistent retry status distinguishes rejection from transport
+failure.
+
+* Unchanged scope
+
+Local =/chat=, SMS, catalog validation, raw limits, canonical limits, and
+record-shape checks are unchanged.  This is an EmacsOS boundary change only;
+Assist storage and server behavior remain unchanged.
+
+* Historical supersessions
+
+This document supersedes only the Assist Web transcript-boundary conclusion in
+[[file:2026-09-16-streaming-transcript-and-sms-cutoff-amendment.org][Streaming transcript and SMS refresh-cutoff amendment]], section
+/Correction/.  The earlier SMS refresh-cutoff conclusion remains unchanged.
