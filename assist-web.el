@@ -147,6 +147,8 @@ The value is nil, `current', `cached', `refresh-failed', or
   "Non-nil while an adopted queue must contract before new sends.")
 (defvar-local emacsos-assist-web--recovery-draft nil
   "A bounded source draft retained during canonical-buffer adoption.")
+(defvar-local emacsos-assist-web--recovery-action-marker nil
+  "Marker for the one visible action that restores a retained source draft.")
 (defvar-local emacsos-assist-web--handshake-token nil
   "This buffer's entry-owned pre-header SSE request-budget token.")
 (defvar-local emacsos-assist-web--thread-id nil)
@@ -1861,6 +1863,14 @@ of it, together with the oldest pagination cursor already reached."
       (setq emacsos-assist-web--snapshot snapshot
             emacsos-assist-web--pending-rendered-p nil)
       (erase-buffer)
+      ;; Queue markers belonged to the erased presentation, never to this
+      ;; canonical snapshot.  Rebuild remaining provisional entries below.
+      (dolist (entry emacsos-assist-web--queue)
+        (setf (plist-get entry :rendered) nil
+              (plist-get entry :user-start) nil
+              (plist-get entry :assistant-start) nil
+              (plist-get entry :assistant-end) nil))
+      (setq emacsos-assist-web--recovery-action-marker nil)
       (let ((transcript-start (point)))
         (insert (format "%s%s\n"
                         (emacsos-assist-web--thread-label
@@ -1917,7 +1927,11 @@ of it, together with the oldest pagination cursor already reached."
         (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t))
         (emacsos-assist-web--write-prompt)
-        (if draft (insert draft) (emacsos-assist-web--restore-draft))
+        (if emacsos-assist-web--queue
+            (progn
+              (when draft (insert draft))
+              (emacsos-assist-web--rerender-queue))
+          (if draft (insert draft) (emacsos-assist-web--restore-draft)))
         (emacsos-assist-web--restore-render-state render-state)
         (setq buffer-read-only nil)
         (set-buffer-modified-p nil)
@@ -3059,6 +3073,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
         :recovered-ready nil
         :stream-process nil :stream-response nil :stream-header-timer nil
         :stream-generation 0
+        :reobserve-generation 0 :reobserve-in-flight nil
+        :requires-reobserve nil
         :user-start nil :assistant-start nil :assistant-end nil
         :stream-attempt nil :stream-index 0 :stream-assistant-bytes 0))
 
@@ -3105,21 +3121,13 @@ consulted; selected-buffer state is never a fallback owner."
       (seq-some #'emacsos-assist-web--entry-active-p emacsos-assist-web--queue)))
 
 (defun emacsos-assist-web--web-active-p ()
-  "Return non-nil when any canonical buffer still owns transport recovery.
-
-An accepted-but-not-yet-observed Run also remains web activity: local chat
-cannot safely claim the shared surface until its exact re-observation settles."
+  "Return non-nil when any canonical buffer owns a POST or observer."
   (seq-some
    (lambda (buffer)
      (and (buffer-live-p buffer)
           (with-current-buffer buffer
             (and (derived-mode-p 'emacsos-assist-web-mode)
-                 (or (emacsos-assist-web--queue-transport-active-p)
-                     (seq-some
-                      (lambda (entry)
-                        (memq (emacsos-assist-web--entry-state entry)
-                              '(accepted-unobserved acceptance-unknown)))
-                      emacsos-assist-web--queue))))))
+                 (emacsos-assist-web--queue-transport-active-p)))))
    (buffer-list)))
 
 (defun emacsos-assist-web--sync-active-surface ()
@@ -3243,10 +3251,76 @@ cannot safely claim the shared surface until its exact re-observation settles."
                               'help-echo label)
           (insert "\n"))))))
 
+(defun emacsos-assist-web--restore-recovery-draft (_)
+  "Restore the retained source draft only into an empty destination prompt."
+  (when emacsos-assist-web--recovery-draft
+    (if (not (string-empty-p (string-trim (emacsos-assist-web--input))))
+        (emacsos-assist-web--set-prompt-refusal
+         "source draft is preserved; destination draft remains editable")
+      (let ((recovered emacsos-assist-web--recovery-draft))
+        (setq emacsos-assist-web--recovery-draft nil)
+        (emacsos-assist-web--replace-input recovered)
+        (unless (emacsos-assist-web--save-draft)
+          (setq emacsos-assist-web--recovery-draft recovered)
+          (emacsos-assist-web--replace-input "")
+          (emacsos-assist-web--set-prompt-refusal
+           "source draft is preserved; local recovery could not be saved"))))))
+
+(defun emacsos-assist-web--render-recovery-draft-action ()
+  "Render the one retained-source Restore Draft action before the prompt."
+  (when (and emacsos-assist-web--recovery-draft
+             (not (and (markerp emacsos-assist-web--recovery-action-marker)
+                       (marker-buffer emacsos-assist-web--recovery-action-marker))))
+    (when-let ((prompt (and (markerp emacsos-assist-web--prompt-marker)
+                            (marker-buffer emacsos-assist-web--prompt-marker)
+                            (marker-position emacsos-assist-web--prompt-marker))))
+      (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+        (goto-char prompt)
+        (insert "[source draft saved: ")
+        (insert-text-button "Restore Draft" 'follow-link t
+                            'action #'emacsos-assist-web--restore-recovery-draft
+                            'help-echo "Restore Draft")
+        (insert "]\n")
+        (setq emacsos-assist-web--recovery-action-marker (copy-marker (point)))
+        (set-marker emacsos-assist-web--prompt-marker (point))))))
+
 (defun emacsos-assist-web--entry-render (entry)
   "Insert ENTRY's own provisional user and assistant regions once."
   (unless (plist-get entry :rendered)
-    (emacsos-assist-web--entry-append-pending entry)))
+    (emacsos-assist-web--entry-append-pending entry)
+    (pcase (emacsos-assist-web--entry-state entry)
+      ('recovered-head
+       (emacsos-assist-web--entry-status entry "recovered draft; tap Restore Draft")
+       (emacsos-assist-web--entry-add-action
+        entry "Restore Draft" #'emacsos-assist-web--restore-create-entry))
+      ('rejected
+       (emacsos-assist-web--entry-status entry "submission rejected; tap Dismiss")
+       (emacsos-assist-web--entry-add-action
+        entry "Dismiss" #'emacsos-assist-web--dismiss-entry)
+       (unless emacsos-assist-web--thread-id
+         (emacsos-assist-web--entry-add-action
+          entry "Reset Draft" #'emacsos-assist-web--reset-create-entry))))))
+
+(defun emacsos-assist-web--rerender-queue ()
+  "Rebuild every provisional entry in durable queue order, preserving the tail."
+  (let* ((draft (emacsos-assist-web--input))
+         (starts (delq nil
+                       (mapcar (lambda (entry)
+                                 (let ((marker (plist-get entry :user-start)))
+                                   (and (markerp marker) (marker-buffer marker) marker)))
+                               emacsos-assist-web--queue))))
+    (when starts
+      (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+        (delete-region (apply #'min (mapcar #'marker-position starts)) (point-max))
+        (emacsos-assist-web--write-prompt)))
+    (dolist (entry emacsos-assist-web--queue)
+      (setf (plist-get entry :rendered) nil
+            (plist-get entry :user-start) nil
+            (plist-get entry :assistant-start) nil
+            (plist-get entry :assistant-end) nil)
+      (emacsos-assist-web--entry-render entry))
+    (emacsos-assist-web--replace-input draft)
+    (emacsos-assist-web--render-recovery-draft-action)))
 
 (defun emacsos-assist-web--discard-entry-render (entry draft point-offset)
   "Remove unpersisted ENTRY and restore exact editable DRAFT/POINT-OFFSET."
@@ -3325,9 +3399,12 @@ cannot safely claim the shared surface until its exact re-observation settles."
 (defun emacsos-assist-web--post-classification (value error)
   "Classify VALUE/ERROR without exposing server-controlled detail text."
   (cond
+   ((equal error "Assist Web token is missing or invalid") 'retryable-rejected)
    (error 'acceptance-unknown)
    ((and (alist-get 'thread_id value) (alist-get 'run_id value)) 'accepted)
-   ((member (alist-get 'http_status value) '(429 503)) 'retryable-rejected)
+   ((and (= (or (alist-get 'http_status value) 0) 503)
+         (equal (alist-get 'detail value) "run-store-unavailable"))
+    'retryable-rejected)
    ((and (= (or (alist-get 'http_status value) 0) 409)
          (member (alist-get 'detail value)
                  '("Resolve the pending approval first" "pending approval")))
@@ -3487,7 +3564,8 @@ could release a pre-header SSE reservation later."
       ;; Use the public cleanup wrapper so a killed queue owner releases the
       ;; exact observer before the legacy transport state is discarded.
       (emacsos-assist-web--stream-cleanup t t)
-      (setq emacsos-assist-web--post-entry nil))))
+      (setq emacsos-assist-web--post-entry nil)))
+  (emacsos-assist-web--sync-active-surface))
 
 (defun emacsos-assist-web--start-post (entry)
   "Asynchronously submit ENTRY, serializing only acknowledgement callbacks."
@@ -3522,12 +3600,6 @@ could release a pre-header SSE reservation later."
          (lambda (value error)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer
-               ;; A validated acceptance owns the aggregate web surface even
-               ;; while canonical-buffer adoption transfers its controller.
-               ;; The receiving entry or its exact recovery callback later
-               ;; performs the normal release.
-               (when (and value (alist-get 'run_id value))
-                 (setq emacsos--assist-active-surface 'web))
                (let ((current (emacsos-assist-web--queue-entry key)))
                  (when (and current (= epoch (plist-get current :epoch))
                             (eq current emacsos-assist-web--post-entry))
@@ -3573,7 +3645,12 @@ could release a pre-header SSE reservation later."
                                     (error "accepted; local draft could not be retired")))
                                 (when (buffer-live-p owner)
                                   (with-current-buffer owner
-                                    (emacsos-assist-web--start-observation current)
+                                    ;; S1 has changed controllers.  Confirm its
+                                    ;; exact persisted Run before C1 can yield
+                                    ;; the observer slot to it.
+                                    (if (and canonical (not (eq canonical buffer)))
+                                        (emacsos-assist-web--reobserve-entry current)
+                                      (emacsos-assist-web--start-observation current))
                                     (emacsos-assist-web--pump-posts)))))))
                         (error
                          ;; The POST response already proved this exact Run.
@@ -3597,6 +3674,8 @@ could release a pre-header SSE reservation later."
                       (setf (plist-get current :state) 'rejected)
                       (emacsos-assist-web--entry-status
                        current "submission rejected; tap Dismiss")
+                      (emacsos-assist-web--entry-add-action
+                       current "Dismiss" #'emacsos-assist-web--dismiss-entry)
                       (when (not existing-thread-id)
                         (emacsos-assist-web--entry-add-action
                          current "Reset Draft" #'emacsos-assist-web--reset-create-entry))
@@ -3612,10 +3691,7 @@ could release a pre-header SSE reservation later."
                       (emacsos-assist-web--entry-status
                        current "acceptance unknown; Send retries safely")
                       (emacsos-assist-web--save-draft)))
-                   (emacsos-assist-web--sync-active-surface)
-                   (when (memq (emacsos-assist-web--entry-state current)
-                               '(posting acceptance-unknown accepted-unobserved observing))
-                     (setq emacsos--assist-active-surface 'web)))))))
+                   (emacsos-assist-web--sync-active-surface))))))
          `(("Idempotency-Key" . ,key)) t)))))
 
 (defun emacsos-assist-web--pump-posts ()
@@ -3728,12 +3804,16 @@ could release a pre-header SSE reservation later."
 (defun emacsos-assist-web--entry-stream-sentinel (url-sentinel target entry epoch)
   "Preserve URL-SENTINEL and retire only the captured ENTRY/EPOCH on close."
   (lambda (ended event)
-    (when (functionp url-sentinel) (funcall url-sentinel ended event))
-    (when (and (not (process-live-p ended))
-               (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
-               (eq ended (plist-get entry :stream-process)))
-      (emacsos-assist-web--interrupt-entry-in-buffer
-       target entry epoch "observation disconnected"))))
+    (if (functionp url-sentinel)
+        ;; url-retrieve's sentinel schedules the final response completion;
+        ;; it must remain the sole owner so a generic disconnect cannot race
+        ;; a terminal event or sanitized 503 classification.
+        (funcall url-sentinel ended event)
+      (when (and (not (process-live-p ended))
+                 (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
+                 (eq ended (plist-get entry :stream-process)))
+        (emacsos-assist-web--interrupt-entry-in-buffer
+         target entry epoch "observation disconnected")))))
 
 (defun emacsos-assist-web--entry-event-filter (url-filter target entry epoch)
   "Wrap URL-FILTER and parse SSE only for captured ENTRY/EPOCH.
@@ -3905,7 +3985,9 @@ this one transport.  No late callback can select a successor from globals."
                                   (eq (emacsos-assist-web--entry-state candidate)
                                       'accepted-unobserved))
                                 emacsos-assist-web--queue)))
-      (emacsos-assist-web--start-observation entry))))
+      (if (plist-get entry :requires-reobserve)
+          (emacsos-assist-web--reobserve-entry entry)
+        (emacsos-assist-web--start-observation entry)))))
 
 (defun emacsos-assist-web--reconcile-when-settled ()
   "Start one entry-owned canonical reconciliation after all Runs terminate."
@@ -3983,9 +4065,13 @@ write leaves the provisional records available for the next exact refresh."
 
 (defun emacsos-assist-web--reobserve-entry (entry)
   "Query ENTRY's exact durable Run before reopening its event stream."
-  (when (and entry emacsos-assist-web--thread-id (plist-get entry :run-id))
+  (when (and entry emacsos-assist-web--thread-id (plist-get entry :run-id)
+             (not (plist-get entry :reobserve-in-flight)))
     (let ((buffer (current-buffer)) (key (plist-get entry :key))
-          (run-id (plist-get entry :run-id)))
+          (run-id (plist-get entry :run-id))
+          (generation (1+ (plist-get entry :reobserve-generation))))
+      (setf (plist-get entry :reobserve-generation) generation
+            (plist-get entry :reobserve-in-flight) t)
       (emacsos-assist-web--request
        "GET" (format "threads/%s/runs/%s"
                       (emacsos-assist-web--require-id emacsos-assist-web--thread-id)
@@ -3994,13 +4080,18 @@ write leaves the provisional records available for the next exact refresh."
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
              (when-let ((current (emacsos-assist-web--queue-entry key)))
-               (if error
+               (when (and (eq current entry)
+                          (= generation (plist-get current :reobserve-generation))
+                          (equal run-id (plist-get current :run-id)))
+                 (setf (plist-get current :reobserve-in-flight) nil)
+                 (if error
                    (emacsos-assist-web--entry-status
                     current "accepted; observation unavailable; Refresh retries")
                  (let ((status (alist-get 'status value)))
                    (cond
                     ((member status '("pending" "running" "transitioning"))
                      (setf (plist-get current :state) 'accepted-unobserved)
+                     (setf (plist-get current :requires-reobserve) nil)
                      (emacsos-assist-web--start-observation current))
                     ((member status '("success" "error" "timeout" "interrupted"
                                              "cancelled" "awaiting_approval"))
@@ -4016,7 +4107,7 @@ write leaves the provisional records available for the next exact refresh."
                        (emacsos-assist-web--entry-status
                         current "terminal observed; local recovery could not be saved")))
                     (t (emacsos-assist-web--entry-status
-                        current "accepted; observation unavailable; Refresh retries")))))))))))))
+                        current "accepted; observation unavailable; Refresh retries"))))))))))))))
 
 (defun emacsos-assist-web-refresh-thread (&optional buffer completed-run-id)
   "Refresh exact queue state first; canonical history remains the final truth."
@@ -4041,7 +4132,8 @@ write leaves the provisional records available for the next exact refresh."
   "Detach the exact accepted entry named by KEY without reposting it."
   (when-let ((entry (emacsos-assist-web--queue-entry key)))
     (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
-      (let ((buffer (current-buffer)) (run-id (plist-get entry :run-id)))
+      (let ((buffer (current-buffer)) (run-id (plist-get entry :run-id))
+            (target entry) (epoch (plist-get entry :epoch)))
         (when (eq entry emacsos-assist-web--stream-entry)
           (emacsos-assist-web--stream-cleanup t)
           (setf (plist-get entry :state) 'accepted-unobserved))
@@ -4051,10 +4143,11 @@ write leaves the provisional records available for the next exact refresh."
                            (emacsos-assist-web--require-id emacsos-assist-web--thread-id)
                            (emacsos-assist-web--require-id run-id)) nil
          (lambda (value error)
-           (when (and (buffer-live-p buffer)
-                      (emacsos-assist-web--queue-entry key))
+           (when (buffer-live-p buffer)
              (with-current-buffer buffer
                (let ((current (emacsos-assist-web--queue-entry key)))
+                 (when (and (eq current target)
+                            (= epoch (plist-get current :epoch)))
                  (cond
                   (error (emacsos-assist-web--entry-status
                           current "stopped watching; cancellation unconfirmed"))
@@ -4062,14 +4155,18 @@ write leaves the provisional records available for the next exact refresh."
                                 (alist-get 'outcome value))
                           '(200 . "cancelled"))
                    (setf (plist-get current :state) 'terminal-unreconciled)
-                   (emacsos-assist-web--reconcile-when-settled))
+                   (if (emacsos-assist-web--save-draft)
+                       (emacsos-assist-web--reconcile-when-settled)
+                     (setf (plist-get current :state) 'accepted-unobserved)
+                     (emacsos-assist-web--entry-status
+                      current "cancelled; local recovery could not be saved")))
                   ((member (alist-get 'outcome value) '("running" "transitioning"))
                    (emacsos-assist-web--entry-status
                     current (format "stopped watching; Assist is %s"
                                     (alist-get 'outcome value))))
                   (t (emacsos-assist-web--entry-status
                       current "stopped watching; cancellation unconfirmed")))
-                 (emacsos-assist-web--save-draft))))) nil t)))))
+                 (emacsos-assist-web--save-draft)))))) nil t)))))
 
 (defun emacsos-assist-web-abort ()
   "Abort a posting entry or detach the exact currently observed Run."
@@ -4236,9 +4333,8 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                 (unless (string-empty-p (string-trim source-input)) source-input))
           (dolist (entry (seq-filter (lambda (entry) (memq entry merged))
                                      source-queue))
-            (setf (plist-get entry :epoch) (1+ (plist-get entry :epoch))
-                  (plist-get entry :rendered) nil)
-            (emacsos-assist-web--entry-render entry))
+            (setf (plist-get entry :epoch) (1+ (plist-get entry :epoch))))
+          (emacsos-assist-web--rerender-queue)
           (when source-current
             (when (memq source-current merged)
               (setq emacsos-assist-web--queue-current source-current))
@@ -4356,6 +4452,8 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                                            (setq changed t))
                                ('reconciling (setf (plist-get entry :state) 'terminal-unreconciled)
                                              (setq changed t)))
+                             (when (eq (plist-get entry :state) 'accepted-unobserved)
+                               (setf (plist-get entry :requires-reobserve) t))
                              entry))))
                      entries))
               (if (or (memq nil restored)
@@ -4376,6 +4474,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                 (when (stringp text) (insert text))
                 (dolist (entry emacsos-assist-web--queue)
                   (emacsos-assist-web--entry-render entry))
+                (emacsos-assist-web--render-recovery-draft-action)
                 ;; A normalized transport state is recovery truth only after it reaches
                 ;; disk.  A failed write leaves this buffer visible but starts no retry,
                 ;; GET, or SSE that could outlive the old cached claim.
