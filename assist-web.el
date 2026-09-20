@@ -654,15 +654,15 @@ An unknown bounded display string is not proof that an accepted Run settled."
     (buffer &optional allow-status array-type object-type)
   "Return BUFFER's JSON value or signal a useful local error.
 When ALLOW-STATUS is non-nil, require an integer HTTP status and a top-level
-object, retaining that status as `http_status' so the DELETE adapter can
-distinguish its bounded structured 409 outcomes.  ARRAY-TYPE defaults to
-`list' and OBJECT-TYPE defaults to `alist'."
+object, retaining that status as `http_status' so the submission adapter can
+classify a bounded structured refusal without exposing its detail.  ARRAY-TYPE
+defaults to `list' and OBJECT-TYPE defaults to `alist'."
   (with-current-buffer buffer
     (let ((status url-http-response-status)
           (start (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)))
       (unless (and (integerp status)
                    (or (<= 200 status 299)
-                       (and allow-status (= status 409))))
+                       (and allow-status (<= 400 status 599))))
         (if (emacsos-assist-web--run-store-unavailable-response-p buffer)
             (error "Assist Web run store is unavailable")
           (error "Assist Web request failed (%s)" (or status "no response"))))
@@ -3247,6 +3247,25 @@ second submission owner while the queue transition is deliberately incremental."
     (prog1 (emacsos-assist-web--legacy-stream-cleanup keep-pending no-render)
       (when entry (emacsos-assist-web--entry-sync-from-legacy entry)))))
 
+(defun emacsos-assist-web--buffer-killed ()
+  "Persist recoverable queue state and release every entry-owned token.
+
+No request token may outlive its buffer: a killed buffer has no callback which
+could release a pre-header SSE reservation later."
+  (when (timerp emacsos-assist-web--draft-save-timer)
+    (cancel-timer emacsos-assist-web--draft-save-timer))
+  (if (not emacsos-assist-web--queue)
+      (unwind-protect
+          (emacsos-assist-web--save-draft)
+        (emacsos-assist-web--legacy-stream-cleanup t t))
+    (unwind-protect
+        (emacsos-assist-web--save-draft)
+      (dolist (entry emacsos-assist-web--queue)
+        (emacsos-assist-web--release-handshake entry))
+      (setq emacsos-assist-web--stream-entry nil
+            emacsos-assist-web--post-entry nil)
+      (emacsos-assist-web--legacy-stream-cleanup t t))))
+
 (defun emacsos-assist-web--start-post (entry)
   "Asynchronously submit ENTRY, serializing only acknowledgement callbacks."
   (when (and entry (not emacsos-assist-web--post-entry)
@@ -3651,41 +3670,40 @@ second submission owner while the queue transition is deliberately incremental."
               (draft (emacsos-assist-web--read-cache name)))
     (let ((entries (alist-get 'queue draft))
           (text (alist-get 'text draft)) changed)
-      (unless entries
-        (cl-return-from emacsos-assist-web--restore-draft
-          (funcall #'emacsos-assist-web--legacy-restore-draft)))
-      (setq emacsos-assist-web--queue
-            (seq-filter
-             #'identity
-             (mapcar
-              (lambda (value)
-                (let* ((state (intern-soft (alist-get 'state value)))
-                       (key (alist-get 'key value)) (body (alist-get 'text value))
-                       (run-id (alist-get 'run_id value)))
-                  (when (and (memq state emacsos-assist-web--entry-states)
-                             (stringp body)
-                             (or (eq state 'recovered-head)
-                                 (and (stringp key)
-                                      (string-match-p emacsos-assist-web--idempotency-regexp key))))
-                    (let ((entry (emacsos-assist-web--entry body state key)))
-                      (setf (plist-get entry :run-id) run-id)
-                      (pcase state
-                        ('posting (setf (plist-get entry :state) 'acceptance-unknown)
-                                  (setq changed t))
-                        ('observing (setf (plist-get entry :state) 'accepted-unobserved)
+      (if (not entries)
+          (funcall #'emacsos-assist-web--legacy-restore-draft)
+        (setq emacsos-assist-web--queue
+              (seq-filter
+               #'identity
+               (mapcar
+                (lambda (value)
+                  (let* ((state (intern-soft (alist-get 'state value)))
+                         (key (alist-get 'key value)) (body (alist-get 'text value))
+                         (run-id (alist-get 'run_id value)))
+                    (when (and (memq state emacsos-assist-web--entry-states)
+                               (stringp body)
+                               (or (eq state 'recovered-head)
+                                   (and (stringp key)
+                                        (string-match-p emacsos-assist-web--idempotency-regexp key))))
+                      (let ((entry (emacsos-assist-web--entry body state key)))
+                        (setf (plist-get entry :run-id) run-id)
+                        (pcase state
+                          ('posting (setf (plist-get entry :state) 'acceptance-unknown)
                                     (setq changed t))
-                        ('reconciling (setf (plist-get entry :state) 'terminal-unreconciled)
-                                      (setq changed t)))
-                      entry))))
-              entries)))
-      (setq emacsos-assist-web--collision-p (and (alist-get 'collision draft) t))
-      (when (stringp text) (insert text))
-      (dolist (entry emacsos-assist-web--queue)
-        (emacsos-assist-web--entry-render entry))
-      (when changed (emacsos-assist-web--save-draft))
-      (unless (eq emacsos--assist-active-surface 'chat)
-        (emacsos-assist-web--pump-posts)
-        (emacsos-assist-web--start-next-observation)))))
+                          ('observing (setf (plist-get entry :state) 'accepted-unobserved)
+                                      (setq changed t))
+                          ('reconciling (setf (plist-get entry :state) 'terminal-unreconciled)
+                                        (setq changed t)))
+                        entry))))
+                entries)))
+        (setq emacsos-assist-web--collision-p (and (alist-get 'collision draft) t))
+        (when (stringp text) (insert text))
+        (dolist (entry emacsos-assist-web--queue)
+          (emacsos-assist-web--entry-render entry))
+        (when changed (emacsos-assist-web--save-draft))
+        (unless (eq emacsos--assist-active-surface 'chat)
+          (emacsos-assist-web--pump-posts)
+          (emacsos-assist-web--start-next-observation))))))
 
 (defun emacsos-assist-web--after-change (&rest _)
   "Persist edits without clearing a queue entry merely because its draft changed."

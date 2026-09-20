@@ -3546,23 +3546,35 @@
                                     emacsos-assist-web--stream-status))))))
 
 (ert-deftest test-assist-web-send-queues-one-same-thread-follow-up ()
-  "A second public Send remains local until the active POST has settled."
+  "A second public Send remains local while the first Run is observed."
   (let ((emacsos--assist-active-surface 'web))
     (with-temp-buffer
       (emacsos-assist-web-mode)
-      (setq emacsos-assist-web--thread-id "thread-1"
-            emacsos-assist-web--in-flight t)
+      (let ((active (emacsos-assist-web--entry
+                     "first" 'observing
+                     "emacsos-0123456789abcdef0123456789abcdef")))
+        (setf (plist-get active :run-id) "run-1")
+        (setq emacsos-assist-web--thread-id "thread-1"
+              emacsos-assist-web--queue (list active)
+              emacsos-assist-web--stream-entry active)
       (emacsos-assist-web--write-prompt)
       (insert "follow up")
-      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+      (let (request)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path _payload _callback &rest _)
+                     (setq request (list method path)))))
         (emacsos-assist-web-send))
+        (should (equal request '("POST" "threads/thread-1/messages"))))
       (should-not (string-match-p "A web-thread request is already running"
                                   (buffer-string)))
-      (should (equal (alist-get 'text (car emacsos-assist-web--follow-ups))
-                     "follow up"))
+      (should (equal (mapcar (lambda (entry) (plist-get entry :text))
+                             emacsos-assist-web--queue)
+                     '("first" "follow up")))
       (should (string-match-p emacsos-assist-web--idempotency-regexp
-                              (alist-get 'key (car emacsos-assist-web--follow-ups))))
-      (should (string-empty-p (emacsos-assist-web--input))))))
+                              (plist-get (cadr emacsos-assist-web--queue) :key)))
+      (should (eq (plist-get (cadr emacsos-assist-web--queue) :state) 'posting))
+      (should (string-empty-p (emacsos-assist-web--input)))))))
 
 (ert-deftest test-assist-web-send-admits-a-different-web-buffer ()
   "Aggregate web activity does not reject another canonical thread buffer."
