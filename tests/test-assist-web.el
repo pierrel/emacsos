@@ -1898,16 +1898,19 @@
       (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-first-refresh-rejection-has-no-cache-status ()
-  (let ((bad (copy-tree test-assist-web--snapshot)))
+  (let ((bad (copy-tree test-assist-web--snapshot))
+        (emacsos-assist-web-cache-directory (make-temp-file "assist-web-first-rejected-" t)))
     (setf (alist-get 'text (car (alist-get 'messages bad))) (concat "bad" (string #x202e)))
-    (with-temp-buffer
-      (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
-      (setq emacsos-assist-web--thread-id "thread-1")
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (_m _p _v callback &rest _) (funcall callback bad nil))))
-        (emacsos-assist-web-refresh-thread))
-      (should-not emacsos-assist-web--snapshot)
-      (should (equal emacsos-assist-web--stream-status "refresh rejected; C-c C-a g retries")))))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_m _p _v callback &rest _) (funcall callback bad nil))))
+            (emacsos-assist-web-refresh-thread))
+          (should-not emacsos-assist-web--snapshot)
+          (should (equal emacsos-assist-web--stream-status "refresh rejected; C-c C-a g retries")))
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-list-activation-refreshes-crlf-and-england-flag ()
   (let* ((thread '((id . "thread-1") (description . "Thread")
