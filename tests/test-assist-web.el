@@ -3672,15 +3672,14 @@
           (should-not cleaned)
           (should (eq emacsos--assist-active-surface 'web))
           (with-current-buffer canonical
-            (should (equal emacsos-assist-web--run-id "run-new"))
+            (should (equal (plist-get (car emacsos-assist-web--queue) :run-id)
+                           "run-new"))
             (should (= emacsos-assist-web--refresh-generation 0))
             (should (= emacsos-assist-web--send-generation 0))
             (should (= emacsos-assist-web--stream-generation 0))
             (should (= (how-many "you> hello" (point-min) (point-max)) 1))
             (should (equal (emacsos-assist-web--input) ""))
-            (should (equal emacsos-assist-web--recovery-draft "next draft"))
-            (should (string-match-p "working; live text unavailable"
-                                    (buffer-string)))))
+            (should (equal emacsos-assist-web--recovery-draft "next draft"))))
       (when (buffer-live-p draft) (kill-buffer draft))
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacsos--assist-active-surface nil))))
@@ -3840,6 +3839,41 @@
               emacsos-assist-web--requests (list token))
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
           (emacsos-assist-web--buffer-killed))
+        (should-not emacsos-assist-web--requests)
+        (should-not (plist-get entry :handshake-token))))))
+
+(ert-deftest test-assist-web-queue-parser-keeps-reset-delta-and-terminal-on-one-entry ()
+  "Reset, delta, and terminal mutate one entry's markers and cleanup token."
+  (let ((emacsos-assist-web--requests nil)
+        (emacsos--assist-active-surface 'web))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (let* ((entry (emacsos-assist-web--entry
+                     "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+             (token (list (current-buffer) (plist-get entry :key))))
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :handshake-token) token)
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--stream-entry entry
+              emacsos-assist-web--requests (list token))
+        (emacsos-assist-web--entry-render entry)
+        (emacsos-assist-web--dispatch-event (current-buffer) "assistant-reset"
+                                            "{\"attempt\":1}")
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta"
+         "{\"attempt\":1,\"index\":1,\"text\":\"owned delta\"}")
+        (should (equal (list (plist-get entry :stream-attempt)
+                             (plist-get entry :stream-index)
+                             emacsos-assist-web--stream-status)
+                       '(1 1 "working")))
+        (should (string-match-p "owned delta" (buffer-string)))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--legacy-refresh-thread) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore))
+          (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}"))
+        (should (eq (plist-get entry :state) 'terminal-unreconciled))
+        (should-not emacsos-assist-web--stream-entry)
         (should-not emacsos-assist-web--requests)
         (should-not (plist-get entry :handshake-token))))))
 

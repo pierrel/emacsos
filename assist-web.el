@@ -3020,6 +3020,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (symbol-function 'emacsos-assist-web--stream-cleanup))
 (defalias 'emacsos-assist-web--legacy-event-filter
   (symbol-function 'emacsos-assist-web--event-filter))
+(defalias 'emacsos-assist-web--legacy-dispatch-event
+  (symbol-function 'emacsos-assist-web--dispatch-event))
 (defalias 'emacsos-assist-web--legacy-abort
   (symbol-function 'emacsos-assist-web-abort))
 (defalias 'emacsos-assist-web--legacy-stream-finish
@@ -3038,7 +3040,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   "Create one locally owned submission record for TEXT."
   (list :text text :state (or state 'queued) :key key
         :epoch 0 :run-id nil :live-text nil :rendered nil
-        :user-start nil :assistant-start nil :assistant-end nil))
+        :user-start nil :assistant-start nil :assistant-end nil
+        :stream-attempt nil :stream-index 0 :stream-assistant-bytes 0))
 
 (defun emacsos-assist-web--entry-state (entry)
   "Return ENTRY's explicit resident state."
@@ -3142,50 +3145,63 @@ cannot safely claim the shared surface until its exact re-observation settles."
             name (emacsos-assist-web--queue-cache-value)))
     t))
 
-(defun emacsos-assist-web--entry-sync-from-legacy (entry)
-  "Copy the one legacy parser slot back into ENTRY.
+(defun emacsos-assist-web--entry-set-assistant-status (entry status)
+  "Replace ENTRY's provisional assistant body with fixed STATUS."
+  (when (and (markerp (plist-get entry :assistant-start))
+             (markerp (plist-get entry :assistant-end)))
+    (set-marker (plist-get entry :assistant-end)
+                (emacsos-conversation-replace-marked
+                 (plist-get entry :assistant-start) (plist-get entry :assistant-end)
+                 (format "[%s]\n" status)))))
 
-The parser remains one-per-buffer; this bridge prevents it from becoming a
-  second submission owner while the queue transition is deliberately incremental."
-  (when entry
-    (when emacsos-assist-web--run-id
-      (setf (plist-get entry :run-id) emacsos-assist-web--run-id))
-    ;; A queued region is rendered before its immutable key is minted.  A
-    ;; later entry activation must not erase that key through an older empty
-    ;; parser slot, or the withheld POST callback can no longer find its entry.
-    (when emacsos-assist-web--pending-key
-      (setf (plist-get entry :key) emacsos-assist-web--pending-key))
-    (setf
-          (plist-get entry :assistant-start) emacsos-assist-web--assistant-start
-          (plist-get entry :assistant-end) emacsos-assist-web--assistant-end
-          (plist-get entry :rendered) emacsos-assist-web--pending-rendered-p))
-  entry)
+(defun emacsos-assist-web--entry-replace-empty-assistant-status (entry status)
+  "Replace ENTRY's empty or queued provisional body with fixed STATUS."
+  (when (and (markerp (plist-get entry :assistant-start))
+             (markerp (plist-get entry :assistant-end)))
+    (let ((body (buffer-substring-no-properties
+                 (plist-get entry :assistant-start) (plist-get entry :assistant-end))))
+      (when (member body '("" "[queued]\n" "[working; live text unavailable]\n"))
+        (emacsos-assist-web--entry-set-assistant-status entry status)))))
 
-(defun emacsos-assist-web--entry-activate (entry)
-  "Materialize ENTRY in the established parser fields for one callback."
-  (unless (eq entry emacsos-assist-web--queue-current)
-    (emacsos-assist-web--entry-sync-from-legacy emacsos-assist-web--queue-current)
-    (setq emacsos-assist-web--queue-current entry))
-  (when entry
-    (setq emacsos-assist-web--pending-key (plist-get entry :key)
-          emacsos-assist-web--submitted-text (plist-get entry :text)
-          emacsos-assist-web--run-id (plist-get entry :run-id)
-          emacsos-assist-web--pending-accepted-p
-          (memq (emacsos-assist-web--entry-state entry)
-                '(accepted-unobserved observing terminal-unreconciled reconciling))
-          emacsos-assist-web--pending-rendered-p (plist-get entry :rendered)
-          emacsos-assist-web--assistant-start (plist-get entry :assistant-start)
-          emacsos-assist-web--assistant-end (plist-get entry :assistant-end)))
-  entry)
+(defun emacsos-assist-web--entry-append-pending (entry)
+  "Render ENTRY with fresh markers while preserving the editable draft tail."
+  (let* ((text (plist-get entry :text))
+         (input-start (emacsos-assist-web--prompt-start))
+         (draft (emacsos-assist-web--input))
+         (input-offset (and input-start (>= (point) input-start)
+                            (- (point) input-start)))
+         (prompt-start (and (markerp emacsos-assist-web--prompt-marker)
+                            (marker-position emacsos-assist-web--prompt-marker)))
+         (inhibit-read-only t))
+    (when prompt-start
+      (delete-region prompt-start (point-max))
+      (let ((transcript-start (point)) (start (point)) body-start)
+        (insert "you> ")
+        (setq body-start (point))
+        (insert text)
+        (emacsos-conversation-commit-user start body-start (point))
+        (insert "\n\nbot> ")
+        (setq body-start (point))
+        (insert "[queued]\n")
+        (pcase-let ((`(,assistant-start . ,assistant-end)
+                     (emacsos-conversation-begin-assistant body-start (point))))
+          (setf (plist-get entry :assistant-start) assistant-start
+                (plist-get entry :assistant-end) assistant-end))
+        (emacsos--chat-present-message start body-start (point) 'assistant)
+        (add-text-properties transcript-start (point)
+                             '(read-only t front-sticky t rear-nonsticky t)))
+      (emacsos-assist-web--write-prompt)
+      (when (and draft (not (equal draft text))) (insert draft))
+      (setf (plist-get entry :rendered) t)
+      (if input-offset
+          (goto-char (min (point-max)
+                          (+ (emacsos-assist-web--prompt-start) input-offset)))
+        (goto-char (point-max))))))
 
 (defun emacsos-assist-web--entry-render (entry)
   "Insert ENTRY's own provisional user and assistant regions once."
   (unless (plist-get entry :rendered)
-    (emacsos-assist-web--entry-activate entry)
-    (emacsos-assist-web--append-pending (plist-get entry :text))
-    (setf (plist-get entry :rendered) t
-          (plist-get entry :assistant-start) emacsos-assist-web--assistant-start
-          (plist-get entry :assistant-end) emacsos-assist-web--assistant-end)
+    (emacsos-assist-web--entry-append-pending entry)
     (let ((buffer (current-buffer)) (key (plist-get entry :key)))
       (save-excursion
         (goto-char (plist-get entry :assistant-end))
@@ -3251,9 +3267,76 @@ The parser remains one-per-buffer; this bridge prevents it from becoming a
 
 (defun emacsos-assist-web--entry-status (entry status)
   "Render fixed STATUS in ENTRY's own provisional assistant region."
-  (emacsos-assist-web--entry-activate entry)
-  (emacsos-assist-web--set-assistant-status status)
-  (emacsos-assist-web--entry-sync-from-legacy entry))
+  (emacsos-assist-web--entry-set-assistant-status entry status))
+
+(defun emacsos-assist-web--entry-reset-assistant (entry attempt)
+  "Reset ENTRY's exact assistant region for integer stream ATTEMPT."
+  (unless (integerp attempt) (error "invalid stream attempt"))
+  (setf (plist-get entry :stream-attempt) attempt
+        (plist-get entry :stream-index) 0
+        (plist-get entry :stream-assistant-bytes) 0)
+  (when (and (markerp (plist-get entry :assistant-start))
+             (markerp (plist-get entry :assistant-end)))
+    (set-marker (plist-get entry :assistant-end)
+                (emacsos-conversation-reset-assistant
+                 (plist-get entry :assistant-start) (plist-get entry :assistant-end)))))
+
+(defun emacsos-assist-web--entry-append-delta (entry attempt index text)
+  "Append one validated SSE delta to ENTRY's exact marker range."
+  (unless (and (integerp attempt) (integerp index) (stringp text)
+               (<= (string-bytes text) (* 16 1024))
+               (emacsos-conversation-valid-text-p text t))
+    (error "invalid Assist delta"))
+  (cond
+   ((not (integerp (plist-get entry :stream-attempt)))
+    (error "Assist stream is missing its reset"))
+   ((< attempt (plist-get entry :stream-attempt)) nil)
+   ((or (/= attempt (plist-get entry :stream-attempt))
+        (/= index (1+ (or (plist-get entry :stream-index) 0))))
+    (error "Assist stream has a gap"))
+   ((and (markerp (plist-get entry :assistant-start))
+         (markerp (plist-get entry :assistant-end))
+         (marker-buffer (plist-get entry :assistant-end)))
+    (let ((total (+ (or (plist-get entry :stream-assistant-bytes) 0)
+                    (string-bytes text))))
+      (when (> total emacsos-assist-web--max-message-bytes)
+        (error "invalid Assist delta"))
+      (set-marker (plist-get entry :assistant-end)
+                  (emacsos-conversation-append-delta
+                   (plist-get entry :assistant-end) text))
+      (setf (plist-get entry :stream-index) index
+            (plist-get entry :stream-assistant-bytes) total)
+      (emacsos-assist-web--set-status "working")))))
+
+(defun emacsos-assist-web--dispatch-event (target event data)
+  "Dispatch SSE EVENT only to TARGET's exact observed queue entry."
+  (when (buffer-live-p target)
+    (with-current-buffer target
+      (if-let ((entry emacsos-assist-web--stream-entry))
+          (condition-case problem
+              (cond
+             ((equal event "assistant-reset")
+              (emacsos-assist-web--entry-reset-assistant
+               entry (alist-get 'attempt (json-parse-string data :object-type 'alist))))
+             ((equal event "assistant-delta")
+              (let ((value (json-parse-string data :object-type 'alist)))
+                (emacsos-assist-web--entry-append-delta
+                 entry (alist-get 'attempt value) (alist-get 'index value)
+                 (alist-get 'text value))))
+             ((equal event "assistant-truncated")
+              (emacsos-assist-web--entry-replace-empty-assistant-status
+               entry "live text truncated; waiting for final")
+              (emacsos-assist-web--set-status "live text truncated; waiting for final"))
+             ((equal event "terminal") (emacsos-assist-web--stream-finish target))
+             ;; Preserve the legacy parser's strict handling for status and
+             ;; server closure events; their mutation is buffer metadata, not
+             ;; per-submission marker state.
+             (t (funcall #'emacsos-assist-web--legacy-dispatch-event target event data)))
+            (error
+             (emacsos-assist-web--entry-replace-empty-assistant-status
+              entry "unverified; refresh")
+             (emacsos-assist-web--set-unverified-status (error-message-string problem))))
+        (emacsos-assist-web--legacy-dispatch-event target event data)))))
 
 (defun emacsos-assist-web--release-handshake (entry)
   "Release ENTRY's pre-header request token exactly once."
@@ -3267,7 +3350,8 @@ The parser remains one-per-buffer; this bridge prevents it from becoming a
   (let ((entry emacsos-assist-web--stream-entry))
     (when entry (emacsos-assist-web--release-handshake entry))
     (prog1 (emacsos-assist-web--legacy-stream-cleanup keep-pending no-render)
-      (when entry (emacsos-assist-web--entry-sync-from-legacy entry)))))
+      (when (eq entry emacsos-assist-web--stream-entry)
+        (setq emacsos-assist-web--stream-entry nil)))))
 
 (defun emacsos-assist-web--buffer-killed ()
   "Persist recoverable queue state and release every entry-owned token.
@@ -3293,7 +3377,6 @@ could release a pre-header SSE reservation later."
   (when (and entry (not emacsos-assist-web--post-entry)
              (memq (emacsos-assist-web--entry-state entry)
                    '(queued acceptance-unknown retryable-rejected)))
-    (emacsos-assist-web--entry-activate entry)
     (unless (plist-get entry :key)
       (setf (plist-get entry :key) (emacsos-assist-web--new-idempotency-key)))
     (setf (plist-get entry :state) 'posting
@@ -3441,7 +3524,6 @@ could release a pre-header SSE reservation later."
           (setf (plist-get entry :handshake-token) token
                 (plist-get entry :state) 'observing
                 (plist-get entry :epoch) (1+ (plist-get entry :epoch)))
-          (emacsos-assist-web--entry-activate entry)
           (setq emacsos-assist-web--stream-entry entry)
           (emacsos-assist-web--save-draft)
           (emacsos-assist-web--sync-active-surface)
@@ -3461,7 +3543,6 @@ could release a pre-header SSE reservation later."
                        (and (eq entry emacsos-assist-web--stream-entry)
                             (emacsos-assist-web--entry-callback-current-p entry epoch))))
             (with-current-buffer target
-              (emacsos-assist-web--entry-activate entry)
               (funcall legacy process bytes)
               (when (and (buffer-live-p (process-buffer process))
                          (with-current-buffer (process-buffer process)
@@ -3471,7 +3552,7 @@ could release a pre-header SSE reservation later."
                 ;; crossed the header boundary; neither may keep this client-side
                 ;; handshake slot while Assist owns (or refuses) the long stream.
                 (emacsos-assist-web--release-handshake entry))
-              (emacsos-assist-web--entry-sync-from-legacy entry))))))))
+              )))))))
 
 (defun emacsos-assist-web--stream-finish (buffer &optional run-still-active)
   "Persist terminal truth for the exact observed queue entry before advancing."
@@ -3481,12 +3562,9 @@ could release a pre-header SSE reservation later."
         (if (not entry)
             (emacsos-assist-web--legacy-stream-finish buffer run-still-active)
           (progn
-          (emacsos-assist-web--entry-activate entry)
           (unless run-still-active
             (setf (plist-get entry :state) 'terminal-unreconciled))
-          (setq emacsos-assist-web--stream-entry nil)
-          (emacsos-assist-web--legacy-stream-cleanup t t)
-          (emacsos-assist-web--entry-sync-from-legacy entry)
+          (emacsos-assist-web--stream-cleanup t t)
           (emacsos-assist-web--save-draft)
           (emacsos-assist-web--sync-active-surface)
           (emacsos-assist-web--start-next-observation)
@@ -3570,8 +3648,6 @@ could release a pre-header SSE reservation later."
     (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
       (let ((buffer (current-buffer)) (run-id (plist-get entry :run-id)))
         (when (eq entry emacsos-assist-web--stream-entry)
-          (emacsos-assist-web--entry-activate entry)
-          (setq emacsos-assist-web--stream-entry nil)
           (emacsos-assist-web--stream-cleanup t)
           (setf (plist-get entry :state) 'accepted-unobserved))
         (emacsos-assist-web--save-draft)
@@ -3728,8 +3804,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
             (emacsos-assist-web--entry-render entry))
           (when source-current
             (when (memq source-current merged)
-              (setq emacsos-assist-web--queue-current source-current)
-              (emacsos-assist-web--entry-activate source-current))
+              (setq emacsos-assist-web--queue-current source-current))
             (unless (or (plist-get source-current :live-text)
                         emacsos-assist-web--stream-entry)
               (emacsos-assist-web--entry-status
