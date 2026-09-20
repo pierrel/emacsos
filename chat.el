@@ -63,7 +63,11 @@ the budget and can run `emacsos--chat-abort' to cancel.  See design doc §6."
   "Non-nil while a stream is open.  Re-entrancy guard for SEND.")
 
 (defvar emacsos--assist-active-surface nil
-  "Owner of the phone-wide Assist request slot, or nil when it is free.")
+  "Active Assist transport: `chat', aggregate `web', or nil.
+
+The local CHAT transport is single-flight.  Canonical Assist Web buffers own
+their own requests, so `web' is an aggregate exclusion for CHAT rather than a
+buffer owner; web SEND remains available while another web buffer observes.")
 
 (defvar emacsos--chat-confirm-pending nil
   "Non-nil when New chat was invoked once and awaits a second invocation.

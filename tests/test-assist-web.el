@@ -3519,12 +3519,10 @@
         (should emacsos-assist-web--in-flight)
         (should observed)))))
 
-(ert-deftest test-assist-web-restored-run-never-steals-another-active-surface ()
+(ert-deftest test-assist-web-restored-run-never-steals-local-chat-ownership ()
   "A recovered accepted run waits without losing its exact retry identity."
-  (let ((owner (generate-new-buffer " *local-chat-owner*"))
-        requested)
-    (unwind-protect
-        (let ((emacsos--assist-active-surface owner))
+  (let (requested)
+    (let ((emacsos--assist-active-surface 'chat))
           (with-temp-buffer
             (emacsos-assist-web-mode)
             (setq emacsos-assist-web--thread-id "thread-1"
@@ -3537,7 +3535,7 @@
                        (lambda (&rest _) (setq requested t))))
               (emacsos-assist-web--resume-accepted-run))
             (should-not requested)
-            (should (eq emacsos--assist-active-surface owner))
+            (should (eq emacsos--assist-active-surface 'chat))
             (should-not emacsos-assist-web--in-flight)
             (should (equal emacsos-assist-web--pending-key
                            "emacsos-0123456789abcdef0123456789abcdef"))
@@ -3545,8 +3543,43 @@
             (should emacsos-assist-web--pending-accepted-p)
             (should (equal emacsos-assist-web--run-id "run-1"))
             (should (string-match-p "another conversation is active"
-                                    emacsos-assist-web--stream-status))))
-      (when (buffer-live-p owner) (kill-buffer owner)))))
+                                    emacsos-assist-web--stream-status))))))
+
+(ert-deftest test-assist-web-send-queues-one-same-thread-follow-up ()
+  "A second public Send remains local until the active POST has settled."
+  (let ((emacsos--assist-active-surface 'web))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--in-flight t)
+      (emacsos-assist-web--write-prompt)
+      (insert "follow up")
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+        (emacsos-assist-web-send))
+      (should-not (string-match-p "A web-thread request is already running"
+                                  (buffer-string)))
+      (should (equal (alist-get 'text (car emacsos-assist-web--follow-ups))
+                     "follow up"))
+      (should (string-match-p emacsos-assist-web--idempotency-regexp
+                              (alist-get 'key (car emacsos-assist-web--follow-ups))))
+      (should (string-empty-p (emacsos-assist-web--input))))))
+
+(ert-deftest test-assist-web-send-admits-a-different-web-buffer ()
+  "Aggregate web activity does not reject another canonical thread buffer."
+  (let ((emacsos--assist-active-surface 'web)
+        requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-2")
+      (emacsos-assist-web--write-prompt)
+      (insert "independent")
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path _payload _callback &rest _)
+                   (setq requested (list method path)))))
+        (emacsos-assist-web-send))
+      (should (equal requested '("POST" "threads/thread-2/messages")))
+      (should (eq emacsos--assist-active-surface 'web)))))
 
 (ert-deftest test-assist-web-does-not-overlap-the-local-chat-stream ()
   (let ((emacsos--assist-active-surface 'chat) requested)
@@ -3623,7 +3656,7 @@
           (should-not (buffer-live-p draft))
           (should (equal observations (list canonical)))
           (should (equal cleaned '(t t)))
-          (should (eq emacsos--assist-active-surface canonical))
+          (should (eq emacsos--assist-active-surface 'web))
           (with-current-buffer canonical
             (should (equal emacsos-assist-web--run-id "run-new"))
             (should (= emacsos-assist-web--refresh-generation 1))

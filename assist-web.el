@@ -139,6 +139,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--run-id nil)
 (defvar-local emacsos-assist-web--pending-key nil)
 (defvar-local emacsos-assist-web--in-flight nil)
+(defvar-local emacsos-assist-web--follow-ups nil
+  "Ordered, locally durable follow-ups behind this buffer's active request.")
 (defvar-local emacsos-assist-web--snapshot nil)
 (defvar-local emacsos-assist-web--stream-process nil)
 (defvar-local emacsos-assist-web--stream-response nil)
@@ -165,6 +167,69 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--stream-index 0)
 (defvar-local emacsos-assist-web--stream-raw-bytes nil)
 (defvar-local emacsos-assist-web--stream-undecided-suffix nil)
+
+(defun emacsos-assist-web--web-active-p ()
+  "Return non-nil when any live canonical buffer owns transport work."
+  (seq-some
+   (lambda (buffer)
+     (and (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (and (derived-mode-p 'emacsos-assist-web-mode)
+                 emacsos-assist-web--in-flight))))
+   (buffer-list)))
+
+(defun emacsos-assist-web--sync-active-surface ()
+  "Publish aggregate web activity without making one buffer its global owner."
+  (cond
+   ((eq emacsos--assist-active-surface 'chat) nil)
+   ((emacsos-assist-web--web-active-p)
+    (setq emacsos--assist-active-surface 'web))
+   (t
+    (setq emacsos--assist-active-surface nil))))
+
+(defun emacsos-assist-web--follow-up-value (text key)
+  "Return the durable queue value for TEXT and its immutable KEY."
+  `((text . ,text) (key . ,key)))
+
+(defun emacsos-assist-web--queue-follow-up (text)
+  "Durably queue TEXT behind this buffer's active request.
+
+The normal resident bound is the active request plus one follow-up."
+  (cond
+   ((consp emacsos-assist-web--follow-ups)
+    (emacsos-assist-web--set-status "queue full; message remains in draft")
+    nil)
+   ((or (> (length text) 64000)
+        (> (string-bytes (json-encode `((message . ,text)))) 66000))
+    (emacsos-assist-web--set-status "message too large; message remains in draft")
+    nil)
+   (t
+    (let ((key (emacsos-assist-web--new-idempotency-key)))
+      (setq emacsos-assist-web--follow-ups
+            (list (emacsos-assist-web--follow-up-value text key)))
+      (if (emacsos-assist-web--save-draft)
+          (progn
+            (emacsos-assist-web--replace-input "")
+            (emacsos-assist-web--set-status "follow-up queued")
+            t)
+        (setq emacsos-assist-web--follow-ups nil)
+        (emacsos-assist-web--set-status "not sent; local draft could not be saved")
+        nil)))))
+
+(defun emacsos-assist-web--start-follow-up ()
+  "Start this buffer's oldest durable follow-up after its predecessor ends."
+  (when-let* ((next (car emacsos-assist-web--follow-ups))
+              (text (alist-get 'text next))
+              (key (alist-get 'key next)))
+    (setq emacsos-assist-web--follow-ups (cdr emacsos-assist-web--follow-ups))
+    (let ((inhibit-modification-hooks t))
+      (emacsos-assist-web--replace-input text))
+    (setq emacsos-assist-web--pending-key key
+          emacsos-assist-web--submitted-text nil
+          emacsos-assist-web--pending-accepted-p nil
+          emacsos-assist-web--run-id nil
+          emacsos-assist-web--pending-rendered-p nil)
+    (emacsos-assist-web-send)))
 
 (defun emacsos-assist-web--cache-path (&optional name)
   "Return the cache path for NAME without changing the filesystem."
@@ -919,8 +984,7 @@ do not ask the phone shell to redraw a dying buffer."
           emacsos-assist-web--stream-raw-bytes nil
           emacsos-assist-web--stream-undecided-suffix nil
           emacsos-assist-web--in-flight nil)
-    (when (eq emacsos--assist-active-surface (current-buffer))
-      (setq emacsos--assist-active-surface nil))
+    (emacsos-assist-web--sync-active-surface)
     (when (process-live-p process)
       (set-process-sentinel process nil)
       (delete-process process))
@@ -959,9 +1023,14 @@ the canonical snapshot must retain its durable identity."
         ;; A terminal SSE is not the answer.  Keep the marker-scoped text raw
         ;; until the canonical snapshot has replaced this provisional region.
         (emacsos-assist-web--stream-cleanup t t)
-        (emacsos-assist-web--set-status "reconciling")
-        (emacsos-assist-web--save-draft)
-        (emacsos-assist-web-refresh-thread buffer completed-run-id)))))
+        (if emacsos-assist-web--follow-ups
+            ;; The server owns execution order.  This client serializes only
+            ;; admission acknowledgements, so a follow-up is admitted after
+            ;; its predecessor has a durable terminal observation.
+            (emacsos-assist-web--start-follow-up)
+          (emacsos-assist-web--set-status "reconciling")
+          (emacsos-assist-web--save-draft)
+          (emacsos-assist-web-refresh-thread buffer completed-run-id))))))
 
 (defun emacsos-assist-web--stream-interrupted (buffer status)
   "Keep BUFFER's exact pending submission and visibly mark STATUS unverified."
@@ -1847,6 +1916,7 @@ Return non-nil on success or when this buffer has no draft identity."
               (submitted_text . ,emacsos-assist-web--submitted-text)
               (pending_accepted . ,emacsos-assist-web--pending-accepted-p)
               (run_id . ,emacsos-assist-web--run-id)
+              (follow_ups . ,emacsos-assist-web--follow-ups)
               (repo_key . ,emacsos-assist-web--draft-repository)
               (harness . ,emacsos-assist-web--draft-harness)))
     t))
@@ -1893,8 +1963,7 @@ That durable identity avoids both a false duplicate after a crash and
 suppressing a genuine repeated submission."
   (when (and emacsos-assist-web--thread-id emacsos-assist-web--run-id)
     (let ((buffer (current-buffer)))
-      (if (and emacsos--assist-active-surface
-               (not (eq emacsos--assist-active-surface buffer)))
+      (if (eq emacsos--assist-active-surface 'chat)
           ;; A recovered durable retry may wait, but it must never steal the
           ;; phone-wide stream owner from an open local or canonical chat.
           (emacsos-assist-web--set-unverified-status
@@ -1903,7 +1972,7 @@ suppressing a genuine repeated submission."
                (run-id (emacsos-assist-web--require-id emacsos-assist-web--run-id))
                (generation (cl-incf emacsos-assist-web--send-generation)))
       (setq emacsos-assist-web--in-flight t
-            emacsos--assist-active-surface buffer)
+            emacsos--assist-active-surface 'web)
       (emacsos-assist-web--request
        "GET" (format "threads/%s/runs/%s" tid run-id) nil
        (lambda (value error)
@@ -1941,8 +2010,7 @@ suppressing a genuine repeated submission."
                              emacsos-assist-web--run-id nil
                              emacsos-assist-web--stream-status nil
                              emacsos-assist-web--in-flight nil)
-                       (when (eq emacsos--assist-active-surface buffer)
-                         (setq emacsos--assist-active-surface nil))
+                       (emacsos-assist-web--sync-active-surface)
                        (emacsos-assist-web--save-draft)
                        (emacsos-assist-web-refresh-thread buffer))
                       (t
@@ -1965,6 +2033,7 @@ suppressing a genuine repeated submission."
     (let ((key (alist-get 'pending_key draft))
           (submitted (alist-get 'submitted_text draft))
           (run-id (alist-get 'run_id draft))
+          (follow-ups (alist-get 'follow_ups draft))
           (text (alist-get 'text draft)))
       (if (and (stringp key)
                (string-match-p emacsos-assist-web--idempotency-regexp key)
@@ -1981,6 +2050,20 @@ suppressing a genuine repeated submission."
               emacsos-assist-web--submitted-text nil
               emacsos-assist-web--pending-accepted-p nil
               emacsos-assist-web--run-id nil))
+      (setq emacsos-assist-web--follow-ups
+            (if (and (listp follow-ups)
+                     (<= (length follow-ups) 1)
+                     (seq-every-p
+                      (lambda (entry)
+                        (let ((queued-text (alist-get 'text entry))
+                              (queued-key (alist-get 'key entry)))
+                          (and (stringp queued-text)
+                               (stringp queued-key)
+                               (string-match-p emacsos-assist-web--idempotency-regexp
+                                               queued-key))))
+                      follow-ups))
+                follow-ups
+              nil))
       (if emacsos-assist-web--pending-accepted-p
           (progn
             (if emacsos-assist-web--run-id
@@ -2515,17 +2598,14 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
 (defun emacsos-assist-web--release-send (buffer status)
   "Release BUFFER's send reservation, show STATUS, and persist retry state."
   (setq emacsos-assist-web--in-flight nil)
-  (when (eq emacsos--assist-active-surface buffer)
-    (setq emacsos--assist-active-surface nil))
+  (emacsos-assist-web--sync-active-surface)
   (emacsos-assist-web--set-status status)
   (emacsos-assist-web--save-draft))
 
 (defun emacsos-assist-web-send ()
   "Send this buffer's prompt to its canonical web thread exactly once."
   (interactive)
-  (when (and (bufferp emacsos--assist-active-surface)
-             (not (buffer-live-p emacsos--assist-active-surface)))
-    (setq emacsos--assist-active-surface nil))
+  (emacsos-assist-web--sync-active-surface)
   (let ((text (or emacsos-assist-web--submitted-text
                   (emacsos-assist-web--input))))
     (cond
@@ -2533,11 +2613,10 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
       (message "Open an Assist Web thread before sending"))
      ((or (not (stringp text)) (string-empty-p (string-trim text)))
       (message "Nothing to send"))
-     (emacsos-assist-web--in-flight
-      (message "A web-thread request is already running"))
-     ((and emacsos--assist-active-surface
-           (not (eq emacsos--assist-active-surface (current-buffer))))
+     ((eq emacsos--assist-active-surface 'chat)
       (message "Another Assist request is still running"))
+     (emacsos-assist-web--in-flight
+      (emacsos-assist-web--queue-follow-up text))
      (t
       (let* ((generation (cl-incf emacsos-assist-web--send-generation))
              (buffer (current-buffer))
@@ -2545,7 +2624,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
         ;; Any older snapshot callback describes the transcript before this send.
         (cl-incf emacsos-assist-web--refresh-generation)
         (setq emacsos-assist-web--in-flight t
-              emacsos--assist-active-surface buffer
+              emacsos--assist-active-surface 'web
               emacsos-assist-web--pending-key
               (or emacsos-assist-web--pending-key
                   (emacsos-assist-web--new-idempotency-key))
@@ -2647,7 +2726,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                              emacsos-assist-web--in-flight t)
                                        (unless emacsos-assist-web--pending-rendered-p
                                          (emacsos-assist-web--append-pending text)))
-                                     (setq emacsos--assist-active-surface canonical)
+                                     (emacsos-assist-web--sync-active-surface)
                                      (with-current-buffer draft
                                        (setq emacsos-assist-web--thread-id nil
                                              emacsos-assist-web--draft-id nil
