@@ -3796,6 +3796,53 @@
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacsos--assist-active-surface nil))))
 
+(ert-deftest test-assist-web-queue-filter-rejects-a-reversed-entry-callback ()
+  "A stale A filter cannot mutate B after B becomes the observed entry."
+  (let ((target (generate-new-buffer " *assist-queue-target*"))
+        (source (generate-new-buffer " *assist-queue-source*"))
+        process calls)
+    (unwind-protect
+        (progn
+          (setq process (make-pipe-process :name "assist-queue-stale"
+                                           :buffer source :noquery t))
+          (with-current-buffer target
+            (emacsos-assist-web-mode)
+            (let ((a (emacsos-assist-web--entry
+                      "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                  (b (emacsos-assist-web--entry
+                      "B" 'observing "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+              (setq emacsos-assist-web--queue (list a b)
+                    emacsos-assist-web--stream-entry a)
+              (cl-letf (((symbol-function 'emacsos-assist-web--legacy-event-filter)
+                         (lambda (&rest _)
+                           (lambda (&rest _) (setq calls (1+ (or calls 0)))))))
+                (let ((a-filter (emacsos-assist-web--event-filter #'ignore target 0)))
+                  ;; B is the later controller before delayed A bytes arrive.
+                  (setq emacsos-assist-web--stream-entry b)
+                  (funcall a-filter process "late A")))
+              (should-not calls)
+              (should (eq emacsos-assist-web--stream-entry b)))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p target) (kill-buffer target))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-queue-buffer-kill-releases-each-entry-token ()
+  "Killing a queue owner releases its pre-header token exactly once."
+  (let ((emacsos-assist-web--requests nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let* ((entry (emacsos-assist-web--entry
+                     "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+             (token (list (current-buffer) (plist-get entry :key))))
+        (setf (plist-get entry :handshake-token) token)
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--stream-entry entry
+              emacsos-assist-web--requests (list token))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+          (emacsos-assist-web--buffer-killed))
+        (should-not emacsos-assist-web--requests)
+        (should-not (plist-get entry :handshake-token))))))
+
 (ert-deftest test-assist-web-transfer-keeps-source-until-its-old-cache-is-retired ()
   "A stale new-thread cache cannot outlive accepted canonical ownership."
   (let ((emacsos--assist-active-surface nil)

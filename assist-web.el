@@ -3057,6 +3057,18 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
   (seq-find (lambda (entry) (equal key (plist-get entry :key)))
             emacsos-assist-web--queue))
 
+(defun emacsos-assist-web--entry-callback-current-p (entry epoch)
+  "Return non-nil only while ENTRY still owns callback EPOCH in this buffer.
+
+Callbacks retain both immutable key and per-entry epoch.  This makes a removed,
+adopted, or retried entry inert before any parser marker or cleanup state is
+consulted; selected-buffer state is never a fallback owner."
+  (and entry
+       (equal (plist-get entry :key)
+              (plist-get (emacsos-assist-web--queue-entry
+                          (plist-get entry :key)) :key))
+       (= epoch (plist-get entry :epoch))))
+
 (defun emacsos-assist-web--queue-head ()
   "Return this buffer's oldest resident entry."
   (car emacsos-assist-web--queue))
@@ -3427,7 +3439,8 @@ could release a pre-header SSE reservation later."
         (let ((token (list (current-buffer) (plist-get entry :key))))
           (push token emacsos-assist-web--requests)
           (setf (plist-get entry :handshake-token) token
-                (plist-get entry :state) 'observing)
+                (plist-get entry :state) 'observing
+                (plist-get entry :epoch) (1+ (plist-get entry :epoch)))
           (emacsos-assist-web--entry-activate entry)
           (setq emacsos-assist-web--stream-entry entry)
           (emacsos-assist-web--save-draft)
@@ -3440,9 +3453,13 @@ could release a pre-header SSE reservation later."
                     (with-current-buffer target emacsos-assist-web--stream-entry))))
     (if (not entry)
         (emacsos-assist-web--legacy-event-filter url-filter target generation)
-      (let ((legacy (emacsos-assist-web--legacy-event-filter url-filter target generation)))
+      (let ((epoch (plist-get entry :epoch))
+            (legacy (emacsos-assist-web--legacy-event-filter url-filter target generation)))
         (lambda (process bytes)
-          (when (buffer-live-p target)
+          (when (and (buffer-live-p target)
+                     (with-current-buffer target
+                       (and (eq entry emacsos-assist-web--stream-entry)
+                            (emacsos-assist-web--entry-callback-current-p entry epoch))))
             (with-current-buffer target
               (emacsos-assist-web--entry-activate entry)
               (funcall legacy process bytes)
