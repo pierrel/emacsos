@@ -1464,6 +1464,19 @@
       (should-not emacsos-assist-web--stream-undecided-suffix)
       (should-not emacsos-assist-web--stream-raw-bytes))))
 
+(ert-deftest test-assist-web-stream-lifecycle-discards-held-suffix ()
+  (dolist (finish (list (lambda () (emacsos-assist-web--reset-assistant 2))
+                        (lambda () (emacsos-assist-web--stream-interrupted (current-buffer) "lost"))
+                        (lambda () (emacsos-assist-web--stream-cleanup t t))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
+      (emacsos-assist-web--append-pending "hello") (emacsos-assist-web--reset-assistant 1)
+      (emacsos-assist-web--append-delta 1 1 (string #x1f3f4))
+      (should emacsos-assist-web--stream-undecided-suffix)
+      (funcall finish)
+      (should (or (equal emacsos-assist-web--stream-undecided-suffix "")
+                  (null emacsos-assist-web--stream-undecided-suffix))))))
+
 (ert-deftest test-assist-web-stream-terminal-flushes-only-safe-tails ()
   (dolist (tail (list "\r" (string #x1f3f4)))
     (with-temp-buffer
@@ -1486,16 +1499,16 @@
     (should (equal emacsos-assist-web--stream-status "invalid Assist delta"))))
 
 (ert-deftest test-assist-web-stream-terminal-tail-reconciles-authoritatively ()
-  (let (refreshed)
-    (with-temp-buffer
+  (with-temp-buffer
       (emacsos-assist-web-mode) (emacsos-assist-web--write-prompt)
       (setq emacsos-assist-web--thread-id "thread-1")
       (emacsos-assist-web--append-pending "hello") (emacsos-assist-web--reset-assistant 1)
       (emacsos-assist-web--append-delta 1 1 "\r")
-      (cl-letf (((symbol-function 'emacsos-assist-web-refresh-thread)
-                 (lambda (&rest _) (setq refreshed t))))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_m _p _v callback &rest _) (funcall callback test-assist-web--snapshot nil)))
+                ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore))
         (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}"))
-      (should refreshed))))
+      (should (equal (alist-get 'text (car (alist-get 'messages emacsos-assist-web--snapshot))) "old"))))
 
 (ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
   (with-temp-buffer
@@ -1799,33 +1812,83 @@
       (should-not rendered))))
 
 (ert-deftest test-assist-web-refresh-and-history-rejection-retain-the-view ()
-  (let ((good (copy-tree test-assist-web--snapshot))
-        (bad (copy-tree test-assist-web--snapshot)))
+  (let ((buffer (generate-new-buffer " *assist-rejected-refresh*"))
+        (window (selected-window))
+        (old-buffer (window-buffer (selected-window)))
+        (good (copy-tree test-assist-web--snapshot))
+        (bad nil))
+    (setf (alist-get 'messages good)
+          `(((id . "m-0") (role . "user") (text . "older") (state . "final"))
+            ,@(alist-get 'messages good))
+          (alist-get 'has_older_messages good) t
+          (alist-get 'next_before good) "cursor-old")
+    (setq bad (copy-tree good))
     (setf (alist-get 'text (car (alist-get 'messages bad)))
           (concat "bad" (string #x202e)))
-    (with-temp-buffer
-      (emacsos-assist-web-mode) (setq emacsos-assist-web--thread-id "thread-1")
-      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) #'ignore))
-        (emacsos-assist-web--render good))
-      (insert "draft")
-      (let ((before (copy-tree emacsos-assist-web--snapshot))
-            (text (buffer-string)))
-        (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                   (lambda (_m _p _v callback &rest _) (funcall callback bad nil)))
-                  ((symbol-function 'emacsos-assist-web--try-write-cache)
-                   (lambda (&rest _) (ert-fail "rejected refresh must not cache"))))
-          (emacsos-assist-web-refresh-thread))
-        (should (equal emacsos-assist-web--snapshot before))
-        (should (string-match-p "draft" (buffer-string)))
-        (should (equal emacsos-assist-web--stream-status
-                       "refresh rejected; cached; C-c C-a g retries"))
-        (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                   (lambda (_m _p _v callback &rest _) (funcall callback bad nil))))
-          (emacsos-assist-web-load-older))
-        (should (equal emacsos-assist-web--snapshot before))
-        (should (equal emacsos-assist-web--stream-status
-                       "older history rejected; cached; C-c C-a l retries"))
-        (should (string-match-p "draft" text))))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (emacsos-assist-web-mode)
+          (set-window-buffer window buffer)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) #'ignore))
+            (emacsos-assist-web--render good))
+          (insert "draft")
+          (goto-char (- (point-max) 2))
+          (set-window-start window (point-min) t)
+          (let* ((before (copy-tree emacsos-assist-web--snapshot))
+                 (input-point-offset-before
+                  (- (point) (emacsos-assist-web--prompt-start)))
+                 (window-start-before (window-start window))
+                 (input-before (emacsos-assist-web--input))
+                 ;; Status is intentionally the only mutable rendered region.
+                 (view-before
+                  (concat (buffer-substring-no-properties
+                           (point-min) emacsos-assist-web--status-start)
+                          (buffer-substring-no-properties
+                           emacsos-assist-web--status-end (point-max)))))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_m _p _v callback &rest _) (funcall callback bad nil)))
+                      ((symbol-function 'emacsos-assist-web--try-write-cache)
+                       (lambda (&rest _) (ert-fail "rejected refresh must not cache"))))
+              (emacsos-assist-web-refresh-thread))
+            (should (equal emacsos-assist-web--snapshot before))
+            (should (equal (mapcar (lambda (message) (alist-get 'id message))
+                                   (alist-get 'messages emacsos-assist-web--snapshot))
+                           '("m-0" "m-1")))
+            (should (equal (alist-get 'next_before emacsos-assist-web--snapshot)
+                           "cursor-old"))
+            (should (equal (emacsos-assist-web--input) input-before))
+            (should (= (- (point) (emacsos-assist-web--prompt-start))
+                       input-point-offset-before))
+            (should (= (window-start window) window-start-before))
+            (should (equal (concat (buffer-substring-no-properties
+                                    (point-min) emacsos-assist-web--status-start)
+                                   (buffer-substring-no-properties
+                                    emacsos-assist-web--status-end (point-max)))
+                           view-before))
+            (should (equal emacsos-assist-web--stream-status
+                           "refresh rejected; cached; C-c C-a g retries"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_m _p _v callback &rest _) (funcall callback bad nil)))
+                      ((symbol-function 'emacsos-assist-web--render)
+                       (lambda (&rest _) (ert-fail "rejected history must not redraw"))))
+              (emacsos-assist-web-load-older))
+            (should (equal emacsos-assist-web--snapshot before))
+            (should (equal (alist-get 'next_before emacsos-assist-web--snapshot)
+                           "cursor-old"))
+            (should (equal (emacsos-assist-web--input) input-before))
+            (should (= (- (point) (emacsos-assist-web--prompt-start))
+                       input-point-offset-before))
+            (should (= (window-start window) window-start-before))
+            (should (equal (concat (buffer-substring-no-properties
+                                    (point-min) emacsos-assist-web--status-start)
+                                   (buffer-substring-no-properties
+                                    emacsos-assist-web--status-end (point-max)))
+                           view-before))
+            (should (equal emacsos-assist-web--stream-status
+                           "older history rejected; cached; C-c C-a l retries"))))
+      (set-window-buffer window old-buffer)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest test-assist-web-first-refresh-rejection-has-no-cache-status ()
   (let ((bad (copy-tree test-assist-web--snapshot)))
@@ -1839,12 +1902,13 @@
       (should-not emacsos-assist-web--snapshot)
       (should (equal emacsos-assist-web--stream-status "refresh rejected; C-c C-a g retries")))))
 
-(ert-deftest test-assist-web-show-thread-refreshes-crlf-and-england-flag ()
+(ert-deftest test-assist-web-list-activation-refreshes-crlf-and-england-flag ()
   (let* ((thread '((id . "thread-1") (description . "Thread")
                    (repo_label . "Assist") (status . "ready")))
          (snapshot (copy-tree test-assist-web--snapshot))
          (flag (nth 0 emacsos-assist-web--subdivision-flags))
-         (buffer nil))
+         (buffer nil)
+         (emacsos-assist-web--catalog (test-assist-web--catalog thread)))
     (setf (alist-get 'text (car (alist-get 'messages snapshot)))
           (concat "a\r\nb " flag))
     (unwind-protect
@@ -1853,7 +1917,11 @@
                    (lambda (_m _p _v callback &rest _) (funcall callback snapshot nil)))
                   ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore)
                   ((symbol-function 'switch-to-buffer) #'ignore))
-          (emacsos-assist-web--show-thread thread)
+          (with-current-buffer (get-buffer-create emacsos-assist-web--thread-list-buffer-name)
+            (emacsos-assist-web-thread-list-mode)
+            (emacsos-assist-web--render-thread-list)
+            (goto-char (emacsos-assist-web--thread-row-position "thread-1"))
+            (emacsos-assist-web-list-activate))
           (setq buffer (emacsos-assist-web--thread-buffer "thread-1"))
           (with-current-buffer buffer
             (should (string-match-p (regexp-quote (concat "a\nb " flag)) (buffer-string)))
