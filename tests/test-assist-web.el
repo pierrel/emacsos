@@ -3981,6 +3981,61 @@
           (emacsos-assist-web--start-observation entry))
         (should (string-match-p "Abort/Detach" (buffer-string)))))))
 
+(ert-deftest test-assist-web-preheader-budget-refuses-a-fifth-observer ()
+  "The shared bounded request list prevents a fifth pre-header SSE open."
+  (let ((emacsos-assist-web--requests (list 'one 'two 'three 'four))
+        opened)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let ((entry (emacsos-assist-web--entry
+                    "A" 'accepted-unobserved
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setf (plist-get entry :run-id) "run-a")
+        (setq emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--observe-run)
+                   (lambda (&rest _) (setq opened t))))
+          (emacsos-assist-web--start-observation entry))
+        (should-not opened)
+        (should (eq (plist-get entry :state) 'accepted-unobserved))
+        (should (= (length emacsos-assist-web--requests) 4))))))
+
+(ert-deftest test-assist-web-queue-without-observer-never-falls-back-to-legacy-parser ()
+  "A delayed queue callback with no exact owner is an inert stale callback."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--queue
+          (list (emacsos-assist-web--entry
+                 "A" 'accepted-unobserved
+                 "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+    (cl-letf (((symbol-function 'emacsos-assist-web--legacy-dispatch-event)
+               (lambda (&rest _) (ert-fail "queue callback reached legacy parser"))))
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       "{\"attempt\":1,\"index\":1,\"text\":\"late\"}"))))
+
+(ert-deftest test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent ()
+  "Every pre-header exit releases only its captured entry generation once."
+  (dolist (exit '(validated-headers non-2xx-429 synchronous-open-error
+                  missing-process invalid-2xx header-timeout disconnect
+                  guarded-filter buffer-kill reload adoption))
+    (let ((emacsos-assist-web--requests nil))
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (let* ((entry (emacsos-assist-web--entry
+                       "A" 'observing
+                       "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+               (token (list exit)))
+          (setf (plist-get entry :epoch) 7
+                (plist-get entry :handshake-token) token)
+          (setq emacsos-assist-web--requests (list token))
+          (emacsos-assist-web--cleanup-handshake entry 6)
+          (should (equal emacsos-assist-web--requests (list token)))
+          (emacsos-assist-web--cleanup-handshake entry 7)
+          (emacsos-assist-web--cleanup-handshake entry 7)
+          (should-not emacsos-assist-web--requests)
+          (should-not (plist-get entry :handshake-token)))))))
+
 (ert-deftest test-assist-web-transfer-keeps-source-until-its-old-cache-is-retired ()
   "A stale new-thread cache cannot outlive accepted canonical ownership."
   (let ((emacsos--assist-active-surface nil)

@@ -3341,15 +3341,15 @@ cannot safely claim the shared surface until its exact re-observation settles."
                entry "live text truncated; waiting for final")
               (emacsos-assist-web--set-status "live text truncated; waiting for final"))
              ((equal event "terminal") (emacsos-assist-web--stream-finish target))
-             ;; Preserve the legacy parser's strict handling for status and
-             ;; server closure events; their mutation is buffer metadata, not
-             ;; per-submission marker state.
-             (t (funcall #'emacsos-assist-web--legacy-dispatch-event target event data)))
+             ;; Queue transport recognizes only entry-owned payloads here.
+             ;; A late singleton status/closure event cannot choose a region.
+             (t nil))
             (error
              (emacsos-assist-web--entry-replace-empty-assistant-status
               entry "unverified; refresh")
              (emacsos-assist-web--set-unverified-status (error-message-string problem))))
-        (emacsos-assist-web--legacy-dispatch-event target event data)))))
+        (unless emacsos-assist-web--queue
+          (emacsos-assist-web--legacy-dispatch-event target event data))))))
 
 (defun emacsos-assist-web--release-handshake (entry)
   "Release ENTRY's pre-header request token exactly once."
@@ -3357,6 +3357,14 @@ cannot safely claim the shared surface until its exact re-observation settles."
     (setq emacsos-assist-web--requests
           (delq token emacsos-assist-web--requests))
     (setf (plist-get entry :handshake-token) nil)))
+
+(defun emacsos-assist-web--cleanup-handshake (entry epoch)
+  "Release ENTRY's handshake only when its captured EPOCH still owns it.
+
+Every pre-header exit uses this small primitive.  A delayed callback from an
+older observer cannot consume the token reserved by a later retry of ENTRY."
+  (when (and entry (= epoch (plist-get entry :epoch)))
+    (emacsos-assist-web--release-handshake entry)))
 
 (defun emacsos-assist-web--stream-cleanup (&optional keep-pending no-render)
   "Clean up the current entry's stream and its pre-header budget token."
@@ -3570,7 +3578,13 @@ could release a pre-header SSE reservation later."
   (let ((entry (and (buffer-live-p target)
                     (with-current-buffer target emacsos-assist-web--stream-entry))))
     (if (not entry)
-        (emacsos-assist-web--legacy-event-filter url-filter target generation)
+        ;; A queue owner without an exact observed entry has already retired or
+        ;; superseded this callback.  It must not fall back into singleton
+        ;; parser state merely because bytes arrived late.
+        (if (and (buffer-live-p target)
+                 (with-current-buffer target emacsos-assist-web--queue))
+            (lambda (&rest _) nil)
+          (emacsos-assist-web--legacy-event-filter url-filter target generation))
       (let ((epoch (plist-get entry :epoch))
             (legacy (emacsos-assist-web--legacy-event-filter url-filter target generation)))
         (lambda (process bytes)
@@ -3587,7 +3601,7 @@ could release a pre-header SSE reservation later."
                 ;; Both a validated event stream and a bounded rejection have
                 ;; crossed the header boundary; neither may keep this client-side
                 ;; handshake slot while Assist owns (or refuses) the long stream.
-                (emacsos-assist-web--release-handshake entry))
+                (emacsos-assist-web--cleanup-handshake entry epoch))
               )))))))
 
 (defun emacsos-assist-web--stream-finish (buffer &optional run-still-active)
@@ -3596,7 +3610,8 @@ could release a pre-header SSE reservation later."
     (with-current-buffer buffer
       (let ((entry emacsos-assist-web--stream-entry))
         (if (not entry)
-            (emacsos-assist-web--legacy-stream-finish buffer run-still-active)
+            (unless emacsos-assist-web--queue
+              (emacsos-assist-web--legacy-stream-finish buffer run-still-active))
           (progn
           (unless run-still-active
             (setf (plist-get entry :state) 'terminal-unreconciled))
