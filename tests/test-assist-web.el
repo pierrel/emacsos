@@ -3960,6 +3960,152 @@
         (should (equal (alist-get 'message (caddar requests)) "S2"))
         (should (equal (emacsos-assist-web--input) "later tail"))))))
 
+(ert-deftest test-assist-web-send-save-failure-restores-the-uncommitted-draft ()
+  "An ordinary enqueue cannot leave a region/key after its cache write fails."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (insert "keep this exact draft")
+      (goto-char (- (point-max) 5))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web-send))
+      (should-not requested)
+      (should-not emacsos-assist-web--queue)
+      (should (equal (emacsos-assist-web--input) "keep this exact draft"))
+      (should (= (point) (- (point-max) 5))))))
+
+(ert-deftest test-assist-web-barrier-enqueue-save-failure-restores-the-draft ()
+  "An ambiguous head may not consume B when B's durable enqueue fails."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (insert "B remains editable")
+      (let ((a (emacsos-assist-web--entry
+                "A" 'acceptance-unknown
+                "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setq emacsos-assist-web--queue (list a))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (setq requested t))))
+          (emacsos-assist-web-send))
+        (should-not requested)
+        (should (equal emacsos-assist-web--queue (list a)))
+        (should (equal (emacsos-assist-web--input) "B remains editable"))))))
+
+(ert-deftest test-assist-web-enqueue-builds-the-real-create-body-before-post ()
+  "Public Send persists its real key and complete create body before POST."
+  (let (persisted request)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--draft-id "new-thread"
+            emacsos-assist-web--draft-repository "repo-key"
+            emacsos-assist-web--draft-harness "deepagents")
+      (emacsos-assist-web--write-prompt)
+      (insert "create this")
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda ()
+                   (setq persisted (emacsos-assist-web--queue-cache-value)) t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path payload _callback &optional headers &rest _)
+                   (setq request (list method path payload headers)))))
+        (emacsos-assist-web-send))
+      (let ((entry (car (alist-get 'queue persisted))))
+        (should (string-match-p emacsos-assist-web--idempotency-regexp
+                                (alist-get 'key entry)))
+        (should (equal (alist-get 'repo_key persisted) "repo-key"))
+        (should (equal (alist-get 'harness persisted) "deepagents"))
+        (should (equal (nth 2 request)
+                       '((message . "create this")
+                         (repo_key . "repo-key") (harness . "deepagents"))))
+        (should (equal (cdr (assoc "Idempotency-Key" (nth 3 request)))
+                       (alist-get 'key entry)))))))
+
+(ert-deftest test-assist-web-collision-refuses-every-new-send ()
+  "A collision is recovery-only: public Send retains its editable draft."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--collision-p t)
+      (emacsos-assist-web--write-prompt)
+      (insert "must remain editable")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web-send))
+      (should-not requested)
+      (should (equal (emacsos-assist-web--input) "must remain editable"))
+      (should (equal (cdr emacsos-assist-web--prompt-refusal)
+                     "submission identity conflict; message remains in draft")))))
+
+(ert-deftest test-assist-web-invalid-queue-cache-fails-closed-but-keeps-tail ()
+  "Malformed queue recovery starts no transport and retains its editable tail."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                 (lambda (&rest _)
+                   '((text . "tail")
+                     (queue . (((text . "A") (key . "not-a-key")
+                                (state . "accepted-unobserved") (run_id . "run-a")))))))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web--restore-draft))
+      (should-not requested)
+      (should-not emacsos-assist-web--queue)
+      (should (equal (emacsos-assist-web--input) "tail")))))
+
+(ert-deftest test-assist-web-restore-retains-entry-live-text-and-recovery-draft ()
+  "A valid durable queue restores every nontransport recovery field."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web--write-prompt)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+               (lambda (&rest _)
+                 '((text . "tail") (recovery_draft . "source tail")
+                   (collision . nil)
+                   (queue . (((text . "A")
+                              (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                              (state . "rejected") (live_text . t)))))))
+              ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+      (emacsos-assist-web--restore-draft))
+    (should (plist-get (emacsos-assist-web--queue-head) :live-text))
+    (should (equal emacsos-assist-web--recovery-draft "source tail"))
+    (should (equal (emacsos-assist-web--input) "tail"))))
+
+(ert-deftest test-assist-web-terminal-does-not-release-an-unpersisted-state ()
+  "A terminal callback cannot advance or release its observer before persistence."
+  (let ((emacsos-assist-web--requests nil) cleaned advanced)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let* ((entry (emacsos-assist-web--entry
+                     "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+             (token (list (current-buffer) (plist-get entry :key))))
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :handshake-token) token)
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--stream-entry entry
+              emacsos-assist-web--requests (list token))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil))
+                  ((symbol-function 'emacsos-assist-web--stream-cleanup)
+                   (lambda (&rest _) (setq cleaned t)))
+                  ((symbol-function 'emacsos-assist-web--start-next-observation)
+                   (lambda () (setq advanced t))))
+          (emacsos-assist-web--stream-finish (current-buffer)))
+        (should-not cleaned)
+        (should-not advanced)
+        (should (eq (plist-get entry :state) 'observing))
+        (should (eq emacsos-assist-web--stream-entry entry))
+        (should (equal emacsos-assist-web--requests (list token)))))))
+
 (ert-deftest test-assist-web-reconcile-persists-snapshot-before-retiring-entries ()
   "Terminal queue entries stay visible unless snapshot then queue persistence succeeds."
   (let (events rendered)
