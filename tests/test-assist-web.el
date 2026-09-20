@@ -1323,7 +1323,7 @@
        (json-encode '((attempt . 1) (index . 2) (text . "x"))))
       (should (string-match-p "partial" (buffer-string)))
       (should-not (string-match-p "partialx" (buffer-string)))
-      (should (= emacsos-assist-web--stream-assistant-bytes 7))
+      (should-not emacsos-assist-web--stream-raw-bytes)
       (should (= emacsos-assist-web--stream-index 1))
       (should (equal emacsos-assist-web--stream-status
                      "invalid Assist delta")))))
@@ -1336,9 +1336,10 @@
       (emacsos-assist-web--append-pending "hello")
       (emacsos-assist-web--reset-assistant 1)
       (emacsos-assist-web--append-delta 1 1 "partial")
-      ;; A newly introduced `defvar-local' has only its default value in an
+      ;; A newly introduced `defvar-local' has no trustworthy state in an
       ;; already-streaming buffer after code reload.
-      (kill-local-variable 'emacsos-assist-web--stream-assistant-bytes)
+      (kill-local-variable 'emacsos-assist-web--stream-raw-bytes)
+      (kill-local-variable 'emacsos-assist-web--stream-undecided-suffix)
       (emacsos-assist-web--dispatch-event
        (current-buffer) "assistant-delta"
        (json-encode '((attempt . 1) (index . 2) (text . "x"))))
@@ -1346,7 +1347,104 @@
       (should-not (string-match-p "partialx" (buffer-string)))
       (should (= emacsos-assist-web--stream-index 1))
       (should (equal emacsos-assist-web--stream-status
-                     "invalid Assist delta")))))
+                     "Assist stream is missing its reset; refresh to reconcile")))))
+
+(ert-deftest test-assist-web-canonicalizes-message-line-endings-and-flags ()
+  (let* ((snapshot (copy-tree test-assist-web--snapshot))
+         (text (concat "a\r\nb\rc" (nth 0 emacsos-assist-web--subdivision-flags))))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot))) text)
+    (setq snapshot (emacsos-assist-web--require-snapshot snapshot))
+    (should (equal (alist-get 'text (car (alist-get 'messages snapshot)))
+                   (concat "a\nb\nc" (nth 0 emacsos-assist-web--subdivision-flags))))
+    (should (equal snapshot (emacsos-assist-web--require-snapshot snapshot))))
+  (dolist (flag emacsos-assist-web--subdivision-flags)
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'text (car (alist-get 'messages snapshot))) flag)
+      (should (equal (alist-get 'text
+                                (car (alist-get 'messages
+                                                (emacsos-assist-web--require-snapshot snapshot))))
+                     flag)))))
+
+(ert-deftest test-assist-web-rejects-unapproved-tag-text ()
+  (dolist (text (list (concat (string #x1f3f4 #xe0067 #xe007f))
+                      (concat (string #x1f3f4 #xe0067 #xe0062 #xe007f))
+                      (concat (nth 0 emacsos-assist-web--subdivision-flags)
+                              (string #xe0067))))
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'text (car (alist-get 'messages snapshot))) text)
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-raw-transcript-limits-precede-normalization ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot))) "\r\nx")
+    (let ((emacsos-assist-web--max-message-bytes 2))
+      (should-error (emacsos-assist-web--require-snapshot snapshot)))
+    (let ((emacsos-assist-web--max-message-bytes 3))
+      (should (equal (alist-get 'text
+                                (car (alist-get 'messages
+                                                (emacsos-assist-web--require-snapshot snapshot))))
+                     "\nx")))))
+
+(ert-deftest test-assist-web-rejected-transcript-does-not-partially-canonicalize ()
+  (let ((snapshot (copy-tree test-assist-web--snapshot)))
+    (setf (alist-get 'messages snapshot)
+          `(((id . "m-1") (role . "assistant") (text . "a\r\nb") (state . "final"))
+            ((id . "m-2") (role . "assistant")
+             (text . ,(concat "bad" (string #x202e))) (state . "final"))))
+    (let ((before (copy-tree snapshot)))
+      (should-error (emacsos-assist-web--require-snapshot snapshot))
+      (should (equal snapshot before)))))
+
+(ert-deftest test-assist-web-stream-canonicalization-is-segmentation-invariant ()
+  (dolist (text (cons "a\r\nb" emacsos-assist-web--subdivision-flags))
+    (dotimes (split (1- (length text)))
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (emacsos-assist-web--write-prompt)
+        (emacsos-assist-web--append-pending "hello")
+        (emacsos-assist-web--reset-assistant 1)
+        (emacsos-assist-web--append-delta 1 1 (substring text 0 (1+ split)))
+        (emacsos-assist-web--append-delta 1 2 (substring text (1+ split)))
+        (should (string-match-p
+                 (regexp-quote (emacsos-assist-web--canonical-message-text text))
+                 (buffer-string)))
+        (should (string-empty-p emacsos-assist-web--stream-undecided-suffix))
+        (should (= emacsos-assist-web--stream-raw-bytes (string-bytes text)))))))
+
+(ert-deftest test-assist-web-stream-keeps-unsafe-flag-prefix-unrendered ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (emacsos-assist-web--append-pending "hello")
+    (emacsos-assist-web--reset-assistant 1)
+    (emacsos-assist-web--append-delta 1 1 (string #x1f3f4))
+    (should-not (string-match-p (regexp-quote (string #x1f3f4)) (buffer-string)))
+    (emacsos-assist-web--dispatch-event
+     (current-buffer) "assistant-delta"
+     (json-encode `((attempt . 1) (index . 2) (text . ,(string #xe007a)))))
+    (should-not (string-match-p (regexp-quote (string #x1f3f4)) (buffer-string)))
+    (should (equal emacsos-assist-web--stream-status "invalid Assist delta"))))
+
+(ert-deftest test-assist-web-stream-terminal-flushes-only-safe-tails ()
+  (dolist (tail (list "\r" (string #x1f3f4)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (emacsos-assist-web--append-pending "hello")
+      (emacsos-assist-web--reset-assistant 1)
+      (emacsos-assist-web--append-delta 1 1 tail)
+      (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}")
+      (should (string-match-p (regexp-quote (if (equal tail "\r") "\n" tail))
+                              (buffer-string)))))
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (emacsos-assist-web--append-pending "hello")
+    (emacsos-assist-web--reset-assistant 1)
+    (emacsos-assist-web--append-delta 1 1
+                                      (substring (nth 0 emacsos-assist-web--subdivision-flags) 0 2))
+    (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}")
+    (should (equal emacsos-assist-web--stream-status "invalid Assist delta"))))
 
 (ert-deftest test-assist-web-delta-admits-layout-and-emoji-format-points ()
   (with-temp-buffer
@@ -1490,6 +1588,35 @@
                                  (alist-get 'messages rendered))
                          '("m-0" "m-1")))
           (should (equal (alist-get 'next_before rendered) "cursor-0")))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-history-union-uses-canonical-not-mixed-raw-bytes ()
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
+        (emacsos-assist-web--max-rendered-transcript-bytes 3)
+        (snapshot (copy-tree test-assist-web--snapshot))
+        rendered
+        (page '((thread . ((id . "thread-1") (description . "Thread")
+                           (status . "ready")
+                           (workspace . ((repo_label . "Assist")))))
+                (messages . (((id . "m-0") (role . "user") (text . "\r\nx")
+                              (state . "final"))))
+                (has_older_messages . nil) (next_before . nil))))
+    (setf (alist-get 'text (car (alist-get 'messages snapshot))) "z")
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                     (lambda (&rest _) snapshot))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback page nil)))
+                    ((symbol-function 'emacsos-assist-web--render)
+                     (lambda (value &rest _) (setq rendered value))))
+            (emacsos-assist-web-load-older))
+          (should (equal (mapcar (lambda (message) (alist-get 'text message))
+                                 (alist-get 'messages rendered))
+                         '("\nx" "z"))))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-history-at-rendered-cap-clears-older-cursor ()

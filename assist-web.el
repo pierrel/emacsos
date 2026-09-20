@@ -116,6 +116,14 @@
 (defconst emacsos-assist-web--record-id-regexp
   "\\`[A-Za-z0-9_-]\\{1,242\\}\\'")
 (defconst emacsos-assist-web--idempotency-regexp "\\`emacsos-[0-9a-f]\\{32\\}\\'")
+(defconst emacsos-assist-web--subdivision-flags
+  (mapcar
+   (lambda (tag)
+     (concat (string #x1f3f4)
+             (apply #'string (mapcar (lambda (character) (+ #xe0000 character)) tag))
+             (string #xe007f)))
+   '("gbeng" "gbsct" "gbwls"))
+  "The only RGI subdivision flags accepted in Assist transcript text.")
 (defvar emacsos-assist-web--catalog nil)
 (defvar emacsos-assist-web--catalog-state nil
   "Current catalog state.
@@ -155,7 +163,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--assistant-end nil)
 (defvar-local emacsos-assist-web--stream-attempt nil)
 (defvar-local emacsos-assist-web--stream-index 0)
-(defvar-local emacsos-assist-web--stream-assistant-bytes 0)
+(defvar-local emacsos-assist-web--stream-raw-bytes nil)
+(defvar-local emacsos-assist-web--stream-undecided-suffix nil)
 
 (defun emacsos-assist-web--cache-path (&optional name)
   "Return the cache path for NAME without changing the filesystem."
@@ -307,9 +316,20 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
        (<= (string-bytes value) emacsos-assist-web--max-catalog-text-bytes)
        (emacsos-conversation-valid-text-p value)))
 
+(defun emacsos-assist-web--canonical-message-text (value)
+  "Canonicalize line endings in transcript VALUE without changing other text."
+  (string-replace "\r" "\n" (string-replace "\r\n" "\n" value)))
+
+(defun emacsos-assist-web--message-validation-text (value)
+  "Return VALUE with only complete allowed subdivision flags masked for validation."
+  (dolist (flag emacsos-assist-web--subdivision-flags value)
+    (setq value (string-replace flag (string #x1f3f4) value))))
+
 (defun emacsos-assist-web--valid-message-text-p (value)
-  "Return non-nil for multiline transcript VALUE without spoofing controls."
-  (emacsos-conversation-valid-text-p value t))
+  "Return non-nil for canonical multiline transcript VALUE without spoofing controls."
+  (and (stringp value)
+       (emacsos-conversation-valid-text-p
+        (emacsos-assist-web--message-validation-text value) t)))
 
 (defun emacsos-assist-web--isolate-display-text (text)
   "Return server-supplied TEXT inside trusted bidirectional isolates."
@@ -393,7 +413,7 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
 
 (defun emacsos-assist-web--require-transcript-limits
     (messages max-messages max-bytes)
-  "Require MESSAGES to fit MAX-MESSAGES, MAX-BYTES, and the per-message cap."
+  "Require raw MESSAGES to fit MAX-MESSAGES, MAX-BYTES, and message caps."
   (let ((remaining messages)
         (count 0)
         (total 0))
@@ -404,7 +424,7 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
       (let* ((message (car remaining))
              (text (and (emacsos-assist-web--object-p message)
                         (alist-get 'text message))))
-        (unless (emacsos-assist-web--valid-message-text-p text)
+        (unless (stringp text)
           (error "Assist Web returned an invalid thread message"))
         (let ((bytes (string-bytes text)))
           (when (> bytes emacsos-assist-web--max-message-bytes)
@@ -415,6 +435,28 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
       (setq remaining (cdr remaining)))
     (unless (null remaining)
       (error "Assist Web returned an invalid thread transcript"))))
+
+(defun emacsos-assist-web--canonicalize-transcript
+    (messages max-messages max-bytes)
+  "Return canonical copies of MESSAGES within MAX-MESSAGES and MAX-BYTES."
+  (let ((canonical nil)
+        (count 0)
+        (total 0))
+    (dolist (message messages (nreverse canonical))
+      (let* ((text (emacsos-assist-web--canonical-message-text
+                    (alist-get 'text message)))
+             (bytes (string-bytes text)))
+        (setq count (1+ count))
+        (unless (emacsos-assist-web--valid-message-text-p text)
+          (error "Assist Web returned an invalid thread message"))
+        (when (> bytes emacsos-assist-web--max-message-bytes)
+          (error "Assist Web thread message is too large"))
+        (setq total (+ total bytes))
+        (when (or (> count max-messages) (> total max-bytes))
+          (error "Assist Web thread transcript is too large"))
+        (let ((copy (copy-tree message)))
+          (setf (alist-get 'text copy) text)
+          (push copy canonical))))))
 
 (defun emacsos-assist-web--require-snapshot
     (value &optional expected-thread-id max-messages max-bytes)
@@ -441,10 +483,12 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
-    (emacsos-assist-web--require-transcript-limits
-     messages
-     (or max-messages emacsos-assist-web--max-snapshot-messages)
-     (or max-bytes emacsos-assist-web--max-snapshot-transcript-bytes))
+    (let ((limit-messages (or max-messages emacsos-assist-web--max-snapshot-messages))
+          (limit-bytes (or max-bytes emacsos-assist-web--max-snapshot-transcript-bytes)))
+      (emacsos-assist-web--require-transcript-limits messages limit-messages limit-bytes)
+      (setq messages
+            (emacsos-assist-web--canonicalize-transcript
+             messages limit-messages limit-bytes)))
     (let ((seen (make-hash-table :test #'equal)))
       (dolist (message messages)
         (unless (and (emacsos-assist-web--object-p message)
@@ -875,6 +919,8 @@ do not ask the phone shell to redraw a dying buffer."
           emacsos-assist-web--stream-scan-marker nil
           emacsos-assist-web--stream-unconsumed-bytes nil
           emacsos-assist-web--stream-header-timer nil
+          emacsos-assist-web--stream-raw-bytes nil
+          emacsos-assist-web--stream-undecided-suffix nil
           emacsos-assist-web--in-flight nil)
     (when (eq emacsos--assist-active-surface (current-buffer))
       (setq emacsos--assist-active-surface nil))
@@ -1031,7 +1077,10 @@ the canonical snapshot must retain its durable identity."
         (emacsos-assist-web--replace-empty-assistant-status
          "live text truncated; waiting for final")
         (emacsos-assist-web--set-status "live text truncated; waiting for final"))
-       ((equal event "terminal") (emacsos-assist-web--stream-finish target))
+       ((equal event "terminal")
+        (condition-case nil
+            (emacsos-assist-web--finish-stream-tail target)
+          (error (emacsos-assist-web--stream-interrupted target "invalid Assist delta"))))
        ((equal event "closed-set")
         (condition-case nil
             (when (equal (alist-get 'reason (json-parse-string data :object-type 'alist))
@@ -1048,22 +1097,51 @@ the canonical snapshot must retain its durable identity."
 
 (defun emacsos-assist-web--reset-assistant (attempt)
   "Clear only the provisional assistant body for ATTEMPT."
-  (unless (integerp attempt) (error "invalid stream attempt"))
+  (unless (integerp attempt) (error "Invalid stream attempt"))
   (setq emacsos-assist-web--stream-attempt attempt
         emacsos-assist-web--stream-index 0
-        emacsos-assist-web--stream-assistant-bytes 0)
+        emacsos-assist-web--stream-raw-bytes 0
+        emacsos-assist-web--stream-undecided-suffix "")
   (when (and (markerp emacsos-assist-web--assistant-start)
              (markerp emacsos-assist-web--assistant-end))
     (set-marker emacsos-assist-web--assistant-end
                 (emacsos-conversation-reset-assistant
                  emacsos-assist-web--assistant-start emacsos-assist-web--assistant-end))))
 
+(defun emacsos-assist-web--undecided-stream-suffix (text)
+  "Return TEXT's longest proper CRLF or allowed-flag prefix suffix."
+  (let ((suffix ""))
+    (dolist (candidate (cons "\r\n" emacsos-assist-web--subdivision-flags))
+      (dotimes (length (1- (length candidate)))
+        (let ((prefix (substring candidate 0 (1+ length))))
+          (when (and (> (length prefix) (length suffix))
+                     (string-suffix-p prefix text))
+            (setq suffix prefix)))))
+    suffix))
+
+(defun emacsos-assist-web--stream-decidable-text (text)
+  "Return canonical decidable text and raw undecided suffix from TEXT."
+  (let* ((suffix (emacsos-assist-web--undecided-stream-suffix text))
+         (decidable (substring text 0 (- (length text) (length suffix))))
+         (canonical (emacsos-assist-web--canonical-message-text decidable)))
+    (unless (emacsos-assist-web--valid-message-text-p canonical)
+      (error "Invalid Assist delta"))
+    (cons canonical suffix)))
+
+(defun emacsos-assist-web--append-rendered-delta (text)
+  "Append validated canonical TEXT at the current provisional assistant marker."
+  (unless (and (markerp emacsos-assist-web--assistant-end)
+               (marker-buffer emacsos-assist-web--assistant-end))
+    (error "Invalid Assist delta"))
+  (set-marker emacsos-assist-web--assistant-end
+              (emacsos-conversation-append-delta
+               emacsos-assist-web--assistant-end text)))
+
 (defun emacsos-assist-web--append-delta (attempt index text)
-  "Append the next bounded delta for ATTEMPT/INDEX to this buffer only."
+  "Append the next raw bounded TEXT delta for ATTEMPT/INDEX atomically."
   (unless (and (integerp attempt) (integerp index) (stringp text)
-               (<= (string-bytes text) (* 16 1024))
-               (emacsos-conversation-valid-text-p text t))
-    (error "invalid Assist delta"))
+               (<= (string-bytes text) (* 16 1024)))
+    (error "Invalid Assist delta"))
   (cond
    ((not (integerp emacsos-assist-web--stream-attempt))
     (emacsos-assist-web--stream-interrupted
@@ -1073,30 +1151,41 @@ the canonical snapshot must retain its durable identity."
         (/= index (1+ emacsos-assist-web--stream-index)))
     (emacsos-assist-web--stream-interrupted
      (current-buffer) "Assist stream has a gap; refresh to reconcile"))
-   ((and (markerp emacsos-assist-web--assistant-end)
-         (marker-buffer emacsos-assist-web--assistant-end))
-    (let* ((prior-bytes
-            (if (local-variable-p
-                 'emacsos-assist-web--stream-assistant-bytes (current-buffer))
-                emacsos-assist-web--stream-assistant-bytes
-              (unless (and (markerp emacsos-assist-web--assistant-start)
-                           (eq (marker-buffer emacsos-assist-web--assistant-start)
-                               (current-buffer)))
-                (error "invalid Assist delta"))
-              (string-bytes
-               (buffer-substring-no-properties
-                emacsos-assist-web--assistant-start
-                emacsos-assist-web--assistant-end))))
-           (total (+ prior-bytes
-                    (string-bytes text))))
+   ((and (local-variable-p 'emacsos-assist-web--stream-raw-bytes (current-buffer))
+         (local-variable-p 'emacsos-assist-web--stream-undecided-suffix (current-buffer))
+         (integerp emacsos-assist-web--stream-raw-bytes)
+         (stringp emacsos-assist-web--stream-undecided-suffix))
+    (let ((total (+ emacsos-assist-web--stream-raw-bytes (string-bytes text))))
       (when (> total emacsos-assist-web--max-message-bytes)
-        (error "invalid Assist delta"))
-      (set-marker emacsos-assist-web--assistant-end
-                  (emacsos-conversation-append-delta
-                   emacsos-assist-web--assistant-end text))
-      (setq emacsos-assist-web--stream-index index
-            emacsos-assist-web--stream-assistant-bytes total)
-      (emacsos-assist-web--set-status "working")))))
+        (error "Invalid Assist delta"))
+      (pcase-let ((`(,canonical . ,suffix)
+                   (emacsos-assist-web--stream-decidable-text
+                    (concat emacsos-assist-web--stream-undecided-suffix text))))
+        (emacsos-assist-web--append-rendered-delta canonical)
+        (setq emacsos-assist-web--stream-index index
+              emacsos-assist-web--stream-raw-bytes total
+              emacsos-assist-web--stream-undecided-suffix suffix)
+        (emacsos-assist-web--set-status "working"))))
+   (t
+    (emacsos-assist-web--stream-interrupted
+     (current-buffer) "Assist stream is missing its reset; refresh to reconcile"))))
+
+(defun emacsos-assist-web--finish-stream-tail (target)
+  "Flush TARGET's one safe pending stream suffix before canonical reconciliation."
+  (with-current-buffer target
+    (let ((suffix emacsos-assist-web--stream-undecided-suffix))
+      (cond
+       ((or (null suffix) (string-empty-p suffix))
+        (emacsos-assist-web--stream-finish target))
+       ((equal suffix "\r")
+        (emacsos-assist-web--append-rendered-delta "\n")
+        (setq emacsos-assist-web--stream-undecided-suffix "")
+        (emacsos-assist-web--stream-finish target))
+       ((equal suffix (string #x1f3f4))
+        (emacsos-assist-web--append-rendered-delta suffix)
+        (setq emacsos-assist-web--stream-undecided-suffix "")
+        (emacsos-assist-web--stream-finish target))
+       (t (error "Invalid Assist delta"))))))
 
 (defun emacsos-assist-web--decoded-end ()
   "Return the response-buffer end known to contain decoded entity bytes."
@@ -2335,7 +2424,14 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                ;; a terminal refresh performs the reconciliation.
                                (unless (and busy emacsos-assist-web--in-flight)
                                  (emacsos-assist-web--render value))))
-                         (error
+                           (error
+                          (if emacsos-assist-web--pending-accepted-p
+                              (emacsos-assist-web--set-unverified-status
+                               "refresh rejected; C-c C-a g retries")
+                            (emacsos-assist-web--set-status
+                             (if emacsos-assist-web--snapshot
+                                 "refresh rejected; cached; C-c C-a g retries"
+                               "refresh rejected; C-c C-a g retries")))
                           (message "Thread refresh rejected: %s"
                                    (error-message-string problem))))))))))))))))
 
@@ -2409,6 +2505,10 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                     (alist-get 'next_before page))))
                          (emacsos-assist-web--render updated))
                      (error
+                      (emacsos-assist-web--set-status
+                       (if (or emacsos-assist-web--snapshot cached)
+                           "older history rejected; cached; C-c C-a l retries"
+                         "older history rejected; C-c C-a l retries"))
                       (message "Older history rejected: %s"
                                (error-message-string problem))))))))))))))
 
