@@ -145,6 +145,8 @@ The value is nil, `current', `cached', `refresh-failed', or
   "Fixed local refusal for the current unchanged editable draft.")
 (defvar-local emacsos-assist-web--collision-p nil
   "Non-nil while an adopted queue must contract before new sends.")
+(defvar-local emacsos-assist-web--recovery-draft nil
+  "A bounded source draft retained during canonical-buffer adoption.")
 (defvar-local emacsos-assist-web--handshake-token nil
   "This buffer's entry-owned pre-header SSE request-budget token.")
 (defvar-local emacsos-assist-web--thread-id nil)
@@ -3102,19 +3104,21 @@ cannot safely claim the shared surface until its exact re-observation settles."
     (run_id . ,(plist-get entry :run-id))
     (live_text . ,(and (plist-get entry :live-text) t))))
 
-(defun emacsos-assist-web--queue-cache-value (&optional queue text)
+(defun emacsos-assist-web--queue-cache-value (&optional queue text recovery-draft)
   "Return the full persisted record for QUEUE and editable TEXT."
   `((text . ,(or text (emacsos-assist-web--input) ""))
     (queue . ,(mapcar #'emacsos-assist-web--entry-cache-value
                        (or queue emacsos-assist-web--queue)))
+    (recovery_draft . ,(or recovery-draft emacsos-assist-web--recovery-draft))
     (collision . ,(and emacsos-assist-web--collision-p t))
     (repo_key . ,emacsos-assist-web--draft-repository)
     (harness . ,emacsos-assist-web--draft-harness)))
 
-(defun emacsos-assist-web--queue-cache-fits-p (queue text)
+(defun emacsos-assist-web--queue-cache-fits-p (queue text &optional recovery-draft)
   "Return non-nil when QUEUE plus TEXT fits one private cache record."
   (<= (string-bytes (json-encode
-                      (emacsos-assist-web--queue-cache-value queue text)))
+                      (emacsos-assist-web--queue-cache-value
+                       queue text recovery-draft)))
       emacsos-assist-web-max-cache-bytes))
 
 (defun emacsos-assist-web--save-draft ()
@@ -3130,10 +3134,16 @@ cannot safely claim the shared surface until its exact re-observation settles."
   "Copy the one legacy parser slot back into ENTRY.
 
 The parser remains one-per-buffer; this bridge prevents it from becoming a
-second submission owner while the queue transition is deliberately incremental."
+  second submission owner while the queue transition is deliberately incremental."
   (when entry
-    (setf (plist-get entry :run-id) emacsos-assist-web--run-id
-          (plist-get entry :key) emacsos-assist-web--pending-key
+    (when emacsos-assist-web--run-id
+      (setf (plist-get entry :run-id) emacsos-assist-web--run-id))
+    ;; A queued region is rendered before its immutable key is minted.  A
+    ;; later entry activation must not erase that key through an older empty
+    ;; parser slot, or the withheld POST callback can no longer find its entry.
+    (when emacsos-assist-web--pending-key
+      (setf (plist-get entry :key) emacsos-assist-web--pending-key))
+    (setf
           (plist-get entry :assistant-start) emacsos-assist-web--assistant-start
           (plist-get entry :assistant-end) emacsos-assist-web--assistant-end
           (plist-get entry :rendered) emacsos-assist-web--pending-rendered-p))
@@ -3349,9 +3359,18 @@ could release a pre-header SSE reservation later."
                                     (emacsos-assist-web--start-observation current)
                                     (emacsos-assist-web--pump-posts)))))))
                         (error
-                         (setf (plist-get current :state) 'acceptance-unknown)
+                         ;; The POST response already proved this exact Run.
+                         ;; An adoption/cache failure must never erase that
+                         ;; proof and turn a later retry into another POST.
+                         (setf (plist-get current :state)
+                               (if (plist-get current :run-id)
+                                   'accepted-unobserved
+                                 'acceptance-unknown))
                          (emacsos-assist-web--entry-status
-                          current "acceptance unknown; Send retries safely"))))
+                          current (if (plist-get current :run-id)
+                                      "accepted; canonical adoption needs recovery"
+                                    "acceptance unknown; Send retries safely"))
+                         (emacsos-assist-web--save-draft))))
                      ('retryable-rejected
                       (setf (plist-get current :state) 'retryable-rejected)
                       (emacsos-assist-web--entry-status
@@ -3582,50 +3601,130 @@ could release a pre-header SSE reservation later."
       (emacsos-assist-web--save-draft)
       (emacsos-assist-web--pump-posts))))
 
+(defconst emacsos-assist-web--entry-progress-rank
+  '((recovered-head . 0) (queued . 1) (posting . 2)
+    (acceptance-unknown . 3) (retryable-rejected . 3) (rejected . 3)
+    (identity-conflict . 4) (accepted-unobserved . 5) (observing . 6)
+    (terminal-unreconciled . 7) (reconciling . 8)))
+
+(defun emacsos-assist-web--more-advanced-entry (left right)
+  "Return the more durably established of same-key LEFT and RIGHT.
+
+The caller has already established that both records carry the same immutable
+key and submitted text.  A disagreement about a returned Run is never a
+tie-break: it is evidence that local recovery is unsafe."
+  (let ((left-run (plist-get left :run-id))
+        (right-run (plist-get right :run-id)))
+    (when (and left-run right-run (not (equal left-run right-run)))
+      (user-error "canonical adoption found conflicting Run identities"))
+    (if (>= (alist-get (emacsos-assist-web--entry-state left)
+                       emacsos-assist-web--entry-progress-rank)
+            (alist-get (emacsos-assist-web--entry-state right)
+                       emacsos-assist-web--entry-progress-rank))
+        left
+      right)))
+
+(defun emacsos-assist-web--adoption-merge (source destination)
+  "Return SOURCE and DESTINATION entries in the one recoverable server order.
+
+Source Runs necessarily precede the independently discovered destination queue;
+unadmitted source followers must remain after it.  Dedupe only immutable keys,
+never submitted text, and fail closed before either buffer changes."
+  (let ((sequence
+         (append (seq-filter (lambda (entry) (plist-get entry :run-id)) source)
+                 destination
+                 (seq-remove (lambda (entry) (plist-get entry :run-id)) source)))
+        merged)
+    (dolist (entry sequence)
+      (let ((key (plist-get entry :key)))
+        (if (not key)
+            (setq merged (append merged (list entry)))
+          (if-let ((previous
+                    (seq-find (lambda (candidate)
+                                (equal key (plist-get candidate :key)))
+                              merged)))
+              (progn
+                (unless (equal (plist-get previous :text)
+                               (plist-get entry :text))
+                  (user-error "canonical adoption found conflicting submission text"))
+                (setcar (member previous merged)
+                        (emacsos-assist-web--more-advanced-entry previous entry)))
+            (setq merged (append merged (list entry)))))))
+    (when (> (length merged) 4)
+      (user-error "canonical adoption needs bounded local recovery"))
+    merged))
+
+(defun emacsos-assist-web--message-fits-p (text &optional existing-thread-id)
+  "Return non-nil when TEXT fits its actual current message endpoint body."
+  (and (<= (length text) 64000)
+       (<= (string-bytes
+            (json-encode
+             (if existing-thread-id
+                 `((message . ,text))
+               `((message . ,text)
+                 (repo_key . ,emacsos-assist-web--draft-repository)
+                 (harness . ,(or emacsos-assist-web--draft-harness "deepagents"))))))
+           66000)))
+
 (defun emacsos-assist-web--adopt-canonical-buffer (source destination)
-  "Move SOURCE's acknowledged queue into DESTINATION after one bounded cache write."
+  "Move SOURCE's acknowledged queue into DESTINATION after one bounded cache write.
+
+The destination stays the controller: its prompt and any live observer survive.
+Nothing in SOURCE is retired until the complete destination record is durable."
   (unless (eq source destination)
     (let ((source-queue (with-current-buffer source emacsos-assist-web--queue))
           (source-input (with-current-buffer source (emacsos-assist-web--input)))
           (source-current (with-current-buffer source emacsos-assist-web--queue-current)))
       (with-current-buffer destination
         (let* ((destination-queue emacsos-assist-web--queue)
-               (merged (delete-dups (append source-queue destination-queue)))
+               (destination-input (emacsos-assist-web--input))
+               (merged (emacsos-assist-web--adoption-merge source-queue destination-queue))
                (collision (> (length merged) 2)))
-          (when (or (> (length merged) 4)
-                    (not (emacsos-assist-web--queue-cache-fits-p merged
-                                                                 (emacsos-assist-web--input))))
+          (when (and (not (string-empty-p (string-trim source-input)))
+                     (or emacsos-assist-web--recovery-draft
+                         (not (emacsos-assist-web--message-fits-p source-input))))
+            (user-error "canonical adoption needs bounded local recovery"))
+          (when (not (emacsos-assist-web--queue-cache-fits-p
+                      merged destination-input
+                      (unless (string-empty-p (string-trim source-input))
+                        source-input)))
             (user-error "canonical adoption needs bounded local recovery"))
           (let ((emacsos-assist-web--queue merged)
-                (emacsos-assist-web--collision-p collision))
+                (emacsos-assist-web--collision-p collision)
+                (emacsos-assist-web--recovery-draft
+                 (unless (string-empty-p (string-trim source-input)) source-input)))
             (unless (emacsos-assist-web--save-draft)
               (user-error "canonical adoption could not be persisted")))
-          ;; Retire the former canonical observer before this durable queue
-          ;; becomes its owner.  A pre-transfer callback cannot be permitted
-          ;; to render into the newly adopted exact Run.
-          (emacsos-assist-web--stream-cleanup t t)
-          (cl-incf emacsos-assist-web--refresh-generation)
-          (cl-incf emacsos-assist-web--send-generation)
-          (setq emacsos-assist-web--queue merged
-                emacsos-assist-web--collision-p collision)
-          (when (stringp source-input)
-            (emacsos-assist-web--replace-input source-input))
+          ;; Source callbacks become inert only after the destination cache
+          ;; holds the complete merge.  Do not close the destination observer:
+          ;; it may already own C1, which is still authoritative for its stream.
           (dolist (entry source-queue)
+            (cl-incf (plist-get entry :epoch)))
+          (setq emacsos-assist-web--queue merged
+                emacsos-assist-web--collision-p collision
+                emacsos-assist-web--recovery-draft
+                (unless (string-empty-p (string-trim source-input)) source-input))
+          (dolist (entry (seq-filter (lambda (entry) (memq entry merged))
+                                     source-queue))
             (setf (plist-get entry :epoch) (1+ (plist-get entry :epoch))
                   (plist-get entry :rendered) nil)
             (emacsos-assist-web--entry-render entry))
           (when source-current
-            (setq emacsos-assist-web--queue-current source-current)
-            (emacsos-assist-web--entry-activate source-current)
-            (unless (plist-get source-current :live-text)
+            (when (memq source-current merged)
+              (setq emacsos-assist-web--queue-current source-current)
+              (emacsos-assist-web--entry-activate source-current))
+            (unless (or (plist-get source-current :live-text)
+                        emacsos-assist-web--stream-entry)
               (emacsos-assist-web--entry-status
                source-current "working; live text unavailable")))
           (with-current-buffer source
+            (unless (emacsos-assist-web--delete-cache "drafts/new-thread.json")
+              (user-error "canonical adoption could not retire its source cache"))
             (setq emacsos-assist-web--queue nil
                   emacsos-assist-web--post-entry nil
                   emacsos-assist-web--stream-entry nil)
-            (unless (emacsos-assist-web--delete-cache "drafts/new-thread.json")
-              (user-error "canonical adoption could not retire its source cache")))))
+            ;; Do not let the killed source re-save the now-retired draft.
+            (remove-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed t))))
       (kill-buffer source)
       (switch-to-buffer destination)
       destination)))

@@ -3667,15 +3667,18 @@
                        '((thread_id . "thread-new") (run_id . "run-new")) nil)))
           (should-not (buffer-live-p draft))
           (should (equal observations (list canonical)))
-          (should (equal cleaned '(t t)))
+          ;; The discovered canonical buffer remains the controller.  Its
+          ;; observer must not be torn down merely because S1 adopts into it.
+          (should-not cleaned)
           (should (eq emacsos--assist-active-surface 'web))
           (with-current-buffer canonical
             (should (equal emacsos-assist-web--run-id "run-new"))
-            (should (= emacsos-assist-web--refresh-generation 1))
-            (should (= emacsos-assist-web--send-generation 1))
-            (should (= emacsos-assist-web--stream-generation 1))
+            (should (= emacsos-assist-web--refresh-generation 0))
+            (should (= emacsos-assist-web--send-generation 0))
+            (should (= emacsos-assist-web--stream-generation 0))
             (should (= (how-many "you> hello" (point-min) (point-max)) 1))
-            (should (equal (emacsos-assist-web--input) "next draft"))
+            (should (equal (emacsos-assist-web--input) ""))
+            (should (equal emacsos-assist-web--recovery-draft "next draft"))
             (should (string-match-p "working; live text unavailable"
                                     (buffer-string)))))
       (when (buffer-live-p draft) (kill-buffer draft))
@@ -3718,7 +3721,7 @@
           (should-not observed)
           (should-not deleted)
           (should (buffer-live-p draft))
-          (should-not emacsos--assist-active-surface)
+          (should (eq emacsos--assist-active-surface 'web))
           (with-current-buffer canonical
             (should-not emacsos-assist-web--run-id)
             (should-not emacsos-assist-web--pending-accepted-p)
@@ -3726,12 +3729,70 @@
           (with-current-buffer draft
             (should-not emacsos-assist-web--thread-id)
             (should (equal emacsos-assist-web--draft-id "new-thread"))
-            (should (equal emacsos-assist-web--pending-key
-                           "emacsos-0123456789abcdef0123456789abcdef"))
-            (should-not emacsos-assist-web--pending-accepted-p)
-            (should-not emacsos-assist-web--run-id)
+            (should (equal (plist-get (car emacsos-assist-web--queue) :run-id)
+                           "run-new"))
+            (should (eq (plist-get (car emacsos-assist-web--queue) :state)
+                        'accepted-unobserved))
             (should-not emacsos-assist-web--in-flight))
       (when (buffer-live-p draft) (kill-buffer draft))
+      (when (buffer-live-p canonical) (kill-buffer canonical))
+      (setq emacsos--assist-active-surface nil))))
+
+(ert-deftest test-assist-web-send-adopts-source-run-before-destination-fifo ()
+  "Public Send preserves S1,C1,C2,S2 by key while retaining D's controller."
+  (let ((emacsos--assist-active-surface nil)
+        (canonical (generate-new-buffer " *assist-canonical-order*"))
+        (source (generate-new-buffer " *assist-source-order*"))
+        first-post destination-controller)
+    (unwind-protect
+        (progn
+          (with-current-buffer canonical
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-new")
+            (emacsos-assist-web--write-prompt)
+            (insert "destination tail")
+            (let ((c1 (emacsos-assist-web--entry "C1" 'observing
+                                                 "emacsos-11111111111111111111111111111111"))
+                  (c2 (emacsos-assist-web--entry "C2" 'queued
+                                                 "emacsos-22222222222222222222222222222222")))
+              (setf (plist-get c1 :run-id) "run-c1")
+              (setq emacsos-assist-web--queue (list c1 c2)
+                    emacsos-assist-web--stream-entry c1
+                    destination-controller c1)))
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread"
+                  emacsos-assist-web--draft-repository "repo-key"
+                  emacsos-assist-web--draft-harness "deepagents")
+            (emacsos-assist-web--write-prompt)
+            (insert "S1")
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--thread-buffer)
+                       (lambda (thread-id)
+                         (and (equal thread-id "thread-new") canonical)))
+                      ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t))
+                      ((symbol-function 'emacsos-assist-web--observe-run) #'ignore)
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _)
+                         (unless first-post
+                           (setq first-post callback)))))
+              (emacsos-assist-web-send)
+              ;; Same text as destination C2 but a distinct client turn/key.
+              (insert "C2")
+              (emacsos-assist-web-send)
+              (funcall first-post
+                       '((thread_id . "thread-new") (run_id . "run-s1")) nil)))
+          (with-current-buffer canonical
+            (should (eq emacsos-assist-web--stream-entry destination-controller))
+            (should (equal (emacsos-assist-web--input) "destination tail"))
+            (should (equal (mapcar (lambda (entry) (plist-get entry :text))
+                                   emacsos-assist-web--queue)
+                           '("S1" "C1" "C2" "C2")))
+            (should (= (length (delete-dups
+                                (mapcar (lambda (entry) (plist-get entry :key))
+                                        emacsos-assist-web--queue)))
+                       4))))
+      (when (buffer-live-p source) (kill-buffer source))
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacsos--assist-active-surface nil))))
 
@@ -3768,11 +3829,15 @@
                          (live_text . t)) nil)))
           (should-not observed)
           (should (buffer-live-p draft))
-          (should-not emacsos--assist-active-surface)
+          ;; A proven accepted Run remains an aggregate web exclusion even
+          ;; though its source cache could not yet retire.
+          (should (eq emacsos--assist-active-surface 'web))
           (with-current-buffer draft
             (should (equal emacsos-assist-web--draft-id "new-thread"))
-            (should (equal emacsos-assist-web--pending-key
-                           "emacsos-0123456789abcdef0123456789abcdef"))))
+            (should (equal (plist-get (car emacsos-assist-web--queue) :run-id)
+                           "run-new"))
+            (should (eq (plist-get (car emacsos-assist-web--queue) :state)
+                        'accepted-unobserved))))
       (when (buffer-live-p draft) (kill-buffer draft))
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacsos--assist-active-surface nil))))
