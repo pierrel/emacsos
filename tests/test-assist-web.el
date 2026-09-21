@@ -4108,6 +4108,35 @@
       (should (equal (cdr emacsos-assist-web--prompt-refusal)
                      "submission identity conflict; message remains in draft")))))
 
+(ert-deftest test-assist-web-two-live-buffers-release-web-only-after-the-last ()
+  "One finished buffer cannot release the other live web transport."
+  (let ((a (generate-new-buffer " *assist-a*"))
+        (b (generate-new-buffer " *assist-b*"))
+        (emacsos--assist-active-surface nil))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list a b))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (let ((entry (emacsos-assist-web--entry
+                            "x" 'observing
+                            "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+                (setq emacsos-assist-web--queue (list entry)
+                      emacsos-assist-web--stream-entry entry))))
+          (with-current-buffer a (emacsos-assist-web--sync-active-surface))
+          (should (eq emacsos--assist-active-surface 'web))
+          (with-current-buffer a
+            (setf (plist-get emacsos-assist-web--stream-entry :state) 'accepted-unobserved)
+            (setq emacsos-assist-web--stream-entry nil)
+            (emacsos-assist-web--sync-active-surface))
+          (should (eq emacsos--assist-active-surface 'web))
+          (with-current-buffer b
+            (setf (plist-get emacsos-assist-web--stream-entry :state) 'accepted-unobserved)
+            (setq emacsos-assist-web--stream-entry nil)
+            (emacsos-assist-web--sync-active-surface))
+          (should-not emacsos--assist-active-surface))
+      (mapc #'kill-buffer (list a b)))))
+
 (ert-deftest test-assist-web-invalid-queue-cache-fails-closed-but-keeps-tail ()
   "Malformed queue recovery starts no transport and retains its editable tail."
   (let (requested)
