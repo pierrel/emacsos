@@ -14,6 +14,7 @@ previous_notice=$state_dir/previous-notice
 service=emacsos-ui
 ready=/run/emacsos-ui/ready
 command='/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300'
+learning_command="$command --glide-learning-fd 3"
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 
 fail() { printf 'wvkbd-transaction: %s\n' "$1" >&2; exit 1; }
@@ -333,7 +334,9 @@ keyboard_pid() {
         [ "$(stat -c '%U' "$proc" 2>/dev/null || true)" = emacsos-lab ] || continue
         [ -r "$proc/cmdline" ] || continue
         actual=$(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null | sed 's/ $//' || true)
-        [ "$actual" = "$command" ] && printf '%s\n' "$pid"
+        if [ "$actual" = "$command" ] || [ "$actual" = "$learning_command" ]; then
+            printf '%s\n' "$pid"
+        fi
     done <"$service_cgroup/cgroup.procs"
     return 0
 }

@@ -269,6 +269,14 @@ EOF
         if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
         printf "ready\n" >/run/emacsos-ui/ready
         /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 --glide-learning-fd 3 >/dev/null 2>&1 & echo \$!" >/tmp/learning-keyboard-pid
+        cat /tmp/learning-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 --glide-learning-fd 4 >/dev/null 2>&1 & echo \$!" >/tmp/invalid-keyboard-pid
+        cat /tmp/invalid-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        kill "$(cat /tmp/invalid-keyboard-pid)" "$(cat /tmp/learning-keyboard-pid)"
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
         su -s /bin/sh emacsos-lab -c "sleep 300 & echo \$!" >/tmp/non-keyboard-pid
         cat /run/emacsos-ui/pid /tmp/non-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
         /usr/local/sbin/emacsos-wvkbd-transaction verify-current
