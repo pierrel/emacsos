@@ -4148,6 +4148,19 @@
             (setq emacsos-assist-web--stream-entry nil)
             (emacsos-assist-web--sync-active-surface))
           (should (eq emacsos--assist-active-surface 'web))
+          ;; The first completion leaves B's observer visible to the local
+          ;; chat admission gate, not merely to the Web UI.
+          (let ((chat (generate-new-buffer " *assist-overlap-chat*")) requested)
+            (unwind-protect
+                (progn
+                  (emacsos--chat-init-buffer chat)
+                  (with-current-buffer chat (goto-char (point-max)) (insert "hello"))
+                  (cl-letf (((symbol-function 'url-retrieve)
+                             (lambda (&rest _) (setq requested t))))
+                    (emacsos--chat-send chat))
+                  (should-not requested)
+                  (should-not emacsos--chat-in-flight))
+              (when (buffer-live-p chat) (kill-buffer chat))))
           (with-current-buffer b
             (setf (plist-get emacsos-assist-web--stream-entry :state) 'accepted-unobserved)
             (setq emacsos-assist-web--stream-entry nil)
