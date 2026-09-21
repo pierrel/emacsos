@@ -192,8 +192,29 @@ EOF
         chmod 0755 /usr/local/bin/wvkbd-emacsos
         old=$(sha256sum /usr/local/bin/wvkbd-emacsos | awk "{print \$1}")
         cat >/tmp/new.c <<"EOF"
+#include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
-int main(void) { for (;;) sleep(61); }
+int main(int argc, char **argv) {
+    if (argc == 5 &&
+        !strcmp(argv[0], "/usr/local/bin/wvkbd-emacsos --mod-swipe") &&
+        !strcmp(argv[1], "-H") && !strcmp(argv[2], "300") &&
+        !strcmp(argv[3], "-L") && !strcmp(argv[4], "300")) {
+        int fd = open("/tmp/forged-keyboard-ready", O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) return 1;
+        close(fd);
+        for (;;) sleep(61);
+    }
+    if (argc == 2 && !strcmp(argv[1], "--forge-argv0")) {
+        char *forged[] = {
+            "/usr/local/bin/wvkbd-emacsos --mod-swipe",
+            "-H", "300", "-L", "300", (char *)0,
+        };
+        execv("/proc/self/exe", forged);
+        return 1;
+    }
+    for (;;) sleep(61);
+}
 EOF
         cc -s -o /home/user/.cache/wvkbd-emacsos.ABC123 /tmp/new.c
         printf notice >/home/user/.cache/wvkbd-notice.ABC123
@@ -269,6 +290,25 @@ EOF
         if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
         printf "ready\n" >/run/emacsos-ui/ready
         /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 --glide-learning-fd 3 >/dev/null 2>&1 & echo \$!" >/tmp/learning-keyboard-pid
+        cat /tmp/learning-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        /usr/local/sbin/emacsos-wvkbd-transaction verify-current
+        su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 --glide-learning-fd 4 >/dev/null 2>&1 & echo \$!" >/tmp/invalid-keyboard-pid
+        cat /tmp/invalid-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        kill "$(cat /tmp/invalid-keyboard-pid)"
+        rm -f /tmp/forged-keyboard-ready
+        su -s /bin/sh emacsos-lab -c "/usr/local/bin/wvkbd-emacsos --forge-argv0 >/dev/null 2>&1 & echo \$!" >/tmp/forged-keyboard-pid
+        tries=0
+        while [ ! -e /tmp/forged-keyboard-ready ] && [ "$tries" -lt 50 ]; do
+            sleep 0.1
+            tries=$((tries + 1))
+        done
+        [ -e /tmp/forged-keyboard-ready ] || exit 1
+        cat /tmp/forged-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
+        if /usr/local/sbin/emacsos-wvkbd-transaction verify-current 2>/dev/null; then exit 1; fi
+        kill "$(cat /tmp/forged-keyboard-pid)" "$(cat /tmp/learning-keyboard-pid)"
+        cat /run/emacsos-ui/pid >/tmp/openrc.emacsos-ui/cgroup.procs
         su -s /bin/sh emacsos-lab -c "sleep 300 & echo \$!" >/tmp/non-keyboard-pid
         cat /run/emacsos-ui/pid /tmp/non-keyboard-pid >/tmp/openrc.emacsos-ui/cgroup.procs
         /usr/local/sbin/emacsos-wvkbd-transaction verify-current

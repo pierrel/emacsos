@@ -13,12 +13,20 @@ previous=$state_dir/previous
 previous_notice=$state_dir/previous-notice
 service=emacsos-ui
 ready=/run/emacsos-ui/ready
-command='/usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300'
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 
 fail() { printf 'wvkbd-transaction: %s\n' "$1" >&2; exit 1; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 checkpoint() { :; }
+
+baseline_cmdline() {
+    printf '%s\0' /usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300
+}
+
+learning_cmdline() {
+    printf '%s\0' /usr/local/bin/wvkbd-emacsos --mod-swipe -H 300 -L 300 \
+        --glide-learning-fd 3
+}
 
 valid_sha256() {
     [ "${#1}" -eq 64 ] && case $1 in *[!0-9a-f]*) false ;; *) true ;; esac
@@ -332,8 +340,10 @@ keyboard_pid() {
         proc=/proc/$pid
         [ "$(stat -c '%U' "$proc" 2>/dev/null || true)" = emacsos-lab ] || continue
         [ -r "$proc/cmdline" ] || continue
-        actual=$(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null | sed 's/ $//' || true)
-        [ "$actual" = "$command" ] && printf '%s\n' "$pid"
+        if baseline_cmdline | cmp -s - "$proc/cmdline" ||
+           learning_cmdline | cmp -s - "$proc/cmdline"; then
+            printf '%s\n' "$pid"
+        fi
     done <"$service_cgroup/cgroup.procs"
     return 0
 }
