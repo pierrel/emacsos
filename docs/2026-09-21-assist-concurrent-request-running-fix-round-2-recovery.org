@@ -1,0 +1,21 @@
+#+title: Assist Web concurrent request round-two recovery
+#+date: 2026-09-21
+
+* Status
+
+This record corrects the round-one recovery's adoption and validation gaps.
+Source entries receive fresh destination-local markers; foreign source markers
+are never used as destination coordinates.  Existing destination history,
+editable tail, point/window state, and a live C1 assistant region remain in
+place.  S1 is marked for exact-Run re-observation before adoption, so C1 cannot
+advance it to SSE before that GET returns.
+
+Create and established endpoint bodies are bounded using their actual JSON
+shape.  Restored terminal queues reconcile, =awaiting_approval= remains active,
+and persistence failure prevents rejection, dismissal, or detach advancement.
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-20-assist-concurrent-request-running-fix-round-1-recovery.org=,
+  “Status” and “D5 public-path scenario matrix”: round one overstated adoption
+  rendering and endpoint-bound evidence before the reviewed corrections.
