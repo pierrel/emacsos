@@ -184,25 +184,6 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--stream-raw-bytes nil)
 (defvar-local emacsos-assist-web--stream-undecided-suffix nil)
 
-(defun emacsos-assist-web--web-active-p ()
-  "Return non-nil when any live canonical buffer owns transport work."
-  (seq-some
-   (lambda (buffer)
-     (and (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (and (derived-mode-p 'emacsos-assist-web-mode)
-                 emacsos-assist-web--in-flight))))
-   (buffer-list)))
-
-(defun emacsos-assist-web--sync-active-surface ()
-  "Publish aggregate web activity without making one buffer its global owner."
-  (cond
-   ((eq emacsos--assist-active-surface 'chat) nil)
-   ((emacsos-assist-web--web-active-p)
-    (setq emacsos--assist-active-surface 'web))
-   (t
-    (setq emacsos--assist-active-surface nil))))
-
 (defun emacsos-assist-web--follow-up-value (text key)
   "Return the durable queue value for TEXT and its immutable KEY."
   `((text . ,text) (key . ,key)))
@@ -1668,8 +1649,11 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
 (defun emacsos-assist-web--write-prompt ()
   "Append the one editable prompt after a rendered transcript."
   (let ((before (point)))
+    ;; Install before the prompt itself, then follow later status/action
+    ;; insertions at that boundary rather than deleting their entry on Send.
     (setq emacsos-assist-web--prompt-marker (copy-marker before nil))
     (insert emacsos-assist-web--prompt)
+    (set-marker-insertion-type emacsos-assist-web--prompt-marker t)
     (add-text-properties before (point)
                          '(read-only t front-sticky t rear-nonsticky t))
     (setq emacsos-assist-web--input-marker (copy-marker (point) nil))))
@@ -3076,6 +3060,7 @@ callbacks even after reconciliation leaves the resident list empty."
         :reobserve-generation 0 :reobserve-in-flight nil
         :requires-reobserve nil
         :user-start nil :assistant-start nil :assistant-end nil
+        :action-start nil :action-end nil
         :stream-attempt nil :stream-index 0 :stream-assistant-bytes 0))
 
 (defun emacsos-assist-web--entry-state (entry)
@@ -3197,8 +3182,7 @@ consulted; selected-buffer state is never a fallback owner."
 
 (defun emacsos-assist-web--entry-append-pending (entry)
   "Render ENTRY with fresh markers while preserving the editable draft tail."
-  (let* ((text (plist-get entry :text))
-         (input-start (emacsos-assist-web--prompt-start))
+  (let* ((input-start (emacsos-assist-web--prompt-start))
          (draft (emacsos-assist-web--input))
          (input-offset (and input-start (>= (point) input-start)
                             (- (point) input-start)))
@@ -3207,25 +3191,10 @@ consulted; selected-buffer state is never a fallback owner."
          (inhibit-read-only t))
     (when prompt-start
       (delete-region prompt-start (point-max))
-      (let ((transcript-start (point)) (start (point)) body-start)
-        (insert "you> ")
-        (setq body-start (point))
-        (insert text)
-        (setf (plist-get entry :user-start) (copy-marker transcript-start))
-        (emacsos-conversation-commit-user start body-start (point))
-        (insert "\n\nbot> ")
-        (setq body-start (point))
-        (insert "[queued]\n")
-        (pcase-let ((`(,assistant-start . ,assistant-end)
-                     (emacsos-conversation-begin-assistant body-start (point))))
-          (setf (plist-get entry :assistant-start) assistant-start
-                (plist-get entry :assistant-end) assistant-end))
-        (emacsos--chat-present-message start body-start (point) 'assistant)
-        (add-text-properties transcript-start (point)
-                             '(read-only t front-sticky t rear-nonsticky t)))
+      (emacsos-assist-web--entry-insert-before entry (point))
+      (goto-char (point-max))
       (emacsos-assist-web--write-prompt)
-      (when (and draft (not (equal draft text))) (insert draft))
-      (setf (plist-get entry :rendered) t)
+      (when (and draft (not (equal draft (plist-get entry :text)))) (insert draft))
       (if input-offset
           (goto-char (min (point-max)
                           (+ (emacsos-assist-web--prompt-start) input-offset)))
@@ -3260,15 +3229,33 @@ consulted; selected-buffer state is never a fallback owner."
              (marker-buffer (plist-get entry :assistant-end)))
     (let ((buffer (current-buffer)) (key (plist-get entry :key)))
       (save-excursion
-        (goto-char (plist-get entry :assistant-end))
+        (goto-char (or (and (markerp (plist-get entry :action-end))
+                            (marker-buffer (plist-get entry :action-end))
+                            (plist-get entry :action-end))
+                       (plist-get entry :assistant-end)))
         (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+          (unless (and (markerp (plist-get entry :action-start))
+                       (marker-buffer (plist-get entry :action-start)))
+            (setf (plist-get entry :action-start) (copy-marker (point))))
           (insert-text-button label 'follow-link t
                               'action (lambda (_)
                                         (when (buffer-live-p buffer)
                                           (with-current-buffer buffer
                                             (funcall action key))))
                               'help-echo label)
-          (insert "\n"))))))
+          (insert "\n")
+          (setf (plist-get entry :action-end) (copy-marker (point))))))))
+
+(defun emacsos-assist-web--entry-clear-actions (entry)
+  "Remove ENTRY's rendered action buttons without disturbing its message body."
+  (let ((start (plist-get entry :action-start))
+        (end (plist-get entry :action-end)))
+    (when (and (markerp start) (markerp end)
+               (marker-buffer start) (eq (marker-buffer start) (marker-buffer end)))
+      (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+        (delete-region start end)))
+    (setf (plist-get entry :action-start) nil
+          (plist-get entry :action-end) nil)))
 
 (defun emacsos-assist-web--restore-recovery-draft (_)
   "Restore the retained source draft only into an empty destination prompt."
@@ -3352,6 +3339,29 @@ consulted; selected-buffer state is never a fallback owner."
       (emacsos-assist-web--replace-input draft)
       (goto-char (min (point-max)
                        (+ (emacsos-assist-web--prompt-start) point-offset)))))
+  (setf (plist-get entry :rendered) nil
+        (plist-get entry :user-start) nil
+        (plist-get entry :assistant-start) nil
+        (plist-get entry :assistant-end) nil))
+
+(defun emacsos-assist-web--entry-remove-render (entry)
+  "Remove only ENTRY's provisional region while preserving following FIFO work."
+  (when-let ((start (and (markerp (plist-get entry :user-start))
+                         (marker-buffer (plist-get entry :user-start))
+                         (marker-position (plist-get entry :user-start)))))
+    (let ((end (or (seq-some (lambda (candidate)
+                               (let ((marker (plist-get candidate :user-start)))
+                                 (and (markerp marker) (marker-buffer marker)
+                                      (> (marker-position marker) start)
+                                      (marker-position marker))))
+                             emacsos-assist-web--queue)
+                   (and (markerp emacsos-assist-web--prompt-marker)
+                        (marker-buffer emacsos-assist-web--prompt-marker)
+                        (marker-position emacsos-assist-web--prompt-marker)))))
+      (when end
+        (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+          (delete-region start end)))))
+  (emacsos-assist-web--entry-clear-actions entry)
   (setf (plist-get entry :rendered) nil
         (plist-get entry :user-start) nil
         (plist-get entry :assistant-start) nil
@@ -4163,7 +4173,8 @@ write leaves the provisional records available for the next exact refresh."
             (target entry) (epoch (plist-get entry :epoch)))
         (when (eq entry emacsos-assist-web--stream-entry)
           (emacsos-assist-web--stream-cleanup t)
-          (setf (plist-get entry :state) 'accepted-unobserved))
+          (setf (plist-get entry :state) 'accepted-unobserved)
+          (emacsos-assist-web--sync-active-surface))
         (when (emacsos-assist-web--save-draft)
           (emacsos-assist-web--request
          "DELETE" (format "threads/%s/runs/%s"
@@ -4222,10 +4233,14 @@ write leaves the provisional records available for the next exact refresh."
   (interactive "sDismiss submission key: ")
   (when-let ((entry (emacsos-assist-web--queue-entry key)))
     (when (eq (emacsos-assist-web--entry-state entry) 'rejected)
-      (setq emacsos-assist-web--queue (delq entry emacsos-assist-web--queue))
-      (if (emacsos-assist-web--save-draft)
-          (emacsos-assist-web--pump-posts)
-        (setq emacsos-assist-web--queue (cons entry emacsos-assist-web--queue))))))
+      (let* ((original emacsos-assist-web--queue)
+             (remaining (delq entry (copy-sequence original))))
+        (setq emacsos-assist-web--queue remaining)
+        (if (emacsos-assist-web--save-draft)
+            (progn
+              (emacsos-assist-web--entry-remove-render entry)
+              (emacsos-assist-web--pump-posts))
+          (setq emacsos-assist-web--queue original))))))
 
 (defun emacsos-assist-web--restore-create-entry (key)
   "Make recovered pre-canonical KEY eligible for one explicit create POST."
@@ -4234,7 +4249,8 @@ write leaves the provisional records available for the next exact refresh."
                (eq (emacsos-assist-web--entry-state entry) 'recovered-head))
       (setf (plist-get entry :recovered-ready) t)
       (emacsos-assist-web--entry-status entry "ready to create; tap Send")
-      (emacsos-assist-web--save-draft))))
+      (when (emacsos-assist-web--save-draft)
+        (emacsos-assist-web--entry-clear-actions entry)))))
 
 (defun emacsos-assist-web--reset-create-entry (key)
   "Reset rejected pre-canonical KEY without silently promoting its follower."
