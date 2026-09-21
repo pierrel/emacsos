@@ -149,6 +149,8 @@ The value is nil, `current', `cached', `refresh-failed', or
   "A bounded source draft retained during canonical-buffer adoption.")
 (defvar-local emacsos-assist-web--recovery-action-marker nil
   "Marker for the one visible action that restores a retained source draft.")
+(defvar-local emacsos-assist-web--recovery-action-start nil
+  "Start marker for the one visible action that restores a retained source draft.")
 (defvar-local emacsos-assist-web--thread-id nil)
 (defvar-local emacsos-assist-web--draft-repository nil)
 (defvar-local emacsos-assist-web--draft-harness nil)
@@ -3108,7 +3110,9 @@ consulted; selected-buffer state is never a fallback owner."
      (and (buffer-live-p buffer)
           (with-current-buffer buffer
             (and (derived-mode-p 'emacsos-assist-web-mode)
-                 (emacsos-assist-web--queue-transport-active-p)))))
+                 (if emacsos-assist-web--queue-model-p
+                     (emacsos-assist-web--queue-transport-active-p)
+                   emacsos-assist-web--in-flight)))))
    (buffer-list)))
 
 (defun emacsos-assist-web--sync-active-surface ()
@@ -3164,6 +3168,7 @@ consulted; selected-buffer state is never a fallback owner."
 
 (defun emacsos-assist-web--entry-set-assistant-status (entry status)
   "Replace ENTRY's provisional assistant body with fixed STATUS."
+  (emacsos-assist-web--entry-clear-actions entry)
   (when (and (markerp (plist-get entry :assistant-start))
              (markerp (plist-get entry :assistant-end)))
     (set-marker (plist-get entry :assistant-end)
@@ -3257,6 +3262,17 @@ consulted; selected-buffer state is never a fallback owner."
     (setf (plist-get entry :action-start) nil
           (plist-get entry :action-end) nil)))
 
+(defun emacsos-assist-web--clear-recovery-draft-action ()
+  "Remove the retained-source Restore Draft action, if it is still rendered."
+  (let ((start emacsos-assist-web--recovery-action-start)
+        (end emacsos-assist-web--recovery-action-marker))
+    (when (and (markerp start) (markerp end)
+               (marker-buffer start) (eq (marker-buffer start) (marker-buffer end)))
+      (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+        (delete-region start end)))
+    (setq emacsos-assist-web--recovery-action-start nil
+          emacsos-assist-web--recovery-action-marker nil)))
+
 (defun emacsos-assist-web--restore-recovery-draft (_)
   "Restore the retained source draft only into an empty destination prompt."
   (when emacsos-assist-web--recovery-draft
@@ -3266,7 +3282,8 @@ consulted; selected-buffer state is never a fallback owner."
       (let ((recovered emacsos-assist-web--recovery-draft))
         (setq emacsos-assist-web--recovery-draft nil)
         (emacsos-assist-web--replace-input recovered)
-        (unless (emacsos-assist-web--save-draft)
+        (if (emacsos-assist-web--save-draft)
+            (emacsos-assist-web--clear-recovery-draft-action)
           (setq emacsos-assist-web--recovery-draft recovered)
           (emacsos-assist-web--replace-input "")
           (emacsos-assist-web--set-prompt-refusal
@@ -3282,6 +3299,7 @@ consulted; selected-buffer state is never a fallback owner."
                             (marker-position emacsos-assist-web--prompt-marker))))
       (let ((inhibit-read-only t) (inhibit-modification-hooks t))
         (goto-char prompt)
+        (setq emacsos-assist-web--recovery-action-start (copy-marker (point)))
         (insert "[source draft saved: ")
         (insert-text-button "Restore Draft" 'follow-link t
                             'action #'emacsos-assist-web--restore-recovery-draft
@@ -3317,13 +3335,18 @@ consulted; selected-buffer state is never a fallback owner."
                                emacsos-assist-web--queue))))
     (when starts
       (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+        (dolist (entry emacsos-assist-web--queue)
+          (emacsos-assist-web--entry-clear-actions entry))
+        (emacsos-assist-web--clear-recovery-draft-action)
         (delete-region (apply #'min (mapcar #'marker-position starts)) (point-max))
         (emacsos-assist-web--write-prompt)))
     (dolist (entry emacsos-assist-web--queue)
       (setf (plist-get entry :rendered) nil
             (plist-get entry :user-start) nil
             (plist-get entry :assistant-start) nil
-            (plist-get entry :assistant-end) nil)
+            (plist-get entry :assistant-end) nil
+            (plist-get entry :action-start) nil
+            (plist-get entry :action-end) nil)
       (emacsos-assist-web--entry-render entry))
     (emacsos-assist-web--replace-input draft)
     (emacsos-assist-web--render-recovery-draft-action)))
@@ -3333,6 +3356,7 @@ consulted; selected-buffer state is never a fallback owner."
   (when (and (plist-get entry :rendered)
              (markerp (plist-get entry :user-start))
              (marker-buffer (plist-get entry :user-start)))
+    (emacsos-assist-web--entry-clear-actions entry)
     (let ((inhibit-read-only t) (inhibit-modification-hooks t))
       (delete-region (plist-get entry :user-start) (point-max))
       (emacsos-assist-web--write-prompt)
@@ -3342,13 +3366,18 @@ consulted; selected-buffer state is never a fallback owner."
   (setf (plist-get entry :rendered) nil
         (plist-get entry :user-start) nil
         (plist-get entry :assistant-start) nil
-        (plist-get entry :assistant-end) nil))
+        (plist-get entry :assistant-end) nil
+        (plist-get entry :action-start) nil
+        (plist-get entry :action-end) nil))
 
 (defun emacsos-assist-web--entry-remove-render (entry)
   "Remove only ENTRY's provisional region while preserving following FIFO work."
   (when-let ((start (and (markerp (plist-get entry :user-start))
                          (marker-buffer (plist-get entry :user-start))
                          (marker-position (plist-get entry :user-start)))))
+    ;; This changes following marker positions, so find FIFO's boundary only
+    ;; after deleting the entry's own action range.
+    (emacsos-assist-web--entry-clear-actions entry)
     (let ((end (or (seq-some (lambda (candidate)
                                (let ((marker (plist-get candidate :user-start)))
                                  (and (markerp marker) (marker-buffer marker)
@@ -3361,11 +3390,12 @@ consulted; selected-buffer state is never a fallback owner."
       (when end
         (let ((inhibit-read-only t) (inhibit-modification-hooks t))
           (delete-region start end)))))
-  (emacsos-assist-web--entry-clear-actions entry)
   (setf (plist-get entry :rendered) nil
         (plist-get entry :user-start) nil
         (plist-get entry :assistant-start) nil
-        (plist-get entry :assistant-end) nil))
+        (plist-get entry :assistant-end) nil
+        (plist-get entry :action-start) nil
+        (plist-get entry :action-end) nil))
 
 (defun emacsos-assist-web--set-prompt-refusal (status)
   "Show fixed STATUS for the unchanged draft without sharing async status state."
@@ -3399,18 +3429,21 @@ consulted; selected-buffer state is never a fallback owner."
   (let* ((draft (emacsos-assist-web--input))
          (point-offset (max 0 (- (point) (or (emacsos-assist-web--prompt-start)
                                                (point-min)))))
-         (entry (emacsos-assist-web--entry
-                 text 'queued (emacsos-assist-web--new-idempotency-key)))
-         (candidate (append emacsos-assist-web--queue (list entry))))
-    ;; Build the real identity and request body before either a region or a
-    ;; transport can observe it.  The cache candidate uses the post-send
-    ;; editable tail, exactly as --save-draft will.
+         (entry (emacsos-assist-web--entry text 'queued nil)))
+    ;; Validate the actual endpoint body, then a byte-identical prospective
+    ;; cache key, before minting an identity or rendering a provisional region.
     (json-encode (emacsos-assist-web--entry-post-payload entry))
-    (if (not (emacsos-assist-web--queue-cache-fits-p candidate ""))
+    (let ((prospective (copy-tree entry)))
+      (setf (plist-get prospective :key)
+            "emacsos-00000000000000000000000000000000")
+      (if (not (emacsos-assist-web--queue-cache-fits-p
+                (append emacsos-assist-web--queue (list prospective)) ""))
         (progn
           (emacsos-assist-web--set-prompt-refusal
            "local cache full; message remains in draft")
           nil)
+      (setf (plist-get entry :key) (emacsos-assist-web--new-idempotency-key))
+      (let ((candidate (append emacsos-assist-web--queue (list entry))))
       (setq emacsos-assist-web--queue candidate
             emacsos-assist-web--queue-model-p t)
       (cl-incf emacsos-assist-web--refresh-generation)
@@ -3423,7 +3456,7 @@ consulted; selected-buffer state is never a fallback owner."
         (emacsos-assist-web--discard-entry-render entry draft point-offset)
         (emacsos-assist-web--set-prompt-refusal
          "local cache full; message remains in draft")
-        nil))))
+        nil))))))
 
 (defun emacsos-assist-web--post-classification (value error)
   "Classify VALUE/ERROR without exposing server-controlled detail text."
@@ -3457,6 +3490,7 @@ consulted; selected-buffer state is never a fallback owner."
 (defun emacsos-assist-web--entry-reset-assistant (entry attempt)
   "Reset ENTRY's exact assistant region for integer stream ATTEMPT."
   (unless (integerp attempt) (error "invalid stream attempt"))
+  (emacsos-assist-web--entry-clear-actions entry)
   (setf (plist-get entry :stream-attempt) attempt
         (plist-get entry :stream-index) 0
         (plist-get entry :stream-assistant-bytes) 0)
@@ -3486,6 +3520,9 @@ consulted; selected-buffer state is never a fallback owner."
                     (string-bytes text))))
       (when (> total emacsos-assist-web--max-message-bytes)
         (error "invalid Assist delta"))
+      ;; A terminal action is outside the assistant body.  Remove it before
+      ;; extending the body marker so a resumed stream cannot write into it.
+      (emacsos-assist-web--entry-clear-actions entry)
       (set-marker (plist-get entry :assistant-end)
                   (emacsos-conversation-append-delta
                    (plist-get entry :assistant-end) text))
@@ -3572,6 +3609,7 @@ older observer cannot consume the token reserved by a later retry of ENTRY."
               (plist-get entry :stream-response) nil
               (plist-get entry :stream-header-timer) nil)
         (setq emacsos-assist-web--stream-entry nil)
+        (emacsos-assist-web--entry-clear-actions entry)
         (emacsos-assist-web--release-handshake entry)
         (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response)
@@ -3753,6 +3791,7 @@ could release a pre-header SSE reservation later."
   "Start ENTRY's exact Run observation when this buffer owns no observer."
   (when (and entry (not emacsos-assist-web--stream-entry)
              (eq (emacsos-assist-web--entry-state entry) 'accepted-unobserved))
+    (emacsos-assist-web--entry-clear-actions entry)
     (if (eq emacsos--assist-active-surface 'chat)
         (emacsos-assist-web--entry-status entry
                                            "another conversation is active; Refresh retries")
@@ -4174,6 +4213,7 @@ write leaves the provisional records available for the next exact refresh."
         (when (eq entry emacsos-assist-web--stream-entry)
           (emacsos-assist-web--stream-cleanup t)
           (setf (plist-get entry :state) 'accepted-unobserved)
+          (emacsos-assist-web--entry-clear-actions entry)
           (emacsos-assist-web--sync-active-surface))
         (when (emacsos-assist-web--save-draft)
           (emacsos-assist-web--request
@@ -4248,9 +4288,15 @@ write leaves the provisional records available for the next exact refresh."
     (when (and (not emacsos-assist-web--thread-id)
                (eq (emacsos-assist-web--entry-state entry) 'recovered-head))
       (setf (plist-get entry :recovered-ready) t)
+      ;; The action lies after the assistant region.  Delete it before writing
+      ;; the ready status, otherwise the old action range can swallow that text.
+      (emacsos-assist-web--entry-clear-actions entry)
       (emacsos-assist-web--entry-status entry "ready to create; tap Send")
-      (when (emacsos-assist-web--save-draft)
-        (emacsos-assist-web--entry-clear-actions entry)))))
+      (unless (emacsos-assist-web--save-draft)
+        (setf (plist-get entry :recovered-ready) nil)
+        (emacsos-assist-web--entry-status entry "recovered draft; tap Restore Draft")
+        (emacsos-assist-web--entry-add-action
+         entry "Restore Draft" #'emacsos-assist-web--restore-create-entry)))))
 
 (defun emacsos-assist-web--reset-create-entry (key)
   "Reset rejected pre-canonical KEY without silently promoting its follower."
@@ -4563,8 +4609,8 @@ Nothing in SOURCE is retired until the complete destination record is durable."
   "Persist edits without clearing a queue entry merely because its draft changed."
   (when (and (derived-mode-p 'emacsos-assist-web-mode)
              (not inhibit-modification-hooks))
-    ;; Compatibility for a pre-queue cached retry: an edit deliberately starts
-    ;; a fresh legacy draft.  Queue entries never take this branch.
+    ;; Only a pre-queue cached retry turns an edit into a fresh legacy draft;
+    ;; entry-owned queues retain their durable identity across prompt edits.
     (when (and (null emacsos-assist-web--queue)
                (not emacsos-assist-web--in-flight)
                emacsos-assist-web--pending-key

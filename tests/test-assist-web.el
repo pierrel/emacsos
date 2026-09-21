@@ -4007,7 +4007,8 @@
       (emacsos-assist-web--write-prompt)
       (insert "later tail")
       (let ((entry (emacsos-assist-web--entry "S2" 'recovered-head nil)))
-        (setq emacsos-assist-web--queue (list entry))
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--queue-model-p t)
         (emacsos-assist-web--entry-render entry)
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                   ((symbol-function 'emacsos-assist-web--request)
@@ -4020,12 +4021,32 @@
           (should-not emacsos-assist-web--thread-id)
           (emacsos-assist-web--restore-create-entry nil)
           (should (plist-get entry :recovered-ready))
+          (should (string-match-p "ready to create; tap Send" (buffer-string)))
           (should-not (string-match-p "Restore Draft" (buffer-string)))
           (emacsos-assist-web-send))
         (should (equal (caar requests) "POST"))
         (should (equal (cadar requests) "threads"))
         (should (equal (alist-get 'message (caddar requests)) "S2"))
         (should (equal (emacsos-assist-web--input) "later tail"))))))
+
+(ert-deftest test-assist-web-source-recovery-action-remains-until-its-save-succeeds ()
+  "The source Restore Draft button is removed only after durable recovery."
+  (dolist (save-p '(nil t))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (setq emacsos-assist-web--recovery-draft "source draft")
+      (emacsos-assist-web--render-recovery-draft-action)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () save-p)))
+        (emacsos-assist-web--restore-recovery-draft nil))
+      (if save-p
+          (progn
+            (should (equal (emacsos-assist-web--input) "source draft"))
+            (should-not emacsos-assist-web--recovery-draft)
+            (should-not (string-match-p "Restore Draft" (buffer-string))))
+        (should (equal emacsos-assist-web--recovery-draft "source draft"))
+        (should (string-match-p "Restore Draft" (buffer-string)))))))
 
 (ert-deftest test-assist-web-send-save-failure-restores-the-uncommitted-draft ()
   "An ordinary enqueue cannot leave a region/key after its cache write fails."
@@ -4223,6 +4244,63 @@
       (should (equal (cdr emacsos-assist-web--prompt-refusal)
                        "message too large; message remains in draft"))))))
 
+(ert-deftest test-assist-web-over-64000-message-refuses-before-key-or-region ()
+  "The character cap itself retains exact draft and point before identity minting."
+  (let (requested keys)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (insert (make-string 64001 ?x))
+      (let ((draft (emacsos-assist-web--input))
+            (offset (- (point) (emacsos-assist-web--prompt-start)))
+            (regions (how-many "you>" (point-min) (point-max))))
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (setq requested t)))
+                  ((symbol-function 'emacsos-assist-web--new-idempotency-key)
+                   (lambda () (setq keys t) "must-not-mint")))
+          (emacsos-assist-web-send))
+        (should-not requested)
+        (should-not keys)
+        (should-not emacsos-assist-web--queue)
+        (should (= (how-many "you>" (point-min) (point-max)) regions))
+        (should (equal (emacsos-assist-web--input) draft))
+        (should (= (- (point) (emacsos-assist-web--prompt-start)) offset))))))
+
+(ert-deftest test-assist-web-prospective-over-512k-cache-refuses-before-key-or-region ()
+  "An oversized complete cache remains a local draft before key, render, or POST."
+  (let (requested keys)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (setq emacsos-assist-web--queue
+            (list (emacsos-assist-web--entry
+                   (make-string (* 260 1024) ?a) 'queued
+                   "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                  (emacsos-assist-web--entry
+                   (make-string (* 260 1024) ?b) 'queued
+                   "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+      (insert "exact tail")
+      (let ((draft (emacsos-assist-web--input))
+            (offset (- (point) (emacsos-assist-web--prompt-start)))
+            (regions (how-many "you>" (point-min) (point-max))))
+        (cl-letf (((symbol-function 'emacsos-assist-web--queue-count-limit)
+                   (lambda () 3))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (setq requested t)))
+                  ((symbol-function 'emacsos-assist-web--new-idempotency-key)
+                   (lambda () (setq keys t) "must-not-mint")))
+          (emacsos-assist-web-send))
+        (should-not requested)
+        (should-not keys)
+        (should (= (length emacsos-assist-web--queue) 2))
+        (should (= (how-many "you>" (point-min) (point-max)) regions))
+        (should (equal (emacsos-assist-web--input) draft))
+        (should (= (- (point) (emacsos-assist-web--prompt-start)) offset))
+        (should (equal (cdr emacsos-assist-web--prompt-refusal)
+                       "local cache full; message remains in draft"))))))
+
 (ert-deftest test-assist-web-two-live-buffers-release-web-only-after-the-last ()
   "One finished buffer cannot release the other live web transport."
   (let ((a (generate-new-buffer " *assist-a*"))
@@ -4236,7 +4314,8 @@
               (let ((entry (emacsos-assist-web--entry
                             "x" 'observing
                             "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
-                (setq emacsos-assist-web--queue (list entry)
+        (setq emacsos-assist-web--queue (list entry)
+                      emacsos-assist-web--queue-model-p t
                       emacsos-assist-web--stream-entry entry))))
           (with-current-buffer a (emacsos-assist-web--sync-active-surface))
           (should (eq emacsos--assist-active-surface 'web))
@@ -4262,6 +4341,80 @@
             (emacsos-assist-web--sync-active-surface))
           (should-not emacsos--assist-active-surface))
       (mapc #'kill-buffer (list a b)))))
+
+(ert-deftest test-assist-web-legacy-in-flight-coexists-with-entry-owned-web-work ()
+  "A pre-queue buffer remains web-active alongside an entry-owned observer."
+  (let ((legacy (generate-new-buffer " *assist-legacy-active*"))
+        (queue (generate-new-buffer " *assist-queue-active*"))
+        (emacsos--assist-active-surface nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer legacy
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--in-flight t))
+          (with-current-buffer queue
+            (emacsos-assist-web-mode)
+            (let ((entry (emacsos-assist-web--entry
+                          "queued" 'observing
+                          "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+              (setq emacsos-assist-web--queue (list entry)
+                    emacsos-assist-web--queue-model-p t
+                    emacsos-assist-web--stream-entry entry)))
+          (with-current-buffer queue (emacsos-assist-web--sync-active-surface))
+          (should (eq emacsos--assist-active-surface 'web))
+          (with-current-buffer queue
+            (setf (plist-get emacsos-assist-web--stream-entry :state)
+                  'accepted-unobserved)
+            (setq emacsos-assist-web--stream-entry nil)
+            (emacsos-assist-web--sync-active-surface))
+          (should (eq emacsos--assist-active-surface 'web))
+          (with-current-buffer legacy
+            (setq emacsos-assist-web--in-flight nil)
+            (emacsos-assist-web--sync-active-surface))
+          (should-not emacsos--assist-active-surface))
+      (mapc #'kill-buffer (list legacy queue)))))
+
+(ert-deftest test-assist-web-delta-detach-and-terminal-remove-actions-not-text ()
+  "Action teardown never lets a delta enter a button range or erase live text."
+  (let ((emacsos-assist-web--requests nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (let* ((entry (emacsos-assist-web--entry
+                     "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+             (token (list (current-buffer) (plist-get entry :key))))
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :handshake-token) token)
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--queue-model-p t
+              emacsos-assist-web--stream-entry entry
+              emacsos-assist-web--requests (list token))
+        (emacsos-assist-web--entry-render entry)
+        (emacsos-assist-web--entry-reset-assistant entry 1)
+        (emacsos-assist-web--entry-add-action
+         entry "Abort/Detach" #'emacsos-assist-web--abort-entry)
+        (emacsos-assist-web--entry-append-delta entry 1 1 "partial")
+        (should (string-match-p "partial" (buffer-string)))
+        (should-not (string-match-p "Abort/Detach" (buffer-string)))
+        (emacsos-assist-web--entry-add-action
+         entry "Abort/Detach" #'emacsos-assist-web--abort-entry)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request) (lambda (&rest _) nil)))
+          (emacsos-assist-web--abort-entry (plist-get entry :key)))
+        (should (string-match-p "partial" (buffer-string)))
+        (should-not (string-match-p "Abort/Detach" (buffer-string)))
+        (setq emacsos-assist-web--stream-entry entry)
+        (setf (plist-get entry :state) 'observing)
+        (emacsos-assist-web--entry-add-action
+         entry "Abort/Detach" #'emacsos-assist-web--abort-entry)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--start-next-observation) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore))
+          (emacsos-assist-web--stream-finish (current-buffer)))
+        (should (string-match-p "partial" (buffer-string)))
+        (should-not (string-match-p "Abort/Detach" (buffer-string)))))))
 
 (ert-deftest test-assist-web-adoption-keeps-live-destination-while-source-get-is-withheld ()
   "S1's exact GET cannot displace a partial C1 stream after adoption."
@@ -4446,6 +4599,52 @@
       (when (buffer-live-p source) (kill-buffer source))
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacsos--assist-active-surface nil))))
+
+(ert-deftest test-assist-web-over-512k-adoption-keeps-both-drafts-and-caches ()
+  "A four-entry merge that cannot fit leaves source and destination untouched."
+  (let ((destination (generate-new-buffer " *assist-adopt-overflow-destination*"))
+        (source (generate-new-buffer " *assist-adopt-overflow-source*"))
+        writes deletes)
+    (unwind-protect
+        (progn
+          (dolist (spec (list (cons destination '("C1" "C2"))
+                              (cons source '("S1" "S2"))))
+            (with-current-buffer (car spec)
+              (emacsos-assist-web-mode)
+              (emacsos-assist-web--write-prompt)
+              (insert (if (eq (car spec) destination) "destination tail" "source tail"))
+              (setq emacsos-assist-web--queue
+                    (cl-loop for text in (cdr spec)
+                             for n from (if (eq (car spec) destination) 1 3)
+                             collect (emacsos-assist-web--entry
+                                      (concat text (make-string (* 130 1024) ?x)) 'queued
+                                      (format "emacsos-%032d" n))))))
+          (let ((source-queue (with-current-buffer source emacsos-assist-web--queue))
+                (destination-queue (with-current-buffer destination emacsos-assist-web--queue))
+                (source-text (with-current-buffer source (buffer-string)))
+                (destination-text (with-current-buffer destination (buffer-string))))
+            (should-not
+             (emacsos-assist-web--queue-cache-fits-p
+              (append source-queue destination-queue) "destination tail" "source tail"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () (setq writes t) nil))
+                      ((symbol-function 'emacsos-assist-web--delete-cache)
+                       (lambda (&rest _) (setq deletes t) nil)))
+              (should-error
+               (emacsos-assist-web--adopt-canonical-buffer source destination)
+               :type 'user-error))
+            (should-not writes)
+            (should-not deletes)
+            (should (eq (with-current-buffer source emacsos-assist-web--queue) source-queue))
+            (should (eq (with-current-buffer destination emacsos-assist-web--queue)
+                        destination-queue))
+            (should (equal (with-current-buffer source (buffer-string)) source-text))
+            (should (equal (with-current-buffer destination (buffer-string)) destination-text))
+            (should (equal (with-current-buffer source (emacsos-assist-web--input))
+                           "source tail"))
+            (should (equal (with-current-buffer destination (emacsos-assist-web--input))
+                           "destination tail"))))
+      (mapc #'kill-buffer (list source destination)))))
 
 (ert-deftest test-assist-web-send-adoption-collision-contracts-after-reconcile ()
   "Public S1/S2 Send adoption refuses new work until exact reconciliation retires it."
@@ -4733,11 +4932,12 @@
                     "A" 'accepted-unobserved
                     "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
         (setf (plist-get entry :run-id) "run-a")
-        (setq emacsos-assist-web--queue (list entry))
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--queue-model-p t)
         (emacsos-assist-web--entry-render entry)
         (should-not (string-match-p "Abort/Detach" (buffer-string)))
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
-                  ((symbol-function 'emacsos-assist-web--observe-run) #'ignore))
+                  ((symbol-function 'emacsos-assist-web--observe-entry) #'ignore))
           (emacsos-assist-web--start-observation entry))
         (should (string-match-p "Abort/Detach" (buffer-string)))))))
 
