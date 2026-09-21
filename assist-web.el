@@ -3251,25 +3251,25 @@ consulted; selected-buffer state is never a fallback owner."
           (insert "\n")
           (setf (plist-get entry :action-end) (copy-marker (point))))))))
 
+(defun emacsos-assist-web--clear-action-range (start end)
+  "Safely remove the rendered action range from START through END."
+  (when (and (markerp start) (markerp end)
+             (marker-buffer start) (eq (marker-buffer start) (marker-buffer end)))
+    (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+      (delete-region start end))))
+
 (defun emacsos-assist-web--entry-clear-actions (entry)
   "Remove ENTRY's rendered action buttons without disturbing its message body."
-  (let ((start (plist-get entry :action-start))
-        (end (plist-get entry :action-end)))
-    (when (and (markerp start) (markerp end)
-               (marker-buffer start) (eq (marker-buffer start) (marker-buffer end)))
-      (let ((inhibit-read-only t) (inhibit-modification-hooks t))
-        (delete-region start end)))
-    (setf (plist-get entry :action-start) nil
-          (plist-get entry :action-end) nil)))
+  (emacsos-assist-web--clear-action-range
+   (plist-get entry :action-start) (plist-get entry :action-end))
+  (setf (plist-get entry :action-start) nil
+        (plist-get entry :action-end) nil))
 
 (defun emacsos-assist-web--clear-recovery-draft-action ()
   "Remove the retained-source Restore Draft action, if it is still rendered."
   (let ((start emacsos-assist-web--recovery-action-start)
         (end emacsos-assist-web--recovery-action-marker))
-    (when (and (markerp start) (markerp end)
-               (marker-buffer start) (eq (marker-buffer start) (marker-buffer end)))
-      (let ((inhibit-read-only t) (inhibit-modification-hooks t))
-        (delete-region start end)))
+    (emacsos-assist-web--clear-action-range start end)
     (setq emacsos-assist-web--recovery-action-start nil
           emacsos-assist-web--recovery-action-marker nil)))
 
@@ -4274,13 +4274,18 @@ write leaves the provisional records available for the next exact refresh."
   (when-let ((entry (emacsos-assist-web--queue-entry key)))
     (when (eq (emacsos-assist-web--entry-state entry) 'rejected)
       (let* ((original emacsos-assist-web--queue)
+             (original-collision emacsos-assist-web--collision-p)
              (remaining (delq entry (copy-sequence original))))
-        (setq emacsos-assist-web--queue remaining)
+        ;; Save the exact post-dismiss queue and its derived collision state
+        ;; together.  A failed write restores both resident facts verbatim.
+        (setq emacsos-assist-web--queue remaining
+              emacsos-assist-web--collision-p (> (length remaining) 2))
         (if (emacsos-assist-web--save-draft)
             (progn
               (emacsos-assist-web--entry-remove-render entry)
               (emacsos-assist-web--pump-posts))
-          (setq emacsos-assist-web--queue original))))))
+          (setq emacsos-assist-web--queue original
+                emacsos-assist-web--collision-p original-collision))))))
 
 (defun emacsos-assist-web--restore-create-entry (key)
   "Make recovered pre-canonical KEY eligible for one explicit create POST."
@@ -4478,6 +4483,10 @@ Nothing in SOURCE is retired until the complete destination record is durable."
     (message "Open an Assist Web thread before sending"))
    ((eq emacsos--assist-active-surface 'chat)
     (message "Another Assist request is still running"))
+   ((and (not emacsos-assist-web--queue-model-p)
+         emacsos-assist-web--in-flight)
+    (emacsos-assist-web--set-prompt-refusal
+     "current Assist Web request is still running; message remains in draft"))
    ((eq (emacsos-assist-web--entry-state (emacsos-assist-web--queue-head))
         'identity-conflict)
     (message "Submission identity conflict; repair required"))
@@ -4609,9 +4618,10 @@ Nothing in SOURCE is retired until the complete destination record is durable."
   "Persist edits without clearing a queue entry merely because its draft changed."
   (when (and (derived-mode-p 'emacsos-assist-web-mode)
              (not inhibit-modification-hooks))
-    ;; Only a pre-queue cached retry turns an edit into a fresh legacy draft;
-    ;; entry-owned queues retain their durable identity across prompt edits.
-    (when (and (null emacsos-assist-web--queue)
+    ;; Only a buffer that never adopted queue ownership can replace its legacy
+    ;; cached retry with an edited draft.
+    (when (and (not emacsos-assist-web--queue-model-p)
+               (null emacsos-assist-web--queue)
                (not emacsos-assist-web--in-flight)
                emacsos-assist-web--pending-key
                (not (equal (emacsos-assist-web--input)

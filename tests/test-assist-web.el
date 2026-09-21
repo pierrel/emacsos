@@ -4374,6 +4374,209 @@
           (should-not emacsos--assist-active-surface))
       (mapc #'kill-buffer (list legacy queue)))))
 
+(ert-deftest test-assist-web-legacy-in-flight-send-retains-its-exact-draft ()
+  "A live legacy request cannot be silently converted to queue ownership."
+  (let ((emacsos--assist-active-surface nil) requested keys)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (insert "keep exact legacy draft")
+      (goto-char (- (point-max) 6))
+      (let ((draft (emacsos-assist-web--input))
+            (offset (- (point) (emacsos-assist-web--prompt-start))))
+        (setq emacsos-assist-web--in-flight t)
+        (emacsos-assist-web--sync-active-surface)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (setq requested t)))
+                  ((symbol-function 'emacsos-assist-web--new-idempotency-key)
+                   (lambda () (setq keys t) "must-not-mint")))
+          (emacsos-assist-web-send))
+        (should-not requested)
+        (should-not keys)
+        (should-not emacsos-assist-web--queue-model-p)
+        (should-not emacsos-assist-web--queue)
+        (should (equal (emacsos-assist-web--input) draft))
+        (should (= (- (point) (emacsos-assist-web--prompt-start)) offset))
+        (should (eq emacsos--assist-active-surface 'web))))))
+
+(ert-deftest test-assist-web-public-post-rejections-offer-dismiss-and-release-follower ()
+  "Public POST 413/422/harness failures reject, and Dismiss releases FIFO work."
+  (dolist (value '(((http_status . 413))
+                   ((http_status . 422))
+                   ((http_status . 409) (detail . "Thread harness is unavailable"))))
+    (let (callback)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (emacsos-assist-web--write-prompt)
+        (insert "reject me")
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload cb &rest _) (setq callback cb))))
+          (emacsos-assist-web-send)
+          (funcall callback value nil))
+        (should (eq (plist-get (emacsos-assist-web--queue-head) :state) 'rejected))
+        (should (string-match-p "Dismiss" (buffer-string))))))
+  (let (callbacks)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callbacks (append callbacks (list cb))))))
+        (insert "first")
+        (emacsos-assist-web-send)
+        (insert "follower")
+        (emacsos-assist-web-send)
+        (funcall (car callbacks) '((http_status . 413)) nil)
+        (should (= (length callbacks) 2))
+        (should (string-match-p "Dismiss" (buffer-string)))
+        (should (string-match-p "Dismiss\n" (buffer-string)))
+        (let ((button (button-at (1+ (string-match "Dismiss\n" (buffer-string))))))
+          (button-activate button))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :text))
+                               emacsos-assist-web--queue)
+                       '("follower")))
+        (should (eq (plist-get (emacsos-assist-web--queue-head) :state) 'posting))))))
+
+(ert-deftest test-assist-web-public-pending-approval-retries-without-dismiss ()
+  "The established pending-approval 409 keeps the exact public Send retryable."
+  (let (callback)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (insert "wait for approval")
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb))))
+        (emacsos-assist-web-send)
+        (funcall callback '((http_status . 409) (detail . "pending approval")) nil))
+      (should (eq (plist-get (emacsos-assist-web--queue-head) :state)
+                  'retryable-rejected))
+      (should-not (string-match-p "Dismiss" (buffer-string)))
+      (should (string-match-p "Send retries" (buffer-string))))))
+
+(ert-deftest test-assist-web-public-adoption-write-failure-keeps-dual-tails ()
+  "A public S1/S2 adoption leaves both queues and editable tails on cache failure."
+  (let ((canonical (generate-new-buffer " *assist-public-adopt-write-fail-c*"))
+        (source (generate-new-buffer " *assist-public-adopt-write-fail-s*"))
+        post deleted)
+    (unwind-protect
+        (progn
+          (with-current-buffer canonical
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-new"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue
+                  (list (emacsos-assist-web--entry
+                         "C1" 'accepted-unobserved "emacsos-11111111111111111111111111111111")
+                        (emacsos-assist-web--entry
+                         "C2" 'accepted-unobserved "emacsos-22222222222222222222222222222222")))
+            (emacsos-assist-web--write-prompt)
+            (insert "destination tail"))
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread"
+                  emacsos-assist-web--draft-repository "repo"
+                  emacsos-assist-web--draft-harness "deepagents")
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () (not (eq (current-buffer) canonical))))
+                      ((symbol-function 'emacsos-assist-web--delete-cache)
+                       (lambda (&rest _) (setq deleted t) t))
+                      ((symbol-function 'emacsos-assist-web--thread-buffer)
+                       (lambda (thread-id) (and (equal thread-id "thread-new") canonical)))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload callback &rest _)
+                         (when (equal method "POST") (setq post callback)))))
+              (insert "S1")
+              (emacsos-assist-web-send)
+              (insert "S2")
+              (emacsos-assist-web-send)
+              (insert "source tail")
+              (funcall post '((thread_id . "thread-new") (run_id . "run-s1")) nil)))
+          (should (buffer-live-p source))
+          (should-not deleted)
+          (should (= (length (with-current-buffer source emacsos-assist-web--queue)) 2))
+          (should (= (length (with-current-buffer canonical emacsos-assist-web--queue)) 2))
+          (should (equal (with-current-buffer source (emacsos-assist-web--input)) "source tail"))
+          (should (equal (with-current-buffer canonical (emacsos-assist-web--input))
+                         "destination tail")))
+      (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer)))
+            (list source canonical)))))
+
+(ert-deftest test-assist-web-dismiss-contracts-a-public-adoption-collision ()
+  "Two actual Dismiss buttons persist 4→3→2 collision contraction with both tails."
+  (let ((canonical (generate-new-buffer " *assist-public-dismiss-c*"))
+        (source (generate-new-buffer " *assist-public-dismiss-s*"))
+        post saved)
+    (unwind-protect
+        (progn
+          (with-current-buffer canonical
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-new"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue
+                  (list (emacsos-assist-web--entry
+                         "C1" 'accepted-unobserved "emacsos-11111111111111111111111111111111")
+                        (emacsos-assist-web--entry
+                         "C2" 'accepted-unobserved "emacsos-22222222222222222222222222222222")))
+            (emacsos-assist-web--write-prompt)
+            (insert "destination tail"))
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread"
+                  emacsos-assist-web--draft-repository "repo"
+                  emacsos-assist-web--draft-harness "deepagents")
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda ()
+                         (when (eq (current-buffer) canonical)
+                           (push (emacsos-assist-web--queue-cache-value) saved))
+                         t))
+                      ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t))
+                      ((symbol-function 'emacsos-assist-web--thread-buffer)
+                       (lambda (thread-id) (and (equal thread-id "thread-new") canonical)))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload callback &rest _)
+                         (when (equal method "POST") (setq post callback))))
+                      ((symbol-function 'emacsos-assist-web--reobserve-entry) #'ignore))
+              (insert "S1")
+              (emacsos-assist-web-send)
+              (insert "S2")
+              (emacsos-assist-web-send)
+              (insert "source tail")
+              (funcall post '((thread_id . "thread-new") (run_id . "run-s1")) nil)))
+          (with-current-buffer canonical
+            (should (= (length emacsos-assist-web--queue) 4))
+            (should emacsos-assist-web--collision-p)
+            (should (equal (emacsos-assist-web--input) "destination tail"))
+            (should (equal emacsos-assist-web--recovery-draft "source tail"))
+            (dolist (entry emacsos-assist-web--queue)
+              (setf (plist-get entry :state) 'rejected)
+              (emacsos-assist-web--entry-status entry "submission rejected; tap Dismiss")
+              (emacsos-assist-web--entry-add-action
+               entry "Dismiss" #'emacsos-assist-web--dismiss-entry))
+            (setq saved nil)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda ()
+                         (push (emacsos-assist-web--queue-cache-value) saved)
+                         t))
+                      ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore))
+              (dotimes (ignored 2)
+                (let ((button (button-at
+                               (1+ (string-match "Dismiss\n" (buffer-string))))))
+                  (button-activate button))))
+            (should (= (length emacsos-assist-web--queue) 2))
+            (should-not emacsos-assist-web--collision-p)
+            (should-not (alist-get 'collision (car saved)))
+            (should (equal (emacsos-assist-web--input) "destination tail"))
+            (should (equal emacsos-assist-web--recovery-draft "source tail"))))
+      (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer)))
+            (list source canonical)))))
+
 (ert-deftest test-assist-web-delta-detach-and-terminal-remove-actions-not-text ()
   "Action teardown never lets a delta enter a button range or erase live text."
   (let ((emacsos-assist-web--requests nil))
