@@ -3063,7 +3063,8 @@ callbacks even after reconciliation leaves the resident list empty."
         :requires-reobserve nil
         :user-start nil :assistant-start nil :assistant-end nil
         :action-start nil :action-end nil
-        :stream-attempt nil :stream-index 0 :stream-assistant-bytes 0))
+        :stream-attempt nil :stream-index 0
+        :stream-raw-bytes 0 :stream-undecided-suffix ""))
 
 (defun emacsos-assist-web--entry-state (entry)
   "Return ENTRY's explicit resident state."
@@ -3493,18 +3494,30 @@ consulted; selected-buffer state is never a fallback owner."
   (emacsos-assist-web--entry-clear-actions entry)
   (setf (plist-get entry :stream-attempt) attempt
         (plist-get entry :stream-index) 0
-        (plist-get entry :stream-assistant-bytes) 0)
+        (plist-get entry :stream-raw-bytes) 0
+        (plist-get entry :stream-undecided-suffix) "")
   (when (and (markerp (plist-get entry :assistant-start))
              (markerp (plist-get entry :assistant-end)))
     (set-marker (plist-get entry :assistant-end)
                 (emacsos-conversation-reset-assistant
                  (plist-get entry :assistant-start) (plist-get entry :assistant-end)))))
 
+(defun emacsos-assist-web--entry-append-rendered-delta (entry text)
+  "Append canonical TEXT only inside ENTRY's owned assistant marker range."
+  (unless (and (markerp (plist-get entry :assistant-end))
+               (marker-buffer (plist-get entry :assistant-end)))
+    (error "invalid Assist delta"))
+  ;; A terminal action is outside the assistant body.  Remove it before
+  ;; extending the body marker so resumed entry-owned text cannot enter it.
+  (emacsos-assist-web--entry-clear-actions entry)
+  (set-marker (plist-get entry :assistant-end)
+              (emacsos-conversation-append-delta
+               (plist-get entry :assistant-end) text)))
+
 (defun emacsos-assist-web--entry-append-delta (entry attempt index text)
   "Append one validated SSE delta to ENTRY's exact marker range."
   (unless (and (integerp attempt) (integerp index) (stringp text)
-               (<= (string-bytes text) (* 16 1024))
-               (emacsos-conversation-valid-text-p text t))
+               (<= (string-bytes text) (* 16 1024)))
     (error "invalid Assist delta"))
   (cond
    ((not (integerp (plist-get entry :stream-attempt)))
@@ -3516,19 +3529,36 @@ consulted; selected-buffer state is never a fallback owner."
    ((and (markerp (plist-get entry :assistant-start))
          (markerp (plist-get entry :assistant-end))
          (marker-buffer (plist-get entry :assistant-end)))
-    (let ((total (+ (or (plist-get entry :stream-assistant-bytes) 0)
+    (let ((total (+ (or (plist-get entry :stream-raw-bytes) 0)
                     (string-bytes text))))
       (when (> total emacsos-assist-web--max-message-bytes)
         (error "invalid Assist delta"))
-      ;; A terminal action is outside the assistant body.  Remove it before
-      ;; extending the body marker so a resumed stream cannot write into it.
-      (emacsos-assist-web--entry-clear-actions entry)
-      (set-marker (plist-get entry :assistant-end)
-                  (emacsos-conversation-append-delta
-                   (plist-get entry :assistant-end) text))
-      (setf (plist-get entry :stream-index) index
-            (plist-get entry :stream-assistant-bytes) total)
+      (pcase-let ((`(,canonical . ,suffix)
+                   (emacsos-assist-web--stream-decidable-text
+                    (concat (or (plist-get entry :stream-undecided-suffix) "") text))))
+        (emacsos-assist-web--entry-append-rendered-delta entry canonical)
+        (setf (plist-get entry :stream-index) index
+              (plist-get entry :stream-raw-bytes) total
+              (plist-get entry :stream-undecided-suffix) suffix))
       (emacsos-assist-web--set-status "working")))))
+
+(defun emacsos-assist-web--entry-finish-stream-tail (target entry epoch)
+  "Flush ENTRY's safe suffix at EPOCH before exact terminal reconciliation."
+  (when (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
+    (with-current-buffer target
+      (let ((suffix (plist-get entry :stream-undecided-suffix)))
+        (cond
+         ((or (null suffix) (string-empty-p suffix))
+          (emacsos-assist-web--stream-finish target))
+         ((equal suffix "\r")
+          (emacsos-assist-web--entry-append-rendered-delta entry "\n")
+          (setf (plist-get entry :stream-undecided-suffix) "")
+          (emacsos-assist-web--stream-finish target))
+         ((equal suffix (string #x1f3f4))
+          (emacsos-assist-web--entry-append-rendered-delta entry suffix)
+          (setf (plist-get entry :stream-undecided-suffix) "")
+          (emacsos-assist-web--stream-finish target))
+         (t (error "invalid Assist delta")))))))
 
 (defun emacsos-assist-web--dispatch-event (target event data)
   "Dispatch SSE EVENT only to TARGET's exact observed queue entry."
@@ -3557,7 +3587,9 @@ consulted; selected-buffer state is never a fallback owner."
               (emacsos-assist-web--entry-replace-empty-assistant-status
                entry "live text truncated; waiting for final")
              (emacsos-assist-web--set-status "live text truncated; waiting for final"))
-             ((equal event "terminal") (emacsos-assist-web--stream-finish target))
+             ((equal event "terminal")
+              (emacsos-assist-web--entry-finish-stream-tail
+               target entry (plist-get entry :epoch)))
              ((equal event "error")
               (let ((detail (alist-get 'detail
                                        (json-parse-string data :object-type 'alist))))
@@ -3607,7 +3639,9 @@ older observer cannot consume the token reserved by a later retry of ENTRY."
         (when (timerp timer) (cancel-timer timer))
         (setf (plist-get entry :stream-process) nil
               (plist-get entry :stream-response) nil
-              (plist-get entry :stream-header-timer) nil)
+              (plist-get entry :stream-header-timer) nil
+              (plist-get entry :stream-raw-bytes) nil
+              (plist-get entry :stream-undecided-suffix) nil)
         (setq emacsos-assist-web--stream-entry nil)
         (emacsos-assist-web--entry-clear-actions entry)
         (emacsos-assist-web--release-handshake entry)
@@ -3832,6 +3866,8 @@ could release a pre-header SSE reservation later."
       (setf (plist-get entry :stream-process) nil
             (plist-get entry :stream-response) nil
             (plist-get entry :stream-header-timer) nil
+            (plist-get entry :stream-raw-bytes) nil
+            (plist-get entry :stream-undecided-suffix) nil
             (plist-get entry :state) 'accepted-unobserved)
       (when (eq entry emacsos-assist-web--stream-entry)
         (setq emacsos-assist-web--stream-entry nil))

@@ -1,0 +1,24 @@
+#+title: Current-main stream recovery for concurrent Assist requests
+#+date: 2026-09-21
+
+* Purpose
+
+The concurrent-request candidate was replayed onto current EmacsOS main.  This
+recovery ports main's accepted split-safe stream canonicalization into the queue
+entry observer without restoring singleton parser ownership.
+
+* Result
+
+Each observed entry now owns its raw-byte total and undecided suffix.  Reset
+clears both for that entry, delta processing joins only that suffix with the
+next payload and appends only canonical decidable text to that entry's marker
+range, and terminal processing flushes only CRLF or the safe black-flag tail
+before its exact entry reconciliation.  The entry and epoch guards still make
+stale or reversed callbacks inert.  Focused coverage exercises split CRLF,
+split RGI subdivision flags, raw-byte overflow, and terminal flushing.
+
+* Historical supersession
+
+This supersedes only the candidate-readiness conclusion in
+[[file:2026-09-21-assist-concurrent-request-running-fix-round-7-evidence.org][the round-7 evidence record]]: replaying onto current main required its later
+split-stream canonicalization contract to be represented in entry-owned state.

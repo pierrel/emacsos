@@ -3974,6 +3974,87 @@
         (should-not emacsos-assist-web--requests)
         (should-not (plist-get entry :handshake-token))))))
 
+(ert-deftest test-assist-web-entry-parser-canonicalizes-split-crlf-and-rgi-flag ()
+  "Entry-owned deltas retain undecided CRLF and flag prefixes until decidable."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+          (flag (nth 0 emacsos-assist-web--subdivision-flags)))
+      (setf (plist-get entry :run-id) "run-a")
+      (setq emacsos-assist-web--queue (list entry)
+            emacsos-assist-web--queue-model-p t
+            emacsos-assist-web--stream-entry entry)
+      (emacsos-assist-web--entry-render entry)
+      (emacsos-assist-web--dispatch-event (current-buffer) "assistant-reset" "{\"attempt\":1}")
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta" "{\"attempt\":1,\"index\":1,\"text\":\"a\\r\"}")
+      (should (equal (plist-get entry :stream-undecided-suffix) "\r"))
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta" "{\"attempt\":1,\"index\":2,\"text\":\"\\nb\"}")
+      (should (equal (buffer-substring-no-properties
+                      (plist-get entry :assistant-start)
+                      (plist-get entry :assistant-end))
+                     "a\nb"))
+      (should (string-empty-p (plist-get entry :stream-undecided-suffix)))
+      (should (= (plist-get entry :stream-raw-bytes) 4))
+      (emacsos-assist-web--dispatch-event (current-buffer) "assistant-reset" "{\"attempt\":2}")
+      (dotimes (index (1- (length flag)))
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta"
+         (json-encode `((attempt . 2) (index . ,(1+ index))
+                        (text . ,(substring flag index (1+ index)))))))
+      (should-not (string-match-p (regexp-quote (string #x1f3f4)) (buffer-string)))
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta"
+       (json-encode `((attempt . 2) (index . ,(length flag))
+                      (text . ,(substring flag (1- (length flag)))))))
+      (should (string-match-p (regexp-quote flag) (buffer-string)))
+      (should (string-empty-p (plist-get entry :stream-undecided-suffix))))))
+
+(ert-deftest test-assist-web-entry-parser-bounds-raw-deltas-and-flushes-safe-terminal-tail ()
+  "Entry raw-byte accounting rejects overflow and terminal flush keeps only safe tails."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+      (setf (plist-get entry :run-id) "run-a")
+      (setq emacsos-assist-web--queue (list entry)
+            emacsos-assist-web--queue-model-p t
+            emacsos-assist-web--stream-entry entry)
+      (emacsos-assist-web--entry-render entry)
+      (emacsos-assist-web--dispatch-event (current-buffer) "assistant-reset" "{\"attempt\":1}")
+      (let ((emacsos-assist-web--max-message-bytes 3))
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta" "{\"attempt\":1,\"index\":1,\"text\":\"abc\"}")
+        (emacsos-assist-web--dispatch-event
+         (current-buffer) "assistant-delta" "{\"attempt\":1,\"index\":2,\"text\":\"d\"}"))
+      (should-not emacsos-assist-web--stream-entry)
+      (should (eq (plist-get entry :state) 'accepted-unobserved))))
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+      (setf (plist-get entry :run-id) "run-a")
+      (setq emacsos-assist-web--queue (list entry)
+            emacsos-assist-web--queue-model-p t
+            emacsos-assist-web--stream-entry entry)
+      (emacsos-assist-web--entry-render entry)
+      (emacsos-assist-web--dispatch-event (current-buffer) "assistant-reset" "{\"attempt\":1}")
+      (emacsos-assist-web--dispatch-event
+       (current-buffer) "assistant-delta" "{\"attempt\":1,\"index\":1,\"text\":\"\\r\"}")
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore))
+        (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}"))
+      (should (equal (buffer-substring-no-properties
+                      (plist-get entry :assistant-start)
+                      (plist-get entry :assistant-end))
+                     "\n"))
+      (should-not emacsos-assist-web--stream-entry))))
+
 (ert-deftest test-assist-web-restore-normalization-never-starts-network-before-save ()
   "A transport-only restored state stays inert if normalized cache persistence fails."
   (let (requested)
