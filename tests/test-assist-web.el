@@ -4108,6 +4108,24 @@
       (should (equal (cdr emacsos-assist-web--prompt-refusal)
                      "submission identity conflict; message remains in draft")))))
 
+(ert-deftest test-assist-web-create-body-overflow-refuses-before-key-or-region ()
+  "Create-only repo metadata counts in the real 66KiB body limit."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--draft-repository (make-string 242 ?r)
+            emacsos-assist-web--draft-harness (make-string 242 ?h))
+      (emacsos-assist-web--write-prompt)
+      ;; One-field JSON is under 66KiB; the actual create payload is not.
+      (insert (make-string 21850 ?€))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web-send))
+      (should-not requested)
+      (should-not emacsos-assist-web--queue)
+      (should (equal (cdr emacsos-assist-web--prompt-refusal)
+                     "message too large; message remains in draft")))))
+
 (ert-deftest test-assist-web-two-live-buffers-release-web-only-after-the-last ()
   "One finished buffer cannot release the other live web transport."
   (let ((a (generate-new-buffer " *assist-a*"))
@@ -4136,6 +4154,125 @@
             (emacsos-assist-web--sync-active-surface))
           (should-not emacsos--assist-active-surface))
       (mapc #'kill-buffer (list a b)))))
+
+(ert-deftest test-assist-web-adoption-keeps-live-destination-while-source-get-is-withheld ()
+  "S1's exact GET cannot displace a partial C1 stream after adoption."
+  (let ((emacsos--assist-active-surface nil)
+        (canonical (generate-new-buffer " *assist-adopt-live-c1*"))
+        (source (generate-new-buffer " *assist-adopt-source-s1*"))
+        c1 c1-start c1-end source-start get-calls observations)
+    (unwind-protect
+        (progn
+          (with-current-buffer canonical
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-new")
+            (emacsos-assist-web--write-prompt)
+            (setq c1 (emacsos-assist-web--entry
+                      "C1" 'observing "emacsos-11111111111111111111111111111111"))
+            (setf (plist-get c1 :run-id) "run-c1")
+            (setq emacsos-assist-web--queue (list c1)
+                  emacsos-assist-web--stream-entry c1)
+            (emacsos-assist-web--entry-render c1)
+            (emacsos-assist-web--entry-reset-assistant c1 1)
+            (emacsos-assist-web--entry-append-delta c1 1 1 "C1 partial")
+            (setq c1-start (plist-get c1 :assistant-start)
+                  c1-end (plist-get c1 :assistant-end)))
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--write-prompt)
+            (let ((s1 (emacsos-assist-web--entry
+                       "S1" 'accepted-unobserved
+                       "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+              (setf (plist-get s1 :run-id) "run-s1"
+                    (plist-get s1 :requires-reobserve) t)
+              (setq emacsos-assist-web--queue (list s1))
+              (emacsos-assist-web--entry-render s1)
+              (setq source-start (plist-get s1 :user-start))
+              (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                        ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t))
+                        ((symbol-function 'emacsos-assist-web--request)
+                         (lambda (method path _payload _callback &rest _)
+                           (when (equal method "GET")
+                             (push path get-calls))))
+                        ((symbol-function 'emacsos-assist-web--start-observation)
+                         (lambda (entry) (push entry observations))))
+                (emacsos-assist-web--adopt-canonical-buffer source canonical)
+                (with-current-buffer canonical
+                  (let ((s1 (car emacsos-assist-web--queue)))
+                    (should (eq emacsos-assist-web--stream-entry c1))
+                    (should (eq (plist-get s1 :state) 'accepted-unobserved))
+                    (should (plist-get s1 :requires-reobserve))
+                    ;; The S1 GET is deliberately withheld.  C1's terminal
+                    ;; cannot create an S1 SSE while that GET owns S1.
+                    (emacsos-assist-web--reobserve-entry s1)
+                    (emacsos-assist-web--stream-finish canonical)
+                    (should (= (length get-calls) 1))
+                    (should-not observations)
+                    (should (eq (marker-buffer c1-start) canonical))
+                    (should (eq (marker-buffer c1-end) canonical))
+                    (should (string-match-p "C1 partial" (buffer-string)))
+                    (should-not (marker-buffer source-start))
+                    (should (eq (marker-buffer (plist-get s1 :user-start))
+                                canonical)))))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p canonical) (kill-buffer canonical))
+      (setq emacsos--assist-active-surface nil)))))
+
+(ert-deftest test-assist-web-four-entry-adoption-blocks-sends-until-reconciliation-contracts ()
+  "Two full queues fit one cache record but remain recovery-only until retired."
+  (let ((emacsos--assist-active-surface nil)
+        (canonical (generate-new-buffer " *assist-adopt-four-canonical*"))
+        (source (generate-new-buffer " *assist-adopt-four-source*"))
+        reconcile requested)
+    (unwind-protect
+        (progn
+          (dolist (spec `((,canonical "thread-new" ("C1" "C2"))
+                          (,source nil ("S1" "S2"))))
+            (pcase-let ((`(,buffer ,thread-id ,texts) spec))
+              (with-current-buffer buffer
+                (emacsos-assist-web-mode)
+                (setq emacsos-assist-web--thread-id thread-id)
+                (emacsos-assist-web--write-prompt)
+                (setq emacsos-assist-web--queue
+                      (cl-loop for text in texts
+                               for n from (if thread-id 1 3)
+                               collect (emacsos-assist-web--entry
+                                        text 'accepted-unobserved
+                                        (format "emacsos-%032d" n)))))))
+          (with-current-buffer source
+            (let ((s1 (car emacsos-assist-web--queue)))
+              (setf (plist-get s1 :run-id) "run-s1")
+              (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                        ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t)))
+                (emacsos-assist-web--adopt-canonical-buffer source canonical))))
+          (with-current-buffer canonical
+            (should (= (length emacsos-assist-web--queue) 4))
+            (should emacsos-assist-web--collision-p)
+            (should (emacsos-assist-web--queue-cache-fits-p
+                     emacsos-assist-web--queue ""))
+            (emacsos-assist-web--write-prompt)
+            (insert "must wait")
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (setq requested t))))
+              (emacsos-assist-web-send))
+            (should-not requested)
+            (should (equal (emacsos-assist-web--input) "must wait"))
+            (dolist (entry emacsos-assist-web--queue)
+              (setf (plist-get entry :state) 'terminal-unreconciled))
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload callback &rest _)
+                         (when (equal method "GET") (setq reconcile callback))))
+                      ((symbol-function 'emacsos-assist-web--require-snapshot) #'ignore)
+                      ((symbol-function 'emacsos-assist-web--try-write-cache) (lambda (&rest _) t))
+                      ((symbol-function 'emacsos-assist-web--render) #'ignore))
+              (emacsos-assist-web--reconcile-when-settled)
+              (funcall reconcile '((thread_id . "thread-new")) nil))
+            (should-not emacsos-assist-web--queue)
+            (should-not emacsos-assist-web--collision-p)))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p canonical) (kill-buffer canonical))
+      (setq emacsos--assist-active-surface nil))))
 
 (ert-deftest test-assist-web-invalid-queue-cache-fails-closed-but-keeps-tail ()
   "Malformed queue recovery starts no transport and retains its editable tail."

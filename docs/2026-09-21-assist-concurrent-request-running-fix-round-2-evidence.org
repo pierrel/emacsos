@@ -1,0 +1,28 @@
+#+title: Assist Web concurrent request round-two public-path evidence
+#+date: 2026-09-21
+
+* Evidence
+
+The round-two recovery is exercised through Send, adoption, terminal cleanup,
+and aggregate activity rather than by helper-only tests.
+
+- Scenario 6 refuses a create whose message alone fits but whose actual
+  =repo_key=/=harness= endpoint JSON exceeds 66 KiB.  It creates no key,
+  provisional region, cache record, or POST.
+- Scenario 13 holds S1's exact Run GET after adoption while C1 has a rendered
+  partial assistant response.  C1 terminal cleanup neither opens S1 SSE nor
+  changes C1's markers; the source marker is dead and S1 receives a fresh
+  destination marker.
+- Scenario 14 adopts two two-entry queues.  The four-entry encoded cache fits
+  the 512 KiB private record, every new Send remains refused while collision is
+  set, and reconciliation clears the collision only after retiring the queue.
+- Scenario 17 keeps aggregate =web= activity after the first of two active
+  buffers finishes, then clears it after the last finishes.  The established
+  chat-side overlap test separately proves local chat is refused while that
+  aggregate =web= sentinel is live.
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-21-assist-concurrent-request-running-fix-round-2-recovery.org=,
+  “Status”: this evidence record replaces its broad statements with explicit
+  public-path regressions for the remaining reviewed scenarios.
