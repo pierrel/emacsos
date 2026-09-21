@@ -2057,7 +2057,7 @@ suppressing a genuine repeated submission."
                    buffer (error-message-string problem))))))))))))))
 
 (defun emacsos-assist-web--restore-draft ()
-  "Restore this thread's local tail and any accepted, unobserved submission."
+  "Restore legacy nonqueue local state before its exact Run is observed."
   (when-let* ((name (emacsos-assist-web--draft-cache-name))
               (draft (emacsos-assist-web--read-cache name)))
     (let ((key (alist-get 'pending_key draft))
@@ -4279,7 +4279,7 @@ write leaves the provisional records available for the next exact refresh."
         ;; Save the exact post-dismiss queue and its derived collision state
         ;; together.  A failed write restores both resident facts verbatim.
         (setq emacsos-assist-web--queue remaining
-              emacsos-assist-web--collision-p (> (length remaining) 2))
+              emacsos-assist-web--collision-p (>= (length remaining) 2))
         (if (emacsos-assist-web--save-draft)
             (progn
               (emacsos-assist-web--entry-remove-render entry)
@@ -4400,7 +4400,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
         (let* ((destination-queue emacsos-assist-web--queue)
                (destination-input (emacsos-assist-web--input))
                (merged (emacsos-assist-web--adoption-merge source-queue destination-queue))
-               (collision (> (length merged) 2)))
+               (collision (>= (length merged) 2)))
           (when (and (not (string-empty-p (string-trim source-input)))
                      (or emacsos-assist-web--recovery-draft
                          (not (emacsos-assist-web--message-fits-p source-input))))
@@ -4587,7 +4587,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                                                             (plist-get entry :key))
                                                           restored)))
                               (length restored)))
-                      (not (eq collision (> (length restored) 2)))
+                      (not (eq collision (>= (length restored) 2)))
                       (not (emacsos-assist-web--queue-cache-fits-p
                             restored text recovery-draft)))
                   (progn

@@ -4508,7 +4508,7 @@
             (list source canonical)))))
 
 (ert-deftest test-assist-web-dismiss-contracts-a-public-adoption-collision ()
-  "Two actual Dismiss buttons persist 4→3→2 collision contraction with both tails."
+  "Dismiss keeps 4→3→2 blocked, then persists the one-entry reopening."
   (let ((canonical (generate-new-buffer " *assist-public-dismiss-c*"))
         (source (generate-new-buffer " *assist-public-dismiss-s*"))
         post saved)
@@ -4570,6 +4570,25 @@
                                (1+ (string-match "Dismiss\n" (buffer-string))))))
                   (button-activate button))))
             (should (= (length emacsos-assist-web--queue) 2))
+            (should emacsos-assist-web--collision-p)
+            (should (alist-get 'collision (car saved)))
+            (let (requested)
+              (emacsos-assist-web--write-prompt)
+              (insert "still blocked")
+              (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                         (lambda (&rest _) (setq requested t))))
+                (emacsos-assist-web-send))
+              (should-not requested)
+            (should (equal (emacsos-assist-web--input) "still blocked")))
+            (emacsos-assist-web--replace-input "destination tail")
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda ()
+                         (push (emacsos-assist-web--queue-cache-value) saved)
+                         t))
+                      ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore))
+              (emacsos-assist-web--dismiss-entry
+               (plist-get (car emacsos-assist-web--queue) :key)))
+            (should (= (length emacsos-assist-web--queue) 1))
             (should-not emacsos-assist-web--collision-p)
             (should-not (alist-get 'collision (car saved)))
             (should (equal (emacsos-assist-web--input) "destination tail"))
@@ -5122,6 +5141,47 @@
                    (funcall callback test-assist-web--snapshot nil))))
         (emacsos-assist-web--reconcile-queue))
       (should (eq (emacsos-assist-web--queue-head) rejected))
+      (should (string-match-p "Dismiss" (buffer-string))))))
+
+(ert-deftest test-assist-web-reconcile-mixed-rejected-terminal-persists-and-reopens ()
+  "Retiring one terminal keeps a rejected survivor durable and unblocks at one."
+  (let (persisted)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--queue-model-p t
+            emacsos-assist-web--collision-p t)
+      (let ((rejected (emacsos-assist-web--entry
+                       "reject" 'rejected "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+            (terminal (emacsos-assist-web--entry
+                       "done" 'terminal-unreconciled
+                       "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+        (setf (plist-get terminal :run-id) "run-b")
+        (setq emacsos-assist-web--queue (list rejected terminal))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda ()
+                     (setq persisted (emacsos-assist-web--queue-cache-value))
+                     t))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (funcall callback test-assist-web--snapshot nil))))
+          (emacsos-assist-web--reconcile-when-settled))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :text))
+                               emacsos-assist-web--queue)
+                       '("reject")))
+        (should-not emacsos-assist-web--collision-p)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                 (lambda (&rest _) persisted))
+                ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+        (emacsos-assist-web--restore-draft))
+      (should (= (length emacsos-assist-web--queue) 1))
+      (should-not emacsos-assist-web--collision-p)
       (should (string-match-p "Dismiss" (buffer-string))))))
 
 (ert-deftest test-assist-web-abort-detach-button-appears-only-for-observed-entry ()
