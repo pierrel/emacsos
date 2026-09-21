@@ -4072,11 +4072,21 @@ this one transport.  No late callback can select a successor from globals."
                               (memq (emacsos-assist-web--entry-state entry)
                                     '(terminal-unreconciled rejected)))
                             emacsos-assist-web--queue))
-    (dolist (entry emacsos-assist-web--queue)
-      (when (eq (emacsos-assist-web--entry-state entry) 'terminal-unreconciled)
-        (setf (plist-get entry :state) 'reconciling)))
-    (when (emacsos-assist-web--save-draft)
-      (emacsos-assist-web--reconcile-queue))))
+    (let ((terminals (seq-filter (lambda (entry)
+                                   (eq (emacsos-assist-web--entry-state entry)
+                                       'terminal-unreconciled))
+                                 emacsos-assist-web--queue)))
+      (dolist (entry terminals)
+        (setf (plist-get entry :state) 'reconciling))
+      (if (emacsos-assist-web--save-draft)
+          (emacsos-assist-web--reconcile-queue)
+        ;; A failed transition never leaves an in-memory reconciling claim
+        ;; that was not durably recorded.  The next explicit retry starts from
+        ;; the exact terminal records and preserves their FIFO order.
+        (dolist (entry terminals)
+          (setf (plist-get entry :state) 'terminal-unreconciled)
+          (emacsos-assist-web--entry-status
+           entry "terminal; local recovery could not be saved; Refresh retries"))))))
 
 (defun emacsos-assist-web--reconcile-queue ()
   "Fetch canonical history and retire only the exact reconciling entries.
@@ -4279,7 +4289,8 @@ write leaves the provisional records available for the next exact refresh."
         ;; Save the exact post-dismiss queue and its derived collision state
         ;; together.  A failed write restores both resident facts verbatim.
         (setq emacsos-assist-web--queue remaining
-              emacsos-assist-web--collision-p (>= (length remaining) 2))
+              emacsos-assist-web--collision-p
+              (and original-collision (>= (length remaining) 2)))
         (if (emacsos-assist-web--save-draft)
             (progn
               (emacsos-assist-web--entry-remove-render entry)
@@ -4400,7 +4411,7 @@ Nothing in SOURCE is retired until the complete destination record is durable."
         (let* ((destination-queue emacsos-assist-web--queue)
                (destination-input (emacsos-assist-web--input))
                (merged (emacsos-assist-web--adoption-merge source-queue destination-queue))
-               (collision (>= (length merged) 2)))
+               (collision (> (length merged) 2)))
           (when (and (not (string-empty-p (string-trim source-input)))
                      (or emacsos-assist-web--recovery-draft
                          (not (emacsos-assist-web--message-fits-p source-input))))
@@ -4587,7 +4598,10 @@ Nothing in SOURCE is retired until the complete destination record is durable."
                                                             (plist-get entry :key))
                                                           restored)))
                               (length restored)))
-                      (not (eq collision (>= (length restored) 2)))
+                      (not (if collision
+                               (and (>= (length restored) 2)
+                                    (<= (length restored) 4))
+                             (<= (length restored) 2)))
                       (not (emacsos-assist-web--queue-cache-fits-p
                             restored text recovery-draft)))
                   (progn

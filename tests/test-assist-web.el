@@ -4822,6 +4822,35 @@
       (when (buffer-live-p canonical) (kill-buffer canonical))
       (setq emacsos--assist-active-surface nil))))
 
+(ert-deftest test-assist-web-one-plus-one-adoption-keeps-the-ordinary-queue-open ()
+  "A one-entry source merged with one destination entry does not collide."
+  (let ((destination (generate-new-buffer " *assist-adopt-one-destination*"))
+        (source (generate-new-buffer " *assist-adopt-one-source*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer destination
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue
+                  (list (emacsos-assist-web--entry
+                         "C1" 'queued "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+            (emacsos-assist-web--write-prompt))
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--queue
+                  (list (emacsos-assist-web--entry
+                         "S1" 'queued "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t)))
+              (emacsos-assist-web--adopt-canonical-buffer source destination)))
+          (with-current-buffer destination
+            (should (= (length emacsos-assist-web--queue) 2))
+            (should-not emacsos-assist-web--collision-p)))
+      (dolist (buffer (list source destination))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest test-assist-web-over-512k-adoption-keeps-both-drafts-and-caches ()
   "A four-entry merge that cannot fit leaves source and destination untouched."
   (let ((destination (generate-new-buffer " *assist-adopt-overflow-destination*"))
@@ -5122,6 +5151,74 @@
         (should-not emacsos-assist-web--queue)
         (should (equal (reverse events) '(queue snapshot queue)))))))
 
+(ert-deftest test-assist-web-reconcile-save-failure-restores-terminals-before-retry ()
+  "A failed reconciling save retains every terminal entry and starts no GET."
+  (let (requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let ((first (emacsos-assist-web--entry
+                    "first" 'terminal-unreconciled
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+            (second (emacsos-assist-web--entry
+                     "second" 'terminal-unreconciled
+                     "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+        (setf (plist-get first :run-id) "run-a"
+              (plist-get second :run-id) "run-b")
+        (setq emacsos-assist-web--queue (list first second))
+        (emacsos-assist-web--write-prompt)
+        (emacsos-assist-web--entry-render first)
+        (emacsos-assist-web--entry-render second)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (setq requested t))))
+          (emacsos-assist-web--reconcile-when-settled))
+        (should-not requested)
+        (should (equal (mapcar (lambda (entry) (plist-get entry :text))
+                               emacsos-assist-web--queue)
+                       '("first" "second")))
+        (should (seq-every-p (lambda (entry)
+                                (eq (plist-get entry :state) 'terminal-unreconciled))
+                              emacsos-assist-web--queue))
+        (should (string-match-p "local recovery could not be saved" (buffer-string)))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method _path _payload callback &rest _)
+                     (should (equal method "GET"))
+                     (setq requested callback))))
+          (emacsos-assist-web--reconcile-when-settled))
+        (should (functionp requested))))))
+
+(ert-deftest test-assist-web-restore-keeps-an-ordinary-two-entry-queue-open ()
+  "A persisted ordinary two-entry FIFO round-trips without collision mode."
+  (let (persisted)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--queue-model-p t
+            emacsos-assist-web--queue
+            (list (emacsos-assist-web--entry
+                   "one" 'queued "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                  (emacsos-assist-web--entry
+                   "two" 'queued "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+      (emacsos-assist-web--write-prompt)
+      (insert "tail")
+      (setq persisted (emacsos-assist-web--queue-cache-value)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                 (lambda (&rest _) persisted))
+                ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore)
+                ((symbol-function 'emacsos-assist-web--start-next-observation) #'ignore)
+                ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore))
+        (emacsos-assist-web--restore-draft))
+      (should (= (length emacsos-assist-web--queue) 2))
+      (should-not emacsos-assist-web--collision-p)
+      (should (equal (emacsos-assist-web--input) "tail")))))
+
 (ert-deftest test-assist-web-reconciliation-rerenders-a-retained-dismiss-action ()
   "Canonical refresh keeps a retained rejected entry actionable after repaint."
   (with-temp-buffer
@@ -5314,8 +5411,6 @@
                          (live_text . t)) nil)))
           (should-not observed)
           (should (buffer-live-p draft))
-          ;; A proven accepted Run remains an aggregate web exclusion even
-          ;; though its source cache could not yet retire.
           ;; Canonical persistence is pending, but it has no live transport.
           (should-not emacsos--assist-active-surface)
           (with-current-buffer draft
