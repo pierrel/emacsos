@@ -3693,7 +3693,7 @@
                                     emacsos-assist-web--stream-status))))))
 
 (ert-deftest test-assist-web-send-queues-one-same-thread-follow-up ()
-  "A second public Send remains local while the first Run is observed."
+  "A second public Send queues behind the observed Run without early POST."
   (let ((emacsos--assist-active-surface 'web))
     (with-temp-buffer
       (emacsos-assist-web-mode)
@@ -3712,7 +3712,7 @@
                    (lambda (method path _payload _callback &rest _)
                      (setq request (list method path)))))
         (emacsos-assist-web-send))
-        (should (equal request '("POST" "threads/thread-1/messages"))))
+        (should-not request))
       (should-not (string-match-p "A web-thread request is already running"
                                   (buffer-string)))
       (should (equal (mapcar (lambda (entry) (plist-get entry :text))
@@ -3720,7 +3720,7 @@
                      '("first" "follow up")))
       (should (string-match-p emacsos-assist-web--idempotency-regexp
                               (plist-get (cadr emacsos-assist-web--queue) :key)))
-      (should (eq (plist-get (cadr emacsos-assist-web--queue) :state) 'posting))
+      (should (eq (plist-get (cadr emacsos-assist-web--queue) :state) 'queued))
       (should (string-empty-p (emacsos-assist-web--input)))))))
 
 (ert-deftest test-assist-web-send-admits-a-different-web-buffer ()
@@ -5373,6 +5373,41 @@
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-passive-legacy-follow-up-posts-after-both-recoveries ()
+  "C2 posts once only after terminal S1 and C1 exact recovery complete."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-new")
+    (let ((s1 (emacsos-assist-web--entry
+               "S1" 'terminal-unreconciled
+               "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+          (c1 (emacsos-assist-web--entry
+               "C1" 'accepted-unobserved
+               "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+          (c2 (emacsos-assist-web--entry
+               "C2" 'queued
+               "emacsos-cccccccccccccccccccccccccccccccc"))
+          requests)
+      (setf (plist-get s1 :run-id) "run-s1"
+            (plist-get c1 :run-id) "run-c1"
+            (plist-get c1 :requires-reobserve) t)
+      (setq emacsos-assist-web--queue (list s1 c1 c2))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path _payload callback &rest _)
+                   (push (list method path callback) requests))))
+        ;; C1 is unresolved, so S1's settled terminal state cannot release C2.
+        (emacsos-assist-web--pump-posts)
+        (should-not requests)
+        (emacsos-assist-web--reobserve-entry c1)
+        (let ((get (car requests)))
+          (should (equal (butlast get) '("GET" "threads/thread-new/runs/run-c1")))
+          (funcall (nth 2 get) '((status . "success")) nil))
+        (should (equal (mapcar #'butlast (nreverse requests))
+                       '(("GET" "threads/thread-new/runs/run-c1")
+                         ("POST" "threads/thread-new/messages"))))
+        (should (eq (emacsos-assist-web--entry-state c2) 'posting))))))
+
 (ert-deftest test-assist-web-cold-source-failed-legacy-normalization-is-passive ()
   "An unnormalizable legacy canonical record fails closed without transport."
   (let ((emacsos--assist-active-surface nil)
@@ -5427,7 +5462,17 @@
             (should canonical)
             (with-current-buffer canonical
               (should emacsos-assist-web--passive-recovery-invalid-p)
-              (should-not emacsos-assist-web--queue))
+              (should-not emacsos-assist-web--queue)
+              ;; Editing clears the transient refusal but not the durable
+              ;; recovery gate; neither Send nor Refresh may start transport.
+              (goto-char (emacsos-assist-web--prompt-start))
+              (insert "S2")
+              (should (equal (emacsos-assist-web--input) "S2"))
+              (emacsos-assist-web--clear-prompt-refusal-if-changed)
+              (should-not emacsos-assist-web--prompt-refusal)
+              (emacsos-assist-web-send)
+              (emacsos-assist-web-refresh-thread)
+              (should-not requests))
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
 

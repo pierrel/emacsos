@@ -3839,13 +3839,21 @@ could release a pre-header SSE reservation later."
 
 (defun emacsos-assist-web--pump-posts ()
   "Start the oldest admissible POST without bypassing an admission barrier."
-  (unless emacsos-assist-web--post-entry
+  (unless (or emacsos-assist-web--passive-recovery-invalid-p
+              emacsos-assist-web--post-entry)
     (let ((entry (seq-find (lambda (candidate)
                              (memq (emacsos-assist-web--entry-state candidate)
                                    '(queued acceptance-unknown retryable-rejected recovered-head)))
                            emacsos-assist-web--queue)))
       (when entry
-        (if (or (and (not emacsos-assist-web--thread-id)
+        (if (or (catch 'unsettled-predecessor
+                  (dolist (candidate emacsos-assist-web--queue)
+                    (if (eq candidate entry)
+                        (throw 'unsettled-predecessor nil)
+                      (unless (memq (emacsos-assist-web--entry-state candidate)
+                                    '(terminal-unreconciled rejected))
+                        (throw 'unsettled-predecessor t)))))
+                (and (not emacsos-assist-web--thread-id)
                      (not (eq entry (emacsos-assist-web--queue-head))))
                 (and (eq (emacsos-assist-web--entry-state entry) 'recovered-head)
                      (not (plist-get entry :recovered-ready)))
@@ -4260,6 +4268,7 @@ write leaves the provisional records available for the next exact refresh."
                      (if (emacsos-assist-web--save-draft)
                          (progn
                            (emacsos-assist-web--start-next-observation)
+                           (emacsos-assist-web--pump-posts)
                            (emacsos-assist-web--reconcile-when-settled))
                        ;; Keep the exact recovered Run eligible for its next
                        ;; GET; neither another observer nor reconciliation may
@@ -4278,6 +4287,8 @@ write leaves the provisional records available for the next exact refresh."
       (with-current-buffer buffer
         (let ((head (emacsos-assist-web--queue-head)))
           (cond
+           (emacsos-assist-web--passive-recovery-invalid-p
+            (message "Canonical recovery needs repair; cached state is preserved"))
            (emacsos-assist-web--stream-entry
             ;; A live observer can follow a terminal queue head.  Its markers
             ;; still belong to the entry-owned stream, never legacy rendering.
@@ -4672,6 +4683,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
     (message "Open an Assist Web thread before sending"))
    ((eq emacsos--assist-active-surface 'chat)
     (message "Another Assist request is still running"))
+   (emacsos-assist-web--passive-recovery-invalid-p
+    (emacsos-assist-web--set-prompt-refusal
+     "canonical recovery needs repair; cached state is preserved"))
    ((and (not emacsos-assist-web--queue-model-p)
          emacsos-assist-web--in-flight)
     (emacsos-assist-web--set-prompt-refusal
@@ -4727,7 +4741,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
         buffer)))
 
 (defun emacsos-assist-web--restore-passive-legacy-accepted (draft)
-  "Normalize DRAFT's accepted legacy Run into this buffer's passive queue."
+  "Normalize DRAFT's accepted Run and optional bounded follow-up queue passively."
   (let ((key (alist-get 'pending_key draft))
         (text (alist-get 'text draft))
         (submitted (alist-get 'submitted_text draft))
