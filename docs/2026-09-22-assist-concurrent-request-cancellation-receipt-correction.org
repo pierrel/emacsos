@@ -1,0 +1,41 @@
+#+title: Cancellation receipt identity correction for concurrent Assist requests
+#+date: 2026-09-22
+
+* Result
+
+Implementation successor =6e230dfe23f2d6cc203a52d0e36149df347fac2f=,
+tree =0a7600e49e594654d31651954b3e5478e6f74e0d=, captures a dedicated
+per-entry cancellation generation with the exact Run identity when it issues
+DELETE.  A confirmed =200/cancelled= receipt no longer compares the
+pre-Abort observer epoch: it retires any current stream for that resident
+entry, invalidates reobservation, and only then records the terminal state and
+starts reconciliation.  DELETE errors and unconfirmed outcomes retain their
+Refresh retry behavior.
+
+New entries initialize their handshake field, so starting the real replacement
+observer cannot make a plist copy that is detached from its resident queue
+entry.  The regression now executes Abort, Refresh GET2, a =running= GET2
+callback that calls the actual observation start and advances the observer
+epoch, then the earlier confirmed DELETE.  It proves the revived stream is
+retired, the entry becomes terminal and reconciles, and the late observer
+callback is inert.
+
+* Verification
+
+- Focused queue interruption and confirmed-cancellation ERT: 4/4 passed.
+- Full =make test-elisp=: 704/705 passed.  The unchanged, independently
+  reproduced =emacsos-call-on-call-added-shows-already-active-call= baseline
+  expects =In progress= and receives =Status unknown=.
+- =make test-pinephone-scripts=: exit 0; its durable epoch-13 log
+  =/tmp/emacsos-pinephone-epoch13.log= ends with final ERT 76/76.  It includes
+  the manifest and both trusted root-pin validation routes.
+- =make test-server= is not applicable to this Elisp/deployment-only successor:
+  the lane intentionally has no sibling =../assist= checkout, so make stops
+  before pytest while resolving =../assist/requirements.txt=.
+
+* Historical supersession
+
+This record supersedes only the =Result= and =Verification= sections of
+[[file:2026-09-22-assist-concurrent-request-confirmed-cancellation-correction.org][the confirmed cancellation correction record]].  Its second fence still
+guarded the DELETE receipt with the pre-Abort observer epoch and therefore did
+not cover a real restarted observer whose GET2 callback advanced that epoch.
