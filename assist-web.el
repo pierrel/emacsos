@@ -145,6 +145,8 @@ The value is nil, `current', `cached', `refresh-failed', or
   "Fixed local refusal for the current unchanged editable draft.")
 (defvar-local emacsos-assist-web--collision-p nil
   "Non-nil while an adopted queue must contract before new sends.")
+(defvar-local emacsos-assist-web--passive-recovery-invalid-p nil
+  "Non-nil when provisional canonical recovery must fail closed.")
 (defvar-local emacsos-assist-web--recovery-draft nil
   "A bounded source draft retained during canonical-buffer adoption.")
 (defvar-local emacsos-assist-web--recovery-action-marker nil
@@ -4729,7 +4731,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
   (let ((key (alist-get 'pending_key draft))
         (text (alist-get 'text draft))
         (submitted (alist-get 'submitted_text draft))
-        (run-id (alist-get 'run_id draft)))
+        (run-id (alist-get 'run_id draft))
+        (follow-ups (alist-get 'follow_ups draft)))
     (when (and (alist-get 'pending_accepted draft)
                (stringp key)
                (string-match-p emacsos-assist-web--idempotency-regexp key)
@@ -4737,11 +4740,27 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                (stringp run-id)
                (string-match-p emacsos-assist-web--record-id-regexp run-id)
                (emacsos-assist-web--message-fits-p
-                submitted emacsos-assist-web--thread-id))
-      (let ((entry (emacsos-assist-web--entry submitted 'accepted-unobserved key)))
+                submitted emacsos-assist-web--thread-id)
+               (or (null follow-ups)
+                   (and (listp follow-ups) (= (length follow-ups) 1)
+                        (let ((follow-up (car follow-ups)))
+                          (and (stringp (alist-get 'text follow-up))
+                               (stringp (alist-get 'key follow-up))
+                               (string-match-p emacsos-assist-web--idempotency-regexp
+                                               (alist-get 'key follow-up))
+                               (emacsos-assist-web--message-fits-p
+                                (alist-get 'text follow-up)
+                                emacsos-assist-web--thread-id))))))
+      (let ((entry (emacsos-assist-web--entry submitted 'accepted-unobserved key))
+            (follow-up (car follow-ups)))
         (setf (plist-get entry :run-id) run-id
               (plist-get entry :requires-reobserve) t)
-        (setq emacsos-assist-web--queue (list entry)
+        (setq emacsos-assist-web--queue
+              (append (list entry)
+                      (when follow-up
+                        (list (emacsos-assist-web--entry
+                               (alist-get 'text follow-up) 'queued
+                               (alist-get 'key follow-up)))))
               emacsos-assist-web--queue-model-p t)
         (emacsos-assist-web--entry-render entry)
         (when (and (stringp text) (not (equal text submitted)))
@@ -4755,8 +4774,11 @@ ACCEPTED-RUN-ID is its already validated Run identity."
     (let ((entries (alist-get 'queue draft))
           (text (alist-get 'text draft)) changed)
       (if (not entries)
-          (unless (and passive-transport
-                       (emacsos-assist-web--restore-passive-legacy-accepted draft))
+          (if passive-transport
+              (unless (emacsos-assist-web--restore-passive-legacy-accepted draft)
+                (setq emacsos-assist-web--passive-recovery-invalid-p t)
+                (emacsos-assist-web--set-prompt-refusal
+                 "local canonical recovery needs repair; cached state is preserved"))
             (funcall #'emacsos-assist-web--legacy-restore-draft))
         (let* ((cached-thread-id (alist-get 'thread_id draft))
                (repo-key (alist-get 'repo_key draft))
@@ -4867,18 +4889,21 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                (emacsos-assist-web--restore-canonical-buffer
                                 thread-id))))
                     (if canonical
-                        (if (emacsos-assist-web--adopt-canonical-buffer
+                        (if (with-current-buffer canonical
+                              emacsos-assist-web--passive-recovery-invalid-p)
+                            (emacsos-assist-web--set-prompt-refusal
+                             "canonical recovery needs repair; local state is preserved")
+                          (if (emacsos-assist-web--adopt-canonical-buffer
                              source canonical)
                             (with-current-buffer canonical
                               (emacsos-assist-web--start-next-observation)
-                              (emacsos-assist-web--pump-posts)
                               (emacsos-assist-web--reconcile-when-settled))
-                          ;; The source stayed authoritative.  Its restored
-                          ;; receipt must exact-GET, never reopen SSE directly.
-                          (dolist (entry emacsos-assist-web--queue)
-                            (when (eq (emacsos-assist-web--entry-state entry)
-                                      'accepted-unobserved)
-                              (emacsos-assist-web--reobserve-entry entry))))
+                            ;; The source stayed authoritative.  Its restored
+                            ;; receipt must exact-GET, never reopen SSE directly.
+                            (dolist (entry emacsos-assist-web--queue)
+                              (when (eq (emacsos-assist-web--entry-state entry)
+                                        'accepted-unobserved)
+                                (emacsos-assist-web--reobserve-entry entry)))))
                       (emacsos-assist-web--pump-posts)
                       (emacsos-assist-web--start-next-observation)
                       (emacsos-assist-web--reconcile-when-settled))))))))))))

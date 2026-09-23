@@ -5315,8 +5315,8 @@
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
 
-(ert-deftest test-assist-web-cold-source-restores-legacy-canonical-run-passively ()
-  "A legacy canonical receipt joins FIFO before any exact recovery transport."
+(ert-deftest test-assist-web-cold-source-restores-legacy-canonical-queue-passively ()
+  "A legacy canonical receipt and follow-up join FIFO before transport."
   (let ((emacsos--assist-active-surface nil)
         (emacsos-assist-web--requests nil)
         (source (generate-new-buffer " *assist-cold-legacy-source*"))
@@ -5341,10 +5341,12 @@
                               (recovery_draft . nil) (collision . nil)
                               (repo_key . "repo") (harness . "deepagents")))
                            ("drafts/thread-new.json"
-                            '((text . "")
+                           '((text . "")
                               (pending_key . "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                               (submitted_text . "C1") (pending_accepted . t)
-                              (run_id . "run-c1")))
+                              (run_id . "run-c1")
+                              (follow_ups . (((text . "C2")
+                                              (key . "emacsos-cccccccccccccccccccccccccccccccc"))))))
                            (_ nil))))
                       ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                       ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t))
@@ -5361,13 +5363,71 @@
             (with-current-buffer canonical
               (should (equal (mapcar (lambda (entry) (plist-get entry :text))
                                      emacsos-assist-web--queue)
-                             '("S1" "C1")))
+                             '("S1" "C1" "C2")))
               (should (eq (emacsos-assist-web--entry-state
                            (car emacsos-assist-web--queue))
                           'accepted-unobserved)))
             (should (equal requests
                            '(("GET" "threads/thread-new/runs/run-s1"))))
             (should-not observed)
+            (kill-buffer canonical)))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-cold-source-failed-legacy-normalization-is-passive ()
+  "An unnormalizable legacy canonical record fails closed without transport."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        (source (generate-new-buffer " *assist-cold-invalid-legacy-source*"))
+        requests observed)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread")
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                       (lambda (name)
+                         (pcase name
+                           ("drafts/new-thread.json"
+                            '((text . "") (thread_id . "thread-new")
+                              (queue . (((text . "S1")
+                                         (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                         (state . "accepted-unobserved")
+                                         (run_id . "run-s1")
+                                         (live_text . t)
+                                         (recovered_ready . nil))))
+                              (recovery_draft . nil) (collision . nil)
+                              (repo_key . "repo") (harness . "deepagents")))
+                           ;; Legacy accepted state admitted this dotted id,
+                           ;; but the queue record grammar deliberately does not.
+                           ("drafts/thread-new.json"
+                            '((text . "")
+                              (pending_key . "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                              (submitted_text . "C1") (pending_accepted . t)
+                              (run_id . "run.1")))
+                           (_ nil))))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (setq requests t)))
+                      ((symbol-function 'emacsos-assist-web--observe-entry)
+                       (lambda (&rest _) (setq observed t)))
+                      ((symbol-function 'switch-to-buffer) #'ignore))
+              (emacsos-assist-web--restore-draft)))
+          (should (buffer-live-p source))
+          (should-not requests)
+          (should-not observed)
+          (should (= (length (with-current-buffer source emacsos-assist-web--queue)) 1))
+          (should (string-match-p "canonical recovery needs repair"
+                                  (with-current-buffer source
+                                    emacsos-assist-web--stream-status)))
+          (let ((canonical (seq-find
+                            (lambda (buffer)
+                              (string-prefix-p "*assist recovered <thread-new>*"
+                                               (buffer-name buffer)))
+                            (buffer-list))))
+            (should canonical)
+            (with-current-buffer canonical
+              (should emacsos-assist-web--passive-recovery-invalid-p)
+              (should-not emacsos-assist-web--queue))
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
 
