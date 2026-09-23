@@ -3716,11 +3716,16 @@ could release a pre-header SSE reservation later."
                    (setq emacsos-assist-web--post-entry nil)
                    (pcase (emacsos-assist-web--post-classification value error)
                      ('accepted
-                      (condition-case problem
-                          (let ((thread-id (emacsos-assist-web--require-id
-                                            (alist-get 'thread_id value)))
-                                (run-id (emacsos-assist-web--require-id
-                                         (alist-get 'run_id value))))
+                      (let (accepted-run-id)
+                        (condition-case problem
+                            (let ((thread-id (emacsos-assist-web--require-id
+                                              (alist-get 'thread_id value)))
+                                  (run-id (emacsos-assist-web--require-id
+                                           (alist-get 'run_id value))))
+                              ;; Keep validated acceptance separate from the
+                              ;; fallible adoption/cache work below.  Its
+                              ;; recovery must retain this exact Run.
+                              (setq accepted-run-id run-id)
                             (let ((canonical
                                    (and (not existing-thread-id)
                                         (emacsos-assist-web--thread-buffer thread-id))))
@@ -3736,7 +3741,7 @@ could release a pre-header SSE reservation later."
                                     ;; start S1 SSE before its exact Run GET.
                                     (plist-get current :requires-reobserve)
                                     (and canonical (not (eq canonical buffer))))
-                              (let ((owner buffer))
+                              (let ((owner buffer) adopted)
                                 ;; The destination cache is the first durable
                                 ;; canonical owner.  Do not give the source a
                                 ;; thread id before its merge has succeeded:
@@ -3744,8 +3749,9 @@ could release a pre-header SSE reservation later."
                                 ;; two buffers claiming the same thread.
                                 (if (and canonical (not (eq canonical buffer)))
                                     (if (emacsos-assist-web--adopt-canonical-buffer
-                                         buffer canonical current)
-                                        (setq owner canonical)
+                                         buffer canonical current run-id)
+                                        (setq owner canonical
+                                              adopted t)
                                       ;; Adoption has unwound the canonical
                                       ;; buffer before returning.  Reinstate
                                       ;; the receipt in SOURCE's resident list
@@ -3762,8 +3768,7 @@ could release a pre-header SSE reservation later."
                                                           entry))
                                                       emacsos-assist-web--queue))
                                         (emacsos-assist-web--entry-status
-                                         current "accepted; canonical adoption needs recovery")
-                                        (emacsos-assist-web--save-draft)))
+                                         current "accepted; canonical adoption needs recovery")))
                                   (setq emacsos-assist-web--thread-id thread-id
                                         emacsos-assist-web--draft-id nil)
                                   (unless (emacsos-assist-web--save-draft)
@@ -3780,23 +3785,26 @@ could release a pre-header SSE reservation later."
                                     ;; S1 has changed controllers.  Confirm its
                                     ;; exact persisted Run before C1 can yield
                                     ;; the observer slot to it.
-                                    (if (and canonical (not (eq canonical buffer)))
+                                    (if adopted
                                         (emacsos-assist-web--reobserve-entry current)
-                                      (emacsos-assist-web--start-observation current))
+                                      (unless canonical
+                                        (emacsos-assist-web--start-observation current)))
                                     (emacsos-assist-web--pump-posts)))))))
-                        (error
-                         ;; The POST response already proved this exact Run.
-                         ;; An adoption/cache failure must never erase that
-                         ;; proof and turn a later retry into another POST.
-                         (setf (plist-get current :state)
-                               (if (plist-get current :run-id)
-                                   'accepted-unobserved
-                                 'acceptance-unknown))
-                         (emacsos-assist-web--entry-status
-                          current (if (plist-get current :run-id)
-                                      "accepted; canonical adoption needs recovery"
-                                    "acceptance unknown; Send retries safely"))
-                         (emacsos-assist-web--save-draft))))
+                          (error
+                           ;; The POST response already proved this exact Run.
+                           ;; An adoption/cache failure must never erase that
+                           ;; proof and turn a later retry into another POST.
+                           (when accepted-run-id
+                             (setf (plist-get current :run-id) accepted-run-id))
+                           (setf (plist-get current :state)
+                                 (if (plist-get current :run-id)
+                                     'accepted-unobserved
+                                   'acceptance-unknown))
+                           (emacsos-assist-web--entry-status
+                            current (if (plist-get current :run-id)
+                                        "accepted; canonical adoption needs recovery"
+                                      "acceptance unknown; Send retries safely"))
+                           (emacsos-assist-web--save-draft)))))
                      ('retryable-rejected
                       (setf (plist-get current :state) 'retryable-rejected)
                       (emacsos-assist-web--entry-status
@@ -4492,13 +4500,15 @@ never submitted text, and fail closed before either buffer changes."
                  (harness . ,(or emacsos-assist-web--draft-harness "deepagents"))))))
            66000)))
 
-(defun emacsos-assist-web--adopt-canonical-buffer (source destination &optional accepted-entry)
+(defun emacsos-assist-web--adopt-canonical-buffer
+    (source destination &optional accepted-entry accepted-run-id)
   "Move SOURCE's acknowledged queue into DESTINATION as one recoverable owner.
 
 The destination stays the controller: its prompt and any live observer survive.
 SOURCE remains the sole owner until its old cache can be retired and the complete
 destination record becomes durable.  ACCEPTED-ENTRY is SOURCE's just-received
-POST receipt when adoption is called from its acknowledgement callback."
+POST receipt when adoption is called from its acknowledgement callback;
+ACCEPTED-RUN-ID is its already validated Run identity."
   (unless (eq source destination)
     (let ((source-queue (with-current-buffer source emacsos-assist-web--queue))
           (source-input (with-current-buffer source (emacsos-assist-web--input))))
@@ -4523,6 +4533,16 @@ POST receipt when adoption is called from its acknowledgement callback."
           ;; ownership with SOURCE, rather than durable destination state that
           ;; shares the same accepted entries.
           (with-current-buffer source
+            ;; The accepted Run is source-owned until destination durability
+            ;; succeeds.  Persist it before retiring the old cache, so a
+            ;; destination rollback can restore this exact proof rather than
+            ;; turn a known POST into a second submission.
+            (when accepted-entry
+              (when accepted-run-id
+                (setf (plist-get accepted-entry :run-id) accepted-run-id
+                      (plist-get accepted-entry :state) 'accepted-unobserved))
+              (unless (emacsos-assist-web--save-draft)
+                (user-error "canonical adoption could not preserve its source receipt")))
             (unless (emacsos-assist-web--delete-cache "drafts/new-thread.json")
               (user-error "canonical adoption could not retire its source cache")))
           ;; Save the prospective destination through its real buffer-local
@@ -4542,8 +4562,13 @@ POST receipt when adoption is called from its acknowledgement callback."
                     emacsos-assist-web--collision-p destination-collision
                     emacsos-assist-web--recovery-draft destination-recovery-draft)
               (throw 'emacsos-assist-web--adoption-failed
-                     (if (with-current-buffer source
+                      (if (with-current-buffer source
                            (when accepted-entry
+                             (when accepted-run-id
+                               (setf (plist-get accepted-entry :run-id)
+                                     accepted-run-id
+                                     (plist-get accepted-entry :state)
+                                     'accepted-unobserved))
                              (when-let ((resident
                                          (emacsos-assist-web--queue-entry
                                           (plist-get accepted-entry :key))))
@@ -4611,6 +4636,10 @@ POST receipt when adoption is called from its acknowledgement callback."
             (progn
               (with-current-buffer source
                 (when accepted-entry
+                  (when accepted-run-id
+                    (setf (plist-get accepted-entry :run-id) accepted-run-id
+                          (plist-get accepted-entry :state)
+                          'accepted-unobserved))
                   (setq emacsos-assist-web--queue
                         (mapcar (lambda (entry)
                                   (if (equal (plist-get entry :key)
