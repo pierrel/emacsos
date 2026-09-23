@@ -1,0 +1,48 @@
+#+title: Cancellation reload and aggregate-surface correction for concurrent Assist requests
+#+date: 2026-09-22
+
+* Result
+
+Implementation successor =2a70d52788fc45443883d839c29e592ad5cfd757=,
+tree =ab6ce5dfc6851d37dc80fb3a2b1b4bfbd89a2d63=, normalizes an entry retained
+through hot reload before it increments or compares its cancellation generation.
+An older resident plist without that field receives generation zero in place,
+so the captured DELETE target remains the resident entry.
+
+On a matching confirmed =200/cancelled= receipt, the terminal transition now
+recomputes aggregate web activity after stream retirement and before
+reconciliation.  The revived stream therefore releases its web slot
+immediately when it was the last transport, while another active web buffer
+continues to hold that aggregate slot.  Dedicated resident-entry, exact-Run,
+and cancellation-generation identity checks remain in force; error and
+unconfirmed DELETE outcomes still permit Refresh progress.
+
+The exact refreshed-observer regression now asserts both the real GET2 epoch
+advance and immediate aggregate-slot release.  New coverage also verifies a
+legacy retained entry without cancellation generation aborts successfully, and
+that confirmed cancellation does not clear a peer web buffer's aggregate slot.
+The stale-DELETE test description and setup now match the current identity
+contract.
+
+* Verification
+
+- Focused interruption, cancellation-receipt, reload, peer-slot, and stale
+  callback ERT: 7/7 passed.
+- Full =make test-elisp=: 706/707 passed.  The unchanged, independently
+  reproduced =emacsos-call-on-call-added-shows-already-active-call= baseline
+  expects =In progress= and receives =Status unknown=.
+- =make test-pinephone-scripts=: exit 0 in
+  =/tmp/emacsos-pinephone-epoch15.exit=; durable log
+  =/tmp/emacsos-pinephone-epoch15.log= ends with final ERT 76/76.  The
+  manifest and both trusted root pins match
+  =46cee402e4f85137015516b7b2cdd3c7533a4ad7162374c9b1427be131b1eda7=.
+- =make test-server= is not applicable to this Elisp/deployment-only successor:
+  the lane intentionally has no sibling =../assist= checkout, so make stops
+  before pytest while resolving =../assist/requirements.txt=.
+
+* Historical supersession
+
+This record supersedes only the =Result= and =Verification= sections of
+[[file:2026-09-22-assist-concurrent-request-cancellation-receipt-correction.org][the cancellation receipt identity correction record]].  That record did not
+normalize the new cancellation field for retained pre-field entries or publish
+the aggregate web-slot release after confirmed revived-stream retirement.
