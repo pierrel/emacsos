@@ -3169,7 +3169,8 @@ consulted; selected-buffer state is never a fallback owner."
   "Persist queue state before transport unless recovery is invalid.
 
 An invalid passive recovery retains its original cache unchanged until explicit
-repair or reload, including when the provisional buffer is killed."
+repair; reload also preserves and re-enters that fail-closed state, including
+when the provisional buffer is killed."
   (if emacsos-assist-web--passive-recovery-invalid-p
       t
     (if-let ((name (emacsos-assist-web--draft-cache-name)))
