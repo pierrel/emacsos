@@ -3489,6 +3489,12 @@ consulted; selected-buffer state is never a fallback owner."
   "Render fixed STATUS in ENTRY's own provisional assistant region."
   (emacsos-assist-web--entry-set-assistant-status entry status))
 
+(defun emacsos-assist-web--abort-receipt-status (entry status)
+  "Report unconfirmed abort STATUS without replacing ENTRY's live evidence."
+  (if (eq entry emacsos-assist-web--stream-entry)
+      (emacsos-assist-web--set-status status)
+    (emacsos-assist-web--entry-status entry status)))
+
 (defun emacsos-assist-web--entry-reset-assistant (entry attempt)
   "Reset ENTRY's exact assistant region for integer stream ATTEMPT."
   (unless (integerp attempt) (error "invalid stream attempt"))
@@ -4292,7 +4298,7 @@ write leaves the provisional records available for the next exact refresh."
                             (= cancellation-generation
                                (plist-get current :cancellation-generation)))
                  (cond
-                  (error (emacsos-assist-web--entry-status
+                  (error (emacsos-assist-web--abort-receipt-status
                           current "stopped watching; cancellation unconfirmed"))
                   ((equal (cons (alist-get 'http_status value)
                                 (alist-get 'outcome value))
@@ -4315,10 +4321,10 @@ write leaves the provisional records available for the next exact refresh."
                      (emacsos-assist-web--entry-status
                       current "cancelled; local recovery could not be saved")))
                   ((member (alist-get 'outcome value) '("running" "transitioning"))
-                   (emacsos-assist-web--entry-status
+                   (emacsos-assist-web--abort-receipt-status
                     current (format "stopped watching; Assist is %s"
                                     (alist-get 'outcome value))))
-                  (t (emacsos-assist-web--entry-status
+                  (t (emacsos-assist-web--abort-receipt-status
                       current "stopped watching; cancellation unconfirmed")))
                  (emacsos-assist-web--save-draft)))))) nil t))))))
 

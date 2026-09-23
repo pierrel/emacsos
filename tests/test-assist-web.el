@@ -5280,6 +5280,56 @@
              current 1 "late observer")
             (should (eq (plist-get current :state) 'terminal-unreconciled))))))))
 
+(ert-deftest test-assist-web-unconfirmed-cancellation-keeps-a-revived-observer ()
+  "Late unconfirmed DELETE receipts preserve the real GET2 observer evidence."
+  (dolist (receipt (list (cons nil "offline")
+                         (cons '((outcome . "running")) nil)
+                         (cons '((outcome . "transitioning")) nil)
+                         (cons '((outcome . "unknown")) nil)))
+    (let ((emacsos-assist-web--requests nil)
+          (emacsos--assist-active-surface nil)
+          get-callback delete-callback)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1"
+              emacsos-assist-web--queue-model-p t)
+        (emacsos-assist-web--write-prompt)
+        (let ((entry (emacsos-assist-web--entry
+                      "old" 'observing
+                      "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+          (setf (plist-get entry :run-id) "run-a")
+          (setq emacsos-assist-web--queue (list entry)
+                emacsos-assist-web--stream-entry entry)
+          (emacsos-assist-web--entry-render entry)
+          (emacsos-assist-web--entry-reset-assistant entry 1)
+          (emacsos-assist-web--entry-append-delta entry 1 1 "partial")
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method _path _payload callback &rest _)
+                       (if (equal method "GET")
+                           (setq get-callback callback)
+                         (setq delete-callback callback))))
+                    ((symbol-function 'emacsos-assist-web--observe-entry) #'ignore))
+            (emacsos-assist-web--abort-entry (plist-get entry :key))
+            (emacsos-assist-web-refresh-thread)
+            (funcall get-callback '((status . "running")) nil)
+            (let ((current (emacsos-assist-web--queue-entry
+                            (plist-get entry :key))))
+              ;; GET2 starts a real new observer and adds its live Abort action
+              ;; after the partial text carried from the retired first stream.
+              (should (eq current emacsos-assist-web--stream-entry))
+              (should (eq (plist-get current :state) 'observing))
+              (should (string-match-p "partial" (buffer-string)))
+              (should (string-match-p "Abort/Detach" (buffer-string)))
+              (funcall delete-callback (car receipt) (cdr receipt))
+              (should (eq current emacsos-assist-web--stream-entry))
+              (should (eq (plist-get current :state) 'observing))
+              (should (string-match-p "partial" (buffer-string)))
+              (should (string-match-p "Abort/Detach" (buffer-string)))
+              ;; The exact observer remains viable after the stale receipt.
+              (emacsos-assist-web--entry-append-delta current 1 2 " later")
+              (should (string-match-p "partial later" (buffer-string))))))))))
+
 (ert-deftest test-assist-web-legacy-entry-without-cancellation-generation-aborts ()
   "A hot-reload retained entry without the new field gets a zero generation."
   (let (reconciled)
