@@ -5222,49 +5222,61 @@
         (should-not observed)
         (should (eq (plist-get new :state) 'accepted-unobserved))))))
 
-(ert-deftest test-assist-web-confirmed-cancellation-invalidates-pending-reobserves ()
-  "Neither a pre- nor post-abort GET can revive confirmed cancellation."
-  (let (get-callbacks delete-callback observed reconciled)
+(ert-deftest test-assist-web-confirmed-cancellation-retires-a-revived-observer ()
+  "Confirmed DELETE wins after Refresh starts a new exact observer."
+  (let ((emacsos-assist-web--requests nil)
+        (emacsos--assist-active-surface nil)
+        get-callback delete-callback observed reconciled)
     (with-temp-buffer
       (emacsos-assist-web-mode)
-      (setq emacsos-assist-web--thread-id "thread-1")
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--queue-model-p t)
       (let ((entry (emacsos-assist-web--entry
-                    "old" 'accepted-unobserved
+                    "old" 'observing
                     "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
         (setf (plist-get entry :run-id) "run-a")
-        (setq emacsos-assist-web--queue (list entry))
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--stream-entry entry)
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                   ((symbol-function 'emacsos-assist-web--request)
                    (lambda (method path _payload callback &rest _)
                      (pcase method
                        ("GET"
                         (should (equal path "threads/thread-1/runs/run-a"))
-                        (push callback get-callbacks))
+                        (setq get-callback callback))
                        ("DELETE"
                         (should (equal path "threads/thread-1/runs/run-a"))
                         (setq delete-callback callback)))))
                   ((symbol-function 'emacsos-assist-web--observe-entry)
-                   (lambda (&rest _) (setq observed t)))
+                   (lambda (entry) (setq observed entry)))
                   ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
                    (lambda () (setq reconciled t))))
-          (emacsos-assist-web--reobserve-entry entry)
-          (should (= (length get-callbacks) 1))
-          (should (plist-get entry :reobserve-in-flight))
           (emacsos-assist-web--abort-entry (plist-get entry :key))
           (should delete-callback)
           (should-not (plist-get entry :reobserve-in-flight))
-          ;; Refresh owns a later GET while cancellation is still pending.
+          ;; Refresh starts GET2 while cancellation is still pending.
           (emacsos-assist-web-refresh-thread)
-          (should (= (length get-callbacks) 2))
+          (should get-callback)
           (should (plist-get entry :reobserve-in-flight))
-          (funcall delete-callback '((http_status . 200) (outcome . "cancelled")) nil)
-          (should reconciled)
-          (should (eq (plist-get entry :state) 'terminal-unreconciled))
-          (should-not (plist-get entry :reobserve-in-flight))
-          (dolist (callback get-callbacks)
-            (funcall callback '((status . "running")) nil))
-          (should-not observed)
-          (should (eq (plist-get entry :state) 'terminal-unreconciled)))))))
+          ;; GET2 proves running and starts a new observer at a later epoch.
+          (funcall get-callback '((status . "running")) nil)
+          (should observed)
+          (let ((current (emacsos-assist-web--queue-entry
+                          (plist-get entry :key))))
+            ;; The callback must operate on the resident entry, whose real
+            ;; observer start above advanced its epoch.
+            (should (eq emacsos-assist-web--stream-entry current))
+            (should (eq (plist-get current :state) 'observing))
+            (should (= (plist-get current :epoch) 1))
+            (funcall delete-callback '((http_status . 200) (outcome . "cancelled")) nil)
+            (should reconciled)
+            (should (eq (plist-get current :state) 'terminal-unreconciled))
+            (should-not emacsos-assist-web--stream-entry)
+            (should-not (plist-get current :reobserve-in-flight))
+            ;; A callback captured by the now-retired restarted observer is inert.
+            (emacsos-assist-web--entry-observation-interrupted
+             current 1 "late observer")
+            (should (eq (plist-get current :state) 'terminal-unreconciled))))))))
 
 (ert-deftest test-assist-web-stale-delete-cannot-mutate-a-replaced-entry ()
   "A DELETE callback addresses its captured entry and epoch, not a key lookup."

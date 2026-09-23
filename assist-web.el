@@ -3058,8 +3058,9 @@ callbacks even after reconciliation leaves the resident list empty."
         :epoch 0 :run-id nil :live-text nil :rendered nil
         :recovered-ready nil
         :stream-process nil :stream-response nil :stream-header-timer nil
-        :stream-generation 0
+        :stream-generation 0 :handshake-token nil
         :reobserve-generation 0 :reobserve-in-flight nil
+        :cancellation-generation 0
         :requires-reobserve nil
         :user-start nil :assistant-start nil :assistant-end nil
         :action-start nil :action-end nil
@@ -4258,8 +4259,11 @@ write leaves the provisional records available for the next exact refresh."
   "Detach the exact accepted entry named by KEY without reposting it."
   (when-let ((entry (emacsos-assist-web--queue-entry key)))
     (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
-      (let ((buffer (current-buffer)) (run-id (plist-get entry :run-id))
-            (target entry) (epoch (plist-get entry :epoch)))
+      (let* ((buffer (current-buffer)) (run-id (plist-get entry :run-id))
+             (target entry)
+             (cancellation-generation
+              (1+ (plist-get entry :cancellation-generation))))
+        (setf (plist-get entry :cancellation-generation) cancellation-generation)
         ;; A delayed exact-Run GET predating this DELETE must not reopen an
         ;; observer after the cancellation receipt makes this entry terminal.
         (cl-incf (plist-get entry :reobserve-generation))
@@ -4279,7 +4283,9 @@ write leaves the provisional records available for the next exact refresh."
              (with-current-buffer buffer
                (let ((current (emacsos-assist-web--queue-entry key)))
                  (when (and (eq current target)
-                            (= epoch (plist-get current :epoch)))
+                            (equal run-id (plist-get current :run-id))
+                            (= cancellation-generation
+                               (plist-get current :cancellation-generation)))
                  (cond
                   (error (emacsos-assist-web--entry-status
                           current "stopped watching; cancellation unconfirmed"))
@@ -4289,6 +4295,8 @@ write leaves the provisional records available for the next exact refresh."
                    ;; Refresh may have started a new exact-Run GET after this
                    ;; cancellation began.  A confirmed terminal receipt wins:
                    ;; make that in-flight callback inert before recording it.
+                   (when (eq current emacsos-assist-web--stream-entry)
+                     (emacsos-assist-web--stream-cleanup t))
                    (cl-incf (plist-get current :reobserve-generation))
                    (setf (plist-get current :reobserve-in-flight) nil)
                    (setf (plist-get current :state) 'terminal-unreconciled)
