@@ -1,0 +1,22 @@
+#+title: Assist Web adoption durability correction
+#+date: 2026-09-22
+
+* Correction
+
+Canonical adoption saves the complete destination recovery record while the
+source record remains durable, then retires the source.  A failed retirement
+restores the destination's prior record when possible; a failed restoration
+leaves recoverable duplicate records rather than losing the accepted Run.
+The retained source records the canonical thread id while keeping its
+=new-thread= cache name, so rollback and reload use an exact Run GET rather
+than a second POST.  When both records survive a restart, the live canonical
+buffer deduplicates the immutable key and Run before transport resumes.
+
+* Historical supersession
+
+- Supersedes only =docs/2026-09-21-assist-concurrent-request-running-fix-round-5-evidence.org=,
+  “Round-five corrections” adoption-order claim.  That claim described a
+  destination write failure before source retirement, but did not preserve a
+  durable owner across termination after destination persistence.  The current
+  transfer order retains a durable source through that window and resolves the
+  resulting duplicate recovery records into the canonical runtime owner.
