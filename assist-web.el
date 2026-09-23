@@ -4259,10 +4259,15 @@ write leaves the provisional records available for the next exact refresh."
   "Detach the exact accepted entry named by KEY without reposting it."
   (when-let ((entry (emacsos-assist-web--queue-entry key)))
     (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
+      ;; A queue restored by older code predates cancellation generation.  Add
+      ;; its zero value in place so TARGET remains the resident entry captured
+      ;; by the DELETE callback.
+      (unless (plist-member entry :cancellation-generation)
+        (setcdr (last entry) (list :cancellation-generation 0)))
       (let* ((buffer (current-buffer)) (run-id (plist-get entry :run-id))
              (target entry)
              (cancellation-generation
-              (1+ (plist-get entry :cancellation-generation))))
+              (1+ (or (plist-get entry :cancellation-generation) 0))))
         (setf (plist-get entry :cancellation-generation) cancellation-generation)
         ;; A delayed exact-Run GET predating this DELETE must not reopen an
         ;; observer after the cancellation receipt makes this entry terminal.
@@ -4300,6 +4305,10 @@ write leaves the provisional records available for the next exact refresh."
                    (cl-incf (plist-get current :reobserve-generation))
                    (setf (plist-get current :reobserve-in-flight) nil)
                    (setf (plist-get current :state) 'terminal-unreconciled)
+                   ;; The terminal state has retired this buffer's transport.
+                   ;; Recompute the aggregate slot before reconciliation, which
+                   ;; may run an arbitrary refresh callback.
+                   (emacsos-assist-web--sync-active-surface)
                    (if (emacsos-assist-web--save-draft)
                        (emacsos-assist-web--reconcile-when-settled)
                      (setf (plist-get current :state) 'accepted-unobserved)

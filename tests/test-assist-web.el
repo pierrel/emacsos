@@ -5261,6 +5261,7 @@
           ;; GET2 proves running and starts a new observer at a later epoch.
           (funcall get-callback '((status . "running")) nil)
           (should observed)
+          (should (eq emacsos--assist-active-surface 'web))
           (let ((current (emacsos-assist-web--queue-entry
                           (plist-get entry :key))))
             ;; The callback must operate on the resident entry, whose real
@@ -5273,13 +5274,78 @@
             (should (eq (plist-get current :state) 'terminal-unreconciled))
             (should-not emacsos-assist-web--stream-entry)
             (should-not (plist-get current :reobserve-in-flight))
+            (should-not emacsos--assist-active-surface)
             ;; A callback captured by the now-retired restarted observer is inert.
             (emacsos-assist-web--entry-observation-interrupted
              current 1 "late observer")
             (should (eq (plist-get current :state) 'terminal-unreconciled))))))))
 
+(ert-deftest test-assist-web-legacy-entry-without-cancellation-generation-aborts ()
+  "A hot-reload retained entry without the new field gets a zero generation."
+  (let (reconciled)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--queue-model-p t)
+      ;; This is the retained queue shape from before cancellation generation
+      ;; existed, after a hot reload rather than a newly constructed entry.
+      (let ((entry (list :text "old" :state 'accepted-unobserved
+                         :key "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                         :epoch 0 :run-id "run-a"
+                         :reobserve-generation 0 :reobserve-in-flight nil)))
+        (setq emacsos-assist-web--queue (list entry))
+        (should-not (plist-member entry :cancellation-generation))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (funcall callback
+                              '((http_status . 200) (outcome . "cancelled")) nil)))
+                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
+                   (lambda () (setq reconciled t))))
+          (emacsos-assist-web--abort-entry (plist-get entry :key)))
+        (should (= (plist-get entry :cancellation-generation) 1))
+        (should (eq (plist-get entry :state) 'terminal-unreconciled))
+        (should reconciled)))))
+
+(ert-deftest test-assist-web-confirmed-cancellation-keeps-a-peer-web-slot ()
+  "Confirmed retirement releases one stream without clearing a peer's web slot."
+  (let ((peer (generate-new-buffer " *assist-web-cancel-peer*"))
+        (emacsos--assist-active-surface nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer peer
+            (emacsos-assist-web-mode)
+            (let ((entry (emacsos-assist-web--entry
+                          "peer" 'observing
+                          "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+              (setq emacsos-assist-web--queue-model-p t
+                    emacsos-assist-web--queue (list entry)
+                    emacsos-assist-web--stream-entry entry)))
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t)
+            (let ((entry (emacsos-assist-web--entry
+                          "old" 'observing
+                          "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+              (setf (plist-get entry :run-id) "run-a")
+              (setq emacsos-assist-web--queue (list entry)
+                    emacsos-assist-web--stream-entry entry)
+              (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                        ((symbol-function 'emacsos-assist-web--request)
+                         (lambda (_method _path _payload callback &rest _)
+                           (funcall callback
+                                    '((http_status . 200) (outcome . "cancelled")) nil)))
+                        ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
+                         #'ignore))
+                (emacsos-assist-web--abort-entry (plist-get entry :key)))
+              (should (eq (plist-get entry :state) 'terminal-unreconciled))
+              (should-not emacsos-assist-web--stream-entry)
+              (should (eq emacsos--assist-active-surface 'web))))
+      (when (buffer-live-p peer) (kill-buffer peer))))))
+
 (ert-deftest test-assist-web-stale-delete-cannot-mutate-a-replaced-entry ()
-  "A DELETE callback addresses its captured entry and epoch, not a key lookup."
+  "A DELETE callback needs the captured resident entry, Run, and generation."
   (let (callback)
     (with-temp-buffer
       (emacsos-assist-web-mode)
@@ -5289,8 +5355,7 @@
             (new (emacsos-assist-web--entry "new" 'accepted-unobserved
                                              "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
         (setf (plist-get old :run-id) "run-a"
-              (plist-get new :run-id) "run-a"
-              (plist-get new :epoch) 1)
+              (plist-get new :run-id) "run-a")
         (setq emacsos-assist-web--queue (list old))
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                   ((symbol-function 'emacsos-assist-web--request)
