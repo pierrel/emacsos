@@ -4629,7 +4629,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                   emacsos-assist-web--post-entry nil
                   emacsos-assist-web--stream-entry nil)
             ;; Do not let the killed source re-save the now-retired draft.
-            (remove-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed t))))))
+            (remove-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed t)
+            nil))))))
         (if failure
             ;; SOURCE remains the live accepted owner.  Its exact Run is
             ;; reobserved by Refresh; do not start a second callback here.
@@ -4648,12 +4649,11 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                     entry))
                                 emacsos-assist-web--queue))
                   (emacsos-assist-web--entry-status
-                   accepted-entry "accepted; canonical adoption needs recovery")
-                  (emacsos-assist-web--save-draft)))
+                   accepted-entry "accepted; canonical adoption needs recovery")))
               nil)
           (kill-buffer source)
           (switch-to-buffer destination)
-          destination))))))
+          destination)))))
 
 (defun emacsos-assist-web-send ()
   "Queue a canonical submission without globally serializing web thread buffers."

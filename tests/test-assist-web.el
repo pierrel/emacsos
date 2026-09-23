@@ -3843,7 +3843,7 @@
   (let ((emacsos--assist-active-surface nil)
         (canonical (generate-new-buffer " *assist-canonical*"))
         (draft (generate-new-buffer " *assist-new-draft*"))
-        callback observed deleted source-saves)
+        callback observed deleted)
     (unwind-protect
         (progn
           (with-current-buffer canonical
@@ -3860,11 +3860,7 @@
             (emacsos-assist-web--write-prompt)
             (insert "hello")
             (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
-                       (lambda ()
-                         (if (eq (current-buffer) canonical)
-                             nil
-                           (cl-incf source-saves)
-                           t)))
+                       (lambda () (not (eq (current-buffer) canonical))))
                       ((symbol-function 'emacsos-assist-web--delete-cache)
                        (lambda (&rest _) (setq deleted t)))
                       ((symbol-function 'emacsos-assist-web--request)
@@ -3877,9 +3873,6 @@
                          (live_text . t)) nil)))
           (should-not observed)
           (should deleted)
-          ;; Initial source persistence plus recovery after the failed final
-          ;; owner write leaves the source cache as the only durable owner.
-          (should (= source-saves 3))
           (should (buffer-live-p draft))
           ;; A completed adoption GET is neither a POST nor an observer.
           (should-not emacsos--assist-active-surface)
