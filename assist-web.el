@@ -3877,7 +3877,11 @@ could release a pre-header SSE reservation later."
       (when (buffer-live-p response)
         (emacsos-assist-web--kill-buffer-later response)))
     (emacsos-assist-web--cleanup-handshake entry epoch)
-    (emacsos-assist-web--entry-status entry status)
+    ;; Streamed text is provisional evidence, but it is still more useful than
+    ;; a generic failure banner.  Keep it in this entry's assistant range and
+    ;; report the unverified observation separately in the thread status.
+    (emacsos-assist-web--entry-replace-empty-assistant-status entry status)
+    (emacsos-assist-web--set-unverified-status status)
     (emacsos-assist-web--save-draft)
     (emacsos-assist-web--sync-active-surface)))
 
@@ -4256,6 +4260,10 @@ write leaves the provisional records available for the next exact refresh."
     (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
       (let ((buffer (current-buffer)) (run-id (plist-get entry :run-id))
             (target entry) (epoch (plist-get entry :epoch)))
+        ;; A delayed exact-Run GET predating this DELETE must not reopen an
+        ;; observer after the cancellation receipt makes this entry terminal.
+        (cl-incf (plist-get entry :reobserve-generation))
+        (setf (plist-get entry :reobserve-in-flight) nil)
         (when (eq entry emacsos-assist-web--stream-entry)
           (emacsos-assist-web--stream-cleanup t)
           (setf (plist-get entry :state) 'accepted-unobserved)

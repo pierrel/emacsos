@@ -1290,6 +1290,57 @@
       (should (string-match-p "partial" (buffer-string)))
       (should (equal emacsos-assist-web--stream-status reason)))))
 
+(ert-deftest test-assist-web-queue-interruptions-keep-partial-and-mark-it-unverified ()
+  "Entry-owned interruption keeps streamed text for every shared failure exit."
+  (dolist (reason '("invalid Assist delta" "Assist event is too large"
+                    "observation disconnected" "observation interrupted"))
+    (let (unverified)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (emacsos-assist-web--write-prompt)
+        (let ((entry (emacsos-assist-web--entry
+                      "hello" 'observing
+                      "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+          (setq emacsos-assist-web--queue (list entry)
+                emacsos-assist-web--stream-entry entry)
+          (emacsos-assist-web--entry-render entry)
+          (emacsos-assist-web--entry-reset-assistant entry 1)
+          (emacsos-assist-web--entry-append-delta entry 1 1 "partial")
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                     (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--set-unverified-status)
+                     (lambda (status) (setq unverified status))))
+            (emacsos-assist-web--entry-observation-interrupted entry 0 reason))
+          (should (equal (buffer-substring-no-properties
+                          (plist-get entry :assistant-start)
+                          (plist-get entry :assistant-end))
+                         "partial"))
+          (should (equal unverified reason)))))))
+
+(ert-deftest test-assist-web-queue-interruption-replaces-only-a-queued-body ()
+  "An interrupted entry without text keeps a fixed local assistant status."
+  (let (unverified)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (let ((entry (emacsos-assist-web--entry
+                    "hello" 'observing
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--stream-entry entry)
+        (emacsos-assist-web--entry-render entry)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--set-unverified-status)
+                   (lambda (status) (setq unverified status))))
+          (emacsos-assist-web--entry-observation-interrupted
+           entry 0 "observation disconnected"))
+        (should (equal (buffer-substring-no-properties
+                        (plist-get entry :assistant-start)
+                        (plist-get entry :assistant-end))
+                       "[observation disconnected]\n"))
+        (should (equal unverified "observation disconnected"))))))
+
 (ert-deftest test-assist-web-malformed-and-oversized-deltas-keep-the-real-partial ()
   "The event adapter, not only its shared failure helper, retains prior text."
   (let ((oversized (json-encode `((attempt . 1) (index . 2)
@@ -5134,6 +5185,44 @@
           (funcall callback '((status . "running")) nil))
         (should-not observed)
         (should (eq (plist-get new :state) 'accepted-unobserved))))))
+
+(ert-deftest test-assist-web-cancellation-invalidates-a-withheld-reobserve ()
+  "A delayed pre-cancellation GET cannot revive a DELETE-confirmed entry."
+  (let (get-callback delete-callback observed reconciled)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let ((entry (emacsos-assist-web--entry
+                    "old" 'accepted-unobserved
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setf (plist-get entry :run-id) "run-a")
+        (setq emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path _payload callback &rest _)
+                     (pcase method
+                       ("GET"
+                        (should (equal path "threads/thread-1/runs/run-a"))
+                        (setq get-callback callback))
+                       ("DELETE"
+                        (should (equal path "threads/thread-1/runs/run-a"))
+                        (setq delete-callback callback)))))
+                  ((symbol-function 'emacsos-assist-web--observe-entry)
+                   (lambda (&rest _) (setq observed t)))
+                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
+                   (lambda () (setq reconciled t))))
+          (emacsos-assist-web--reobserve-entry entry)
+          (should get-callback)
+          (should (plist-get entry :reobserve-in-flight))
+          (emacsos-assist-web--abort-entry (plist-get entry :key))
+          (should delete-callback)
+          (should-not (plist-get entry :reobserve-in-flight))
+          (funcall delete-callback '((http_status . 200) (outcome . "cancelled")) nil)
+          (should reconciled)
+          (should (eq (plist-get entry :state) 'terminal-unreconciled))
+          (funcall get-callback '((status . "running")) nil)
+          (should-not observed)
+          (should (eq (plist-get entry :state) 'terminal-unreconciled)))))))
 
 (ert-deftest test-assist-web-stale-delete-cannot-mutate-a-replaced-entry ()
   "A DELETE callback addresses its captured entry and epoch, not a key lookup."
