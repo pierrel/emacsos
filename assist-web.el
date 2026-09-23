@@ -3166,13 +3166,18 @@ consulted; selected-buffer state is never a fallback owner."
       (harness . ,(or emacsos-assist-web--draft-harness "deepagents")))))
 
 (defun emacsos-assist-web--save-draft ()
-  "Persist queue state before transport work and return whether it succeeded."
-  (if-let ((name (emacsos-assist-web--draft-cache-name)))
-      (and (emacsos-assist-web--queue-cache-fits-p emacsos-assist-web--queue
-                                                   (emacsos-assist-web--input))
-           (emacsos-assist-web--try-write-cache
-            name (emacsos-assist-web--queue-cache-value)))
-    t))
+  "Persist queue state before transport unless recovery is invalid.
+
+An invalid passive recovery retains its original cache unchanged until explicit
+repair or reload, including when the provisional buffer is killed."
+  (if emacsos-assist-web--passive-recovery-invalid-p
+      t
+    (if-let ((name (emacsos-assist-web--draft-cache-name)))
+        (and (emacsos-assist-web--queue-cache-fits-p emacsos-assist-web--queue
+                                                     (emacsos-assist-web--input))
+             (emacsos-assist-web--try-write-cache
+              name (emacsos-assist-web--queue-cache-value)))
+      t)))
 
 (defun emacsos-assist-web--entry-set-assistant-status (entry status)
   "Replace ENTRY's provisional assistant body with fixed STATUS."
@@ -4905,8 +4910,10 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                     (if canonical
                         (if (with-current-buffer canonical
                               emacsos-assist-web--passive-recovery-invalid-p)
-                            (emacsos-assist-web--set-prompt-refusal
-                             "canonical recovery needs repair; local state is preserved")
+                            (progn
+                              (setq emacsos-assist-web--passive-recovery-invalid-p t)
+                              (emacsos-assist-web--set-prompt-refusal
+                               "canonical recovery needs repair; local state is preserved"))
                           (if (emacsos-assist-web--adopt-canonical-buffer
                              source canonical)
                             (with-current-buffer canonical

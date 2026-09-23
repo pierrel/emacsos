@@ -5450,7 +5450,18 @@
           (should (buffer-live-p source))
           (should-not requests)
           (should-not observed)
-          (should (= (length (with-current-buffer source emacsos-assist-web--queue)) 1))
+          (with-current-buffer source
+            (should emacsos-assist-web--passive-recovery-invalid-p)
+            (should (= (length emacsos-assist-web--queue) 1))
+            ;; The live source shares the repair gate with its hidden
+            ;; canonical recovery, even after this edit clears the refusal.
+            (goto-char (emacsos-assist-web--prompt-start))
+            (insert "S2")
+            (emacsos-assist-web--clear-prompt-refusal-if-changed)
+            (emacsos-assist-web-send)
+            (emacsos-assist-web-refresh-thread)
+            (emacsos-assist-web--pump-posts)
+            (should-not requests))
           (should (string-match-p "canonical recovery needs repair"
                                   (with-current-buffer source
                                     emacsos-assist-web--stream-status)))
@@ -5475,6 +5486,76 @@
               (should-not requests))
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-invalid-passive-canonical-kill-keeps-both-caches ()
+  "An invalid passive canonical edit and kill leave both durable caches intact."
+  (let* ((emacsos--assist-active-surface nil)
+         (emacsos-assist-web--requests nil)
+         (emacsos-assist-web-cache-directory (make-temp-file "assist-web-invalid-" t))
+         (source-value
+          '((text . "") (thread_id . "thread-new")
+            (queue . (((text . "S1")
+                       (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                       (state . "accepted-unobserved")
+                       (run_id . "run-s1")
+                       (live_text . t) (recovered_ready . nil))))
+            (recovery_draft . nil) (collision . nil)
+            (repo_key . "repo") (harness . "deepagents")))
+         (legacy-value
+          '((text . "")
+            (pending_key . "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            (submitted_text . "C1") (pending_accepted . t)
+            (run_id . "run.1")
+            (follow_ups . (((text . "C2")
+                            (key . "emacsos-cccccccccccccccccccccccccccccccc"))))))
+         (source (generate-new-buffer " *assist-invalid-cache-source*"))
+         canonical source-bytes canonical-bytes)
+    (unwind-protect
+        (progn
+          (emacsos-assist-web--write-cache "drafts/new-thread.json" source-value)
+          (emacsos-assist-web--write-cache "drafts/thread-new.json" legacy-value)
+          (setq source-bytes
+                (with-temp-buffer
+                  (insert-file-contents
+                   (emacsos-assist-web--cache-path "drafts/new-thread.json"))
+                  (buffer-string))
+                canonical-bytes
+                (with-temp-buffer
+                  (insert-file-contents
+                   (emacsos-assist-web--cache-path "drafts/thread-new.json"))
+                  (buffer-string)))
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread")
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (ert-fail "invalid recovery started transport")))
+                      ((symbol-function 'switch-to-buffer) #'ignore))
+              (emacsos-assist-web--restore-draft)))
+          (setq canonical
+                (seq-find (lambda (buffer)
+                            (string-prefix-p "*assist recovered <thread-new>*"
+                                             (buffer-name buffer)))
+                          (buffer-list)))
+          (should canonical)
+          (with-current-buffer canonical
+            (should emacsos-assist-web--passive-recovery-invalid-p)
+            (goto-char (emacsos-assist-web--prompt-start))
+            (insert "edited")
+            (kill-buffer canonical))
+          (should (equal source-bytes
+                         (with-temp-buffer
+                           (insert-file-contents
+                            (emacsos-assist-web--cache-path "drafts/new-thread.json"))
+                           (buffer-string))))
+          (should (equal canonical-bytes
+                         (with-temp-buffer
+                           (insert-file-contents
+                            (emacsos-assist-web--cache-path "drafts/thread-new.json"))
+                           (buffer-string)))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p canonical) (kill-buffer canonical))
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-cold-adoption-failure-reobserves-only-source-run ()
   "A passive canonical duplicate cannot race source recovery after adoption fails."
