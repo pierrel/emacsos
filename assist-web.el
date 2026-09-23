@@ -4546,8 +4546,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                 (user-error "canonical adoption could not preserve its source receipt"))))
           ;; Save the prospective destination through its real buffer-local
           ;; state rather than dynamically binding a special buffer-local.
-          ;; The latter would also hide SOURCE's real queue while restoring
-          ;; its cache after a failed write.
+          ;; The latter would hide SOURCE's real queue while persisting its
+          ;; durable retry after a failed destination write.
           (setq emacsos-assist-web--queue merged
                 emacsos-assist-web--collision-p collision
                 emacsos-assist-web--recovery-draft
@@ -4719,11 +4719,13 @@ ACCEPTED-RUN-ID is its already validated Run identity."
             (setq emacsos-assist-web--status-end (copy-marker (point) nil))
             (insert "\n\n")
             (emacsos-assist-web--write-prompt)
-            (emacsos-assist-web--restore-draft)))
+            ;; Do not transport a provisional canonical queue before SOURCE
+            ;; has either merged into it or remained the durable owner.
+            (emacsos-assist-web--restore-draft t)))
         buffer)))
 
-(defun emacsos-assist-web--restore-draft ()
-  "Restore and normalize queue state before reissuing any exact transport work."
+(defun emacsos-assist-web--restore-draft (&optional passive-transport)
+  "Restore queue state before exact transport, unless PASSIVE-TRANSPORT defers it."
   (when-let* ((name (emacsos-assist-web--draft-cache-name))
               (draft (emacsos-assist-web--read-cache name)))
     (let ((entries (alist-get 'queue draft))
@@ -4829,7 +4831,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                 (when changed
                   (unless (emacsos-assist-web--save-draft)
                     (setq changed 'persistence-failed)))
-                (unless (or (eq changed 'persistence-failed)
+                (unless (or passive-transport
+                            (eq changed 'persistence-failed)
                             (eq emacsos--assist-active-surface 'chat))
                   (let* ((source (current-buffer))
                          (thread-id emacsos-assist-web--thread-id)

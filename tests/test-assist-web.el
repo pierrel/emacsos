@@ -5248,10 +5248,12 @@
       (dolist (buffer (list source canonical))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(ert-deftest test-assist-web-cold-source-restore-loads-and-merges-canonical-cache ()
-  "A source-first restart merges both durable Runs without reposting either."
-  (let ((source (generate-new-buffer " *assist-cold-source*"))
-        requests callbacks)
+(ert-deftest test-assist-web-cold-source-restore-observes-predecessor-first ()
+  "A source-first restart merges durable Runs before observing S1 ahead of C1."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        (source (generate-new-buffer " *assist-cold-source*"))
+        requests callbacks observed)
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -5287,6 +5289,8 @@
                        (lambda (method path _payload callback &rest _)
                          (push (list method path) requests)
                          (push callback callbacks)))
+                      ((symbol-function 'emacsos-assist-web--observe-entry)
+                       (lambda (entry) (setq observed (plist-get entry :text))))
                       ((symbol-function 'switch-to-buffer) #'ignore))
               (emacsos-assist-web--restore-draft)))
           (should-not (buffer-live-p source))
@@ -5297,13 +5301,83 @@
                                      emacsos-assist-web--queue)
                              '("S1" "C1")))
               (should-not emacsos-assist-web--draft-id))
-            ;; C1's exact terminal receipt frees S1 for its own exact GET.
-            (funcall (car callbacks) '((status . "success")) nil)
+            ;; C1 has no provisional request that could win the response race.
+            ;; The first exact receipt belongs to predecessor S1.
             (should (equal (nreverse requests)
-                           '(("GET" "threads/thread-new/runs/run-c1")
-                             ("GET" "threads/thread-new/runs/run-s1"))))
+                           '(("GET" "threads/thread-new/runs/run-s1"))))
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--observe-entry)
+                       (lambda (entry) (setq observed (plist-get entry :text)))))
+              (funcall (car callbacks) '((status . "running")) nil))
+            (should (equal observed "S1"))
+            (should (equal requests
+                           '(("GET" "threads/thread-new/runs/run-s1"))))
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-cold-adoption-failure-reobserves-only-source-run ()
+  "A passive canonical duplicate cannot race source recovery after adoption fails."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        (source (generate-new-buffer " *assist-cold-failure-source*"))
+        requests observers canonical)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread")
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                       (lambda (name)
+                         (pcase name
+                           ("drafts/new-thread.json"
+                            '((text . "") (thread_id . "thread-new")
+                              (queue . (((text . "S1")
+                                         (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                         (state . "accepted-unobserved")
+                                         (run_id . "run-s1")
+                                         (live_text . t)
+                                         (recovered_ready . nil))))
+                              (recovery_draft . nil) (collision . nil)
+                              (repo_key . "repo") (harness . "deepagents")))
+                           ("drafts/thread-new.json"
+                            '((text . "")
+                              (queue . (((text . "S1")
+                                         (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                         (state . "accepted-unobserved")
+                                         (run_id . "run-s1")
+                                         (live_text . t)
+                                         (recovered_ready . nil))))
+                              (recovery_draft . nil) (collision . nil)))
+                           (_ nil))))
+                      ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) nil))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _payload callback &rest _)
+                         (push (list method path callback) requests)))
+                      ((symbol-function 'emacsos-assist-web--observe-entry)
+                       (lambda (entry) (push (list (current-buffer)
+                                                   (plist-get entry :text)) observers))))
+              (emacsos-assist-web--restore-draft)))
+          (setq canonical
+                (seq-find (lambda (buffer)
+                            (string-prefix-p "*assist recovered <thread-new>*"
+                                             (buffer-name buffer)))
+                          (buffer-list)))
+          (should canonical)
+          (should (buffer-live-p source))
+          (should (equal (mapcar (lambda (request) (seq-take request 2)) requests)
+                         '(("GET" "threads/thread-new/runs/run-s1"))))
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--observe-entry)
+                     (lambda (entry) (push (list (current-buffer)
+                                                 (plist-get entry :text)) observers))))
+            (funcall (nth 2 (car requests)) '((status . "running")) nil))
+          (should (equal observers (list (list source "S1"))))
+          (with-current-buffer canonical
+            (should-not emacsos-assist-web--stream-entry)))
+      (dolist (buffer (list source canonical))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest test-assist-web-restore-adoption-starts-the-source-exact-get ()
   "Successful restore adoption advances an accepted source Run immediately."
