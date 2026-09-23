@@ -1,0 +1,35 @@
+#+title: Current-main Assist stream recovery correction
+#+date: 2026-09-22
+
+* Result
+
+Implementation successor =49c60111a2206f21245fa30aa82010e8794fd527=,
+tree =f1a2ebbe9e2890fa57779653f089a6237cf5fb18=, preserves streamed
+entry-owned assistant text when observation is interrupted and exposes the
+unverified observation status separately.  It also makes a reobserve GET that
+predates cancellation inert before a successful DELETE receipt can settle the
+entry terminally.
+
+At terminal processing, a held lone CR flushes as canonical LF, a bare black
+flag flushes, and every other partial flag tail fails closed.
+
+* Verification
+
+- Focused queue interruption and cancellation ERT: 3/3 passed.
+- Full =make test-elisp=: 703/704 passed.  The sole failure is the unchanged,
+  independently reproduced =emacsos-call-on-call-added-shows-already-active-call=
+  baseline: it expected =In progress= and received =Status unknown=.
+- =make test-pinephone-scripts=: exit 0, including its final 76/76 ERT run;
+  the Assist Web manifest entry and both trusted root manifest-hash pins match.
+- =make test-server= is not applicable to this Elisp/deployment-only successor:
+  this lane intentionally has no sibling =../assist= checkout, so make stops
+  before pytest while resolving =../assist/requirements.txt=.
+
+* Historical supersession
+
+This record supersedes only the =Result= and =Historical supersession= sections
+of [[file:2026-09-21-assist-concurrent-request-current-main-stream-recovery.org][the current-main stream recovery record]].  Its terminal-tail description is
+replaced by the exact behavior above.  Its lineage also incorrectly treated the
+round-seven evidence as a current-main candidate-readiness conclusion; that
+round-seven record made no such conclusion.  The current-main recovery record
+is the directly superseded document.
