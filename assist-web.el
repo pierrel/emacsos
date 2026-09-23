@@ -2978,7 +2978,10 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                 (insert "\n\n")
                 (emacsos-assist-web--write-prompt)
                 (emacsos-assist-web--restore-draft)))
-            (switch-to-buffer buffer))))))))
+            ;; Recovery can promote and retire this local draft.  Its adoption
+            ;; already selects the canonical destination in that case.
+            (when (buffer-live-p buffer)
+              (switch-to-buffer buffer)))))))))
 
 (defun emacsos-assist-web-new-thread ()
   "Refresh the catalog and open a draft now or when usable choices arrive."
@@ -4551,7 +4554,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                 (unless (string-empty-p (string-trim source-input)) source-input))
           (unless (emacsos-assist-web--save-draft)
               ;; The destination write is not durable.  Restore its live
-              ;; state before returning the source cache to its actual owner.
+              ;; state while the source cache remains its durable owner.
               (setq emacsos-assist-web--queue destination-queue
                     emacsos-assist-web--collision-p destination-collision
                     emacsos-assist-web--recovery-draft destination-recovery-draft)
@@ -4636,8 +4639,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
             (remove-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed t)
             nil))))))
         (if failure
-            ;; SOURCE remains the live accepted owner.  Its exact Run is
-            ;; reobserved by Refresh; do not start a second callback here.
+            ;; SOURCE remains the durable accepted owner.  Its exact Run is
+            ;; refreshed by its recovery path; do not start a second callback here.
             (progn
               (with-current-buffer source
                 (when accepted-entry
@@ -4694,6 +4697,30 @@ ACCEPTED-RUN-ID is its already validated Run identity."
         (when (emacsos-assist-web--admit-text-p text)
           (when (emacsos-assist-web--enqueue-text text)
             (emacsos-assist-web--pump-posts))))))))
+
+(defun emacsos-assist-web--restore-canonical-buffer (thread-id)
+  "Return THREAD-ID's live canonical recovery buffer, restoring its cache."
+  (or (seq-find
+       (lambda (buffer)
+         (with-current-buffer buffer
+           (and (derived-mode-p 'emacsos-assist-web-mode)
+                (not emacsos-assist-web--draft-id)
+                (equal emacsos-assist-web--thread-id thread-id))))
+       (buffer-list))
+      (let ((buffer (generate-new-buffer
+                     (format "*assist recovered <%s>*" thread-id))))
+        (with-current-buffer buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id thread-id)
+          (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+            (insert (format "*assist recovered <%s>*\n" thread-id))
+            (setq emacsos-assist-web--status-start (copy-marker (point) nil))
+            (insert "[recovering]")
+            (setq emacsos-assist-web--status-end (copy-marker (point) nil))
+            (insert "\n\n")
+            (emacsos-assist-web--write-prompt)
+            (emacsos-assist-web--restore-draft)))
+        buffer)))
 
 (defun emacsos-assist-web--restore-draft ()
   "Restore and normalize queue state before reissuing any exact transport work."
@@ -4808,19 +4835,15 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                          (thread-id emacsos-assist-web--thread-id)
                          (canonical
                           (and emacsos-assist-web--draft-id thread-id
-                               (seq-find
-                                (lambda (buffer)
-                                  (and (not (eq buffer source))
-                                       (buffer-live-p buffer)
-                                       (with-current-buffer buffer
-                                         (and (derived-mode-p 'emacsos-assist-web-mode)
-                                              (not emacsos-assist-web--draft-id)
-                                              (equal emacsos-assist-web--thread-id
-                                                     thread-id)))))
-                                (buffer-list)))))
+                               (emacsos-assist-web--restore-canonical-buffer
+                                thread-id))))
                     (if canonical
-                        (unless (emacsos-assist-web--adopt-canonical-buffer
-                                 source canonical)
+                        (if (emacsos-assist-web--adopt-canonical-buffer
+                             source canonical)
+                            (with-current-buffer canonical
+                              (emacsos-assist-web--start-next-observation)
+                              (emacsos-assist-web--pump-posts)
+                              (emacsos-assist-web--reconcile-when-settled))
                           ;; The source stayed authoritative.  Its restored
                           ;; receipt must exact-GET, never reopen SSE directly.
                           (dolist (entry emacsos-assist-web--queue)

@@ -1,0 +1,20 @@
+#+title: Assist Web source-first recovery correction
+#+date: 2026-09-23
+
+* Correction
+
+A cold restart can restore =drafts/new-thread.json= before any canonical
+thread buffer exists.  When that source record has a returned thread id, Assist
+Web first materializes a canonical recovery buffer and restores its canonical
+draft record, then merges the source into that owner.  Successful adoption
+starts the next exact observation, so an accepted source Run cannot wait for a
+manual Refresh.  The recovered local draft is retired; a subsequent New Thread
+request remains available for a fresh draft.
+
+* Historical supersession
+
+- Supersedes only =docs/2026-09-22-assist-concurrent-request-adoption-durability-correction.org=,
+  “Correction” claim that a live canonical buffer deduplicates duplicate
+  recovery records.  A canonical buffer is not necessarily live after a cold
+  restart, so the current recovery materializes and restores it before
+  deduplication.
