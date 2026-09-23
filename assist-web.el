@@ -4724,6 +4724,30 @@ ACCEPTED-RUN-ID is its already validated Run identity."
             (emacsos-assist-web--restore-draft t)))
         buffer)))
 
+(defun emacsos-assist-web--restore-passive-legacy-accepted (draft)
+  "Normalize DRAFT's accepted legacy Run into this buffer's passive queue."
+  (let ((key (alist-get 'pending_key draft))
+        (text (alist-get 'text draft))
+        (submitted (alist-get 'submitted_text draft))
+        (run-id (alist-get 'run_id draft)))
+    (when (and (alist-get 'pending_accepted draft)
+               (stringp key)
+               (string-match-p emacsos-assist-web--idempotency-regexp key)
+               (stringp submitted)
+               (stringp run-id)
+               (string-match-p emacsos-assist-web--record-id-regexp run-id)
+               (emacsos-assist-web--message-fits-p
+                submitted emacsos-assist-web--thread-id))
+      (let ((entry (emacsos-assist-web--entry submitted 'accepted-unobserved key)))
+        (setf (plist-get entry :run-id) run-id
+              (plist-get entry :requires-reobserve) t)
+        (setq emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--queue-model-p t)
+        (emacsos-assist-web--entry-render entry)
+        (when (and (stringp text) (not (equal text submitted)))
+          (insert text))
+        t))))
+
 (defun emacsos-assist-web--restore-draft (&optional passive-transport)
   "Restore queue state before exact transport, unless PASSIVE-TRANSPORT defers it."
   (when-let* ((name (emacsos-assist-web--draft-cache-name))
@@ -4731,7 +4755,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
     (let ((entries (alist-get 'queue draft))
           (text (alist-get 'text draft)) changed)
       (if (not entries)
-          (funcall #'emacsos-assist-web--legacy-restore-draft)
+          (unless (and passive-transport
+                       (emacsos-assist-web--restore-passive-legacy-accepted draft))
+            (funcall #'emacsos-assist-web--legacy-restore-draft))
         (let* ((cached-thread-id (alist-get 'thread_id draft))
                (repo-key (alist-get 'repo_key draft))
                (harness (alist-get 'harness draft))

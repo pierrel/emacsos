@@ -5315,6 +5315,62 @@
             (kill-buffer canonical)))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-cold-source-restores-legacy-canonical-run-passively ()
+  "A legacy canonical receipt joins FIFO before any exact recovery transport."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        (source (generate-new-buffer " *assist-cold-legacy-source*"))
+        requests observed)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--draft-id "new-thread")
+            (emacsos-assist-web--write-prompt)
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                       (lambda (name)
+                         (pcase name
+                           ("drafts/new-thread.json"
+                            '((text . "") (thread_id . "thread-new")
+                              (queue . (((text . "S1")
+                                         (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                         (state . "accepted-unobserved")
+                                         (run_id . "run-s1")
+                                         (live_text . t)
+                                         (recovered_ready . nil))))
+                              (recovery_draft . nil) (collision . nil)
+                              (repo_key . "repo") (harness . "deepagents")))
+                           ("drafts/thread-new.json"
+                            '((text . "")
+                              (pending_key . "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                              (submitted_text . "C1") (pending_accepted . t)
+                              (run_id . "run-c1")))
+                           (_ nil))))
+                      ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--delete-cache) (lambda (&rest _) t))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path &rest _)
+                         (push (list method path) requests)))
+                      ((symbol-function 'emacsos-assist-web--observe-entry)
+                       (lambda (&rest _) (setq observed t)))
+                      ((symbol-function 'switch-to-buffer) #'ignore))
+              (emacsos-assist-web--restore-draft)))
+          (should-not (buffer-live-p source))
+          (let ((canonical (emacsos-assist-web--thread-buffer "thread-new")))
+            (should canonical)
+            (with-current-buffer canonical
+              (should (equal (mapcar (lambda (entry) (plist-get entry :text))
+                                     emacsos-assist-web--queue)
+                             '("S1" "C1")))
+              (should (eq (emacsos-assist-web--entry-state
+                           (car emacsos-assist-web--queue))
+                          'accepted-unobserved)))
+            (should (equal requests
+                           '(("GET" "threads/thread-new/runs/run-s1"))))
+            (should-not observed)
+            (kill-buffer canonical)))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
 (ert-deftest test-assist-web-cold-adoption-failure-reobserves-only-source-run ()
   "A passive canonical duplicate cannot race source recovery after adoption fails."
   (let ((emacsos--assist-active-surface nil)
