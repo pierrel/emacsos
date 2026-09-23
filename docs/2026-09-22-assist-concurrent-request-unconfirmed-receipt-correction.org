@@ -1,0 +1,46 @@
+#+title: Unconfirmed cancellation receipt correction for concurrent Assist requests
+#+date: 2026-09-22
+
+* Result
+
+Implementation successor =56d2a2d5429b42a31aa9b2a3a5986a38b35e3cc8=,
+tree =ccacb206c331ec20234603e090b23a4698223d59=, distinguishes a late
+unconfirmed DELETE receipt from a retired observer.  When the exact resident
+entry has already been revived by Refresh GET2 and owns the current stream,
+the receipt reports its bounded status at thread level rather than replacing
+the entry-owned assistant region.  Its partial live text and Abort action stay
+intact, its state remains =observing=, and subsequent deltas remain valid.
+
+When no observer owns that entry, the receipt retains the existing
+entry-specific fixed status.  Confirmed cancellation, reload normalization,
+aggregate surface release, and the resident-entry, Run, and cancellation
+generation identity fences are unchanged.
+
+The queue-backed regression uses a real GET2 observer start carrying partial
+text and its Abort action, then exercises a DELETE transport error and
+=running=, =transitioning=, and other unconfirmed outcomes.  It proves each
+receipt preserves the body, action, observer ownership and state, and accepts
+a later delta.
+
+* Verification
+
+- Focused interruption, confirmed-cancellation, reload, aggregate-slot, and
+  unconfirmed-receipt ERT: 7/7 passed.
+- Full =make test-elisp=: 707/708 passed.  The unchanged, independently
+  reproduced =emacsos-call-on-call-added-shows-already-active-call= baseline
+  expects =In progress= and receives =Status unknown=.
+- =make test-pinephone-scripts=: exit 0 in
+  =/tmp/emacsos-pinephone-epoch17.exit=; durable log
+  =/tmp/emacsos-pinephone-epoch17.log= ends with final ERT 76/76.  The
+  manifest and both trusted root pins match
+  =03ed1c09760ba752f0f317fc243b2e8720ec89b2a4da6e2526551b1de5a8fa9d=.
+- =make test-server= is not applicable to this Elisp/deployment-only successor:
+  the lane intentionally has no sibling =../assist= checkout, so make stops
+  before pytest while resolving =../assist/requirements.txt=.
+
+* Historical supersession
+
+This record supersedes only the =Result= and =Verification= sections of
+[[file:2026-09-22-assist-concurrent-request-cancellation-reload-surface-correction.org][the cancellation reload and aggregate-surface correction record]].  That
+record did not cover an unconfirmed DELETE receipt arriving after Refresh had
+already revived the exact observer with partial evidence and an Abort action.
