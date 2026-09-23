@@ -4286,6 +4286,11 @@ write leaves the provisional records available for the next exact refresh."
                   ((equal (cons (alist-get 'http_status value)
                                 (alist-get 'outcome value))
                           '(200 . "cancelled"))
+                   ;; Refresh may have started a new exact-Run GET after this
+                   ;; cancellation began.  A confirmed terminal receipt wins:
+                   ;; make that in-flight callback inert before recording it.
+                   (cl-incf (plist-get current :reobserve-generation))
+                   (setf (plist-get current :reobserve-in-flight) nil)
                    (setf (plist-get current :state) 'terminal-unreconciled)
                    (if (emacsos-assist-web--save-draft)
                        (emacsos-assist-web--reconcile-when-settled)

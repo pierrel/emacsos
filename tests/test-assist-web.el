@@ -1341,6 +1341,42 @@
                        "[observation disconnected]\n"))
         (should (equal unverified "observation disconnected"))))))
 
+(ert-deftest test-assist-web-queue-dispatch-keeps-partial-on-malformed-and-overflow ()
+  "Queue-owned dispatch clears failed transport state without erasing text."
+  (dolist (case '(malformed overflow))
+    (let ((emacsos-assist-web--max-message-bytes
+           (if (eq case 'overflow) 7 emacsos-assist-web--max-message-bytes))
+          unverified)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (emacsos-assist-web--write-prompt)
+        (let ((entry (emacsos-assist-web--entry
+                      "hello" 'observing
+                      "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+          (setq emacsos-assist-web--queue (list entry)
+                emacsos-assist-web--stream-entry entry)
+          (emacsos-assist-web--entry-render entry)
+          (emacsos-assist-web--entry-reset-assistant entry 1)
+          (emacsos-assist-web--entry-append-delta entry 1 1 "partial")
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                     (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--set-unverified-status)
+                     (lambda (status) (setq unverified status))))
+            (emacsos-assist-web--dispatch-event
+             (current-buffer) "assistant-delta"
+             (if (eq case 'malformed)
+                 "{not json}"
+               (json-encode '((attempt . 1) (index . 2) (text . "x"))))))
+          (should (equal (buffer-substring-no-properties
+                          (plist-get entry :assistant-start)
+                          (plist-get entry :assistant-end))
+                         "partial"))
+          (should (stringp unverified))
+          (should (eq (plist-get entry :state) 'accepted-unobserved))
+          (should-not emacsos-assist-web--stream-entry)
+          (should-not (plist-get entry :stream-raw-bytes))
+          (should-not (plist-get entry :stream-undecided-suffix)))))))
+
 (ert-deftest test-assist-web-malformed-and-oversized-deltas-keep-the-real-partial ()
   "The event adapter, not only its shared failure helper, retains prior text."
   (let ((oversized (json-encode `((attempt . 1) (index . 2)
@@ -5186,9 +5222,9 @@
         (should-not observed)
         (should (eq (plist-get new :state) 'accepted-unobserved))))))
 
-(ert-deftest test-assist-web-cancellation-invalidates-a-withheld-reobserve ()
-  "A delayed pre-cancellation GET cannot revive a DELETE-confirmed entry."
-  (let (get-callback delete-callback observed reconciled)
+(ert-deftest test-assist-web-confirmed-cancellation-invalidates-pending-reobserves ()
+  "Neither a pre- nor post-abort GET can revive confirmed cancellation."
+  (let (get-callbacks delete-callback observed reconciled)
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1")
@@ -5203,7 +5239,7 @@
                      (pcase method
                        ("GET"
                         (should (equal path "threads/thread-1/runs/run-a"))
-                        (setq get-callback callback))
+                        (push callback get-callbacks))
                        ("DELETE"
                         (should (equal path "threads/thread-1/runs/run-a"))
                         (setq delete-callback callback)))))
@@ -5212,15 +5248,21 @@
                   ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
                    (lambda () (setq reconciled t))))
           (emacsos-assist-web--reobserve-entry entry)
-          (should get-callback)
+          (should (= (length get-callbacks) 1))
           (should (plist-get entry :reobserve-in-flight))
           (emacsos-assist-web--abort-entry (plist-get entry :key))
           (should delete-callback)
           (should-not (plist-get entry :reobserve-in-flight))
+          ;; Refresh owns a later GET while cancellation is still pending.
+          (emacsos-assist-web-refresh-thread)
+          (should (= (length get-callbacks) 2))
+          (should (plist-get entry :reobserve-in-flight))
           (funcall delete-callback '((http_status . 200) (outcome . "cancelled")) nil)
           (should reconciled)
           (should (eq (plist-get entry :state) 'terminal-unreconciled))
-          (funcall get-callback '((status . "running")) nil)
+          (should-not (plist-get entry :reobserve-in-flight))
+          (dolist (callback get-callbacks)
+            (funcall callback '((status . "running")) nil))
           (should-not observed)
           (should (eq (plist-get entry :state) 'terminal-unreconciled)))))))
 
