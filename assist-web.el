@@ -190,8 +190,6 @@ The value is nil, `current', `cached', `refresh-failed', or
   "Non-nil during the one recovery pass begun by explicit Refresh.")
 (defvar-local emacsos-assist-web--manual-recovery-reason nil
   "Short stopped-pass reason for the phone header and Details action.")
-(defvar-local emacsos-assist-web--post-sse-run-id nil
-  "Exact Run whose SSE ended before a new exact status read.")
 (defvar-local emacsos-assist-web--display-recovery nil
   "Non-nil after canonical history commits but its presentation fails.")
 (defvar-local emacsos-assist-web--send-generation 0)
@@ -1096,6 +1094,10 @@ error instead of the legacy string.  A Git probe's nondiagnostic failure
 does not downgrade a separate chat-accepted Git observation."
   (let ((run-owner (emacsos-assist-web--run-http-owner method path))
         (request-tid (and (equal method "GET") emacsos-assist-web--thread-id))
+        (canonical-thread-get
+         (and (equal method "GET")
+              emacsos-assist-web--thread-id
+              (equal path (concat "threads/" emacsos-assist-web--thread-id))))
         token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
@@ -1162,20 +1164,23 @@ does not downgrade a separate chat-accepted Git observation."
                                   run-owner request-tid)
                                ((error quit) nil)))
                        (when (and (not git-failure-notified)
+                                  canonical-thread-get
                                   (not git-typed-error)
-                                  (equal method "GET")
-                                  (buffer-live-p origin))
+                                  (buffer-live-p origin)
+                                  (equal request-tid
+                                         (buffer-local-value
+                                          'emacsos-assist-web--thread-id origin)))
                          (with-current-buffer origin
                            (emacsos-assist-web-git--canonical-uncertain))))
-                     (setq finished t))
-                   (when (timerp timer) (cancel-timer timer))
-                   (setq emacsos-assist-web--requests
-			 (delq response emacsos-assist-web--requests))
-                   (funcall callback value
-                            (if (and git-typed-error problem)
-                                (emacsos-assist-web--git-request-error
-                                 status (or kind 'transport) detail)
-                              problem)))))
+                     (setq finished t)
+                     (when (timerp timer) (cancel-timer timer))
+                     (setq emacsos-assist-web--requests
+			   (delq response emacsos-assist-web--requests))
+                     (funcall callback value
+                              (if (and git-typed-error problem)
+                                  (emacsos-assist-web--git-request-error
+                                   status (or kind 'transport) detail)
+                                problem))))))
             (condition-case error
 		(progn
                   (setq url (emacsos-assist-web--endpoint path))
@@ -3532,6 +3537,8 @@ callbacks even after reconciliation leaves the resident list empty."
         :stream-process nil :stream-response nil :stream-header-timer nil
         :stream-generation 0 :handshake-token nil
         :reobserve-generation 0 :reobserve-in-flight nil
+        :observer-end-kind nil :observer-end-generation nil
+        :observer-end-checked nil :approval-stopped nil
         :reconcile-owner nil
         :cancellation-generation 0
         :requires-reobserve nil
@@ -3605,6 +3612,11 @@ consulted; selected-buffer state is never a fallback owner."
     (key . ,(plist-get entry :key))
     (state . ,(symbol-name (emacsos-assist-web--entry-state entry)))
     (run_id . ,(plist-get entry :run-id))
+    (observer_end_kind . ,(when-let ((kind (plist-get entry :observer-end-kind)))
+                            (symbol-name kind)))
+    (observer_end_generation . ,(plist-get entry :observer-end-generation))
+    (observer_end_checked . ,(and (plist-get entry :observer-end-checked) t))
+    (approval_stopped . ,(and (plist-get entry :approval-stopped) t))
     (recovered_ready . ,(and (plist-get entry :recovered-ready) t))
     (live_text . ,(and (plist-get entry :live-text) t))))
 
@@ -4375,10 +4387,17 @@ could release a pre-header SSE reservation later."
              entry "accepted; local recovery could not be saved")))))))
 
 (defun emacsos-assist-web--entry-observation-interrupted (entry epoch status)
-  "Retire ENTRY's exact observer at EPOCH without touching another entry."
+  "Record ENTRY's disconnected observer at EPOCH without touching another."
   (when (and (emacsos-assist-web--entry-callback-current-p entry epoch)
              (eq entry emacsos-assist-web--stream-entry)
              (eq (emacsos-assist-web--entry-state entry) 'observing))
+    ;; Fence Git before cleanup or provisional text/status presentation can
+    ;; signal.  This observer has ended even if the following save fails.
+    (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
+      (setf (plist-get entry :observer-end-kind) 'disconnect
+            (plist-get entry :observer-end-generation) epoch
+            (plist-get entry :observer-end-checked) nil)
+      (emacsos-assist-web-git--stop-reobserve entry 'disconnect))
     (when-let ((timer (plist-get entry :stream-header-timer)))
       (when (timerp timer) (cancel-timer timer)))
     (let ((process (plist-get entry :stream-process))
@@ -4390,7 +4409,8 @@ could release a pre-header SSE reservation later."
             (plist-get entry :stream-header-timer) nil
             (plist-get entry :stream-raw-bytes) nil
             (plist-get entry :stream-undecided-suffix) nil
-            (plist-get entry :state) 'accepted-unobserved)
+            (plist-get entry :state) 'accepted-unobserved
+            (plist-get entry :requires-reobserve) t)
       (when (eq entry emacsos-assist-web--stream-entry)
         (setq emacsos-assist-web--stream-entry nil))
       (when (process-live-p process) (delete-process process))
@@ -4402,17 +4422,20 @@ could release a pre-header SSE reservation later."
     ;; Streamed text is provisional evidence, but it is still more useful than
     ;; a generic failure banner.  Keep it in this entry's assistant range and
     ;; report the unverified observation separately in the thread status.
-    (emacsos-assist-web--entry-replace-empty-assistant-status entry status)
-    (emacsos-assist-web--set-unverified-status status)
-    (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
-      (setq emacsos-assist-web--post-sse-run-id (plist-get entry :run-id)))
+    (condition-case nil
+        (progn
+          (emacsos-assist-web--entry-replace-empty-assistant-status entry status)
+          (emacsos-assist-web--set-unverified-status status))
+      ((error quit) nil))
     (if emacsos-assist-web--manual-recovery-active
         (emacsos-assist-web--manual-recovery-rearm
          entry "observation disconnected")
-      (progn
-        (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
-          (emacsos-assist-web-git--stop-reobserve entry))
-        (emacsos-assist-web--save-draft)))
+      (unless (emacsos-assist-web--save-draft)
+        (setq emacsos-assist-web--reconcile-recovery-paused t)
+        (emacsos-assist-web-git--invalidate
+         "local observation could not be saved; restart to recover")
+        (emacsos-assist-web--entry-status
+         entry "local observation could not be saved; restart to recover")))
     (emacsos-assist-web--sync-active-surface)))
 
 (defun emacsos-assist-web--interrupt-entry-in-buffer (target entry epoch status)
@@ -4604,7 +4627,7 @@ this one transport.  No late callback can select a successor from globals."
 
 (defun emacsos-assist-web--stream-finish
     (buffer &optional run-still-active verified-outcome verified-start-epoch)
-  "Persist terminal truth for the exact observed queue entry before advancing.
+  "Persist the exact queue observer's provisional terminal SSE before a Run GET.
 For a legacy observer, forward VERIFIED-OUTCOME and its authenticated
 VERIFIED-START-EPOCH from an exact Run GET."
   (when (buffer-live-p buffer)
@@ -4618,33 +4641,36 @@ VERIFIED-START-EPOCH from an exact Run GET."
           (progn
           (unless run-still-active
             (setf (plist-get entry :state) 'terminal-unreconciled
-                  (plist-get entry :verified-outcome) nil))
-          (when (not run-still-active)
-            (setq emacsos-assist-web--post-sse-run-id
-                  (plist-get entry :run-id)))
+                  (plist-get entry :verified-outcome) nil
+                  (plist-get entry :observer-end-kind) 'terminal-sse
+                  (plist-get entry :observer-end-generation)
+                  (plist-get entry :stream-generation)
+                  (plist-get entry :observer-end-checked) nil)
+            (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
+              (emacsos-assist-web-git--stop-reobserve entry 'terminal-sse)))
           (if (emacsos-assist-web--save-draft)
               (progn
                 (emacsos-assist-web--stream-cleanup t t)
                 (emacsos-assist-web--sync-active-surface)
-                (emacsos-assist-web--start-next-observation)
+                ;; The SSE terminal event is not A's outcome.  A's exact Run
+                ;; GET must save a terminal result before B takes the slot.
+                (emacsos-assist-web--reobserve-entry entry)
                 (emacsos-assist-web--pump-posts)
                 (emacsos-assist-web--reconcile-when-settled))
-            ;; Do not advance/cleanup until the terminal state is durable.
-            ;; A manual pass pauses for restart after this failed save.
+            ;; Do not advance or clean up an unsaved terminal observation.
             (setf (plist-get entry :state) 'observing)
-            (when emacsos-assist-web--manual-recovery-active
-              (setq emacsos-assist-web--reconcile-recovery-paused t
-                    emacsos-assist-web--manual-recovery-active nil
-                    emacsos-assist-web--post-sse-run-id nil)
-              (emacsos-assist-web-git--invalidate
-               "local recovery could not be saved; restart to recover"))
+            (setq emacsos-assist-web--reconcile-recovery-paused t
+                  emacsos-assist-web--manual-recovery-active nil)
+            (emacsos-assist-web-git--invalidate
+             "local recovery could not be saved; restart to recover")
             (emacsos-assist-web--entry-status
              entry "terminal observed; local recovery could not be saved"))))))))
 
 (defun emacsos-assist-web--start-next-observation (&optional continue-recovery)
   "Observe the next Run or stream.
 Only CONTINUE-RECOVERY may chain another recovered terminal Run's exact GET;
-restoring the cache itself waits for an explicit Refresh."
+restoring the cache itself waits for an explicit Refresh.  An ended accepted
+observer or stopped approval also waits for the next explicit Refresh."
   (unless (or emacsos-assist-web--stream-entry
               emacsos-assist-web--reconcile-recovery-paused
               (and emacsos-assist-web--manual-recovery-required
@@ -4657,9 +4683,16 @@ restoring the cache itself waits for an explicit Refresh."
                                                'terminal-unreconciled)
                                            (plist-get candidate :requires-reobserve))))
                                 emacsos-assist-web--queue)))
-      (if (plist-get entry :requires-reobserve)
-          (emacsos-assist-web--reobserve-entry entry)
-        (emacsos-assist-web--start-observation entry)))))
+      ;; An ended observer's accepted receipt owns the FIFO slot, but only
+      ;; the next explicit Refresh may recheck it.  Do not skip it to B.
+      (unless (and (eq (emacsos-assist-web--entry-state entry)
+                       'accepted-unobserved)
+                   (or (eq (plist-get entry :observer-end-kind) 'disconnect)
+                       (plist-get entry :observer-end-checked)
+                       (plist-get entry :approval-stopped)))
+        (if (plist-get entry :requires-reobserve)
+            (emacsos-assist-web--reobserve-entry entry)
+          (emacsos-assist-web--start-observation entry))))))
 
 (defun emacsos-assist-web--reconcile-when-settled ()
   "Start one entry-owned canonical reconciliation after all Runs terminate."
@@ -4882,8 +4915,7 @@ restoration pauses this buffer until restart."
                          (when emacsos-assist-web--manual-recovery-required
                            (setq emacsos-assist-web--manual-recovery-required nil
                                  emacsos-assist-web--manual-recovery-active nil
-                                 emacsos-assist-web--manual-recovery-reason nil
-                                 emacsos-assist-web--post-sse-run-id nil))
+                                 emacsos-assist-web--manual-recovery-reason nil))
                          (dolist (entry current)
                            (when (integerp
                                   (plist-get entry :run-read-start-epoch))
@@ -4935,6 +4967,7 @@ The start epoch proves freshness after any earlier definitive thread denial."
              (not (plist-get entry :reobserve-in-flight)))
     (let* ((buffer (current-buffer)) (key (plist-get entry :key))
           (run-id (plist-get entry :run-id))
+          (end-checked (plist-get entry :observer-end-checked))
           (tid emacsos-assist-web--thread-id)
           (run-auth-start
            (progn
@@ -4973,18 +5006,26 @@ The start epoch proves freshness after any earlier definitive thread denial."
                       tid run-id run-auth-start)
                      (emacsos-assist-web--manual-recovery-stop
                       current "newer Run denial; Refresh retries exact status"))
-                    ((and (or (equal emacsos-assist-web--post-sse-run-id
-                                     run-id)
-                              (and emacsos-assist-web--manual-recovery-active
-                                   (equal status "awaiting_approval")))
+                    ((and (or (equal status "awaiting_approval")
+                              (and (eq (plist-get current :observer-end-kind)
+                                       'terminal-sse)
+                                   (not (plist-get current :observer-end-checked))))
                           (member status
                                   '("pending" "running" "transitioning"
                                     "awaiting_approval")))
-                     ;; A terminal SSE contradicted by a still-active exact
-                     ;; Run must stop this pass, not attach another SSE loop.
-                     (setq emacsos-assist-web--post-sse-run-id nil)
+                     ;; The first exact read after terminal SSE stops on a
+                     ;; contradiction.  Approval always stops, including on
+                     ;; repeated explicit Refresh; neither starts an SSE loop.
                      (setf (plist-get current :state) 'accepted-unobserved
-                           (plist-get current :requires-reobserve) t)
+                           (plist-get current :requires-reobserve) t
+                           (plist-get current :observer-end-checked)
+                           (and (eq (plist-get current :observer-end-kind)
+                                    'terminal-sse) t)
+                           (plist-get current :approval-stopped)
+                           (equal status "awaiting_approval"))
+                     (emacsos-assist-web-git--stop-reobserve
+                      current (if (equal status "awaiting_approval")
+                                  'approval 'terminal-sse))
                      (if emacsos-assist-web--manual-recovery-active
                          (emacsos-assist-web--manual-recovery-rearm
                           current
@@ -4995,14 +5036,20 @@ The start epoch proves freshness after any earlier definitive thread denial."
                               'approval 'changed))
                        (if (emacsos-assist-web--save-draft)
                            (progn
-                             (emacsos-assist-web-git--stop-reobserve current)
                              (emacsos-assist-web--entry-status
                               current
                               (if (equal status "awaiting_approval")
                                   "Approval pending; Refresh [?]"
                                 "Run changed; Refresh [?]")))
+                         (setf (plist-get current :observer-end-checked)
+                               end-checked
+                               (plist-get current :approval-stopped)
+                               (and (equal status "awaiting_approval") t))
+                         (setq emacsos-assist-web--reconcile-recovery-paused t)
+                         (emacsos-assist-web-git--invalidate
+                          "local Run status could not be saved; restart to recover")
                          (emacsos-assist-web--entry-status
-                          current "local Run status could not be saved; Refresh"))))
+                          current "local Run status could not be saved; restart to recover"))))
                     ((member status '("pending" "running" "transitioning" "awaiting_approval"))
                      (let ((previous (emacsos-assist-web--entry-state current)))
                        (setf (plist-get current :state) 'accepted-unobserved
@@ -5033,13 +5080,14 @@ The start epoch proves freshness after any earlier definitive thread denial."
                                   current "observation unavailable"))))
                          (setf (plist-get current :state) previous
                                (plist-get current :requires-reobserve) t)
-                         (emacsos-assist-web--manual-recovery-stop
-                          current "local Run status could not be saved"))))
+                         (setq emacsos-assist-web--reconcile-recovery-paused t
+                               emacsos-assist-web--manual-recovery-active nil)
+                         (emacsos-assist-web-git--invalidate
+                          "local Run status could not be saved; restart to recover")
+                         (emacsos-assist-web--entry-status
+                          current "local Run status could not be saved; restart to recover"))))
                     ((member status '("success" "error" "timeout" "interrupted"
                                              "cancelled"))
-                     (when (equal emacsos-assist-web--post-sse-run-id
-                                  run-id)
-                       (setq emacsos-assist-web--post-sse-run-id nil))
                      (let ((previous (emacsos-assist-web--entry-state current)))
                        (setf (plist-get current :state) 'terminal-unreconciled
                              (plist-get current :requires-reobserve) nil
@@ -5056,8 +5104,12 @@ The start epoch proves freshness after any earlier definitive thread denial."
                          (setf (plist-get current :state) previous
                                (plist-get current :requires-reobserve) t
                                (plist-get current :verified-outcome) nil)
-                         (emacsos-assist-web--manual-recovery-stop
-                          current "local Run status could not be saved"))))
+                         (setq emacsos-assist-web--reconcile-recovery-paused t
+                               emacsos-assist-web--manual-recovery-active nil)
+                         (emacsos-assist-web-git--invalidate
+                          "local Run status could not be saved; restart to recover")
+                         (emacsos-assist-web--entry-status
+                          current "local Run status could not be saved; restart to recover"))))
                     (t (emacsos-assist-web--manual-recovery-stop
                         current "exact Run status invalid"))))))))))))))
 
@@ -5714,6 +5766,10 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                               (key (alist-get 'key value))
                               (body (alist-get 'text value))
                               (run-id (alist-get 'run_id value))
+                              (end-kind (alist-get 'observer_end_kind value))
+                              (end-generation (alist-get 'observer_end_generation value))
+                              (end-checked (alist-get 'observer_end_checked value))
+                              (approval-stopped (alist-get 'approval_stopped value))
                               (live-text (alist-get 'live_text value))
                               (recovered-ready (alist-get 'recovered_ready value)))
                          (when (and (listp value)
@@ -5723,6 +5779,15 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                      body emacsos-assist-web--thread-id)
                                     (memq live-text '(nil t))
                                     (memq recovered-ready '(nil t))
+                                    (memq approval-stopped '(nil t))
+                                    (or (and (null end-kind)
+                                             (null end-generation)
+                                             (null end-checked))
+                                        (and (member end-kind
+                                                     '("terminal-sse" "disconnect"))
+                                             (natnump end-generation)
+                                             (memq end-checked '(nil t))
+                                             run-id))
                                     (or (eq state 'recovered-head)
                                         (and (stringp key)
                                              (string-match-p emacsos-assist-web--idempotency-regexp key)))
@@ -5734,6 +5799,14 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                         run-id))
                            (let ((entry (emacsos-assist-web--entry body state key)))
                              (setf (plist-get entry :run-id) run-id
+                                   (plist-get entry :observer-end-kind)
+                                   (and end-kind (intern end-kind))
+                                   (plist-get entry :observer-end-generation)
+                                   end-generation
+                                   (plist-get entry :observer-end-checked)
+                                   end-checked
+                                   (plist-get entry :approval-stopped)
+                                   approval-stopped
                                    (plist-get entry :live-text) live-text
                                    (plist-get entry :recovered-ready) recovered-ready)
                              (pcase state
