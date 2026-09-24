@@ -215,10 +215,9 @@ one record; definitive thread denial preserves it for later reauthorization.")
                 latest (emacsos-assist-web-git-generation-metadata generation)))
           "stale")
          ((not (eq generation emacsos-assist-web-git--current)) "stale")
-         ((and emacsos-assist-web-git--stopped-reobserve
-               (eq (emacsos-assist-web-git-generation-state generation)
-                   'current))
-          "cached / Run changed; Refresh")
+         (emacsos-assist-web-git--stopped-reobserve
+          (concat "cached / "
+                  (emacsos-assist-web-git--stopped-label)))
          ((not (equal (emacsos-assist-web-git--request-key latest)
                       (emacsos-assist-web-git--request-key
                        (emacsos-assist-web-git-generation-metadata generation))))
@@ -312,7 +311,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
        (emacsos-assist-web-git--details-link)))
      (emacsos-assist-web-git--stopped-reobserve
       (concat (emacsos-assist-web-git--run-refresh-link
-               "Run changed; Refresh")
+               (emacsos-assist-web-git--stopped-label))
               (emacsos-assist-web-git--details-link)))
      ((emacsos-assist-web-git--run-gated-p)
       (concat (emacsos-assist-web-git--run-refresh-link)
@@ -856,7 +855,10 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                        'changed)
                    "The Run was still active after its stream ended. The observation may have changed. Refresh to make one new exact Run check; this pass will not reattach automatically. Press q to return.")
                   (emacsos-assist-web-git--stopped-reobserve
-                   "The observer ended, but the exact Run was still active or awaiting approval. The old Git view is noncurrent. Refresh to check the exact Run and canonical thread again; this observation will not reattach automatically. Press q to return.")
+                   (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+                     ('disconnect "The observation disconnected before the exact Run outcome was known. The old Git view is noncurrent. Refresh to check this Run; a running Run may attach a new observer.")
+                     ('approval "The exact Run is awaiting approval. Approve it first, then Refresh to check its status. The old Git view is noncurrent; this observer will not reattach automatically.")
+                     (_ "The stream ended but the exact Run was still active. The old Git view is noncurrent. Refresh to check this Run; this observer will not reattach automatically.")))
                   ((emacsos-assist-web-git--run-gated-p)
                    "Thread access was confirmed, but the exact Run outcome is still unverified. Refresh the Assist thread to check that Run before opening Git. Existing views are noncurrent.")
                   (t "Git state needs a fresh canonical thread check. Refresh before opening another view.")))
@@ -997,8 +999,7 @@ Only a resident queue entry or accepted legacy receipt may claim the gate."
   "Make a superseding exact TID/RUN-ID read noncurrent until it commits."
   (unless (emacsos-assist-web-git--run-record tid run-id)
     (push (list :tid tid :run-id run-id
-                :epoch emacsos-assist-web-git--auth-epoch
-                :source 'recheck)
+                :epoch emacsos-assist-web-git--auth-epoch)
           emacsos-assist-web-git--run-outcome-uncertain))
   (when emacsos-assist-web-git--current
     (setf (emacsos-assist-web-git-generation-state
@@ -1209,7 +1210,7 @@ The caller owns both the exact Run GET and subsequent canonical commit."
         ((error quit) nil)))))
 
 (defun emacsos-assist-web-git--stop-reobserve (entry &optional kind)
-  "Make ENTRY's stopped Run KIND noncurrent until exact recheck."
+  "Make ENTRY's stopped Run KIND noncurrent until committed Run/T recheck."
   (let ((inhibit-quit t))
     (setq emacsos-assist-web-git--stopped-reobserve
           (list :entry entry :tid emacsos-assist-web--thread-id
@@ -1221,11 +1222,16 @@ The caller owns both the exact Run GET and subsequent canonical commit."
       (setf (emacsos-assist-web-git-generation-state
              emacsos-assist-web-git--current) 'cached))
     (setq emacsos-assist-web-git--unavailable
-          (if (eq kind 'disconnect)
-              "observation disconnected; Refresh"
-            "Run changed; Refresh")))
+          (emacsos-assist-web-git--stopped-label)))
   (condition-case nil (emacsos-assist-web-git--update-headers)
     ((error quit) nil)))
+
+(defun emacsos-assist-web-git--stopped-label ()
+  "Return the short, evidence-specific stopped-observer label."
+  (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+    ('disconnect "Observation lost; Refresh")
+    ('approval "Approval pending; Refresh")
+    (_ "Run changed; Refresh")))
 
 (defun emacsos-assist-web-git--stopped-reobserve-owner-p (entry)
   "Whether ENTRY is a fresh exact recheck of the stopped observer."

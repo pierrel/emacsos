@@ -4028,7 +4028,7 @@
                      "emacsos-0123456789abcdef0123456789abcdef"))
       (should-not emacsos-assist-web--in-flight)
       (should-not emacsos--assist-active-surface)
-      (should (string-match-p "invalid Assist run status"
+      (should (string-match-p "invalid exact Run response"
                               emacsos-assist-web--stream-status)))))
 
 (ert-deftest test-assist-web-replay-renders-a-new-submission-with-the-same-text ()
@@ -5860,6 +5860,7 @@
                "emacsos-cccccccccccccccccccccccccccccccc"))
           requests)
       (setf (plist-get s1 :run-id) "run-s1"
+            (plist-get s1 :verified-outcome) "success"
             (plist-get c1 :run-id) "run-c1"
             (plist-get c1 :requires-reobserve) t)
       (setq emacsos-assist-web--queue (list s1 c1 c2))
@@ -6976,8 +6977,8 @@
         (should (string-match-p label (buffer-string)))))))
 
 (ert-deftest test-assist-web-terminal-does-not-release-an-unpersisted-state ()
-  "A terminal callback cannot advance or release its observer before persistence."
-  (let ((emacsos-assist-web--requests nil) cleaned advanced)
+  "A failed terminal save pauses recovery and closes, never advances, its owner."
+  (let ((emacsos-assist-web--requests nil) advanced)
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (let* ((entry (emacsos-assist-web--entry
@@ -6985,20 +6986,20 @@
              (token (list (current-buffer) (plist-get entry :key))))
         (setf (plist-get entry :run-id) "run-a"
               (plist-get entry :handshake-token) token)
-        (setq emacsos-assist-web--queue (list entry)
+        (setq emacsos-assist-web--queue-model-p t
+              emacsos-assist-web--queue (list entry)
               emacsos-assist-web--stream-entry entry
               emacsos-assist-web--requests (list token))
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil))
-                  ((symbol-function 'emacsos-assist-web--stream-cleanup)
-                   (lambda (&rest _) (setq cleaned t)))
                   ((symbol-function 'emacsos-assist-web--start-next-observation)
                    (lambda () (setq advanced t))))
           (emacsos-assist-web--stream-finish (current-buffer)))
-        (should-not cleaned)
         (should-not advanced)
-        (should (eq (plist-get entry :state) 'observing))
-        (should (eq emacsos-assist-web--stream-entry entry))
-        (should (equal emacsos-assist-web--requests (list token)))))))
+        (should emacsos-assist-web--reconcile-recovery-paused)
+        (should (eq (plist-get entry :state) 'terminal-unreconciled))
+        (should-not (plist-get entry :verified-outcome))
+        (should-not emacsos-assist-web--stream-entry)
+        (should-not emacsos-assist-web--requests)))))
 
 (ert-deftest test-assist-web-manual-terminal-save-failure-pauses-recovery ()
   "An unsaved recovered terminal SSE cannot strand an active manual pass."
@@ -7019,7 +7020,7 @@
       (should-not emacsos-assist-web--manual-recovery-active)
       (should (eq (plist-get entry :observer-end-kind) 'terminal-sse))
       (should emacsos-assist-web--manual-recovery-required)
-      (should (eq (plist-get entry :state) 'observing)))))
+      (should (eq (plist-get entry :state) 'terminal-unreconciled)))))
 
 (ert-deftest test-assist-web-reconcile-persists-snapshot-before-retiring-entries ()
   "Terminal queue entries stay visible unless snapshot then queue persistence succeeds."
