@@ -1023,8 +1023,8 @@ nondiagnostic failure must not invalidate another window's accepted state.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Git.
 REQUEST-TID is the trusted origin thread captured before an async T GET; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
-Return non-nil only after an applicable Git safety notification completes;
-nil leaves it eligible for a later chunk or completion retry."
+Return non-nil when the Git safety notification completed or the exact Run
+status is safely ignored as stale; nil permits a bounded later retry."
   (when (and (equal method "GET")
              (or (memq status '(401 403 404)) early-failure)
              (stringp path))

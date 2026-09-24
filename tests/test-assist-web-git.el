@@ -2052,11 +2052,15 @@
              response process done)
         (setq-local emacsos-assist-web--thread-id "thread-1"
                     emacsos-assist-web-git--metadata metadata
-                    emacsos-assist-web-git--current generation)
+                    emacsos-assist-web-git--current generation
+                    emacsos-assist-web-git--pending
+                    (list :intents (list 'w1)))
         (unwind-protect
             (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
                        (lambda () "token"))
                       ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                      ((symbol-function 'emacsos-assist-web-git--release-intents)
+                       (lambda (&rest _) (signal 'quit nil)))
                       ((symbol-function 'url-retrieve)
                        (lambda (_url callback &rest _)
                          (setq done callback
@@ -2078,7 +2082,8 @@
                             url-http-end-of-headers (copy-marker (point-min)))
                 (funcall done nil))
               (should (eq (emacsos-assist-web-git-generation-state generation)
-                          'cached)))
+                          'cached))
+              (should-not emacsos-assist-web-git--pending))
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p response) (kill-buffer response)))))))
 
