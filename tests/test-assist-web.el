@@ -4114,6 +4114,8 @@
                        (submitted_text . "hello") (pending_accepted . t)
                        (run_id . "run-2"))))
                   ((symbol-function 'emacsos-assist-web--try-write-cache) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () t))
                   ((symbol-function 'emacsos-assist-web--request)
                    (lambda (_method _path _payload callback &rest _)
                      (funcall callback '((id . "run-2") (thread_id . "thread-1")
@@ -6935,6 +6937,27 @@
         (should (eq (plist-get entry :state) 'observing))
         (should (eq emacsos-assist-web--stream-entry entry))
         (should (equal emacsos-assist-web--requests (list token)))))))
+
+(ert-deftest test-assist-web-manual-terminal-save-failure-pauses-recovery ()
+  "An unsaved recovered terminal SSE cannot strand an active manual pass."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--manual-recovery-required t
+                emacsos-assist-web--manual-recovery-active t)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'observing "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+      (setf (plist-get entry :run-id) "run-a")
+      (setq emacsos-assist-web--queue (list entry)
+            emacsos-assist-web--stream-entry entry)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () nil)))
+        (emacsos-assist-web--stream-finish (current-buffer)))
+      (should emacsos-assist-web--reconcile-recovery-paused)
+      (should-not emacsos-assist-web--manual-recovery-active)
+      (should-not emacsos-assist-web--manual-terminal-run-id)
+      (should emacsos-assist-web--manual-recovery-required)
+      (should (eq (plist-get entry :state) 'observing)))))
 
 (ert-deftest test-assist-web-reconcile-persists-snapshot-before-retiring-entries ()
   "Terminal queue entries stay visible unless snapshot then queue persistence succeeds."

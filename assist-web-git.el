@@ -66,7 +66,9 @@
 (defvar-local emacsos-assist-web-git--auth-epoch 0)
 (defvar-local emacsos-assist-web-git--denied nil)
 (defvar-local emacsos-assist-web-git--run-outcome-uncertain nil
-  "Non-nil until an exact Run GET resolves a prior Run access failure.")
+  "Outstanding (thread, Run, denial epoch) access failures.
+Exact post-denial Run verification plus durable canonical acceptance removes
+one record; definitive thread denial preserves it for later reauthorization.")
 (defvar-local emacsos-assist-web-git--run-recheck-needed nil
   "Auth epoch of one pending auth-only thread GET after exact Run denial.")
 (defvar-local emacsos-assist-web-git--intent-serial 0)
@@ -184,7 +186,8 @@
       (let ((latest emacsos-assist-web-git--metadata))
         (cond
          ((or (eq emacsos-assist-web-git--denied 'run)
-              emacsos-assist-web-git--run-outcome-uncertain)
+              (and (not emacsos-assist-web-git--denied)
+                   emacsos-assist-web-git--run-outcome-uncertain))
           "unavailable; exact Run status needs Refresh")
          (emacsos-assist-web-git--denied "unavailable; reauthorize and Retry")
          ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
@@ -265,9 +268,7 @@
     (cond
      (paused
       (emacsos-assist-web-git--status-action "Restart to recover"))
-     ((or (eq emacsos-assist-web-git--denied 'run)
-          (and (not emacsos-assist-web-git--denied)
-               emacsos-assist-web-git--run-outcome-uncertain))
+     ((eq emacsos-assist-web-git--denied 'run)
       (concat (emacsos-assist-web-git--run-refresh-link)
               (emacsos-assist-web-git--details-link)))
      (emacsos-assist-web-git--denied
@@ -275,12 +276,16 @@
        (if (string-match-p "404" (or emacsos-assist-web-git--unavailable ""))
            "Thread unavailable" "Reauthorize")))
      (manual
-      (propertize "Run recovery pending; Refresh"
-                  'mouse-face 'highlight
-                  'local-map (let ((map (make-sparse-keymap)))
-                               (define-key map [header-line mouse-1]
-                                 #'emacsos-assist-web-refresh-thread)
-                               map)))
+      (concat
+       (emacsos-assist-web-git--run-refresh-link
+        (pcase (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
+          ('approval "Approval pending; Refresh")
+          ('changed "Run changed; Refresh")
+          (_ "Run recovery pending; Refresh")))
+       (emacsos-assist-web-git--details-link)))
+     (emacsos-assist-web-git--run-outcome-uncertain
+      (concat (emacsos-assist-web-git--run-refresh-link)
+              (emacsos-assist-web-git--details-link)))
      ((and display-failed (not paused))
         (concat
          (propertize "Saved; Refresh" 'mouse-face 'highlight
@@ -774,9 +779,9 @@ queue-free compatibility path."
   "Return compact LABEL and a clickable explanation affordance."
   (concat label (emacsos-assist-web-git--details-link)))
 
-(defun emacsos-assist-web-git--run-refresh-link ()
-  "Return a compact action for rechecking an uncertain exact Run."
-  (propertize "Run status; Refresh" 'mouse-face 'highlight
+(defun emacsos-assist-web-git--run-refresh-link (&optional label)
+  "Return a compact LABEL action for rechecking an exact Run."
+  (propertize (or label "Run status; Refresh") 'mouse-face 'highlight
               'local-map
               (let ((map (make-sparse-keymap)))
                 (define-key map [header-line mouse-1]
@@ -791,14 +796,21 @@ queue-free compatibility path."
          (reason (cond
                   (paused
                    "The local Run reconciliation record could not be saved. Git is paused. Restart Emacs, reopen this thread, then use Refresh to recover the exact Run. Do not retry Git in this session.")
-                  ((or (eq emacsos-assist-web-git--denied 'run)
-                       emacsos-assist-web-git--run-outcome-uncertain)
-                   "The exact Run status could not be verified. This does not prove the thread is gone. Refresh the Assist thread to check access and the Run before opening another Git view. Existing views are noncurrent.")
+                  ((eq emacsos-assist-web-git--denied 'run)
+                   "The exact Run status could not be verified. This does not prove the thread is gone. A thread access check is pending; then Refresh the exact Run before opening Git. Existing views are noncurrent.")
                   ((and emacsos-assist-web-git--denied
                         (string-match-p "404" (or emacsos-assist-web-git--unavailable "")))
                    "This thread is unavailable. Reopen it from the Assist thread list after checking access. Existing Git views are noncurrent; do not use them as the thread's latest state.")
                   (emacsos-assist-web-git--denied
                    "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are noncurrent.")
+                  ((eq (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
+                       'approval)
+                   "The exact Run is awaiting approval after its stream ended. Approve it first, then Refresh to check the exact Run again. This pass stopped; it will not reattach automatically. Press q to return.")
+                  ((eq (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
+                       'changed)
+                   "The Run was still active after its stream ended. The observation may have changed. Refresh to make one new exact Run check; this pass will not reattach automatically. Press q to return.")
+                  (emacsos-assist-web-git--run-outcome-uncertain
+                   "Thread access was confirmed, but the exact Run outcome is still unverified. Refresh the Assist thread to check that Run before opening Git. Existing views are noncurrent.")
                   (t "Git state needs a fresh canonical thread check. Refresh before opening another view.")))
          (view (generate-new-buffer " *Assist Web Git status*")))
     (with-current-buffer view
@@ -814,7 +826,8 @@ queue-free compatibility path."
   (interactive)
   (if (or (bound-and-true-p emacsos-assist-web--reconcile-recovery-paused)
           emacsos-assist-web-git--denied
-          emacsos-assist-web-git--run-outcome-uncertain)
+          emacsos-assist-web-git--run-outcome-uncertain
+          (bound-and-true-p emacsos-assist-web--manual-recovery-required))
       (emacsos-assist-web-git-status-details)
     (emacsos-assist-web-git-display-details)))
 
@@ -833,7 +846,6 @@ queue-free compatibility path."
   "Latch canonical HTTP STATUS denial across old Git callbacks and views."
   (cl-incf emacsos-assist-web-git--auth-epoch)
   (setq emacsos-assist-web-git--denied t
-        emacsos-assist-web-git--run-outcome-uncertain nil
         emacsos-assist-web-git--run-recheck-needed nil)
   (when emacsos-assist-web-git--current
     (setf (emacsos-assist-web-git-generation-state
@@ -845,20 +857,37 @@ queue-free compatibility path."
     (emacsos-assist-web-git--invalidate reason)
     (message "Thread Git: %s" reason)))
 
-(defun emacsos-assist-web-git--run-access-uncertain (status)
-  "Fence Git after exact Run GET receives STATUS before its body is parsed.
-A later canonical thread GET checks thread access; Run status stays uncertain."
-  (unless (eq emacsos-assist-web-git--denied t)
-    (let ((thread (current-buffer)))
-      (cl-incf emacsos-assist-web-git--auth-epoch)
+(defun emacsos-assist-web-git--run-record (tid run-id)
+  "Return the outstanding denial record for exact TID and RUN-ID."
+  (seq-find (lambda (record)
+              (and (equal (plist-get record :tid) tid)
+                   (equal (plist-get record :run-id) run-id)))
+            emacsos-assist-web-git--run-outcome-uncertain))
+
+(defun emacsos-assist-web-git--run-read-superseded-p (tid run-id start-epoch)
+  "Whether a newer denial superseded TID/RUN-ID's exact GET."
+  (when-let ((record (emacsos-assist-web-git--run-record tid run-id)))
+    (or (not (integerp start-epoch))
+        (< start-epoch (plist-get record :epoch)))))
+
+(defun emacsos-assist-web-git--run-access-uncertain (status run-id)
+  "Fence Git for exact RUN-ID after HTTP STATUS, preserving stronger denial."
+  (let* ((thread (current-buffer))
+         (tid emacsos-assist-web--thread-id)
+         (strong (eq emacsos-assist-web-git--denied t))
+         (epoch (cl-incf emacsos-assist-web-git--auth-epoch)))
+    (setq emacsos-assist-web-git--run-outcome-uncertain
+          (cons (list :tid tid :run-id run-id :epoch epoch)
+                (seq-remove (lambda (record)
+                              (and (equal (plist-get record :tid) tid)
+                                   (equal (plist-get record :run-id) run-id)))
+                            emacsos-assist-web-git--run-outcome-uncertain)))
+    (unless strong
       (setq emacsos-assist-web-git--denied 'run
-            emacsos-assist-web-git--run-outcome-uncertain t
-            emacsos-assist-web-git--run-recheck-needed
-            emacsos-assist-web-git--auth-epoch)
+            emacsos-assist-web-git--run-recheck-needed epoch)
       (emacsos-assist-web-git--invalidate
        (format "Run status unavailable (%d); Refresh thread" status))
-      ;; The Run denial alone cannot establish whether the thread vanished.
-      ;; One chat-owned canonical GET settles that scope after this callback.
+      ;; One newer thread GET determines access, not the Run outcome.
       (run-at-time
        0 nil
        (lambda ()
@@ -943,11 +972,42 @@ An auth-only GET leaves exact Run outcome uncertain."
         (emacsos-assist-web-git--clear-feedback (car item))))
     (emacsos-assist-web-git--update-headers)))
 
-(defun emacsos-assist-web-git--run-status-confirmed ()
-  "Clear only the Run-outcome warning after strict exact Run validation."
-  (when emacsos-assist-web-git--run-outcome-uncertain
-    (setq emacsos-assist-web-git--run-outcome-uncertain nil)
-    (emacsos-assist-web-git--update-headers)))
+(defun emacsos-assist-web-git--run-status-confirmed (tid run-id start-epoch)
+  "Clear TID/RUN-ID's warning only after post-denial durable acceptance.
+The caller owns both the exact Run GET and subsequent canonical commit."
+  (when-let ((record (emacsos-assist-web-git--run-record tid run-id)))
+    (when (<= (plist-get record :epoch) start-epoch)
+      (setq emacsos-assist-web-git--run-outcome-uncertain
+            (delq record emacsos-assist-web-git--run-outcome-uncertain))
+      (emacsos-assist-web-git--update-headers))))
+
+(defun emacsos-assist-web-git--confirm-active-run (tid run-id start-epoch)
+  "After durable active RUN-ID state, read a fresh nonready TID snapshot.
+The read only releases this Run's Git gate; it never claims a ready checkout."
+  (when (emacsos-assist-web-git--run-record tid run-id)
+    (let ((thread (current-buffer))
+          (auth-epoch emacsos-assist-web-git--auth-epoch)
+          (key-epoch emacsos-assist-web-git--epoch)
+          (observation emacsos-assist-web-git--observation))
+      (emacsos-assist-web-git--read-metadata
+       thread
+       (lambda (metadata problem)
+         (when (buffer-live-p thread)
+           (with-current-buffer thread
+             (when (and (not problem)
+                        (equal tid emacsos-assist-web--thread-id)
+                        (eql auth-epoch emacsos-assist-web-git--auth-epoch)
+                        (eql key-epoch emacsos-assist-web-git--epoch)
+                        (eql observation emacsos-assist-web-git--observation)
+                        (not (eq emacsos-assist-web-git--denied t))
+                        (member (plist-get metadata :status)
+                                emacsos-assist-web--active-snapshot-statuses)
+                        (not (emacsos-assist-web-git--run-read-superseded-p
+                              tid run-id start-epoch)))
+               (emacsos-assist-web-git--canonical-authorized auth-epoch)
+               (emacsos-assist-web-git--run-status-confirmed
+                tid run-id start-epoch)
+               (emacsos-assist-web-git--note metadata)))))))))
 
 (defun emacsos-assist-web-git--problem-text (problem)
   "Return the safe display text from PROBLEM."
@@ -1110,15 +1170,18 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                        ((plist-get result :ok)
                         (emacsos-assist-web-git--final-check request result))
                        (t
-                        (emacsos-assist-web-git--cleanup
-                         id "staging"
-                         (lambda (ok)
-                           (when (buffer-live-p thread)
-                             (with-current-buffer thread
-                               (if ok
-                                   (emacsos-assist-web-git--failed
-                                    request (plist-get result :reason))
-                                 (emacsos-assist-web-git--cleanup-failed))))))))))))))
+                        (condition-case nil
+                            (emacsos-assist-web-git--cleanup
+                             id "staging"
+                             (lambda (ok)
+                               (when (buffer-live-p thread)
+                                 (with-current-buffer thread
+                                   (if ok
+                                       (emacsos-assist-web-git--failed
+                                        request (plist-get result :reason))
+                                     (emacsos-assist-web-git--cleanup-failed))))))
+                          ((error quit)
+                           (emacsos-assist-web-git--cleanup-failed)))))))))))
           (emacsos-assist-web-git--request-put request :process process))
       (error
        (emacsos-assist-web-git--failed

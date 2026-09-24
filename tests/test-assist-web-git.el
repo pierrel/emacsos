@@ -175,7 +175,7 @@
                 ((symbol-function 'emacsos-assist-web--request)
                  (lambda (method path _payload callback &rest _)
                    (push (list method path callback) requests))))
-        (emacsos-assist-web-git--run-access-uncertain 404)
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-1")
         (should (= (length scheduled) 1))
         (should (= emacsos-assist-web-git--auth-epoch 1))
         (funcall (car scheduled))
@@ -201,10 +201,10 @@
                 ((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload callback &rest _)
                    (push callback requests))))
-        (emacsos-assist-web-git--run-access-uncertain 404)
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-1")
         (let ((older emacsos-assist-web-git--auth-epoch))
           (funcall (car scheduled))
-          (emacsos-assist-web-git--run-access-uncertain 403)
+          (emacsos-assist-web-git--run-access-uncertain 403 "run-1")
           (should (= emacsos-assist-web-git--auth-epoch (1+ older)))
           (funcall (car scheduled))
           (should (= (length requests) 2))
@@ -222,10 +222,447 @@
     (setq-local emacsos-assist-web--thread-id "thread-1")
     (emacsos-assist-web-git--canonical-denied 403)
     (let ((epoch emacsos-assist-web-git--auth-epoch))
-      (emacsos-assist-web-git--run-access-uncertain 404)
+      (emacsos-assist-web-git--run-access-uncertain 404 "run-1")
       (should (eq emacsos-assist-web-git--denied t))
-      (should (= emacsos-assist-web-git--auth-epoch epoch))
+      (should (= emacsos-assist-web-git--auth-epoch (1+ epoch)))
+      (should (emacsos-assist-web-git--run-record "thread-1" "run-1"))
       (should-not emacsos-assist-web-git--run-recheck-needed))))
+
+(ert-deftest test-assist-web-git-run-clearance-needs-exact-id-and-newer-read ()
+  "B or an older A response cannot discharge A's outstanding denial."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      (emacsos-assist-web-git--run-access-uncertain 404 "run-a"))
+    (let ((epoch emacsos-assist-web-git--auth-epoch))
+      (emacsos-assist-web-git--canonical-authorized epoch)
+      (emacsos-assist-web-git--run-status-confirmed
+       "thread-1" "run-b" epoch)
+      (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+      (emacsos-assist-web-git--run-status-confirmed
+       "thread-1" "run-a" (1- epoch))
+      (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+      (emacsos-assist-web-git--run-status-confirmed
+       "thread-1" "run-a" epoch)
+      (should-not emacsos-assist-web-git--run-outcome-uncertain))))
+
+(ert-deftest test-assist-web-git-thread-reauthorization-keeps-run-denial ()
+  "A definitive thread denial and later 200 never erase exact Run A."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web-git--canonical-denied 403)
+    (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+    (let ((epoch emacsos-assist-web-git--auth-epoch))
+      (should (eq emacsos-assist-web-git--denied t))
+      (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+      (emacsos-assist-web-git--canonical-authorized epoch)
+      (should-not emacsos-assist-web-git--denied)
+      (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+      (should (string-match-p "Thread access was confirmed"
+                              (let ((emacsos-assist-web-git--display-details-thread
+                                     nil))
+                                (save-window-excursion
+                                  (emacsos-assist-web-git-status-details)
+                                  (prog1 (buffer-string)
+                                    (emacsos-assist-web-git-display-details-back)))))))))
+
+(ert-deftest test-assist-web-git-active-run-needs-saved-status-and-newer-busy-t ()
+  "An active Run opens no Git gate until its saved state and fresh busy T GET."
+  (dolist (saved '(t nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry
+                    "fixture" 'accepted-unobserved "exact-key"))
+            requests)
+        (setf (plist-get entry :run-id) "run-a")
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method path _payload done &rest _)
+                     (push (cons path done) requests)))
+                  ((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () saved))
+                  ((symbol-function 'emacsos-assist-web--start-observation)
+                   (lambda (&rest _) nil)))
+          (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+          (emacsos-assist-web-git--canonical-authorized
+           emacsos-assist-web-git--auth-epoch)
+          (emacsos-assist-web--reobserve-entry entry)
+          (should (= (length requests) 1))
+          (funcall (cdar requests)
+                   '((id . "run-a") (thread_id . "thread-1")
+                     (status . "running")) nil)
+          (should emacsos-assist-web-git--run-outcome-uncertain)
+          (if saved
+              (progn
+                (should (= (length requests) 2))
+                (should (equal (caar requests) "threads/thread-1"))
+                (funcall (cdar requests)
+                         (test-assist-web-git--snapshot
+                          "processing" "main" "topic/old") nil)
+                (should-not emacsos-assist-web-git--run-outcome-uncertain)
+                (should (equal (plist-get emacsos-assist-web-git--metadata
+                                               :status)
+                               "processing")))
+            (should (= (length requests) 1))
+            (should emacsos-assist-web-git--run-outcome-uncertain)))))))
+
+(ert-deftest test-assist-web-git-active-run-clearance-preserves-manual-gate ()
+  "A fresh busy T clears Run denial, not restored-Run manual recovery."
+  (dolist (manual '(nil t))
+    (save-window-excursion
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web-git-thread-mode t
+                    emacsos-assist-web--manual-recovery-required manual)
+        (let ((window (selected-window))
+              (original-intent (window-parameter (selected-window)
+                                                 'assist-web-git-intent))
+              fresh-read command-read)
+          (unwind-protect
+          (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                    ((symbol-function 'emacsos-assist-web-git--read-metadata)
+                     (lambda (_thread callback) (setq fresh-read callback))))
+            (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+            (emacsos-assist-web-git--canonical-authorized
+             emacsos-assist-web-git--auth-epoch)
+            (emacsos-assist-web-git--confirm-active-run
+             "thread-1" "run-a" emacsos-assist-web-git--auth-epoch)
+            (should fresh-read)
+            (funcall fresh-read
+                     (emacsos-assist-web-git--metadata-from-snapshot
+                      (test-assist-web-git--snapshot
+                       "processing" "main" "topic/old")) nil)
+            (should-not emacsos-assist-web-git--run-outcome-uncertain)
+            (should (eq emacsos-assist-web--manual-recovery-required manual))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                       (lambda (&rest _) (setq command-read t))))
+              (if manual
+                  (should-error (emacsos-assist-web-git--command 'files)
+                                :type 'user-error)
+                (emacsos-assist-web-git--command 'files)))
+            (should (eq command-read (not manual))))
+            (set-window-parameter window 'assist-web-git-intent
+                                  original-intent)))))))
+
+(ert-deftest test-assist-web-git-old-run-get-cannot-clear-newer-denial ()
+  "A's old successful GET is inert after a newer A denial and T reauth."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "fixture" 'accepted-unobserved "exact-key"))
+          old-run canonical)
+      (setf (plist-get entry :run-id) "run-a")
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (if (string-match-p "/runs/" path)
+                       (setq old-run done)
+                     (setq canonical done)))))
+        (emacsos-assist-web--reobserve-entry entry)
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (funcall old-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
+        (should-not canonical)
+        (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+        (should (eq (emacsos-assist-web--entry-state entry)
+                    'accepted-unobserved))))))
+
+(ert-deftest test-assist-web-git-active-run-ready-t-cannot-clear-gate ()
+  "An active exact Run contradicted by ready T stays unavailable."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "fixture" 'accepted-unobserved "exact-key"))
+          requests)
+      (setf (plist-get entry :run-id) "run-a")
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (push (cons path done) requests)))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (&rest _) nil)))
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web--reobserve-entry entry)
+        (funcall (cdar requests)
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
+        (should (= (length requests) 2))
+        (funcall (cdar requests)
+                 (test-assist-web-git--snapshot "ready" "topic/one") nil)
+        (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+        (should-not emacsos-assist-web-git--metadata)))))
+
+(ert-deftest test-assist-web-git-active-run-t-read-cannot-replace-newer-chat ()
+  "A post-save busy T result cannot replace a later accepted ready snapshot."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let (fresh-read)
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread callback) (setq fresh-read callback))))
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web-git--confirm-active-run
+         "thread-1" "run-a" emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web-git--note
+         (emacsos-assist-web-git--metadata-from-snapshot
+          (test-assist-web-git--snapshot "ready" "topic/new")))
+        (funcall fresh-read
+                 (emacsos-assist-web-git--metadata-from-snapshot
+                  (test-assist-web-git--snapshot
+                   "processing" "main" "topic/old")) nil)
+        (should (equal (plist-get emacsos-assist-web-git--metadata :branch)
+                       "topic/new"))
+        (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))))))
+
+(ert-deftest test-assist-web-git-manual-stop-outranks-old-run-warning ()
+  "After thread reauth, stopped manual recovery shows its actionable reason."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--manual-recovery-required t
+                emacsos-assist-web--manual-recovery-reason 'approval
+                emacsos-assist-web-git--run-outcome-uncertain
+                (list (list :tid "thread-1" :run-id "run-a" :epoch 1)))
+    (should (string-match-p "Approval pending; Refresh"
+                            (substring-no-properties
+                             (emacsos-assist-web-git--thread-header))))))
+
+(ert-deftest test-assist-web-git-manual-sse-terminal-active-stops-with-details ()
+  "A recovered Run's terminal SSE followed by active GET never loops SSE."
+  (dolist (status '("running" "awaiting_approval"))
+    (save-window-excursion
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (emacsos-assist-web--write-prompt)
+        (let ((entry (emacsos-assist-web--entry
+                      "fixture" 'observing "exact-key"))
+              exact-run)
+          (setf (plist-get entry :run-id) "run-a")
+          (setq-local emacsos-assist-web--thread-id "thread-1"
+                      emacsos-assist-web--queue (list entry)
+                      emacsos-assist-web--stream-entry entry
+                      emacsos-assist-web--manual-recovery-required t
+                      emacsos-assist-web--manual-recovery-active t)
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                     (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method path _payload done &rest _)
+                       (should (string-match-p "/runs/" path))
+                       (setq exact-run done)))
+                    ((symbol-function 'emacsos-assist-web--start-observation)
+                     (lambda (&rest _) (ert-fail "SSE reattached"))))
+            (emacsos-assist-web--stream-finish (current-buffer))
+            (should exact-run)
+            (funcall exact-run
+                     `((id . "run-a") (thread_id . "thread-1")
+                       (status . ,status)) nil)
+            (should-not emacsos-assist-web--manual-recovery-active)
+            (should emacsos-assist-web--manual-recovery-required)
+            (should (eq (emacsos-assist-web--entry-state entry)
+                        'accepted-unobserved))
+            (should (plist-get entry :requires-reobserve))
+            (should (equal (substring-no-properties
+                            (emacsos-assist-web-git--thread-header))
+                           (if (equal status "awaiting_approval")
+                               "Approval pending; Refresh [?] "
+                             "Run changed; Refresh [?] ")))
+            (emacsos-assist-web-git-details)
+            (should (string-match-p
+                     (if (equal status "awaiting_approval")
+                         "Approve it first" "will not reattach")
+                     (buffer-string)))
+            (emacsos-assist-web-git-display-details-back)
+            (when (equal status "awaiting_approval")
+              (emacsos-assist-web-refresh-thread)
+              (funcall exact-run
+                       '((id . "run-a") (thread_id . "thread-1")
+                         (status . "awaiting_approval")) nil)
+              (should-not emacsos-assist-web--manual-recovery-active)
+              (should (eq emacsos-assist-web--manual-recovery-reason
+                          'approval)))))))))
+
+(ert-deftest test-assist-web-git-terminal-run-gate-waits-for-r2-commit ()
+  "A terminal A GET leaves A gated through cache and queue retirement."
+  (dolist (retirement-fails '(nil t new-denial))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry
+                    "fixture" 'accepted-unobserved "exact-key"))
+            exact-run r2)
+        (setf (plist-get entry :run-id) "run-a")
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method path _payload done &rest _)
+                     (if (string-match-p "/runs/" path)
+                         (setq exact-run done)
+                       (setq r2 done))))
+                  ((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () (not (and (eq retirement-fails t)
+                                        (null emacsos-assist-web--queue)))))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'emacsos-assist-web--render)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'emacsos-assist-web-git--begin)
+                   (lambda (&rest _) nil)))
+          (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+          (emacsos-assist-web-git--canonical-authorized
+           emacsos-assist-web-git--auth-epoch)
+          (emacsos-assist-web--reobserve-entry entry)
+          (funcall exact-run
+                   '((id . "run-a") (thread_id . "thread-1")
+                     (status . "success")) nil)
+          (should r2)
+          (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+          (when (eq retirement-fails 'new-denial)
+            (emacsos-assist-web-git--run-access-uncertain 403 "run-a"))
+          (funcall r2
+                   (test-assist-web-git--snapshot "ready" "topic/new") nil)
+          (if retirement-fails
+              (progn
+                (should emacsos-assist-web--queue)
+                (should (emacsos-assist-web-git--run-record
+                         "thread-1" "run-a")))
+            (should-not emacsos-assist-web--queue)
+            (should-not emacsos-assist-web-git--run-outcome-uncertain)))))))
+
+(ert-deftest test-assist-web-git-legacy-terminal-gate-waits-for-draft-retirement ()
+  "Legacy exact success cannot clear A before its canonical draft commit."
+  (dolist (retirement-fails '(nil t))
+    (let ((emacsos-assist-web-cache-directory
+           (make-temp-file "assist-git-legacy-run-gate-" t)))
+      (unwind-protect
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--write-prompt)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--run-id "run-a"
+                        emacsos-assist-web--pending-key
+                        "emacsos-0123456789abcdef0123456789abcdef"
+                        emacsos-assist-web--submitted-text "hello"
+                        emacsos-assist-web--pending-accepted-p t)
+            (should (emacsos-assist-web--save-draft))
+            (let ((real-save
+                   (symbol-function 'emacsos-assist-web--legacy-save-draft))
+                  run-callback chat-callback)
+              (cl-letf (((symbol-function 'run-at-time)
+                         (lambda (&rest _) nil))
+                        ((symbol-function 'emacsos-assist-web--request)
+                         (lambda (_method path _payload done &rest _)
+                           (if (string-match-p "/runs/" path)
+                               (setq run-callback done)
+                             (setq chat-callback done))))
+                        ((symbol-function 'emacsos-assist-web--try-write-cache)
+                         (lambda (&rest _) t))
+                        ((symbol-function 'emacsos-assist-web--legacy-save-draft)
+                         (lambda ()
+                           (if (and retirement-fails
+                                    (not emacsos-assist-web--run-id))
+                               nil
+                             (funcall real-save))))
+                        ((symbol-function 'emacsos-assist-web--render)
+                         (lambda (&rest _) nil))
+                        ((symbol-function 'emacsos-assist-web-git--begin)
+                         (lambda (&rest _) nil)))
+                (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+                (emacsos-assist-web-git--canonical-authorized
+                 emacsos-assist-web-git--auth-epoch)
+                (emacsos-assist-web--legacy-terminal-probe
+                 (current-buffer) "run-a")
+                (funcall run-callback
+                         '((id . "run-a") (thread_id . "thread-1")
+                           (status . "success")) nil)
+                (should (emacsos-assist-web-git--run-record
+                         "thread-1" "run-a"))
+                (funcall chat-callback
+                         (test-assist-web-git--snapshot
+                          "ready" "topic/new") nil)
+                (if retirement-fails
+                    (progn
+                      (should (equal emacsos-assist-web--run-id "run-a"))
+                      (should (emacsos-assist-web-git--run-record
+                               "thread-1" "run-a")))
+                  (should-not emacsos-assist-web--run-id)
+                  (should-not emacsos-assist-web-git--run-outcome-uncertain)))))
+        (delete-directory emacsos-assist-web-cache-directory t)))))
+
+(ert-deftest test-assist-web-git-unknown-legacy-run-status-keeps-gate ()
+  "An authenticated but unknown exact Run status cannot clear A."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--run-id "run-a"
+                emacsos-assist-web--pending-accepted-p t)
+    (let (run-callback chat-requested)
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (if (string-match-p "/runs/" path)
+                       (setq run-callback done)
+                     (setq chat-requested t)))))
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web--legacy-terminal-probe (current-buffer) "run-a")
+        (funcall run-callback
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "unexpected")) nil)
+        (should-not chat-requested)
+        (should (emacsos-assist-web-git--run-record
+                 "thread-1" "run-a"))))))
+
+(ert-deftest test-assist-web-git-legacy-active-run-save-failure-blocks-t-get ()
+  "A legacy active status must save its exact R receipt before fresh T GET."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--run-id "run-a"
+                emacsos-assist-web--pending-accepted-p t
+                emacsos-assist-web--pending-key
+                "emacsos-0123456789abcdef0123456789abcdef"
+                emacsos-assist-web--submitted-text "hello"
+                emacsos-assist-web-git-thread-mode t)
+    (let (run-callback chat-requested)
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (if (string-match-p "/runs/" path)
+                       (setq run-callback done)
+                     (setq chat-requested t))))
+                ((symbol-function 'emacsos-assist-web--legacy-save-draft)
+                 (lambda () nil)))
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web--legacy-terminal-probe (current-buffer) "run-a")
+        (funcall run-callback
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
+        (should-not chat-requested)
+        (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+        (should-error (emacsos-assist-web-git--command 'files)
+                      :type 'user-error)))))
 
 (ert-deftest test-assist-web-git-manual-run-404-recheck-is-auth-only ()
   "A Run denial permits one thread-auth GET, not manual recovery work."
@@ -257,7 +694,7 @@
         (emacsos-assist-web-git--maybe-run-recheck)
         (should-not requests)
         ;; The prior user-initiated exact Run GET received 404.
-        (emacsos-assist-web-git--run-access-uncertain 404)
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-1")
         (funcall (car scheduled))
         (should (= (length requests) 1))
         (should (equal (cadar requests) "threads/thread-1"))
@@ -269,8 +706,8 @@
         (should (eq (emacsos-assist-web--entry-state entry)
                     'terminal-unreconciled))
         (should-not emacsos-assist-web-git--metadata)
-        (should (string-prefix-p "Run status; Refresh"
-                                 (emacsos-assist-web-git--thread-header)))
+          (should (string-prefix-p "Run recovery pending; Refresh"
+                                   (emacsos-assist-web-git--thread-header)))
         ;; A second explicit Refresh is the first renewed exact Run read.
         (emacsos-assist-web-refresh-thread)
         (should (= (length requests) 2))
@@ -290,7 +727,7 @@
                 ((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload callback &rest _)
                    (push callback requests))))
-        (emacsos-assist-web-git--run-access-uncertain 404)
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-1")
         (funcall (car scheduled))
         (should-not requests)
         (emacsos-assist-web-git--canonical-authorized 0)
@@ -313,7 +750,7 @@
                    (push callback scheduled)))
                 ((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
                  (lambda (&rest _) (ert-fail "recheck during recovery pause"))))
-        (emacsos-assist-web-git--run-access-uncertain 404)
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-1")
         (setq-local emacsos-assist-web--reconcile-recovery-paused t
                     emacsos-assist-web--reconcile-generation nil)
         (funcall (car scheduled))
@@ -2309,6 +2746,51 @@
           (set-window-parameter first 'assist-web-git-intent nil)
           (set-window-parameter second 'assist-web-git-intent nil)
           (kill-buffer thread))))))
+
+(ert-deftest test-assist-web-git-failed-helper-cleanup-launch-error-releases-both ()
+  "A synchronous cleanup launch error cannot strand successor intents."
+  (save-window-excursion
+    (let* ((thread (generate-new-buffer " *git-cleanup-launch*"))
+           (first (selected-window))
+           (second (split-window-right))
+           (metadata (test-assist-web-git--metadata
+                      "ready" "topic/old" test-assist-web-git--head))
+           (i1 (list :action 'files :buffer thread :window first :serial 1))
+           (i2 (list :action 'diff :buffer thread :window second :serial 1))
+           helper (cleanup-calls 0))
+      (unwind-protect
+          (progn
+            (set-window-buffer first thread)
+            (set-window-buffer second thread)
+            (set-window-parameter first 'assist-web-git-intent 1)
+            (set-window-parameter second 'assist-web-git-intent 1)
+            (with-current-buffer thread
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--metadata metadata)
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (_payload done) (setq helper done) nil))
+                        ((symbol-function 'emacsos-assist-web-git--cleanup)
+                         (lambda (&rest _)
+                           ;; Model an exact success accepted while cleanup
+                           ;; launch is in progress, then a failed spawn.
+                           (cl-incf cleanup-calls)
+                           (when (= cleanup-calls 1)
+                             (setq emacsos-assist-web-git--success-watermark 1)
+                             (emacsos-assist-web-git--enqueue metadata i2))
+                           (error "cleanup launch failed"))))
+                (emacsos-assist-web-git--begin metadata (list i1))
+                (funcall helper (list :ok nil :reason "fetch failed"))
+                (should-not emacsos-assist-web-git--next)
+                (should (= (window-parameter first 'assist-web-git-intent)
+                           2))
+                (should (= (window-parameter second 'assist-web-git-intent)
+                           2))
+                (should (string-match-p "mirror cleanup failed"
+                                        emacsos-assist-web-git--unavailable)))))
+        (set-window-parameter first 'assist-web-git-intent nil)
+        (set-window-parameter second 'assist-web-git-intent nil)
+        (kill-buffer thread)))))
 
 (ert-deftest test-assist-web-git-stale-r2-reobserves-before-r3 ()
   (with-temp-buffer
