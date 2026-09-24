@@ -9,6 +9,7 @@
 
 (require 'cl-lib)
 (require 'chat)
+(require 'assist-web-git)
 (require 'json)
 (require 'seq)
 (require 'subr-x)
@@ -116,6 +117,9 @@
 (defconst emacsos-assist-web--record-id-regexp
   "\\`[A-Za-z0-9_-]\\{1,242\\}\\'")
 (defconst emacsos-assist-web--idempotency-regexp "\\`emacsos-[0-9a-f]\\{32\\}\\'")
+(defconst emacsos-assist-web--git-repo-key-regexp "\\`[0-9a-f]\\{20\\}\\'")
+(defconst emacsos-assist-web--git-oid-regexp
+  "\\`\\(?:[0-9a-f]\\{40\\}\\|[0-9a-f]\\{64\\}\\)\\'")
 (defconst emacsos-assist-web--subdivision-flags
   (mapcar
    (lambda (tag)
@@ -583,6 +587,53 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
     (when-let ((cursor (alist-get 'next_before value)))
       (emacsos-assist-web--require-record-id cursor))
     value))
+
+(defun emacsos-assist-web-git--metadata-from-snapshot (snapshot)
+  "Select the authenticated committed ref from validated SNAPSHOT.
+
+Ready threads select their actual checkout; all other statuses select only the
+atomic last-published pair.  Git itself checks the selected ref format before
+the fetch begins."
+  (let* ((thread (alist-get 'thread snapshot))
+         (workspace (alist-get 'workspace thread))
+         (tid (emacsos-assist-web--require-id (alist-get 'id thread)))
+         (status (alist-get 'status thread))
+         (repo-key (alist-get 'repo_key workspace))
+         (actual-branch (alist-get 'branch workspace))
+         (head (alist-get 'revision workspace))
+         (published-branch (alist-get 'published_branch workspace))
+         (published-revision (alist-get 'published_revision workspace)))
+    (emacsos-assist-web--snapshot-active-p snapshot)
+    (unless (or (null repo-key)
+                (and (stringp repo-key)
+                     (string-match-p
+                      emacsos-assist-web--git-repo-key-regexp repo-key)))
+      (error "Assist Web returned an invalid Git repository key"))
+    (dolist (oid (list head published-revision))
+      (unless (or (null oid)
+                  (and (stringp oid)
+                       (string-match-p emacsos-assist-web--git-oid-regexp oid)))
+        (error "Assist Web returned an invalid Git object ID")))
+    (unless (or (and (null published-branch)
+                     (null published-revision))
+                (and (stringp published-branch)
+                     (stringp published-revision)))
+      (error "Assist Web returned an incomplete published Git ref"))
+    (let* ((ready (equal status "ready"))
+           (branch (if ready actual-branch published-branch))
+           (expected (if ready head published-revision)))
+      (when (and branch
+                 (not (and (stringp branch)
+                           (<= (string-bytes branch) 240)
+                           (not (string-match-p "[[:cntrl:]]" branch)))))
+        (error "Assist Web returned an invalid Git branch"))
+      (list :tid tid :repo-key repo-key
+            :branch (and (stringp branch)
+                         (not (equal branch "main"))
+                         branch)
+            :expected expected :status status
+            :actual-branch (and ready actual-branch)
+            :head head))))
 
 (defun emacsos-assist-web--require-history-page (page thread-id current before)
   "Return PAGE after validating its identity and progress from CURRENT/BEFORE."
@@ -1848,6 +1899,7 @@ of it, together with the oldest pagination cursor already reached."
         (setq emacsos-assist-web--thread-id returned-id))
       (setq emacsos-assist-web--snapshot snapshot
             emacsos-assist-web--pending-rendered-p nil)
+      (emacsos-assist-web-git--sync-keys)
       (erase-buffer)
       ;; Queue markers belonged to the erased presentation, never to this
       ;; canonical snapshot.  Rebuild remaining provisional entries below.
@@ -2508,6 +2560,14 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                              (emacsos-assist-web--require-snapshot value tid)
                              (let ((busy
                                     (emacsos-assist-web--snapshot-active-p value)))
+                               (emacsos-assist-web-git--note
+                                (emacsos-assist-web-git--metadata-from-snapshot
+                                 value)
+                                (and completed-run-id
+                                     (not busy)
+                                     (equal (alist-get 'status
+                                                       (alist-get 'thread value))
+                                            "ready")))
                                (emacsos-assist-web--try-write-cache
                                 (emacsos-assist-web--snapshot-cache-name tid) value)
                                (when (or (and completed-run-id
@@ -3022,6 +3082,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
      (open-object . emacsos-conversation--open-object)
      (catalog . emacsos-assist-web-refresh-threads)))
   (add-hook 'after-change-functions #'emacsos-assist-web--after-change nil t)
+  (add-hook 'post-command-hook #'emacsos-assist-web-git--sync-keys nil t)
+  (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
 
 (define-key emacsos-assist-web-mode-map (kbd "RET")
@@ -4213,6 +4275,10 @@ write leaves the provisional records available for the next exact refresh."
                      (condition-case problem
                          (progn
                            (emacsos-assist-web--require-snapshot value thread-id)
+                           (emacsos-assist-web-git--note
+                            (emacsos-assist-web-git--metadata-from-snapshot value)
+                            (equal (alist-get 'status (alist-get 'thread value))
+                                   "ready"))
                            (unless (emacsos-assist-web--try-write-cache
                                     (emacsos-assist-web--snapshot-cache-name thread-id) value)
                              (error "canonical snapshot could not be saved"))

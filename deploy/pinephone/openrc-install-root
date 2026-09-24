@@ -11,7 +11,7 @@ snapshot=
 reference_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=036c626920bc4a197adbeaf1699649d7f829f1512dc0d9b3771811d2947ee901
+manifest_hash=000f9172abac451ffd0297dcbd986df8dbcfe86e698889fa7e4ae95e696061e9
 committed=0
 mutating=0
 lab_group_created=0
@@ -219,7 +219,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -233,7 +233,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 40 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 42 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
@@ -244,7 +244,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper \
-    os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+    os.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root \
     openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
@@ -382,7 +382,7 @@ rc-update show default 2>/dev/null |
 rc-service modemmanager status >/dev/null 2>&1 && modemmanager_was_running=1
 mutating=1
 
-set -- sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox \
+set -- sway swayidle emacs-pgtk emacs-magit emacs-vterm git openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox \
     mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils \
     doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc \
     mobile-broadband-provider-info pinephone-callaudiod alsa-utils py3-dbus
@@ -394,7 +394,7 @@ done
 for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     /usr/bin/pipewire-pulse /usr/bin/wireplumber /usr/bin/waydroid \
     /usr/bin/swayidle /usr/bin/doas /usr/bin/flock /usr/bin/setsid \
-    /usr/bin/alsaucm /usr/bin/callaudiocli /usr/bin/mmcli /usr/bin/gdbus /usr/bin/python3 \
+    /usr/bin/alsaucm /usr/bin/callaudiocli /usr/bin/mmcli /usr/bin/gdbus /usr/bin/python3 /usr/bin/git /usr/bin/ssh \
     /usr/sbin/nft; do
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
@@ -457,11 +457,13 @@ if [ -e /usr/local/libexec ] || [ -L /usr/local/libexec ]; then
 else
     install -d -o root -g root -m 0755 /usr/local/libexec
 fi
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for module in os.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     dtach-shell.el dtach-shell-init.el; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
 done
+install -o root -g root -m 0755 "$snapshot/assist-web-git-helper.py" \
+    /usr/local/share/emacsos-openrc/assist-web-git-helper.py
 install -o root -g root -m 0644 "$snapshot/openrc-init.el" \
     /usr/local/share/emacsos-openrc/init.el
 install -o root -g root -m 0644 "$snapshot/openrc-sway.config" \
@@ -583,10 +585,12 @@ cmp -s "$snapshot/assist-web-token" \
     'emacsos-lab:emacsos-lab:600:1:regular file' ]
 cmp -s "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
-for module in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for module in os.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     dtach-shell.el dtach-shell-init.el; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done
+cmp -s "$snapshot/assist-web-git-helper.py" \
+    /usr/local/share/emacsos-openrc/assist-web-git-helper.py
 cmp -s "$snapshot/emacsos-ui.initd" /etc/init.d/emacsos-ui
 cmp -s "$snapshot/openrc-boot-mode" /usr/local/sbin/emacsos-openrc-boot-mode
 cmp -s "$snapshot/waydroid-container.service" \

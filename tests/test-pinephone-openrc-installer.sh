@@ -7,7 +7,7 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone:/source:ro" \
     -v "$repo_dir:/repo:ro" \
-    alpine:3.22 /bin/sh -s <<'CONTAINER'
+alpine:3.22 /bin/sh -s <<'CONTAINER'
 set -eu
 
 refresh_keyboard_digests() {
@@ -37,7 +37,7 @@ for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-ini
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for name in os.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -297,7 +297,7 @@ printf '%s\n' 'table inet filter { chain input { type filter hook input priority
     >/etc/nftables.nft
 printf '%s\n' '#!/bin/sh' 'exit 0' >/usr/sbin/nft
 chmod 0755 /usr/sbin/nft
-for executable in swayidle doas setsid; do
+for executable in swayidle doas setsid git ssh; do
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" /' >/usr/bin/findmnt
@@ -466,7 +466,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
 [ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
-grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-vterm openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
+grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-magit emacs-vterm git openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
     /tmp/apk-log >/dev/null
 grep -F 'rc-service emacsos-ui start' /tmp/rc-service-log >/dev/null
 grep -F 'rc-service eg25-manager start' /tmp/rc-service-log >/dev/null
@@ -1002,7 +1002,7 @@ rm -f /tmp/py3-dbus-present
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -e /tmp/py3-dbus-present ]
-dbus_install_line=$(grep -nFx 'apk add py3-dbus' /tmp/transaction-log | cut -d: -f1)
+dbus_install_line=$(grep -nFx 'apk add py3-dbus emacs-magit git openssh-client-default' /tmp/transaction-log | cut -d: -f1)
 ui_stop_line=$(grep -nFx 'rc-service emacsos-ui stop' /tmp/transaction-log | cut -d: -f1)
 [ "$dbus_install_line" -lt "$ui_stop_line" ]
 if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; then
