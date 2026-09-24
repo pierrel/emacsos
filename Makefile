@@ -98,7 +98,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp EMACSOS-COMMANDS.org $(PINEPHONE_HOST):~/EMACSOS-COMMANDS.org
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
@@ -213,7 +213,11 @@ test-local-deploy-restart:
 	tests/test-local-deploy-restart.sh
 
 test-elisp: test-install-local
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
+
+test-assist-web-git:
+	PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-assist-web-git-helper.py
+	emacs -Q --batch -L . -L tests -l tests/test-assist-web-git.el -f ert-run-tests-batch-and-exit
 
 test-swipe-learning:
 	python3 -m unittest -v tests/test-swipe-learning-collector.py tests/test-emacsos-wvkbd-launch.py
