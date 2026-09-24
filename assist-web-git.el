@@ -1106,19 +1106,20 @@ Only a resident queue entry or accepted legacy receipt may claim the gate."
   "Downgrade freshness after a failed chat-owned canonical refresh attempt."
   (unless emacsos-assist-web-git--denied
     (let ((intents (plist-get emacsos-assist-web-git--pending :intents)))
-      (cl-incf emacsos-assist-web-git--epoch)
-      (setq emacsos-assist-web-git--pending nil)
-      ;; An earlier final read cannot install after this failed chat check.
-      (when emacsos-assist-web-git--request
-        (emacsos-assist-web-git--request-put
-         emacsos-assist-web-git--request :epoch emacsos-assist-web-git--epoch))
-      (when emacsos-assist-web-git--current
-        (setf (emacsos-assist-web-git-generation-state
-               emacsos-assist-web-git--current) 'cached))
-      (setq emacsos-assist-web-git--unavailable
-            (if emacsos-assist-web-git--current
-                "canonical refresh unavailable; existing views only; Retry"
-              "canonical refresh unavailable; no mirror; Retry"))
+      (let ((inhibit-quit t))
+        (when emacsos-assist-web-git--current
+          (setf (emacsos-assist-web-git-generation-state
+                 emacsos-assist-web-git--current) 'cached))
+        (cl-incf emacsos-assist-web-git--epoch)
+        (setq emacsos-assist-web-git--pending nil)
+        ;; An earlier final read cannot install after this failed chat check.
+        (when emacsos-assist-web-git--request
+          (emacsos-assist-web-git--request-put
+           emacsos-assist-web-git--request :epoch emacsos-assist-web-git--epoch))
+        (setq emacsos-assist-web-git--unavailable
+              (if emacsos-assist-web-git--current
+                  "canonical refresh unavailable; existing views only; Retry"
+                "canonical refresh unavailable; no mirror; Retry")))
       ;; The safety latch precedes fallible window and echo-area feedback.
       (when intents
         (condition-case nil

@@ -1150,12 +1150,24 @@ does not downgrade a separate chat-accepted Git observation."
           (cl-labels
               ((finish (value problem &optional status kind detail)
 		 (unless finished
-                   (setq finished t)
-                   (when (and problem (not git-failure-notified))
-                     (setq git-failure-notified
-                           (emacsos-assist-web--git-http-status
-                            origin method path status (not git-typed-error)
-                            run-owner request-tid)))
+                   ;; A failed canonical GET must fence old Git currentness
+                   ;; before completion becomes irreversible.  Raw status
+                   ;; notification may have been interrupted before latching.
+                   (let ((inhibit-quit t))
+                     (when (and problem (not git-failure-notified))
+                       (setq git-failure-notified
+                             (condition-case nil
+                                 (emacsos-assist-web--git-http-status
+                                  origin method path status (not git-typed-error)
+                                  run-owner request-tid)
+                               ((error quit) nil)))
+                       (when (and (not git-failure-notified)
+                                  (not git-typed-error)
+                                  (equal method "GET")
+                                  (buffer-live-p origin))
+                         (with-current-buffer origin
+                           (emacsos-assist-web-git--canonical-uncertain))))
+                     (setq finished t))
                    (when (timerp timer) (cancel-timer timer))
                    (setq emacsos-assist-web--requests
 			 (delq response emacsos-assist-web--requests))
@@ -1185,9 +1197,11 @@ does not downgrade a separate chat-accepted Git observation."
                                             git-failure-notified)
                                  (setq git-failure-notified
                                        (or git-failure-notified
-                                           (emacsos-assist-web--git-http-status
-                                            origin method path status nil
-                                            run-owner request-tid))))
+                                           (condition-case nil
+                                               (emacsos-assist-web--git-http-status
+                                                origin method path status nil
+                                                run-owner request-tid)
+                                             ((error quit) nil)))))
                                (unwind-protect
                                    (if (plist-get transport-status :error)
                                        (setq problem "Assist Web connection unavailable")
