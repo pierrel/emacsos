@@ -851,8 +851,11 @@ them.  STATUS-OBSERVER sees a bounded raw status prefix before any refusal."
                         (setq status-prefix
                               (substring status-prefix (match-end 0)))
                       (setq scan nil))
-                  (setq status-seen t)
-                  (funcall status-observer status))))))
+                  (when (condition-case nil
+                            (funcall status-observer status)
+                          ((error quit) nil))
+                    (setq status-seen t))
+                  (setq scan nil))))))
         (when (and streaming
                    (> (string-bytes bytes)
                       emacsos-assist-web-max-stream-chunk-bytes))
@@ -1021,28 +1024,31 @@ RUN-OWNER prevents a retired or superseded exact Run GET from relatching Git."
              (equal method "GET")
              (or (memq status '(401 403 404)) early-failure)
              (stringp path))
-    (let ((thread-get (string-match "\\`threads/\\([^/]+\\)\\'" path))
-          (tid nil)
-          (run-id nil))
-      (if thread-get
-          (setq tid (match-string 1 path))
-        (when (and (memq status '(401 403 404))
-                   (string-match "\\`threads/\\([^/]+\\)/runs/\\([^/]+\\)\\'" path))
-          (setq tid (match-string 1 path)
-                run-id (match-string 2 path))))
-      (with-current-buffer origin
-        (when (and tid (equal tid emacsos-assist-web--thread-id))
-          (condition-case nil
+    (condition-case nil
+        (let ((thread-get (string-match "\\`threads/\\([^/]+\\)\\'" path))
+              (tid nil)
+              (run-id nil))
+          (if thread-get
+              (setq tid (match-string 1 path))
+            (when (and (memq status '(401 403 404))
+                       (string-match "\\`threads/\\([^/]+\\)/runs/\\([^/]+\\)\\'" path))
+              (setq tid (match-string 1 path)
+                    run-id (match-string 2 path))))
+          (with-current-buffer origin
+            (when (and tid (equal tid emacsos-assist-web--thread-id))
               (cond
                ((and run-id
                      (emacsos-assist-web--run-http-owner-current-p
                       run-owner tid run-id))
-                (emacsos-assist-web-git--run-access-uncertain status run-id))
+                (emacsos-assist-web-git--run-access-uncertain status run-id)
+                t)
                (run-id nil)
                ((memq status '(401 403 404))
-                (emacsos-assist-web-git--canonical-denied status))
-               (t (emacsos-assist-web-git--canonical-uncertain)))
-            (error nil)))))))
+                (emacsos-assist-web-git--canonical-denied status)
+                t)
+               (t (emacsos-assist-web-git--canonical-uncertain)
+                  t)))))
+      ((error quit) nil))))
 
 (defun emacsos-assist-web--git-request-error (status kind &optional detail)
   "Return a bounded typed Git error for STATUS, KIND and local DETAIL.
@@ -1130,10 +1136,10 @@ does not downgrade a separate chat-accepted Git observation."
 		 (unless finished
                    (setq finished t)
                    (when (and problem (not git-failure-notified))
-                     (setq git-failure-notified t)
-                     (emacsos-assist-web--git-http-status
-                      origin method path status (not git-typed-error)
-                      run-owner))
+                     (setq git-failure-notified
+                           (emacsos-assist-web--git-http-status
+                            origin method path status (not git-typed-error)
+                            run-owner)))
                    (when (timerp timer) (cancel-timer timer))
                    (setq emacsos-assist-web--requests
 			 (delq response emacsos-assist-web--requests))
@@ -1159,11 +1165,13 @@ does not downgrade a separate chat-accepted Git observation."
                              (let (value problem
                                          (status (and (boundp 'url-http-response-status)
                                                       url-http-response-status)))
-                               (unless (eql observed-http-status status)
-                                 (when (memq status '(401 403 404))
-                                   (setq git-failure-notified t))
-                                 (emacsos-assist-web--git-http-status
-                                  origin method path status nil run-owner))
+                               (unless (and (eql observed-http-status status)
+                                            git-failure-notified)
+                                 (setq git-failure-notified
+                                       (or git-failure-notified
+                                           (emacsos-assist-web--git-http-status
+                                            origin method path status nil
+                                            run-owner))))
                                (unwind-protect
                                    (if (plist-get transport-status :error)
                                        (setq problem "Assist Web connection unavailable")
@@ -1213,11 +1221,11 @@ does not downgrade a separate chat-accepted Git observation."
                        (emacsos-assist-web--guarded-filter
 			url-filter
 			(lambda (active problem)
-			  (unless (memq observed-http-status '(401 403 404))
-                            (setq git-failure-notified t)
-                            (emacsos-assist-web--git-http-status
-                             origin method path observed-http-status
-                             (not git-typed-error) run-owner))
+			  (unless git-failure-notified
+                            (setq git-failure-notified
+                                  (emacsos-assist-web--git-http-status
+                                   origin method path observed-http-status
+                                   (not git-typed-error) run-owner)))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
@@ -1228,10 +1236,12 @@ does not downgrade a separate chat-accepted Git observation."
                         nil
                         (lambda (status)
                           (setq observed-http-status status)
-                          (when (memq status '(401 403 404))
-                            (setq git-failure-notified t))
-                          (emacsos-assist-web--git-http-status
-                           origin method path status nil run-owner)))))))
+                          (setq git-failure-notified
+                                (or git-failure-notified
+                                    (emacsos-assist-web--git-http-status
+                                     origin method path status nil run-owner)
+                                    (not (memq status '(401 403 404)))))
+                          git-failure-notified))))))
               (error (finish nil (error-message-string error)))))))))))
 
 (defun emacsos-assist-web--display-status (status)

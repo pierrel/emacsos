@@ -720,7 +720,8 @@ queue-free compatibility path."
         (emacsos-assist-web-refresh-thread (current-buffer)))))))
 
 (defun emacsos-assist-web-git--invalidate (reason)
-  "Make Git freshness unavailable for REASON without changing chat state."
+  "Make Git freshness unavailable for REASON without changing chat state.
+A definitive thread denial keeps its endpoint-specific reason instead."
   (when (eq emacsos-assist-web-git--denied t)
     (setq reason (emacsos-assist-web-git--thread-denial-reason)))
   (let ((intents (emacsos-assist-web-git--live-intents
@@ -750,12 +751,17 @@ queue-free compatibility path."
     ((error quit) nil)))
 
 (defun emacsos-assist-web-git--release-intents (intents reason &optional quiet)
-  "Give each live INTENT a reason-specific window result; message unless QUIET."
+  "End live INTENTS and attempt window feedback; message unless QUIET."
   (let (released)
     (dolist (intent intents)
       (condition-case nil
           (when (emacsos-assist-web-git--intent-live-p intent)
             (setq released t)
+            ;; The action is finished even if constructing its feedback fails.
+            ;; A later callback must not find a still-live busy window token.
+            (set-window-parameter (plist-get intent :window)
+                                  'assist-web-git-intent
+                                  (1+ (plist-get intent :serial)))
             (let* ((window (plist-get intent :window))
              (thread (plist-get intent :buffer))
              (restart (string-match-p "restart to recover" reason))
@@ -789,8 +795,6 @@ queue-free compatibility path."
              (header `(:eval (if (eq (current-buffer) ,thread)
                                  ,(concat label retry details)
                                header-line-format))))
-        (set-window-parameter window 'assist-web-git-intent
-                              (1+ (plist-get intent :serial)))
         (set-window-parameter window 'assist-web-git-feedback header)
         (set-window-parameter window 'header-line-format header)
         (setq emacsos-assist-web-git--feedback-windows
@@ -939,7 +943,9 @@ queue-free compatibility path."
               ((error quit) nil))))))
     (when (buffer-live-p source)
       (with-current-buffer source
-        (message "Thread Git: %s" emacsos-assist-web-git--unavailable)))))
+        (condition-case nil
+            (message "Thread Git: %s" emacsos-assist-web-git--unavailable)
+          ((error quit) nil))))))
 
 (defun emacsos-assist-web-git--run-record (tid run-id)
   "Return the outstanding safety record for exact TID and RUN-ID."
