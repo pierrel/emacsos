@@ -379,14 +379,14 @@
   (condition-case nil (emacsos-assist-web-git--cancel) (error nil))
   (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
 
-(defun emacsos-assist-web-git--release-intents (intents reason)
-  "Release live INTENTS and message terminal Git failure REASON."
+(defun emacsos-assist-web-git--release-intents (intents reason &optional quiet)
+  "Release live INTENTS and, unless QUIET, message Git failure REASON."
   (dolist (intent intents)
     (when (emacsos-assist-web-git--intent-live-p intent)
       (set-window-parameter
        (plist-get intent :window) 'assist-web-git-intent
        (1+ (plist-get intent :serial)))
-      (message "Thread Git: %s" reason))))
+      (unless quiet (message "Thread Git: %s" reason)))))
 
 (defun emacsos-assist-web-git--canonical-denied (status)
   "Latch canonical HTTP STATUS denial across old Git callbacks and views."
@@ -403,13 +403,14 @@
     (message "Thread Git: %s" reason)))
 
 (defun emacsos-assist-web-git--canonical-uncertain ()
-  "Downgrade freshness after a failed chat-owned canonical GET."
+  "Downgrade freshness after a failed chat-owned canonical refresh attempt."
   (unless emacsos-assist-web-git--denied
     (when emacsos-assist-web-git--current
       (setf (emacsos-assist-web-git-generation-state
              emacsos-assist-web-git--current) 'cached))
-    (emacsos-assist-web-git--invalidate
-     "canonical metadata unavailable; Retry")))
+    (setq emacsos-assist-web-git--unavailable
+          "canonical refresh unavailable; existing views only; Retry")
+    (emacsos-assist-web-git--update-headers)))
 
 (defun emacsos-assist-web-git--canonical-authorized (start-epoch)
   "Clear a denial only after chat accepts a GET begun at START-EPOCH."
@@ -671,6 +672,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                              emacsos-assist-web-git--current
                              emacsos-assist-web-git--current generation
                              emacsos-assist-web-git--request nil
+                             emacsos-assist-web-git--unavailable nil
                              installed t))
                    (error
                     (emacsos-assist-web-git--cleanup id "staging" #'ignore)
@@ -747,15 +749,16 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                (when emacsos-assist-web-git--current
                  (setf (emacsos-assist-web-git-generation-state
                         emacsos-assist-web-git--current) 'cached))
-               (setq emacsos-assist-web-git--unavailable
-                     (if emacsos-assist-web-git--current
-                         "metadata unavailable; existing views only; Retry"
-                       "metadata unavailable; no cached mirror; Retry"))
+               (unless emacsos-assist-web-git--request
+                 (setq emacsos-assist-web-git--unavailable
+                       (if emacsos-assist-web-git--current
+                           "metadata unavailable; existing views only; Retry"
+                         "metadata unavailable; no cached mirror; Retry")))
                (emacsos-assist-web-git--update-headers))
              (message "Thread Git metadata unavailable: %s"
                       (emacsos-assist-web-git--problem-text problem))
              (emacsos-assist-web-git--release-intents
-              (list intent) "metadata unavailable; Retry"))
+              (list intent) "metadata unavailable; Retry" t))
             (t
              (emacsos-assist-web-git--note metadata)
              (emacsos-assist-web-git--enqueue metadata intent)))))))))
