@@ -94,6 +94,7 @@ class GitHelperTest(unittest.TestCase):
                           side_effect=self.isolated_env):
             for branch, generation in (
                     ("main", "a" * 32),
+                    ("HEAD", "e" * 32),
                     ("bad..ref", "c" * 32),
                     ("thread/missing", "d" * 32)):
                 with self.assertRaises(helper.Refusal):

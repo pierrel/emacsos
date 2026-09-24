@@ -61,6 +61,80 @@
           "same-label")
     (should-error (emacsos-assist-web-git--metadata-from-snapshot snapshot))))
 
+(ert-deftest test-assist-web-git-rejects-detached-head-in-either-selection ()
+  (dolist (status '("ready" "processing"))
+    (let ((snapshot (test-assist-web-git--snapshot
+                     status "HEAD" (and (equal status "processing") "HEAD"))))
+      (should-error (emacsos-assist-web-git--metadata-from-snapshot snapshot)))))
+
+(ert-deftest test-assist-web-git-invalid-projection-clears-currentness ()
+  (with-temp-buffer
+    (let* ((valid (test-assist-web-git--snapshot "ready" "topic/one"))
+           (broken (copy-tree valid))
+           (metadata (emacsos-assist-web-git--metadata-from-snapshot valid))
+           (generation (make-emacsos-assist-web-git-generation
+                        :metadata metadata :state 'current)))
+      (setf (alist-get 'published_revision
+                      (alist-get 'workspace (alist-get 'thread broken)))
+            test-assist-web-git--published)
+      (setq-local emacsos-assist-web-git--metadata metadata
+                  emacsos-assist-web-git--current generation)
+      (emacsos-assist-web-git--note-snapshot broken)
+      (should-not emacsos-assist-web-git--metadata)
+      (should (equal emacsos-assist-web-git--unavailable
+                     "invalid Git metadata"))
+      (should (equal (emacsos-assist-web-git--view-state
+                      generation (current-buffer)) "stale")))))
+
+(ert-deftest test-assist-web-git-invalid-projection-does-not-reject-chat-refresh ()
+  (let ((broken (test-assist-web-git--snapshot "ready" "topic/one"))
+        rendered)
+    (setf (alist-get 'published_revision
+                    (alist-get 'workspace (alist-get 'thread broken)))
+          test-assist-web-git--published)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq-local emacsos-assist-web--thread-id "thread-1")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback broken nil)))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (snapshot &rest _) (setq rendered snapshot))))
+        (emacsos-assist-web--legacy-refresh-thread (current-buffer))
+        (should (eq rendered broken))
+        (should-not emacsos-assist-web-git--metadata)
+        (should (equal emacsos-assist-web-git--unavailable
+                       "invalid Git metadata"))))))
+
+(ert-deftest test-assist-web-git-invalid-projection-does-not-block-reconciliation ()
+  (let ((broken (test-assist-web-git--snapshot "ready" "topic/one"))
+        rendered)
+    (setf (alist-get 'published_revision
+                    (alist-get 'workspace (alist-get 'thread broken)))
+          test-assist-web-git--published)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue
+                  (list (list :key "exact-key" :state 'reconciling)))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback broken nil)))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (snapshot &rest _) (setq rendered snapshot)))
+                ((symbol-function 'emacsos-assist-web--sync-active-surface)
+                 #'ignore))
+        (emacsos-assist-web--reconcile-queue)
+        (should (eq rendered broken))
+        (should-not emacsos-assist-web--queue)
+        (should-not emacsos-assist-web-git--metadata)))))
+
 (ert-deftest test-assist-web-git-helper-refusal-is-not-success ()
   (let ((result (emacsos-assist-web-git--parse-helper-result
                  "{\"ok\":false,\"reason\":\"no configured Git remote\"}")))
@@ -116,6 +190,26 @@
                   (should (string-match-p "committed content" (buffer-string)))
                   (should-not test-assist-web-git--executed))
               (kill-buffer view))))
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-file-view-rejects-git-internals-and-large-blob ()
+  (let* ((root (make-temp-file "assist-git-file-bound-" t))
+         (git-dir (expand-file-name ".git/objects" root))
+         (internal (expand-file-name "object" git-dir))
+         (large (expand-file-name "large.txt" root))
+         (generation (make-emacsos-assist-web-git-generation
+                      :path root :oid test-assist-web-git--head)))
+    (unwind-protect
+        (progn
+          (make-directory git-dir t)
+          (with-temp-file internal (insert "not a worktree file"))
+          (with-temp-file large
+            (insert (make-string (1+ emacsos-assist-web-git--file-view-limit)
+                                 ?x)))
+          (should-error (emacsos-assist-web-git--literal-file-view
+                         internal root (current-buffer) generation))
+          (should-error (emacsos-assist-web-git--literal-file-view
+                         large root (current-buffer) generation)))
       (delete-directory root t))))
 
 (defun test-assist-web-git--metadata (status branch oid)
