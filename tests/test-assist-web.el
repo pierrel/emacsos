@@ -724,6 +724,75 @@
     (should (= (plist-get typed :status) 200))
     (should (equal (plist-get typed :text) "Assist Web response invalid"))))
 
+(ert-deftest test-assist-web-git-oversized-denial-status-precedes-refusal ()
+  (let ((emacsos-assist-web-max-response-bytes 90)
+        (header "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\n"))
+    (dolist (chunks (list (list (concat header (make-string 100 ?x)))
+                          (list header (make-string 100 ?x))))
+      (let (statuses refused forwarded)
+        (let ((filter
+               (emacsos-assist-web--guarded-filter
+                (lambda (&rest _) (setq forwarded t))
+                (lambda (_process reason) (setq refused reason))
+                nil (lambda (status) (push status statuses)))))
+          (dolist (chunk chunks) (funcall filter nil chunk)))
+        (should (equal statuses '(403)))
+        (should (equal refused "Assist Web response is too large"))
+        (when (= (length chunks) 1)
+          (should-not forwarded))))))
+
+(ert-deftest test-assist-web-git-request-budget-is-not-offline-authority ()
+  (let ((emacsos-assist-web--requests '(one two))
+        (emacsos-assist-web-max-concurrent-requests 2)
+        problem)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+               (lambda () "token")))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value error) (setq problem error))
+       nil nil nil nil t))
+    (should (eq (plist-get problem :kind) 'transport))
+    (should-not (plist-get problem :offline))))
+
+(ert-deftest test-assist-web-git-tls-error-is-not-parse-or-offline ()
+  (let ((emacsos-assist-web--requests nil) problem)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+               (lambda () "token"))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'url-retrieve)
+               (lambda (_url callback &rest _)
+                 (let ((response (generate-new-buffer " *git-tls-test*")))
+                   (with-current-buffer response
+                     (funcall callback '(:error (tls "bad certificate"))))
+                   response))))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value error) (setq problem error))
+       nil nil nil nil t))
+    (should (eq (plist-get problem :kind) 'transport))
+    (should-not (plist-get problem :offline))
+    (should-not (plist-get problem :status))))
+
+(ert-deftest test-assist-web-git-timeout-is-not-offline-authority ()
+  (let ((emacsos-assist-web--requests nil)
+        (response (generate-new-buffer " *git-timeout-test*"))
+        timer problem)
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                   (lambda () "token"))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (&rest _) response))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat callback) (setq timer callback))))
+          (emacsos-assist-web--request
+           "GET" "threads/thread-1" nil
+           (lambda (_value error) (setq problem error))
+           nil nil nil nil t)
+          (funcall timer)
+          (should (eq (plist-get problem :kind) 'transport))
+          (should-not (plist-get problem :offline)))
+      (when (buffer-live-p response) (kill-buffer response)))))
+
 (ert-deftest test-assist-web-json-request-reports-an-invalid-token ()
   (let (result)
     (cl-letf (((symbol-function 'emacsos-assist-web--read-token)

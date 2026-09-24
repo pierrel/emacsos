@@ -53,6 +53,8 @@
 (defvar-local emacsos-assist-web-git--epoch 0)
 (defvar-local emacsos-assist-web-git--observation 0
   "Serial that makes older Git metadata responses inert.")
+(defvar-local emacsos-assist-web-git--auth-epoch 0)
+(defvar-local emacsos-assist-web-git--denied nil)
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
 (defvar-local emacsos-assist-web-git--view-thread nil)
@@ -159,6 +161,7 @@
     (with-current-buffer thread
       (let ((latest emacsos-assist-web-git--metadata))
         (cond
+         (emacsos-assist-web-git--denied "unavailable; reauthorize and Retry")
          ((not (emacsos-assist-web-git--same-identity
                 latest (emacsos-assist-web-git-generation-metadata generation)))
           "stale")
@@ -207,10 +210,16 @@
   "Return a compact, actionable mirror state for the thread header."
   (let* ((generation emacsos-assist-web-git--current)
          (state (cond
+                 (emacsos-assist-web-git--denied
+                  (or emacsos-assist-web-git--unavailable "unavailable"))
                  ((not (emacsos-assist-web-git--usable
                         emacsos-assist-web-git--metadata))
                   (or emacsos-assist-web-git--unavailable "unavailable"))
                  (emacsos-assist-web-git--request "fetching")
+                 ((and emacsos-assist-web-git--unavailable
+                       (string-prefix-p "metadata unavailable"
+                                        emacsos-assist-web-git--unavailable))
+                  emacsos-assist-web-git--unavailable)
                  ((and generation
                        (not (emacsos-assist-web-git--same-identity
                              emacsos-assist-web-git--metadata
@@ -359,18 +368,55 @@
 
 (defun emacsos-assist-web-git--invalidate (reason)
   "Make Git freshness unavailable for REASON without changing chat state."
-  (setq emacsos-assist-web-git--metadata nil
-        emacsos-assist-web-git--unavailable reason
-        emacsos-assist-web-git--next nil)
+  (let ((intents (append (plist-get emacsos-assist-web-git--request :intents)
+                         (cadr emacsos-assist-web-git--next))))
+    (setq emacsos-assist-web-git--metadata nil
+          emacsos-assist-web-git--unavailable reason
+          emacsos-assist-web-git--next nil)
+    (emacsos-assist-web-git--release-intents intents reason))
   (cl-incf emacsos-assist-web-git--observation)
   (cl-incf emacsos-assist-web-git--epoch)
   (condition-case nil (emacsos-assist-web-git--cancel) (error nil))
   (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
 
+(defun emacsos-assist-web-git--release-intents (intents reason)
+  "Visibly release live INTENTS after terminal Git failure REASON."
+  (dolist (intent intents)
+    (when (emacsos-assist-web-git--intent-live-p intent)
+      (set-window-parameter
+       (plist-get intent :window) 'assist-web-git-intent
+       (1+ (plist-get intent :serial)))
+      (message "Thread Git: %s" reason))))
+
 (defun emacsos-assist-web-git--canonical-denied (status)
-  "Invalidate this thread's Git authority after canonical HTTP STATUS denial."
-  (emacsos-assist-web-git--invalidate
-   (format "thread access denied (%d); Git unavailable" status)))
+  "Latch canonical HTTP STATUS denial across old Git callbacks and views."
+  (cl-incf emacsos-assist-web-git--auth-epoch)
+  (setq emacsos-assist-web-git--denied t)
+  (when emacsos-assist-web-git--current
+    (setf (emacsos-assist-web-git-generation-state
+           emacsos-assist-web-git--current) 'cached))
+  (let ((reason (if (= status 404)
+                    "thread unavailable (404); reopen and Retry"
+                  (format "thread access denied (%d); reauthorize and Retry"
+                          status))))
+    (emacsos-assist-web-git--invalidate reason)
+    (message "Thread Git: %s" reason)))
+
+(defun emacsos-assist-web-git--canonical-uncertain ()
+  "Downgrade freshness after an unclassified canonical transport failure."
+  (unless emacsos-assist-web-git--denied
+    (when emacsos-assist-web-git--current
+      (setf (emacsos-assist-web-git-generation-state
+             emacsos-assist-web-git--current) 'cached))
+    (emacsos-assist-web-git--invalidate
+     "canonical metadata unavailable; Retry")))
+
+(defun emacsos-assist-web-git--canonical-authorized (start-epoch)
+  "Clear a denial only after chat accepts a GET begun at START-EPOCH."
+  (when (and emacsos-assist-web-git--denied
+             (eql start-epoch emacsos-assist-web-git--auth-epoch))
+    (setq emacsos-assist-web-git--denied nil)
+    (emacsos-assist-web-git--update-headers)))
 
 (defun emacsos-assist-web-git--problem-text (problem)
   "Return the safe display text from PROBLEM."
@@ -680,28 +726,41 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
      (lambda (metadata problem)
        (when (buffer-live-p thread)
          (with-current-buffer thread
-           (when (= observation emacsos-assist-web-git--observation)
-             (if problem
-               (progn
-                 (if (and (listp problem)
-                          (eq (plist-get problem :kind) 'http)
-                          (memq (plist-get problem :status) '(401 403 404)))
-                     (emacsos-assist-web-git--canonical-denied
-                      (plist-get problem :status))
-                   (if (and (consp problem)
-                            (memq (car problem) '(canonical git)))
-                       (emacsos-assist-web-git--invalidate
-                        (if (eq (car problem) 'canonical)
-                            "invalid authenticated thread snapshot"
-                          "invalid Git workspace metadata"))
-                     (when emacsos-assist-web-git--current
-                       (setf (emacsos-assist-web-git-generation-state
-                              emacsos-assist-web-git--current) 'cached))
-                     (setq emacsos-assist-web-git--unavailable
-                           "metadata refresh failed; cached")
-                     (emacsos-assist-web-git--update-headers)))
-                 (message "Thread Git metadata unavailable: %s"
-                          (emacsos-assist-web-git--problem-text problem)))
+           (cond
+            ((and (listp problem)
+                  (eq (plist-get problem :kind) 'http)
+                  (memq (plist-get problem :status) '(401 403 404)))
+             ;; The shared request boundary already installed the denial.
+             (emacsos-assist-web-git--release-intents
+              (list intent) emacsos-assist-web-git--unavailable)
+             (message "Thread Git metadata unavailable: %s"
+                      (emacsos-assist-web-git--problem-text problem)))
+            ((and problem
+                  (/= observation emacsos-assist-web-git--observation))
+             (emacsos-assist-web-git--release-intents
+              (list intent) "metadata observation superseded; Retry"))
+            ((/= observation emacsos-assist-web-git--observation) nil)
+            (emacsos-assist-web-git--denied
+             (emacsos-assist-web-git--release-intents
+              (list intent) "thread access unavailable; reauthorize and Retry"))
+            (problem
+             (if (and (consp problem)
+                      (memq (car problem) '(canonical git)))
+                 (emacsos-assist-web-git--invalidate
+                  (if (eq (car problem) 'canonical)
+                      "invalid authenticated thread snapshot"
+                    "invalid Git workspace metadata"))
+               (when emacsos-assist-web-git--current
+                 (setf (emacsos-assist-web-git-generation-state
+                        emacsos-assist-web-git--current) 'cached))
+               (setq emacsos-assist-web-git--unavailable
+                     (if emacsos-assist-web-git--current
+                         "metadata unavailable; existing views only; Retry"
+                       "metadata unavailable; no cached mirror; Retry"))
+               (emacsos-assist-web-git--update-headers))
+             (message "Thread Git metadata unavailable: %s"
+                      (emacsos-assist-web-git--problem-text problem)))
+            (t
              (emacsos-assist-web-git--note metadata)
              (emacsos-assist-web-git--enqueue metadata intent)))))))))
 
@@ -777,8 +836,14 @@ interpret repository-local code."
   (let* ((window (plist-get intent :window))
          (thread (plist-get intent :buffer))
          (root (emacsos-assist-web-git-generation-path generation))
-         (default-directory (file-name-as-directory root)))
+         (default-directory (file-name-as-directory root))
+         (auth-epoch (with-current-buffer thread
+                       emacsos-assist-web-git--auth-epoch))
+         (safety-epoch (with-current-buffer thread
+                         emacsos-assist-web-git--epoch)))
     (when (emacsos-assist-web-git--intent-live-p intent)
+      (when (with-current-buffer thread emacsos-assist-web-git--denied)
+        (user-error "Thread Git access denied; reauthorize and Retry"))
       (pcase (plist-get intent :action)
         ('files
          (let* ((prompt (format "Git %s %s file: "
@@ -798,6 +863,11 @@ interpret repository-local code."
                               minibuffer-setup-hook)))
                    (read-file-name prompt default-directory nil t))))
            (when (emacsos-assist-web-git--intent-live-p intent)
+             (unless (with-current-buffer thread
+                       (and (not emacsos-assist-web-git--denied)
+                            (= auth-epoch emacsos-assist-web-git--auth-epoch)
+                            (= safety-epoch emacsos-assist-web-git--epoch)))
+               (user-error "Thread Git repository changed; Retry"))
              (let ((view (emacsos-assist-web-git--literal-file-view
                           choice root thread generation)))
                (condition-case error
