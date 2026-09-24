@@ -6955,7 +6955,7 @@
         (emacsos-assist-web--stream-finish (current-buffer)))
       (should emacsos-assist-web--reconcile-recovery-paused)
       (should-not emacsos-assist-web--manual-recovery-active)
-      (should-not emacsos-assist-web--manual-terminal-run-id)
+      (should-not emacsos-assist-web--post-sse-run-id)
       (should emacsos-assist-web--manual-recovery-required)
       (should (eq (plist-get entry :state) 'observing)))))
 
