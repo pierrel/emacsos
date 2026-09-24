@@ -61,11 +61,17 @@
           "same-label")
     (should-error (emacsos-assist-web-git--metadata-from-snapshot snapshot))))
 
-(ert-deftest test-assist-web-git-rejects-detached-head-in-either-selection ()
-  (dolist (status '("ready" "processing"))
-    (let ((snapshot (test-assist-web-git--snapshot
-                     status "HEAD" (and (equal status "processing") "HEAD"))))
-      (should-error (emacsos-assist-web-git--metadata-from-snapshot snapshot)))))
+(ert-deftest test-assist-web-git-detached-head-is-not-a-branch-selection ()
+  (let* ((snapshot (test-assist-web-git--snapshot "ready" "HEAD"))
+         (metadata (emacsos-assist-web-git--metadata-from-snapshot snapshot)))
+    (should-not (emacsos-assist-web-git--usable metadata))
+    (with-temp-buffer
+      (emacsos-assist-web-git--note-snapshot snapshot)
+      (should (equal emacsos-assist-web-git--unavailable
+                     "detached HEAD; Git unavailable"))))
+  (let ((snapshot (test-assist-web-git--snapshot
+                   "processing" "main" "HEAD")))
+    (should-error (emacsos-assist-web-git--metadata-from-snapshot snapshot))))
 
 (ert-deftest test-assist-web-git-invalid-projection-clears-currentness ()
   (with-temp-buffer
@@ -82,7 +88,7 @@
       (emacsos-assist-web-git--note-snapshot broken)
       (should-not emacsos-assist-web-git--metadata)
       (should (equal emacsos-assist-web-git--unavailable
-                     "invalid Git metadata"))
+                     "Git state unavailable"))
       (should (equal (emacsos-assist-web-git--view-state
                       generation (current-buffer)) "stale")))))
 
@@ -106,7 +112,7 @@
         (should (eq rendered broken))
         (should-not emacsos-assist-web-git--metadata)
         (should (equal emacsos-assist-web-git--unavailable
-                       "invalid Git metadata"))))))
+                       "Git state unavailable"))))))
 
 (ert-deftest test-assist-web-git-invalid-projection-does-not-block-reconciliation ()
   (let ((broken (test-assist-web-git--snapshot "ready" "topic/one"))
@@ -134,6 +140,77 @@
         (should (eq rendered broken))
         (should-not emacsos-assist-web--queue)
         (should-not emacsos-assist-web-git--metadata)))))
+
+(ert-deftest test-assist-web-git-state-update-error-does-not-reject-chat-refresh ()
+  (let ((snapshot (test-assist-web-git--snapshot "ready" "topic/one"))
+        rendered)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq-local emacsos-assist-web--thread-id "thread-1")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil)))
+                ((symbol-function 'emacsos-assist-web-git--note)
+                 (lambda (&rest _) (error "Git state update failed")))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (value &rest _) (setq rendered value))))
+        (emacsos-assist-web--legacy-refresh-thread (current-buffer))
+        (should (eq rendered snapshot))
+        (should-not emacsos-assist-web-git--metadata)
+        (should (equal emacsos-assist-web-git--unavailable
+                       "Git state unavailable"))))))
+
+(ert-deftest test-assist-web-git-state-update-error-does-not-retain-queue ()
+  (let ((snapshot (test-assist-web-git--snapshot "ready" "topic/one"))
+        rendered)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue
+                  (list (list :key "exact-key" :state 'reconciling)))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil)))
+                ((symbol-function 'emacsos-assist-web-git--note)
+                 (lambda (&rest _) (error "Git state update failed")))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (value &rest _) (setq rendered value)))
+                ((symbol-function 'emacsos-assist-web--sync-active-surface)
+                 #'ignore))
+        (emacsos-assist-web--reconcile-queue)
+        (should (eq rendered snapshot))
+        (should-not emacsos-assist-web--queue)
+        (should (equal emacsos-assist-web-git--unavailable
+                       "Git state unavailable"))))))
+
+(ert-deftest test-assist-web-git-unknown-status-still-rejects-reconciliation ()
+  (let ((snapshot (test-assist-web-git--snapshot "future-state" "topic/one"))
+        rendered cached)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue
+                  (list (list :key "exact-key" :state 'reconciling)))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil)))
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) (setq cached t)))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (&rest _) (setq rendered t)))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t)))
+        (emacsos-assist-web--reconcile-queue)
+        (should-not rendered)
+        (should-not cached)
+        (should (eq (plist-get (car emacsos-assist-web--queue) :state)
+                    'terminal-unreconciled))))))
 
 (ert-deftest test-assist-web-git-helper-refusal-is-not-success ()
   (let ((result (emacsos-assist-web-git--parse-helper-result
@@ -192,11 +269,15 @@
               (kill-buffer view))))
       (delete-directory root t))))
 
-(ert-deftest test-assist-web-git-file-view-rejects-git-internals-and-large-blob ()
+(ert-deftest test-assist-web-git-file-view-rejects-internals-symlinks-and-large-file ()
   (let* ((root (make-temp-file "assist-git-file-bound-" t))
          (git-dir (expand-file-name ".git/objects" root))
          (internal (expand-file-name "object" git-dir))
          (large (expand-file-name "large.txt" root))
+         (small (expand-file-name "small.txt" root))
+         (linked (expand-file-name "linked.txt" root))
+         (nested (expand-file-name "nested" root))
+         (linked-dir (expand-file-name "linked-dir" root))
          (generation (make-emacsos-assist-web-git-generation
                       :path root :oid test-assist-web-git--head)))
     (unwind-protect
@@ -206,11 +287,81 @@
           (with-temp-file large
             (insert (make-string (1+ emacsos-assist-web-git--file-view-limit)
                                  ?x)))
+          (make-directory nested)
+          (with-temp-file small (insert "small"))
+          (with-temp-file (expand-file-name "file.txt" nested)
+            (insert "nested"))
+          (make-symbolic-link small linked)
+          (make-symbolic-link nested linked-dir)
           (should-error (emacsos-assist-web-git--literal-file-view
                          internal root (current-buffer) generation))
           (should-error (emacsos-assist-web-git--literal-file-view
-                         large root (current-buffer) generation)))
+                         large root (current-buffer) generation))
+          (should-error (emacsos-assist-web-git--literal-file-view
+                         linked root (current-buffer) generation))
+          (should-error (emacsos-assist-web-git--literal-file-view
+                         (expand-file-name "file.txt" linked-dir)
+                         root (current-buffer) generation)))
       (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-command-probe-failure-downgrades-freshness ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web-git--sync-keys)
+    (let* ((metadata (test-assist-web-git--metadata
+                      "ready" "topic/one" test-assist-web-git--head))
+           (generation (make-emacsos-assist-web-git-generation
+                        :metadata metadata :state 'current)))
+      (setq-local emacsos-assist-web-git--metadata metadata
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread callback) (funcall callback nil "offline"))))
+        (emacsos-assist-web-git--command 'files))
+      (should (eq (emacsos-assist-web-git-generation-state generation)
+                  'cached))
+      (should-not (string-match-p " current" (emacsos-assist-web-git--thread-header)))
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread callback)
+                   (funcall callback nil '(invalid . "bad Git fields")))))
+        (emacsos-assist-web-git--command 'files))
+      (should-not emacsos-assist-web-git--metadata)
+      (should (equal emacsos-assist-web-git--unavailable
+                     "invalid authenticated Git metadata")))))
+
+(ert-deftest test-assist-web-git-view-refusal-after-promotion-keeps-generation ()
+  (let* ((cache (make-temp-file "assist-git-promote-" t))
+         (generation-id (make-string 32 ?c))
+         (stage (expand-file-name (concat "staging/" generation-id) cache))
+         (path (expand-file-name (concat "generations/" generation-id) cache))
+         (intent (list :action 'files))
+         (metadata (test-assist-web-git--metadata
+                    "ready" "topic/one" test-assist-web-git--head))
+         (request (list :id generation-id :epoch 0 :metadata metadata
+                        :intents (list intent)))
+         opened)
+    (unwind-protect
+        (with-temp-buffer
+          (make-directory stage t)
+          (make-directory (expand-file-name "generations" cache))
+          (let ((emacsos-assist-web-git-cache-directory cache))
+            (setq-local emacsos-assist-web-git--metadata metadata
+                        emacsos-assist-web-git--request request)
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--intent-live-p)
+                       (lambda (_) t))
+                      ((symbol-function 'emacsos-assist-web-git--open)
+                       (lambda (&rest _) (setq opened t)
+                         (error "file is above display limit"))))
+              (emacsos-assist-web-git--promote
+               request (list :thread_oid test-assist-web-git--head
+                             :main_oid test-assist-web-git--published)))
+            (should opened)
+            (should-not emacsos-assist-web-git--request)
+            (should (equal (emacsos-assist-web-git-generation-path
+                            emacsos-assist-web-git--current) path))
+            (should (file-directory-p path))
+            (should-not (file-exists-p stage))))
+      (delete-directory cache t))))
 
 (defun test-assist-web-git--metadata (status branch oid)
   "Return a selected STATUS, BRANCH, OID tuple for race tests."
