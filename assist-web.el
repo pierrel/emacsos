@@ -603,7 +603,6 @@ the fetch begins."
          (head (alist-get 'revision workspace))
          (published-branch (alist-get 'published_branch workspace))
          (published-revision (alist-get 'published_revision workspace)))
-    (emacsos-assist-web--snapshot-active-p snapshot)
     (unless (or (null repo-key)
                 (and (stringp repo-key)
                      (string-match-p
@@ -619,34 +618,36 @@ the fetch begins."
                 (and (stringp published-branch)
                      (stringp published-revision)))
       (error "Assist Web returned an incomplete published Git ref"))
+    (when (equal published-branch "HEAD")
+      (error "Assist Web returned detached HEAD as a published Git ref"))
     (let* ((ready (equal status "ready"))
            (branch (if ready actual-branch published-branch))
            (expected (if ready head published-revision)))
       (when (and branch
                  (not (and (stringp branch)
                            (<= (string-bytes branch) 240)
-                           (not (string-match-p "[[:cntrl:]]" branch))
-                           (not (equal branch "HEAD")))))
+                           (not (string-match-p "[[:cntrl:]]" branch)))))
         (error "Assist Web returned an invalid Git branch"))
       (list :tid tid :repo-key repo-key
             :branch (and (stringp branch)
                          (not (equal branch "main"))
+                         (not (equal branch "HEAD"))
                          branch)
             :expected expected :status status
             :actual-branch (and ready actual-branch)
             :head head))))
 
 (defun emacsos-assist-web-git--note-snapshot (snapshot &optional terminal)
-  "Update Git state from SNAPSHOT without rejecting canonical chat on Git errors.
+  "Update optional Git state from validated SNAPSHOT without rejecting chat.
 TERMINAL has the same meaning as in `emacsos-assist-web-git--note'."
-  (let ((metadata (condition-case nil
-                      (emacsos-assist-web-git--metadata-from-snapshot snapshot)
-                    (error nil))))
-    (if metadata
+  (condition-case nil
+      (let ((metadata (emacsos-assist-web-git--metadata-from-snapshot snapshot)))
         (emacsos-assist-web-git--note metadata terminal)
-      (emacsos-assist-web-git--note nil)
-      (setq emacsos-assist-web-git--unavailable "invalid Git metadata")
-      (emacsos-assist-web-git--update-headers))))
+        (when (equal (plist-get metadata :actual-branch) "HEAD")
+          (setq emacsos-assist-web-git--unavailable
+                "detached HEAD; Git unavailable")
+          (emacsos-assist-web-git--update-headers)))
+    (error (emacsos-assist-web-git--invalidate "Git state unavailable"))))
 
 (defun emacsos-assist-web--require-history-page (page thread-id current before)
   "Return PAGE after validating its identity and progress from CURRENT/BEFORE."
@@ -4287,6 +4288,7 @@ write leaves the provisional records available for the next exact refresh."
                      (condition-case problem
                          (progn
                            (emacsos-assist-web--require-snapshot value thread-id)
+                           (emacsos-assist-web--snapshot-active-p value)
                            (emacsos-assist-web-git--note-snapshot
                             value
                             (equal (alist-get 'status (alist-get 'thread value))

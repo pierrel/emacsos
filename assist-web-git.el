@@ -11,6 +11,7 @@
 
 (declare-function emacsos-assist-web--request "assist-web")
 (declare-function emacsos-assist-web--require-snapshot "assist-web")
+(declare-function emacsos-assist-web--snapshot-active-p "assist-web")
 (declare-function emacsos-assist-web--require-id "assist-web")
 (declare-function emacsos-assist-web--valid-id-p "assist-web")
 (declare-function emacsos-assist-web-git--metadata-from-snapshot "assist-web")
@@ -37,7 +38,7 @@
   :group 'emacsos-assist-web-git)
 
 (defconst emacsos-assist-web-git--file-view-limit (* 1024 1024)
-  "Largest committed file opened synchronously in a mirror view.")
+  "Largest mirror worktree file opened synchronously in a view.")
 
 (cl-defstruct emacsos-assist-web-git-generation
   id path metadata oid main state views)
@@ -352,6 +353,19 @@
   (when (and terminal (emacsos-assist-web-git--usable metadata))
     (emacsos-assist-web-git--enqueue metadata nil)))
 
+(defun emacsos-assist-web-git--invalidate (reason)
+  "Make Git freshness unavailable for REASON without changing chat state."
+  (setq emacsos-assist-web-git--metadata nil
+        emacsos-assist-web-git--unavailable reason
+        emacsos-assist-web-git--next nil)
+  (cl-incf emacsos-assist-web-git--epoch)
+  (condition-case nil (emacsos-assist-web-git--cancel) (error nil))
+  (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
+
+(defun emacsos-assist-web-git--problem-text (problem)
+  "Return the safe display text from PROBLEM."
+  (if (consp problem) (cdr problem) problem))
+
 (defun emacsos-assist-web-git--read-metadata (thread callback)
   "Read THREAD's authenticated canonical metadata and call CALLBACK."
   (with-current-buffer thread
@@ -363,15 +377,18 @@
            (with-current-buffer thread
              (if problem
                  (funcall callback nil problem)
-               (condition-case error
-                   (progn
-                     (emacsos-assist-web--require-snapshot value tid)
-                     (funcall callback
-                              (emacsos-assist-web-git--metadata-from-snapshot
-                               value)
-                              nil))
-                 (error (funcall callback nil
-                                 (error-message-string error))))))))))))
+               (let ((result
+                      (condition-case error
+                          (progn
+                            (emacsos-assist-web--require-snapshot value tid)
+                            (emacsos-assist-web--snapshot-active-p value)
+                            (cons 'valid
+                                  (emacsos-assist-web-git--metadata-from-snapshot
+                                   value)))
+                        (error (cons 'invalid (error-message-string error))))))
+                 (if (eq (car result) 'valid)
+                     (funcall callback (cdr result) nil)
+                   (funcall callback nil result)))))))))))
 
 (defun emacsos-assist-web-git--intent-live-p (intent)
   "Return non-nil while INTENT still owns its original thread window."
@@ -504,7 +521,8 @@
             (problem
              (emacsos-assist-web-git--cleanup
               (plist-get request :id) "staging" #'ignore)
-             (emacsos-assist-web-git--failed request problem))
+             (emacsos-assist-web-git--failed
+              request (emacsos-assist-web-git--problem-text problem)))
             ((not (equal (emacsos-assist-web-git--request-key metadata)
                          (emacsos-assist-web-git--request-key
                           (plist-get request :metadata))))
@@ -568,7 +586,8 @@
                         :metadata (plist-get request :metadata)
                         :oid (plist-get result :thread_oid)
                         :main (plist-get result :main_oid)
-                        :state state)))
+                        :state state))
+                      (installed nil))
                  (condition-case error
                      (progn
                        (with-temp-file (expand-file-name "assist-git-manifest.json"
@@ -590,15 +609,23 @@
                        (setq emacsos-assist-web-git--previous
                              emacsos-assist-web-git--current
                              emacsos-assist-web-git--current generation
-                             emacsos-assist-web-git--request nil)
-                       (emacsos-assist-web-git--update-headers)
-                       (dolist (intent (plist-get request :intents))
-                         (when (emacsos-assist-web-git--intent-live-p intent)
-                           (emacsos-assist-web-git--open intent generation))))
+                             emacsos-assist-web-git--request nil
+                             installed t))
                    (error
                     (emacsos-assist-web-git--cleanup id "staging" #'ignore)
                     (emacsos-assist-web-git--failed
-                     request (error-message-string error))))))))
+                     request (error-message-string error))))
+                 (when installed
+                   (condition-case nil
+                       (emacsos-assist-web-git--update-headers)
+                     (error nil))
+                   (dolist (intent (plist-get request :intents))
+                     (when (emacsos-assist-web-git--intent-live-p intent)
+                       (condition-case error
+                           (emacsos-assist-web-git--open intent generation)
+                         (error
+                          (message "Thread Git view unavailable: %s"
+                                   (error-message-string error)))))))))))
         (if prior
             (emacsos-assist-web-git--cleanup
              (emacsos-assist-web-git-generation-id prior) "generations"
@@ -630,7 +657,18 @@
        (when (buffer-live-p thread)
          (with-current-buffer thread
            (if problem
-               (message "Thread Git metadata unavailable: %s" problem)
+               (progn
+                 (if (consp problem)
+                     (emacsos-assist-web-git--invalidate
+                      "invalid authenticated Git metadata")
+                   (when emacsos-assist-web-git--current
+                     (setf (emacsos-assist-web-git-generation-state
+                            emacsos-assist-web-git--current) 'cached))
+                   (setq emacsos-assist-web-git--unavailable
+                         "metadata refresh failed; cached")
+                   (emacsos-assist-web-git--update-headers))
+                 (message "Thread Git metadata unavailable: %s"
+                          (emacsos-assist-web-git--problem-text problem)))
              (emacsos-assist-web-git--note metadata)
              (emacsos-assist-web-git--enqueue metadata intent))))))))
 
@@ -655,14 +693,24 @@
 (defun emacsos-assist-web-git--literal-file-view (file root thread generation)
   "Return a read-only FILE from ROOT for THREAD and GENERATION.
 Do not interpret repository-local code."
-  (let ((resolved (file-truename file)))
+  (let ((resolved (file-truename file))
+        (cursor (expand-file-name file))
+        (base (expand-file-name root))
+        (symlink nil))
+    (while (and (not symlink)
+                (not (equal cursor base))
+                (file-in-directory-p cursor base))
+      (setq symlink (file-symlink-p cursor)
+            cursor (directory-file-name (file-name-directory cursor))))
     (unless (and (file-regular-p resolved)
+                 (not symlink)
+                 (not (file-symlink-p base))
                  (file-in-directory-p resolved (file-truename root))
                  (not (file-in-directory-p
                        resolved (file-truename (expand-file-name ".git" root))))
                  (<= (file-attribute-size (file-attributes resolved))
                      emacsos-assist-web-git--file-view-limit))
-      (error "Git file is outside the committed display limit")))
+      (error "Git worktree file is outside the display limit")))
   (let* ((relative (file-relative-name file root))
          (view (generate-new-buffer
                 (format "*Git %s %s*"

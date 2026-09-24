@@ -255,7 +255,7 @@ def refresh(request: dict) -> dict:
     env = git_environment(key, hosts)
     if branch in ("main", "HEAD"):
         shutil.rmtree(stage)
-        raise Refusal("thread is not on a published branch")
+        raise Refusal("thread branch is main or detached HEAD")
     try:
         git(["check-ref-format", "refs/heads/" + branch], env)
     except Refusal as exc:
