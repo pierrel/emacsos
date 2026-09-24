@@ -146,12 +146,89 @@
       (should-not emacsos-assist-web-git--metadata)
       (should (string-match-p "Run status unavailable"
                               emacsos-assist-web-git--unavailable))
+      (should (equal (substring-no-properties
+                     (emacsos-assist-web-git--thread-header))
+                     "Run status; Refresh [?] "))
+      (should-not (string-match-p "reauthorize\\|thread unavailable"
+                                  (emacsos-assist-web-git--view-state
+                                   generation (current-buffer))))
+      (emacsos-assist-web-git-status-details)
+      (should (string-match-p "does not prove the thread is gone"
+                              (buffer-string)))
+      (emacsos-assist-web-git-display-details-back)
       (setq start-epoch emacsos-assist-web-git--auth-epoch)
       (emacsos-assist-web-git--canonical-authorized start-epoch)
       (should-not emacsos-assist-web-git--denied)
       ;; Reauthorization alone never promotes the old generation.
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'cached)))))
+
+(ert-deftest test-assist-web-git-run-denial-starts-one-chat-owned-recheck ()
+  "A Run 404 suspends Git and schedules one canonical thread GET."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let (scheduled (refreshes 0))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat callback &rest _)
+                   (push callback scheduled)))
+                ((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
+                 (lambda (&rest _) (cl-incf refreshes))))
+        (emacsos-assist-web-git--run-access-uncertain 404)
+        (emacsos-assist-web-git--run-access-uncertain 404)
+        (should (= (length scheduled) 1))
+        (should (= emacsos-assist-web-git--auth-epoch 1))
+        (funcall (car scheduled))
+        (should (= refreshes 1))
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (funcall (car scheduled))
+        (should (= refreshes 1))))))
+
+(ert-deftest test-assist-web-git-run-denial-during-r2-defers-one-recheck ()
+  "A pre-denial R2 cannot clear the fence; teardown starts one newer GET."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--reconcile-generation 7)
+    (let (scheduled (refreshes 0))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat callback &rest _)
+                   (push callback scheduled)))
+                ((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
+                 (lambda (&rest _) (cl-incf refreshes))))
+        (emacsos-assist-web-git--run-access-uncertain 404)
+        (funcall (car scheduled))
+        (should (= refreshes 0))
+        (emacsos-assist-web-git--canonical-authorized 0)
+        (should (eq emacsos-assist-web-git--denied 'run))
+        (setq emacsos-assist-web--reconcile-generation nil)
+        (emacsos-assist-web-git--r2-finished 7 t)
+        (emacsos-assist-web-git--r2-finished 7 t)
+        (should (= refreshes 1))
+        (should-not emacsos-assist-web-git--run-recheck-needed)))))
+
+(ert-deftest test-assist-web-git-run-recheck-pauses-with-failed-recovery ()
+  "A failed local recovery discards deferred transport and shows restart."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--reconcile-generation 7)
+    (let (scheduled)
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat callback &rest _)
+                   (push callback scheduled)))
+                ((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
+                 (lambda (&rest _) (ert-fail "recheck during recovery pause"))))
+        (emacsos-assist-web-git--run-access-uncertain 404)
+        (setq-local emacsos-assist-web--reconcile-recovery-paused t
+                    emacsos-assist-web--reconcile-generation nil)
+        (funcall (car scheduled))
+        (should-not emacsos-assist-web-git--run-recheck-needed)
+        (should (string-match-p "restart to recover"
+                                emacsos-assist-web-git--unavailable))
+        (should (string-match-p "Restart to recover"
+                                (emacsos-assist-web-git--thread-header)))))))
 
 (ert-deftest test-assist-web-git-recovery-gate-drains-active-probe-intent ()
   "An older probe callback cannot defer a window intent past a recovery gate."
@@ -628,12 +705,22 @@
                     (feedback (eval (cadr (window-parameter
                                            window 'assist-web-git-feedback)) t)))
                 (should (equal (substring-no-properties header)
-                               "Restart to recover [?]"))
+                               "Restart to recover [?] "))
                 (should (equal (substring-no-properties feedback)
-                               "Restart to recover [?]"))
+                               "Restart to recover [?] "))
                 (should-not (string-match-p "Retry" feedback))
-                (should (get-text-property (1- (length header)) 'local-map header)))
-              (emacsos-assist-web-git-status-details)
+                (should (equal (get-text-property (- (length header) 5)
+                                                  'display header)
+                               '(space :width (20) :height (40))))
+                (should (equal (get-text-property (1- (length header))
+                                                  'display header)
+                               '(space :width (20) :height (40))))
+                (should (get-text-property (1- (length header))
+                                           'local-map header)))
+              (should (eq (lookup-key emacsos-assist-web-git-thread-mode-map
+                                      (kbd "C-c ?"))
+                          #'emacsos-assist-web-git-details))
+              (emacsos-assist-web-git-details)
               (should (string-match-p "Restart Emacs" (buffer-string)))
               (should visual-line-mode)
               (emacsos-assist-web-git-display-details-back)
@@ -646,11 +733,11 @@
               (should (= (length emacsos-assist-web-git--feedback-windows) 1))
               (should (equal (substring-no-properties
                               (emacsos-assist-web-git--thread-header))
-                             "Reauthorize [?]"))
+                             "Reauthorize [?] "))
               (should (string-match-p "Reauthorize"
                                       (eval (cadr (window-parameter
                                                    window 'assist-web-git-feedback)) t)))
-              (emacsos-assist-web-git-status-details)
+              (emacsos-assist-web-git-details)
               (should (string-match-p "Reauthorize Assist" (buffer-string)))
               (emacsos-assist-web-git-display-details-back)
               (emacsos-assist-web-git--clear-feedback window)
@@ -1241,6 +1328,7 @@
   (save-window-excursion
     (let* ((thread (generate-new-buffer " *git-late-r2-probe*"))
            (window (selected-window))
+           (second (split-window-right))
            (old (test-assist-web-git--metadata
                  "ready" "topic/old" test-assist-web-git--head))
            (new (test-assist-web-git--metadata
@@ -1250,7 +1338,9 @@
       (unwind-protect
           (progn
             (set-window-buffer window thread)
+            (set-window-buffer second thread)
             (set-window-parameter window 'assist-web-git-intent 1)
+            (set-window-parameter second 'assist-web-git-intent 1)
             (setf (plist-get entry :run-id) "run-r2"
                   (plist-get entry :verified-outcome) "success")
             (with-current-buffer thread
@@ -1268,6 +1358,11 @@
                         ((symbol-function 'emacsos-assist-web--render) #'ignore)
                         ((symbol-function 'emacsos-assist-web-git--begin)
                          (lambda (metadata intents)
+                           (setq emacsos-assist-web-git--request
+                                 (list :id "post-r2" :epoch emacsos-assist-web-git--epoch
+                                       :metadata metadata :intents intents
+                                       :cause-at-start
+                                       emacsos-assist-web-git--success-watermark))
                            (setq fetched (list metadata intents)))))
                 (emacsos-assist-web--reconcile-queue)
                 (should r2)
@@ -1275,6 +1370,15 @@
                  (list :action 'files :buffer thread :window window :serial 1)
                  new nil emacsos-assist-web-git--epoch)
                 (should emacsos-assist-web-git--r2-waiting)
+                (let ((barrier-epoch emacsos-assist-web-git--epoch))
+                  ;; A later old-key C2 diagnostic joins, never fetches H1.
+                  (emacsos-assist-web-git--route-probe
+                   (list :action 'diff :buffer thread :window second :serial 1)
+                   old nil barrier-epoch)
+                  (should (= emacsos-assist-web-git--epoch barrier-epoch)))
+                (should (= (length (plist-get
+                                    emacsos-assist-web-git--r2-waiting :intents))
+                           2))
                 (should-not fetched)
                 (funcall r2 (test-assist-web-git--snapshot
                              "ready" "topic/old") nil)
@@ -1285,9 +1389,12 @@
                              "ready" "topic/new") nil)
                 (should fetched)
                 (should (equal (plist-get (car fetched) :branch) "topic/new"))
-                (should (= (length (cadr fetched)) 1))
+                (should (= (length (plist-get
+                                    emacsos-assist-web-git--request :intents))
+                           2))
                 (should-not emacsos-assist-web-git--r2-waiting))))
         (set-window-parameter window 'assist-web-git-intent nil)
+        (set-window-parameter second 'assist-web-git-intent nil)
         (kill-buffer thread)))))
 
 (ert-deftest test-assist-web-git-late-final-conflict-keeps-window-intent ()
@@ -1657,7 +1764,7 @@
           (should fetched))))))
 
 (ert-deftest test-assist-web-git-postcommit-display-failure-keeps-retirement ()
-  (dolist (failure '(render surface))
+  (dolist (failure '(render surface quit))
     (save-window-excursion
       (let* ((thread (generate-new-buffer " *git-postcommit-display*"))
              (window (selected-window))
@@ -1695,6 +1802,8 @@
                              t))
                           ((symbol-function 'emacsos-assist-web--render)
                            (lambda (&rest _)
+                             (when (eq failure 'quit)
+                               (signal 'quit nil))
                              (when (eq failure 'render)
                                (setq emacsos-assist-web--status-start nil
                                      emacsos-assist-web--status-end nil)
@@ -1850,8 +1959,16 @@
                 (should (= emacsos-assist-web-git--success-watermark 1))
                 (should (eq (emacsos-assist-web-git-generation-state generation)
                             'cached))
-                (should cleanup)
+                (should-not cleanup)
                 (should-not successor)
+                (should (eq emacsos-assist-web-git--request request))
+                (should-not (plist-get request :intents))
+                (should (equal (cadr emacsos-assist-web-git--next)
+                               (list i1 i2)))
+                ;; The older same-key transfer is allowed to finish; only
+                ;; its final cleanup makes the post-success fetch eligible.
+                (emacsos-assist-web-git--finish-obsolete request)
+                (should cleanup)
                 (funcall cleanup t)
                 (should (equal (emacsos-assist-web-git--request-key
                                 (car successor))
@@ -1872,6 +1989,7 @@
            successor)
       (setq-local emacsos-assist-web-git--metadata metadata
                   emacsos-assist-web-git--request request
+                  emacsos-assist-web-git--next (list metadata nil)
                   emacsos-assist-web-git--success-watermark 1)
       (cl-letf (((symbol-function 'emacsos-assist-web-git--cleanup)
                  (lambda (_id _kind done) (funcall done t)))
@@ -1884,6 +2002,105 @@
       (should successor)
       (should-not emacsos-assist-web-git--current)
       (should-not emacsos-assist-web-git--request))))
+
+(ert-deftest test-assist-web-git-successor-cleanup-failure-releases-windows ()
+  "Both cancel and stale-helper cleanup failures release moved W1/W2 intents."
+  (dolist (path '(cancel stale-helper))
+    (save-window-excursion
+      (let* ((thread (generate-new-buffer " *git-successor-cleanup*"))
+             (first (selected-window))
+             (second (split-window-right))
+             (metadata (test-assist-web-git--metadata
+                        "ready" "topic/old" test-assist-web-git--head))
+             (i1 (list :action 'files :buffer thread :window first :serial 1))
+             (i2 (list :action 'diff :buffer thread :window second :serial 1))
+             helper cleanup)
+        (unwind-protect
+            (progn
+              (set-window-buffer first thread)
+              (set-window-buffer second thread)
+              (set-window-parameter first 'assist-web-git-intent 1)
+              (set-window-parameter second 'assist-web-git-intent 1)
+              (with-current-buffer thread
+                (emacsos-assist-web-mode)
+                (setq-local emacsos-assist-web--thread-id "thread-1"
+                            emacsos-assist-web-git--metadata metadata)
+                (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                           (lambda (_payload done)
+                             (setq helper done)
+                             nil))
+                          ((symbol-function 'emacsos-assist-web-git--cleanup)
+                           (lambda (_id _kind done) (setq cleanup done))))
+                  (emacsos-assist-web-git--begin metadata nil)
+                  (setq emacsos-assist-web-git--next
+                        (list metadata (list i1 i2)))
+                  (if (eq path 'cancel)
+                      (emacsos-assist-web-git--cancel)
+                    (setq emacsos-assist-web-git--canceling
+                          (plist-get emacsos-assist-web-git--request :id)
+                          emacsos-assist-web-git--request nil)
+                    (funcall helper (list :ok nil :reason "cancelled")))
+                  (should cleanup)
+                  (funcall cleanup nil)
+                  (should-not emacsos-assist-web-git--next)
+                  (should (= (window-parameter first 'assist-web-git-intent) 2))
+                  (should (= (window-parameter second 'assist-web-git-intent) 2))
+                  (should (string-match-p "mirror cleanup failed"
+                                          emacsos-assist-web-git--unavailable)))))
+          (set-window-parameter first 'assist-web-git-intent nil)
+          (set-window-parameter second 'assist-web-git-intent nil)
+          (kill-buffer thread))))))
+
+(ert-deftest test-assist-web-git-post-cause-successor-waits-for-old-helper ()
+  "A no-op success leaves its older fetch alive but not promotable."
+  (save-window-excursion
+    (let* ((thread (generate-new-buffer " *git-natural-successor*"))
+           (first (selected-window))
+           (second (split-window-right))
+           (metadata (test-assist-web-git--metadata
+                      "ready" "topic/old" test-assist-web-git--head))
+           (i1 (list :action 'files :buffer thread :window first :serial 1))
+           (i2 (list :action 'diff :buffer thread :window second :serial 1))
+           callbacks cleanup)
+      (unwind-protect
+          (progn
+            (set-window-buffer first thread)
+            (set-window-buffer second thread)
+            (set-window-parameter first 'assist-web-git-intent 1)
+            (set-window-parameter second 'assist-web-git-intent 1)
+            (with-current-buffer thread
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--metadata metadata)
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (_payload done) (push done callbacks) nil))
+                        ((symbol-function 'emacsos-assist-web-git--cleanup)
+                         (lambda (_id _kind done) (setq cleanup done)))
+                        ((symbol-function 'emacsos-assist-web-git--final-check)
+                         (lambda (&rest _) (ert-fail "old final read ran"))))
+                (emacsos-assist-web-git--begin metadata (list i1))
+                (let ((old-request emacsos-assist-web-git--request)
+                      (old-helper (car callbacks)))
+                  (setq emacsos-assist-web-git--success-watermark 1)
+                  (emacsos-assist-web-git--enqueue metadata i2)
+                  (should (eq old-request emacsos-assist-web-git--request))
+                  (should (= (length callbacks) 1))
+                  (should-not (plist-get old-request :intents))
+                  (should (equal (cadr emacsos-assist-web-git--next)
+                                 (list i1 i2)))
+                  (funcall old-helper (list :ok t))
+                  (should cleanup)
+                  (should (= (length callbacks) 1))
+                  (funcall cleanup t)
+                  (should (= (length callbacks) 2))
+                  (should (= (plist-get emacsos-assist-web-git--request
+                                         :cause-at-start) 1))
+                  (should (equal (plist-get emacsos-assist-web-git--request
+                                            :intents)
+                                 (list i1 i2)))))))
+        (set-window-parameter first 'assist-web-git-intent nil)
+        (set-window-parameter second 'assist-web-git-intent nil)
+        (kill-buffer thread)))))
 
 (ert-deftest test-assist-web-git-stale-r2-reobserves-before-r3 ()
   (with-temp-buffer
