@@ -653,6 +653,77 @@
     (should (equal result
                    '(nil "Too many Assist Web requests are already running")))))
 
+(ert-deftest test-assist-web-git-typed-malformed-denial-precedes-json-parse ()
+  (let ((emacsos-assist-web--requests nil)
+        (emacsos-assist-web--thread-id "thread-1")
+        typed legacy observed)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+               (lambda () "token"))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'emacsos-assist-web-git--canonical-denied)
+               (lambda (status) (push status observed)))
+              ((symbol-function 'url-retrieve)
+               (lambda (_url callback &rest _)
+                 (let ((response (generate-new-buffer " *git-http-test*")))
+                   (with-current-buffer response
+                     (setq-local url-http-response-status 401
+                                 url-http-content-type "text/plain"
+                                 url-http-end-of-headers (copy-marker (point-min)))
+                     (insert "malformed denial")
+                     (funcall callback nil))
+                   response))))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value problem) (setq legacy problem)))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value problem) (setq typed problem))
+       nil nil nil nil t))
+    (should (stringp legacy))
+    (should (equal (plist-get typed :kind) 'http))
+    (should (= (plist-get typed :status) 401))
+    (should (equal (plist-get typed :text)
+                   "Assist Web request failed (401)"))
+    (should (equal observed '(401 401)))))
+
+(ert-deftest test-assist-web-git-typed-errors-preserve-legacy-credentials ()
+  (let (typed legacy)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+               (lambda () "invalid token")))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value problem) (setq legacy problem)))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value problem) (setq typed problem))
+       nil nil nil nil t))
+    (should (equal legacy "Assist Web token is missing or invalid"))
+    (should (equal (plist-get typed :kind) 'credentials))
+    (should-not (plist-get typed :status))))
+
+(ert-deftest test-assist-web-git-typed-invalid-success-is-parse-not-http ()
+  (let ((emacsos-assist-web--requests nil) typed)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+               (lambda () "token"))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'url-retrieve)
+               (lambda (_url callback &rest _)
+                 (let ((response (generate-new-buffer " *git-parse-test*")))
+                   (with-current-buffer response
+                     (insert "x")
+                     (setq-local url-http-response-status 200
+                                 url-http-content-type "text/plain"
+                                 url-http-end-of-headers (copy-marker (point-min)))
+                     (funcall callback nil))
+                   response))))
+      (emacsos-assist-web--request
+       "GET" "threads/thread-1" nil
+       (lambda (_value problem) (setq typed problem))
+       nil nil nil nil t))
+    (should (equal (plist-get typed :kind) 'parse))
+    (should (= (plist-get typed :status) 200))
+    (should (equal (plist-get typed :text) "Assist Web response invalid"))))
+
 (ert-deftest test-assist-web-json-request-reports-an-invalid-token ()
   (let (result)
     (cl-letf (((symbol-function 'emacsos-assist-web--read-token)

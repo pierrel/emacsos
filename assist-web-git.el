@@ -367,9 +367,17 @@
   (condition-case nil (emacsos-assist-web-git--cancel) (error nil))
   (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
 
+(defun emacsos-assist-web-git--canonical-denied (status)
+  "Invalidate this thread's Git authority after canonical HTTP STATUS denial."
+  (emacsos-assist-web-git--invalidate
+   (format "thread access denied (%d); Git unavailable" status)))
+
 (defun emacsos-assist-web-git--problem-text (problem)
   "Return the safe display text from PROBLEM."
-  (if (consp problem) (cdr problem) problem))
+  (cond ((and (listp problem) (plist-get problem :text))
+         (plist-get problem :text))
+        ((consp problem) (cdr problem))
+        (t problem)))
 
 (defun emacsos-assist-web-git--read-metadata (thread callback)
   "Read THREAD's canonical and Git metadata and call CALLBACK.
@@ -400,7 +408,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                             (error (cons 'git (error-message-string error))))))
                      (if (eq (car result) 'valid)
                          (funcall callback (cdr result) nil)
-                       (funcall callback nil result)))))))))))))
+                       (funcall callback nil result)))))))))
+       nil nil nil nil t))))
 
 (defun emacsos-assist-web-git--intent-live-p (intent)
   "Return non-nil while INTENT still owns its original thread window."
@@ -674,17 +683,23 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
            (when (= observation emacsos-assist-web-git--observation)
              (if problem
                (progn
-                 (if (consp problem)
-                     (emacsos-assist-web-git--invalidate
-                      (if (eq (car problem) 'canonical)
-                          "invalid authenticated thread snapshot"
-                        "invalid Git workspace metadata"))
-                   (when emacsos-assist-web-git--current
-                     (setf (emacsos-assist-web-git-generation-state
-                            emacsos-assist-web-git--current) 'cached))
-                   (setq emacsos-assist-web-git--unavailable
-                         "metadata refresh failed; cached")
-                   (emacsos-assist-web-git--update-headers))
+                 (if (and (listp problem)
+                          (eq (plist-get problem :kind) 'http)
+                          (memq (plist-get problem :status) '(401 403 404)))
+                     (emacsos-assist-web-git--canonical-denied
+                      (plist-get problem :status))
+                   (if (and (consp problem)
+                            (memq (car problem) '(canonical git)))
+                       (emacsos-assist-web-git--invalidate
+                        (if (eq (car problem) 'canonical)
+                            "invalid authenticated thread snapshot"
+                          "invalid Git workspace metadata"))
+                     (when emacsos-assist-web-git--current
+                       (setf (emacsos-assist-web-git-generation-state
+                              emacsos-assist-web-git--current) 'cached))
+                     (setq emacsos-assist-web-git--unavailable
+                           "metadata refresh failed; cached")
+                     (emacsos-assist-web-git--update-headers)))
                  (message "Thread Git metadata unavailable: %s"
                           (emacsos-assist-web-git--problem-text problem)))
              (emacsos-assist-web-git--note metadata)
