@@ -637,17 +637,24 @@ the fetch begins."
             :actual-branch (and ready actual-branch)
             :head head))))
 
-(defun emacsos-assist-web-git--note-snapshot (snapshot &optional terminal)
+(defun emacsos-assist-web-git--note-snapshot
+    (snapshot &optional terminal auth-start-epoch)
   "Update optional Git state from validated SNAPSHOT without rejecting chat.
-TERMINAL has the same meaning as in `emacsos-assist-web-git--note'."
+TERMINAL has the same meaning as in `emacsos-assist-web-git--note'.
+AUTH-START-EPOCH permits only a post-denial accepted canonical GET to clear
+the Git denial latch."
   (condition-case nil
       (let ((metadata (emacsos-assist-web-git--metadata-from-snapshot snapshot)))
-        (emacsos-assist-web-git--note metadata terminal)
-        (when (equal (plist-get metadata :actual-branch) "HEAD")
-          (setq emacsos-assist-web-git--unavailable
-                "detached HEAD; Git unavailable")
-          (emacsos-assist-web-git--update-headers)))
-    (error (emacsos-assist-web-git--invalidate "Git state unavailable"))))
+        (emacsos-assist-web-git--canonical-authorized auth-start-epoch)
+        (unless emacsos-assist-web-git--denied
+          (emacsos-assist-web-git--note metadata terminal)
+          (when (equal (plist-get metadata :actual-branch) "HEAD")
+            (setq emacsos-assist-web-git--unavailable
+                  "detached HEAD; Git unavailable")
+            (emacsos-assist-web-git--update-headers))))
+    (error (unless emacsos-assist-web-git--denied
+             (emacsos-assist-web-git--invalidate
+              "Git state unavailable")))))
 
 (defun emacsos-assist-web--require-history-page (page thread-id current before)
   "Return PAGE after validating its identity and progress from CURRENT/BEFORE."
@@ -767,18 +774,32 @@ defaults to `list' and OBJECT-TYPE defaults to `alist'."
                     (point-max))))
             (emacsos-assist-web--range-bytes decoded-end (point-max))))))))
 
-(defun emacsos-assist-web--guarded-filter (url-filter fail &optional streaming)
+(defun emacsos-assist-web--guarded-filter
+    (url-filter fail &optional streaming status-observer)
   "Wrap URL-FILTER with raw HTTP bounds, invoking FAIL with a safe message.
 
 STREAMING permits an unbounded body only for a valid 200 SSE response; it
 bounds every other response and each raw transport callback before URL-FILTER
 retains it.  Decoded SSE records are bounded by the event filter.  Headers and
 encoded responses are rejected before URL-FILTER can redirect or decompress
-them."
+them.  STATUS-OBSERVER sees a bounded raw status prefix before any refusal."
   (let ((received 0) (header "") (header-complete nil) (failed nil)
+        (status-prefix "") (status-seen nil)
         (bounded-body (not streaming)))
     (lambda (process bytes)
       (unless failed
+        (when (and status-observer (not status-seen)
+                   (< (length status-prefix) 64))
+          (setq status-prefix
+                (concat status-prefix
+                        (substring bytes 0 (min (length bytes)
+                                                (- 64 (length status-prefix))))))
+          (when (string-match
+                 "\\`HTTP/[0-9.]+[ \t]+\\([0-9][0-9][0-9]\\)[ \t\r\n]"
+                 status-prefix)
+            (setq status-seen t)
+            (funcall status-observer
+                     (string-to-number (match-string 1 status-prefix)))))
         (when (and streaming
                    (> (string-bytes bytes)
                       emacsos-assist-web-max-stream-chunk-bytes))
@@ -882,28 +903,31 @@ them."
                           (setq offset end))))))
               (funcall url-filter process bytes))))))))
 
-(defun emacsos-assist-web--git-http-status (origin method path status)
-  "Tell ORIGIN's optional Git projection about canonical thread denial.
+(defun emacsos-assist-web--git-http-status (origin method path status &optional early-failure)
+  "Tell ORIGIN's optional Git projection about canonical GET failure.
 METHOD and PATH identify the exact thread GET.  STATUS is read before JSON
-parsing, so a malformed denial body cannot hide a 401, 403, or 404."
+parsing, so a malformed denial body cannot hide a 401, 403, or 404.
+EARLY-FAILURE without a denial status downgrades freshness conservatively."
   (when (and (buffer-live-p origin)
              (equal method "GET")
-             (memq status '(401 403 404))
+             (or (memq status '(401 403 404)) early-failure)
              (stringp path)
              (string-match "\\`threads/\\([^/]+\\)\\'" path))
     (let ((tid (match-string 1 path)))
       (with-current-buffer origin
-        (when (and (equal tid emacsos-assist-web--thread-id)
-                   (fboundp 'emacsos-assist-web-git--canonical-denied))
+        (when (equal tid emacsos-assist-web--thread-id)
           (condition-case nil
-              (emacsos-assist-web-git--canonical-denied status)
+              (if (memq status '(401 403 404))
+                  (emacsos-assist-web-git--canonical-denied status)
+                (emacsos-assist-web-git--canonical-uncertain))
             (error nil)))))))
 
-(defun emacsos-assist-web--git-request-error (_problem status kind)
+(defun emacsos-assist-web--git-request-error (status kind)
   "Return a bounded typed Git error for STATUS and KIND.
 The ordinary chat callback continues to receive its original error string."
   (list :kind (if (and (integerp status) (<= 400 status 599)) 'http kind)
         :status (and (integerp status) status)
+        :offline nil
         :text (cond
                ((and (integerp status) (<= 400 status 599))
                 (format "Assist Web request failed (%d)" status))
@@ -930,13 +954,13 @@ error instead of the legacy string."
         (funcall callback nil
                  (if git-typed-error
                      (emacsos-assist-web--git-request-error
-                      token-error nil 'credentials)
+                      nil 'credentials)
                    token-error))
       (if (not (emacsos-assist-web--safe-token-p token))
         (funcall callback nil
                  (if git-typed-error
                      (emacsos-assist-web--git-request-error
-                      "Assist Web token is missing or invalid" nil 'credentials)
+                      nil 'credentials)
                    "Assist Web token is missing or invalid"))
       ;; Invalid endpoints are a local, deterministic rejection.  Report one
       ;; even if unrelated requests presently consume the transport budget.
@@ -948,8 +972,7 @@ error instead of the legacy string."
           (funcall callback nil
                    (if git-typed-error
                        (emacsos-assist-web--git-request-error
-                        "Too many Assist Web requests are already running" nil
-                        'transport)
+                        nil 'transport)
                      "Too many Assist Web requests are already running"))
         (let* ((url-request-method method)
                (url-request-extra-headers
@@ -961,6 +984,7 @@ error instead of the legacy string."
 		(and payload (encode-coding-string (json-encode payload) 'utf-8)))
                (url nil)
                (origin (current-buffer))
+               (observed-http-status nil)
                (finished nil)
                response process timer)
           (cl-labels
@@ -973,7 +997,7 @@ error instead of the legacy string."
                    (funcall callback value
                             (if (and git-typed-error problem)
                                 (emacsos-assist-web--git-request-error
-                                 problem status (or kind 'transport))
+                                 status (or kind 'transport))
                               problem)))))
             (condition-case error
 		(progn
@@ -988,23 +1012,28 @@ error instead of the legacy string."
                           (emacsos-assist-web--close-idle-origin-connections)
                           (url-retrieve
                            url
-                           (lambda (_status)
+                           (lambda (transport-status)
                              (let (value problem
                                          (status (and (boundp 'url-http-response-status)
                                                       url-http-response-status)))
-                               (emacsos-assist-web--git-http-status
-                                origin method path status)
+                               (unless (eql observed-http-status status)
+                                 (emacsos-assist-web--git-http-status
+                                  origin method path status))
                                (unwind-protect
-                                   (condition-case parse-error
-                                       (setq value
-                                             (emacsos-assist-web--response-json
-                                             (current-buffer) allow-status
-                                              array-type object-type))
-                                     (error
-                                      (setq problem
-                                            (error-message-string parse-error))))
+                                   (if (plist-get transport-status :error)
+                                       (setq problem "Assist Web connection unavailable")
+                                     (condition-case parse-error
+                                         (setq value
+                                               (emacsos-assist-web--response-json
+                                                (current-buffer) allow-status
+                                                array-type object-type))
+                                       (error
+                                        (setq problem
+                                              (error-message-string parse-error)))))
 				 (kill-buffer (current-buffer)))
-			       (finish value problem status 'parse)))
+			       (finish value problem status
+                                       (if (plist-get transport-status :error)
+                                           'transport 'parse))))
                            nil t t)))
                   (when (buffer-live-p response)
                     (with-current-buffer response
@@ -1033,13 +1062,21 @@ error instead of the legacy string."
                        (emacsos-assist-web--guarded-filter
 			url-filter
 			(lambda (active problem)
+			  (unless (memq observed-http-status '(401 403 404))
+                            (emacsos-assist-web--git-http-status
+                             origin method path observed-http-status t))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
 			  (when (buffer-live-p (process-buffer active))
                             (emacsos-assist-web--kill-buffer-later
                              (process-buffer active)))
-			  (finish nil problem)))))))
+			  (finish nil problem observed-http-status 'transport))
+                        nil
+                        (lambda (status)
+                          (setq observed-http-status status)
+                          (emacsos-assist-web--git-http-status
+                           origin method path status)))))))
               (error (finish nil (error-message-string error)))))))))))
 
 (defun emacsos-assist-web--display-status (status)
@@ -2603,8 +2640,7 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
           (let ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
                 (generation (cl-incf emacsos-assist-web--refresh-generation))
                 (send-generation emacsos-assist-web--send-generation)
-                (git-observation
-                 (cl-incf emacsos-assist-web-git--observation)))
+                (git-auth-start-epoch emacsos-assist-web-git--auth-epoch))
             (emacsos-assist-web--request
              "GET" (concat "threads/" tid) nil
              (lambda (value error)
@@ -2630,15 +2666,6 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                              (emacsos-assist-web--require-snapshot value tid)
                              (let ((busy
                                     (emacsos-assist-web--snapshot-active-p value)))
-                               (when (= git-observation
-                                        emacsos-assist-web-git--observation)
-                                 (emacsos-assist-web-git--note-snapshot
-                                  value
-                                  (and completed-run-id
-                                       (not busy)
-                                       (equal (alist-get 'status
-                                                         (alist-get 'thread value))
-                                              "ready"))))
                                (emacsos-assist-web--try-write-cache
                                 (emacsos-assist-web--snapshot-cache-name tid) value)
                                (when (or (and completed-run-id
@@ -2665,7 +2692,15 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                                ;; snapshot but leave that rendered region intact;
                                ;; a terminal refresh performs the reconciliation.
                                (unless (and busy emacsos-assist-web--in-flight)
-                                 (emacsos-assist-web--render value))))
+                                 (emacsos-assist-web--render value))
+                               (emacsos-assist-web-git--note-snapshot
+                                value
+                                (and completed-run-id
+                                     (not busy)
+                                     (equal (alist-get 'status
+                                                       (alist-get 'thread value))
+                                            "ready"))
+                                git-auth-start-epoch)))
                            (error
                           (if emacsos-assist-web--pending-accepted-p
                               (emacsos-assist-web--set-unverified-status
@@ -4319,8 +4354,7 @@ write leaves the provisional records available for the next exact refresh."
     (let* ((buffer (current-buffer))
            (thread-id emacsos-assist-web--thread-id)
            (generation (cl-incf emacsos-assist-web--refresh-generation))
-           (git-observation
-            (cl-incf emacsos-assist-web-git--observation))
+           (git-auth-start-epoch emacsos-assist-web-git--auth-epoch)
            (keys (mapcar (lambda (entry) (plist-get entry :key))
                          (seq-filter (lambda (entry)
                                        (eq (emacsos-assist-web--entry-state entry)
@@ -4349,12 +4383,6 @@ write leaves the provisional records available for the next exact refresh."
                          (progn
                            (emacsos-assist-web--require-snapshot value thread-id)
                            (emacsos-assist-web--snapshot-active-p value)
-                           (when (= git-observation
-                                    emacsos-assist-web-git--observation)
-                             (emacsos-assist-web-git--note-snapshot
-                              value
-                              (equal (alist-get 'status (alist-get 'thread value))
-                                     "ready")))
                            (unless (emacsos-assist-web--try-write-cache
                                     (emacsos-assist-web--snapshot-cache-name thread-id) value)
                              (error "canonical snapshot could not be saved"))
@@ -4373,7 +4401,12 @@ write leaves the provisional records available for the next exact refresh."
                              (when (< (length retired) 2)
                                (setq emacsos-assist-web--collision-p nil))
                              (emacsos-assist-web--render value)
-                             (emacsos-assist-web--sync-active-surface)))
+                             (emacsos-assist-web--sync-active-surface)
+                             (emacsos-assist-web-git--note-snapshot
+                              value
+                              (equal (alist-get 'status (alist-get 'thread value))
+                                     "ready")
+                              git-auth-start-epoch)))
                        (error
                         (dolist (entry entries)
                           (setf (plist-get entry :state) 'terminal-unreconciled)
