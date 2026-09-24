@@ -2016,7 +2016,8 @@
 (ert-deftest test-assist-web-git-thread-denial-fences-peer-before-source-quit ()
   "A source UI quit cannot leave another same-T buffer current."
   (let ((source (generate-new-buffer " *git-denial-source*"))
-        (peer (generate-new-buffer " *git-denial-peer*")))
+        (peer (generate-new-buffer " *git-denial-peer*"))
+        cancelled)
     (unwind-protect
         (progn
           (dolist (buffer (list source peer))
@@ -2033,9 +2034,13 @@
           (cl-letf (((symbol-function 'emacsos-assist-web-git--release-intents)
                      (lambda (&rest _)
                        (when (eq (current-buffer) source)
-                         (signal 'quit nil)))))
+                         (signal 'quit nil))))
+                    ((symbol-function 'emacsos-assist-web-git--cancel)
+                     (lambda () (push (current-buffer) cancelled))))
             (with-current-buffer source
               (emacsos-assist-web-git--canonical-denied 403)))
+          (should (memq source cancelled))
+          (should (memq peer cancelled))
           (with-current-buffer peer
             (should (eq emacsos-assist-web-git--denied t))
             (should-not emacsos-assist-web-git--metadata)
@@ -2049,6 +2054,57 @@
             (should-not emacsos-assist-web-git--metadata)))
       (kill-buffer source)
       (kill-buffer peer)))
+
+(ert-deftest test-assist-web-git-thread-denial-defers-quit-in-peer-discovery ()
+  "An input quit during same-T discovery cannot leave the peer current."
+  (let ((source (generate-new-buffer " *git-discovery-source*"))
+        (peer (generate-new-buffer " *git-discovery-peer*"))
+        (reader (symbol-function 'buffer-local-value)))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list source peer))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--current
+                          (make-emacsos-assist-web-git-generation
+                           :state 'current))))
+          (cl-letf (((symbol-function 'buffer-local-value)
+                     (lambda (symbol buffer)
+                       (when (eq buffer peer) (setq quit-flag t))
+                       (funcall reader symbol buffer))))
+            (with-current-buffer source
+              (let ((inhibit-quit t))
+                (emacsos-assist-web-git--canonical-denied 403)
+                (setq quit-flag nil))))
+          (with-current-buffer peer
+            (should (eq emacsos-assist-web-git--denied t))
+            (should (eq (emacsos-assist-web-git-generation-state
+                         emacsos-assist-web-git--current) 'cached))))
+      (setq quit-flag nil)
+      (kill-buffer source)
+      (kill-buffer peer))))
+
+(ert-deftest test-assist-web-git-thread-404-survives-cleanup-failure ()
+  "An async cleanup failure cannot replace a definitive T404 reason."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let ((once t))
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--cancel)
+                 (lambda ()
+                   (when once
+                     (setq once nil)
+                     (emacsos-assist-web-git--cleanup-failed)))))
+        (emacsos-assist-web-git--canonical-denied 404))
+      (should (eq emacsos-assist-web-git--denied t))
+      (should (eql emacsos-assist-web-git--thread-denial-status 404))
+      (should (equal emacsos-assist-web-git--unavailable
+                     "thread unavailable (404); reopen and Retry"))
+      (should (string-prefix-p
+               "Thread unavailable"
+               (substring-no-properties
+                (emacsos-assist-web-git--thread-header)))))))
 
 (ert-deftest test-assist-web-git-denial-requires-new-accepted-chat-get ()
   (with-temp-buffer
