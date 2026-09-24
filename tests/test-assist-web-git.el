@@ -1976,6 +1976,62 @@
       (should-not (string-match-p " current"
                                   (emacsos-assist-web-git--thread-header))))))
 
+(ert-deftest test-assist-web-git-raw-denial-retries-a-prelatch-quit ()
+  "A seen HTTP 404 is not acknowledged until same-T Git is fenced."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let* ((real-deny (symbol-function 'emacsos-assist-web-git--canonical-denied))
+           (metadata (test-assist-web-git--metadata
+                      "ready" "topic/one" test-assist-web-git--head))
+           (generation (make-emacsos-assist-web-git-generation
+                        :metadata metadata :state 'current))
+           (attempts 0))
+      (setq-local emacsos-assist-web-git--metadata metadata
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                 (lambda () "token"))
+                ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web-git--canonical-denied)
+                 (lambda (status)
+                   (cl-incf attempts)
+                   (if (= attempts 1)
+                       (signal 'quit nil)
+                     (funcall real-deny status))))
+                ((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   ;; Model a raw header observer that quit before the latch.
+                   (emacsos-assist-web--git-http-status
+                    (current-buffer) "GET" "threads/thread-1" 404)
+                   (let ((response (generate-new-buffer " *git-prelatch-404*")))
+                     (with-current-buffer response
+                       (insert "denied")
+                       (setq-local url-http-response-status 404
+                                   url-http-content-type "text/plain"
+                                   url-http-end-of-headers
+                                   (copy-marker (point-min)))
+                       (funcall callback nil))
+                     response))))
+        (emacsos-assist-web--request
+         "GET" "threads/thread-1" nil (lambda (_value _problem) nil)))
+      (should (= attempts 2))
+      (should (eq emacsos-assist-web-git--denied t))
+      (should (eq (emacsos-assist-web-git-generation-state generation)
+                  'cached))
+      (should (equal emacsos-assist-web-git--unavailable
+                     "thread unavailable (404); reopen and Retry")))))
+
+(ert-deftest test-assist-web-git-raw-status-seen-only-after-fence ()
+  "A failed bounded raw observer is retried on the next chunk."
+  (let* ((attempts 0)
+        (filter (emacsos-assist-web--guarded-filter
+                 #'ignore #'ignore nil
+                 (lambda (_status) (>= (cl-incf attempts) 2)))))
+    (funcall filter nil "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    (should (= attempts 1))
+    (funcall filter nil "")
+    (should (= attempts 2))))
+
 (ert-deftest test-assist-web-git-busy-thread-404-keeps-denial-reason ()
   "A busy-check callback cannot replace a raw definitive T404 reason."
   (with-temp-buffer
@@ -2105,6 +2161,38 @@
                "Thread unavailable"
                (substring-no-properties
                 (emacsos-assist-web-git--thread-header)))))))
+
+(ert-deftest test-assist-web-git-feedback-error-still-ends-each-window-intent ()
+  "W1 feedback failure cannot leave W1 busy or skip W2's outcome."
+  (save-window-excursion
+    (let* ((thread (generate-new-buffer " *git-feedback-failure*"))
+           (first (selected-window))
+           (second (split-window-below))
+           (first-link t))
+      (unwind-protect
+          (progn
+            (with-current-buffer thread
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"))
+            (set-window-buffer first thread)
+            (set-window-buffer second thread)
+            (set-window-parameter first 'assist-web-git-intent 1)
+            (set-window-parameter second 'assist-web-git-intent 2)
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--details-link)
+                       (lambda (&optional _command)
+                         (if first-link
+                             (progn (setq first-link nil)
+                                    (error "details failed"))
+                           " [?]"))))
+              (with-current-buffer thread
+                (emacsos-assist-web-git--release-intents
+                 (list (list :action 'files :buffer thread :window first :serial 1)
+                       (list :action 'diff :buffer thread :window second :serial 2))
+                 "thread unavailable (404); reopen and Retry" t)))
+            (should (= (window-parameter first 'assist-web-git-intent) 2))
+            (should (= (window-parameter second 'assist-web-git-intent) 3))
+            (should (window-parameter second 'assist-web-git-feedback)))
+        (kill-buffer thread)))))
 
 (ert-deftest test-assist-web-git-denial-requires-new-accepted-chat-get ()
   (with-temp-buffer
