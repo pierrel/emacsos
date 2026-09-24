@@ -322,11 +322,14 @@ context rider
 (=assist/manage/web/threads.py:183-187=); the current phone send body carries
 only message text (=assist/manage/web/phone_api.py:122-130=).
 
-The separate =emacsos-thread-git-sync= effort is *in flight*, not shipped.
-Its accepted scope is a clean, committed, thread-specific branch with a
-separate Git credential and standard device fetch/pull after a successful
-turn; it adds =C-x C-f= browsing and thread-local =C-c d= Magit against a
-labeled, remote-published =main=, while preserving terminal =C-c d= elsewhere.
+The separate =emacsos-thread-git-sync= effort has implementation in flight
+under its accepted local design; it has no linkable in-repo design or PR yet.
+That design specifies a clean, committed, thread-specific branch, a separate
+Git credential, and device =git fetch= after a successful canonical terminal
+snapshot (without merging). It calls for =C-x C-f= browsing and thread-local
+=C-c d= Magit against a labeled, remote-published =main=, while preserving
+terminal =C-c d= elsewhere. This is separate-effort design scope, not shipped
+phone behavior.
 This Git-sync path does not itself provide Web diff, dirty-worktree, or
 untracked-file parity.
 The present phone archive excludes =.git= and provides bounded regular files;
@@ -336,8 +339,8 @@ the diff endpoint is bounded text, not a full Git synchronization protocol
 projection omits untracked files, whereas Web's =main_diff= includes them
 as additions (=assist/domain_manager.py:205-265=). P1 and P2 proceed
 independently. At P3 implementation/integration, reconcile this roadmap with
-that effort's reviewed Git contract and avoid a second competing mirror or
-diff path.
+that effort's eventual reviewed implementation and avoid a second competing
+mirror or diff path.
 
 Web's render pages can also expose artifacts saved under a thread's sandbox
 =/tmp= mount. Provide authenticated, bounded access to those per-thread
