@@ -789,17 +789,27 @@ them.  STATUS-OBSERVER sees a bounded raw status prefix before any refusal."
     (lambda (process bytes)
       (unless failed
         (when (and status-observer (not status-seen)
-                   (< (length status-prefix) 64))
+                   (< (length status-prefix)
+                      emacsos-assist-web-max-header-bytes))
           (setq status-prefix
                 (concat status-prefix
                         (substring bytes 0 (min (length bytes)
-                                                (- 64 (length status-prefix))))))
-          (when (string-match
-                 "\\`HTTP/[0-9.]+[ \t]+\\([0-9][0-9][0-9]\\)[ \t\r\n]"
-                 status-prefix)
-            (setq status-seen t)
-            (funcall status-observer
-                     (string-to-number (match-string 1 status-prefix)))))
+                                                (- emacsos-assist-web-max-header-bytes
+                                                   (length status-prefix))))))
+          (let ((scan t))
+            (while (and scan (not status-seen)
+                        (string-match
+                         "\\`HTTP/[0-9.]+[ \t]+\\([0-9][0-9][0-9]\\)[ \t\r\n]"
+                         status-prefix))
+              (let ((status (string-to-number
+                             (match-string 1 status-prefix))))
+                (if (and (<= 100 status) (< status 200))
+                    (if-let ((end (string-match "\r?\n\r?\n" status-prefix)))
+                        (setq status-prefix
+                              (substring status-prefix (match-end 0)))
+                      (setq scan nil))
+                  (setq status-seen t)
+                  (funcall status-observer status))))))
         (when (and streaming
                    (> (string-bytes bytes)
                       emacsos-assist-web-max-stream-chunk-bytes))
@@ -922,17 +932,19 @@ EARLY-FAILURE without a denial status downgrades freshness conservatively."
                 (emacsos-assist-web-git--canonical-uncertain))
             (error nil)))))))
 
-(defun emacsos-assist-web--git-request-error (status kind)
-  "Return a bounded typed Git error for STATUS and KIND.
+(defun emacsos-assist-web--git-request-error (status kind &optional detail)
+  "Return a bounded typed Git error for STATUS, KIND and local DETAIL.
 The ordinary chat callback continues to receive its original error string."
   (list :kind (if (and (integerp status) (<= 400 status 599)) 'http kind)
         :status (and (integerp status) status)
-        :offline nil
         :text (cond
                ((and (integerp status) (<= 400 status 599))
                 (format "Assist Web request failed (%d)" status))
                ((eq kind 'credentials) "Assist Web credentials unavailable")
                ((eq kind 'parse) "Assist Web response invalid")
+               ((eq detail 'busy) "Assist Web request budget is busy")
+               ((eq detail 'timeout) "Assist Web request timed out")
+               ((eq detail 'trust) "Assist Web TLS/trust failed")
                (t "Assist Web connection unavailable"))))
 
 (defun emacsos-assist-web--request
@@ -951,17 +963,23 @@ error instead of the legacy string."
         (setq token (emacsos-assist-web--read-token))
       (error (setq token-error (error-message-string error))))
     (if token-error
-        (funcall callback nil
-                 (if git-typed-error
-                     (emacsos-assist-web--git-request-error
-                      nil 'credentials)
-                   token-error))
+        (progn
+          (emacsos-assist-web--git-http-status
+           (current-buffer) method path nil t)
+          (funcall callback nil
+                   (if git-typed-error
+                       (emacsos-assist-web--git-request-error
+                        nil 'credentials)
+                     token-error)))
       (if (not (emacsos-assist-web--safe-token-p token))
-        (funcall callback nil
-                 (if git-typed-error
-                     (emacsos-assist-web--git-request-error
-                      nil 'credentials)
-                   "Assist Web token is missing or invalid"))
+        (progn
+          (emacsos-assist-web--git-http-status
+           (current-buffer) method path nil t)
+          (funcall callback nil
+                   (if git-typed-error
+                       (emacsos-assist-web--git-request-error
+                        nil 'credentials)
+                     "Assist Web token is missing or invalid")))
       ;; Invalid endpoints are a local, deterministic rejection.  Report one
       ;; even if unrelated requests presently consume the transport budget.
       (if (and (>= (length emacsos-assist-web--requests)
@@ -969,11 +987,14 @@ error instead of the legacy string."
                (condition-case nil
                    (progn (emacsos-assist-web--endpoint path) t)
                  (error nil)))
-          (funcall callback nil
-                   (if git-typed-error
-                       (emacsos-assist-web--git-request-error
-                        nil 'transport)
-                     "Too many Assist Web requests are already running"))
+          (progn
+            (emacsos-assist-web--git-http-status
+             (current-buffer) method path nil t)
+            (funcall callback nil
+                     (if git-typed-error
+                         (emacsos-assist-web--git-request-error
+                          nil 'transport 'busy)
+                       "Too many Assist Web requests are already running")))
         (let* ((url-request-method method)
                (url-request-extra-headers
 		(append `(("Authorization" . ,(concat "Bearer " token))
@@ -985,19 +1006,24 @@ error instead of the legacy string."
                (url nil)
                (origin (current-buffer))
                (observed-http-status nil)
+               (git-failure-notified nil)
                (finished nil)
                response process timer)
           (cl-labels
-              ((finish (value problem &optional status kind)
+              ((finish (value problem &optional status kind detail)
 		 (unless finished
                    (setq finished t)
+                   (when (and problem (not git-failure-notified))
+                     (setq git-failure-notified t)
+                     (emacsos-assist-web--git-http-status
+                      origin method path status t))
                    (when (timerp timer) (cancel-timer timer))
                    (setq emacsos-assist-web--requests
 			 (delq response emacsos-assist-web--requests))
                    (funcall callback value
                             (if (and git-typed-error problem)
                                 (emacsos-assist-web--git-request-error
-                                 status (or kind 'transport))
+                                 status (or kind 'transport) detail)
                               problem)))))
             (condition-case error
 		(progn
@@ -1017,6 +1043,8 @@ error instead of the legacy string."
                                          (status (and (boundp 'url-http-response-status)
                                                       url-http-response-status)))
                                (unless (eql observed-http-status status)
+                                 (when (memq status '(401 403 404))
+                                   (setq git-failure-notified t))
                                  (emacsos-assist-web--git-http-status
                                   origin method path status))
                                (unwind-protect
@@ -1033,7 +1061,12 @@ error instead of the legacy string."
 				 (kill-buffer (current-buffer)))
 			       (finish value problem status
                                        (if (plist-get transport-status :error)
-                                           'transport 'parse))))
+                                           'transport 'parse)
+                                       (when (memq
+                                              (car-safe
+                                               (plist-get transport-status :error))
+                                              '(tls gnutls-error))
+                                         'trust))))
                            nil t t)))
                   (when (buffer-live-p response)
                     (with-current-buffer response
@@ -1054,7 +1087,8 @@ error instead of the legacy string."
                                (set-process-sentinel process nil)
                                (delete-process process))
                              (when (buffer-live-p response) (kill-buffer response))
-                             (finish nil "Assist Web request timed out")))))
+                             (finish nil "Assist Web request timed out"
+                                     nil 'transport 'timeout)))))
 		  (when (process-live-p process)
                     (let ((url-filter (process-filter process)))
                       (set-process-filter
@@ -1063,6 +1097,7 @@ error instead of the legacy string."
 			url-filter
 			(lambda (active problem)
 			  (unless (memq observed-http-status '(401 403 404))
+                            (setq git-failure-notified t)
                             (emacsos-assist-web--git-http-status
                              origin method path observed-http-status t))
 			  (set-process-filter active nil)
@@ -1075,6 +1110,8 @@ error instead of the legacy string."
                         nil
                         (lambda (status)
                           (setq observed-http-status status)
+                          (when (memq status '(401 403 404))
+                            (setq git-failure-notified t))
                           (emacsos-assist-web--git-http-status
                            origin method path status)))))))
               (error (finish nil (error-message-string error)))))))))))

@@ -516,7 +516,9 @@
   (let ((emacsos-assist-web-max-response-bytes 90)
         (header "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\n"))
     (dolist (chunks (list (list (concat header (make-string 100 ?x)))
-                          (list header (make-string 100 ?x))))
+                          (list header (make-string 100 ?x))
+                          (list "HTTP/1.1 103 Early Hints\r\n\r\n"
+                                (concat header (make-string 100 ?x)))))
       (with-temp-buffer
         (setq-local emacsos-assist-web--thread-id "thread-1")
         (let ((response (generate-new-buffer " *git-raw-denial*"))
@@ -574,6 +576,73 @@
                   'cached))
       (should-not (equal (emacsos-assist-web-git--view-state
                           generation (current-buffer)) "current")))))
+
+(ert-deftest test-assist-web-git-canonical-timeout-downgrades-current ()
+  (with-temp-buffer
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let* ((metadata (test-assist-web-git--metadata
+                      "ready" "topic/one" test-assist-web-git--head))
+           (generation (make-emacsos-assist-web-git-generation
+                        :metadata metadata :state 'current))
+           (response (generate-new-buffer " *git-canonical-timeout*"))
+           timer problem)
+      (setq-local emacsos-assist-web-git--metadata metadata
+                  emacsos-assist-web-git--current generation)
+      (unwind-protect
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                     (lambda () "token"))
+                    ((symbol-function 'url-retrieve)
+                     (lambda (&rest _) response))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_delay _repeat callback) (setq timer callback))))
+            (emacsos-assist-web--request
+             "GET" "threads/thread-1" nil
+             (lambda (_value error) (setq problem error))
+             nil nil nil nil t)
+            (funcall timer)
+            (should (equal (plist-get problem :text)
+                           "Assist Web request timed out"))
+            (should-not emacsos-assist-web-git--metadata)
+            (should (eq (emacsos-assist-web-git-generation-state generation)
+                        'cached)))
+        (when (buffer-live-p response) (kill-buffer response))))))
+
+(ert-deftest test-assist-web-git-canonical-tls-and-local-busy-downgrade ()
+  (dolist (failure '(tls busy))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "thread-1")
+      (let* ((metadata (test-assist-web-git--metadata
+                        "ready" "topic/one" test-assist-web-git--head))
+             (generation (make-emacsos-assist-web-git-generation
+                          :metadata metadata :state 'current))
+             (emacsos-assist-web--requests (and (eq failure 'busy)
+                                                  '(one two)))
+             (emacsos-assist-web-max-concurrent-requests 2)
+             problem)
+        (setq-local emacsos-assist-web-git--metadata metadata
+                    emacsos-assist-web-git--current generation)
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                   (lambda () "token"))
+                  ((symbol-function 'run-at-time)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (_url callback &rest _)
+                     (let ((response (generate-new-buffer " *git-canonical-tls*")))
+                       (with-current-buffer response
+                         (funcall callback
+                                  '(:error (tls "bad certificate"))))
+                       response))))
+          (emacsos-assist-web--request
+           "GET" "threads/thread-1" nil
+           (lambda (_value error) (setq problem error))
+           nil nil nil nil t))
+        (should (equal (plist-get problem :text)
+                       (if (eq failure 'tls)
+                           "Assist Web TLS/trust failed"
+                         "Assist Web request budget is busy")))
+        (should-not emacsos-assist-web-git--metadata)
+        (should (eq (emacsos-assist-web-git-generation-state generation)
+                    'cached))))))
 
 (ert-deftest test-assist-web-git-metadata-error-tags-separate-thread-and-workspace ()
   (with-temp-buffer
@@ -679,6 +748,34 @@
         (funcall callback old nil)
         (should-not emacsos-assist-web-git--metadata)
         (should-not enqueued)))))
+
+(ert-deftest test-assist-web-git-chat-advance-releases-live-probe-intent ()
+  (save-window-excursion
+    (let ((thread (generate-new-buffer " *git-live-probe*"))
+          (window (selected-window))
+          callback)
+      (unwind-protect
+          (progn
+            (set-window-buffer window thread)
+            (with-current-buffer thread
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1")
+              (emacsos-assist-web-git--sync-keys)
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                         (lambda (_thread done) (setq callback done))))
+                (emacsos-assist-web-git--command 'files)
+                (should (= (window-parameter window 'assist-web-git-intent)
+                           1))
+                (emacsos-assist-web-git--note
+                 (test-assist-web-git--metadata
+                  "ready" "topic/new" test-assist-web-git--published))
+                (funcall callback
+                         (test-assist-web-git--metadata
+                          "ready" "topic/old" test-assist-web-git--head)
+                         nil)
+                (should (= (window-parameter window 'assist-web-git-intent)
+                           2)))))
+        (kill-buffer thread)))))
 
 (ert-deftest test-assist-web-git-newer-started-command-wins-reverse-completion ()
   (with-temp-buffer
@@ -854,7 +951,7 @@
         (should-not promoted)
         (should (eq emacsos-assist-web-git--request new))))))
 
-(ert-deftest test-assist-web-git-network-cache-only-for-exact-pair ()
+(ert-deftest test-assist-web-git-helper-timeout-does-not-open-cache ()
   (with-temp-buffer
     (let* ((metadata (test-assist-web-git--metadata
                       "processing" "topic/old" test-assist-web-git--published))
@@ -873,7 +970,7 @@
       (cl-letf (((symbol-function 'emacsos-assist-web-git--open)
                  (lambda (&rest _) (setq opened t))))
         (emacsos-assist-web-git--failed request "Git operation timed out")
-        (should opened)
+        (should-not opened)
         (should (eq (emacsos-assist-web-git-generation-state generation)
                     'cached))
         (setq opened nil)
@@ -883,6 +980,47 @@
                      "processing" "topic/new" test-assist-web-git--published))
         (emacsos-assist-web-git--failed request "Git operation timed out")
         (should-not opened)))))
+
+(ert-deftest test-assist-web-git-post-denial-reauth-needs-new-generation ()
+  (let ((root (make-temp-file "assist-git-reauth-" t))
+        (window (selected-window))
+        (original (window-buffer (selected-window))))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((thread (current-buffer))
+                 (snapshot (test-assist-web-git--snapshot "ready" "topic/one"))
+                 (metadata (emacsos-assist-web-git--metadata-from-snapshot
+                            snapshot))
+                 (generation (make-emacsos-assist-web-git-generation
+                              :path root :metadata metadata :state 'current
+                              :auth-epoch 0))
+                 (intent (list :action 'files :buffer thread :window window
+                               :serial 1))
+                 (request (list :metadata metadata :intents (list intent)))
+                 opened)
+            (set-window-buffer window thread)
+            (set-window-parameter window 'assist-web-git-intent 1)
+            (setq-local emacsos-assist-web-git--metadata metadata
+                        emacsos-assist-web-git--current generation)
+            (emacsos-assist-web-git--canonical-denied 403)
+            (emacsos-assist-web-git--note-snapshot
+             snapshot nil emacsos-assist-web-git--auth-epoch)
+            (should-not emacsos-assist-web-git--denied)
+            (setq-local emacsos-assist-web-git--request request)
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--open)
+                       (lambda (&rest _) (setq opened t))))
+              (emacsos-assist-web-git--failed
+               request "Git operation timed out"))
+            (should-not opened)
+            (set-window-parameter window 'assist-web-git-intent 1)
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _) (setq opened t) "irrelevant")))
+              (should-error (emacsos-assist-web-git--open
+                             intent generation)))
+            (should-not opened)))
+      (set-window-buffer window original)
+      (set-window-parameter window 'assist-web-git-intent nil)
+      (delete-directory root t))))
 
 (ert-deftest test-assist-web-git-pinned-prior-is-not-deleted ()
   (with-temp-buffer
