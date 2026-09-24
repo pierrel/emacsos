@@ -78,7 +78,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
 (defvar-local emacsos-assist-web-git--busy-check nil
   "One post-save active-Run thread check, owned by its exact receipt.")
 (defvar-local emacsos-assist-web-git--stopped-reobserve nil
-  "Exact queue Run whose ended observer contradicted its next status read.")
+  "Local projection of a Run stopped by SSE end, disconnect, or approval.")
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
 (defvar-local emacsos-assist-web-git--feedback-windows nil)
@@ -1208,18 +1208,24 @@ The caller owns both the exact Run GET and subsequent canonical commit."
           (emacsos-assist-web-git--update-headers)
         ((error quit) nil)))))
 
-(defun emacsos-assist-web-git--stop-reobserve (entry)
-  "Make an ended observer's contradictory ENTRY noncurrent until rechecked."
-  (setq emacsos-assist-web-git--stopped-reobserve
-        (list :entry entry :tid emacsos-assist-web--thread-id
-              :run-id (plist-get entry :run-id)
-              :generation (plist-get entry :reobserve-generation)))
-  (cl-incf emacsos-assist-web-git--epoch)
-  (when emacsos-assist-web-git--current
-    (setf (emacsos-assist-web-git-generation-state
-           emacsos-assist-web-git--current) 'cached))
-  (setq emacsos-assist-web-git--unavailable "Run changed; Refresh")
-  (emacsos-assist-web-git--update-headers))
+(defun emacsos-assist-web-git--stop-reobserve (entry &optional kind)
+  "Make ENTRY's stopped Run KIND noncurrent until exact recheck."
+  (let ((inhibit-quit t))
+    (setq emacsos-assist-web-git--stopped-reobserve
+          (list :entry entry :tid emacsos-assist-web--thread-id
+                :run-id (plist-get entry :run-id)
+                :generation (plist-get entry :reobserve-generation)
+                :kind kind))
+    (cl-incf emacsos-assist-web-git--epoch)
+    (when emacsos-assist-web-git--current
+      (setf (emacsos-assist-web-git-generation-state
+             emacsos-assist-web-git--current) 'cached))
+    (setq emacsos-assist-web-git--unavailable
+          (if (eq kind 'disconnect)
+              "observation disconnected; Refresh"
+            "Run changed; Refresh")))
+  (condition-case nil (emacsos-assist-web-git--update-headers)
+    ((error quit) nil)))
 
 (defun emacsos-assist-web-git--stopped-reobserve-owner-p (entry)
   "Whether ENTRY is a fresh exact recheck of the stopped observer."

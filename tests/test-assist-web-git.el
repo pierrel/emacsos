@@ -1007,14 +1007,14 @@
                    (substring-no-properties
                     (emacsos-assist-web-git--thread-header)))))))))
 
-(ert-deftest test-assist-web-git-ordinary-sse-close-active-stops-no-reattach ()
-  "A disconnected observer and contradictory Run need an explicit later pass."
+(ert-deftest test-assist-web-git-ordinary-sse-close-active-reattaches-on-refresh ()
+  "A disconnected observer reattaches once after explicit exact running status."
   (with-temp-buffer
     (emacsos-assist-web-mode)
     (emacsos-assist-web--write-prompt)
     (let ((entry (emacsos-assist-web--entry
                   "fixture" 'observing "exact-key"))
-          exact-run)
+          exact-run canonical (attachments 0))
       (setf (plist-get entry :run-id) "run-a"
             (plist-get entry :epoch) 1
             (plist-get entry :reobserve-generation) 1)
@@ -1025,22 +1025,229 @@
                  (lambda () t))
                 ((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method path _payload done &rest _)
-                   (should (string-match-p "/runs/" path))
-                   (setq exact-run done)))
+                   (if (string-match-p "/runs/" path)
+                       (setq exact-run done)
+                     (setq canonical done))))
                 ((symbol-function 'emacsos-assist-web--start-observation)
-                 (lambda (&rest _) (ert-fail "SSE reattached"))))
+                 (lambda (&rest _) (cl-incf attachments))))
         (emacsos-assist-web--entry-observation-interrupted
          entry 1 "observation disconnected")
         (should emacsos-assist-web-git--stopped-reobserve)
-        (should (equal emacsos-assist-web--post-sse-run-id "run-a"))
+        (should (eq (plist-get entry :observer-end-kind) 'disconnect))
         (emacsos-assist-web-refresh-thread)
         (should exact-run)
         (funcall exact-run
                  '((id . "run-a") (thread_id . "thread-1")
                    (status . "running")) nil)
-        (should (plist-get entry :requires-reobserve))
+        (should (= attachments 1))
+        (should canonical)
         (should emacsos-assist-web-git--stopped-reobserve)
         (should-not emacsos-assist-web--stream-entry)))))
+
+(ert-deftest test-assist-web-git-two-ended-runs-keep-separate-provenance ()
+  "A's terminal end cannot be overwritten by B's disconnected observer."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((a (emacsos-assist-web--entry "A" 'accepted-unobserved "key-a"))
+          (b (emacsos-assist-web--entry "B" 'accepted-unobserved "key-b"))
+          exact-run (attachments 0))
+      (setf (plist-get a :run-id) "run-a"
+            (plist-get a :observer-end-kind) 'terminal-sse
+            (plist-get a :observer-end-generation) 4
+            (plist-get b :run-id) "run-b"
+            (plist-get b :observer-end-kind) 'disconnect
+            (plist-get b :observer-end-generation) 8)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list a b))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload done &rest _)
+                   (setq exact-run done)))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (&rest _) (cl-incf attachments))))
+        (emacsos-assist-web--reobserve-entry a)
+        (should exact-run)
+        (funcall exact-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
+        (should (= attachments 0))
+        (should (plist-get a :observer-end-checked))
+        (should (eq (plist-get b :observer-end-kind) 'disconnect))
+        (should-not (plist-get b :observer-end-checked))))))
+
+(ert-deftest test-assist-web-git-b-waits-for-a-exact-terminal-save ()
+  "A terminal SSE alone cannot admit B's observer before exact A success."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((a (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (b (emacsos-assist-web--entry "B" 'accepted-unobserved "key-b"))
+          exact-run observed)
+      (setf (plist-get a :run-id) "run-a"
+            (plist-get a :stream-generation) 1
+            (plist-get b :run-id) "run-b")
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue (list a b)
+                  emacsos-assist-web--stream-entry a)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (should (string-match-p "/runs/run-a" path))
+                   (setq exact-run done)))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (entry) (push entry observed)))
+                ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore))
+        (emacsos-assist-web--stream-finish (current-buffer))
+        (should exact-run)
+        (should-not observed)
+        (funcall exact-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "success")) nil)
+        (should (equal observed (list b)))))))
+
+(ert-deftest test-assist-web-git-repeated-approval-never-reattaches ()
+  "Two explicit awaiting-approval checks remain stopped, not SSE-active."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'accepted-unobserved "key-a"))
+          exact-run (attachments 0))
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :observer-end-kind) 'terminal-sse
+            (plist-get entry :observer-end-generation) 1)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload done &rest _)
+                   (setq exact-run done)))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (&rest _) (cl-incf attachments))))
+        (dotimes (_ 2)
+          (emacsos-assist-web--reobserve-entry entry)
+          (funcall exact-run
+                   '((id . "run-a") (thread_id . "thread-1")
+                     (status . "awaiting_approval")) nil)
+          (should (plist-get entry :requires-reobserve))
+          (should (= attachments 0)))
+        (should (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+                    'approval))))))
+
+(ert-deftest test-assist-web-git-approval-without-sse-has-separate-record ()
+  "An exact approval stop is durable without fabricating terminal provenance."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'accepted-unobserved "key-a"))
+          exact-run)
+      (setf (plist-get entry :run-id) "run-a")
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload done &rest _)
+                   (setq exact-run done)))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (&rest _) (ert-fail "approval reattached SSE"))))
+        (emacsos-assist-web--reobserve-entry entry)
+        (funcall exact-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "awaiting_approval")) nil)
+        (should (plist-get entry :approval-stopped))
+        (should-not (plist-get entry :observer-end-kind))
+        (should-not (plist-get entry :observer-end-checked))
+        (should (alist-get 'approval_stopped
+                           (emacsos-assist-web--entry-cache-value entry)))))))
+
+(ert-deftest test-assist-web-git-contradiction-save-failure-stays-noncurrent ()
+  "An unsaved active result cannot lift an ended observer's Git fence."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "A" 'accepted-unobserved "key-a"))
+          (generation (make-emacsos-assist-web-git-generation :state 'current))
+          exact-run)
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :observer-end-kind) 'terminal-sse
+            (plist-get entry :observer-end-generation) 1)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload done &rest _)
+                   (setq exact-run done)))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (&rest _) (ert-fail "SSE reattached"))))
+        (emacsos-assist-web--reobserve-entry entry)
+        (funcall exact-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
+        (should (eq (emacsos-assist-web-git-generation-state generation)
+                    'cached))
+        (should-not (plist-get entry :observer-end-checked))
+        (should (plist-get entry :requires-reobserve))
+        (should emacsos-assist-web-git--stopped-reobserve)))))
+
+(ert-deftest test-assist-web-git-unsaved-observer-end-pauses-before-next-run ()
+  "A failed ordinary terminal or disconnect save blocks B and Git current."
+  (dolist (kind '(terminal-sse disconnect))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((a (emacsos-assist-web--entry "A" 'observing "key-a"))
+            (b (emacsos-assist-web--entry "B" 'accepted-unobserved "key-b"))
+            (generation (make-emacsos-assist-web-git-generation :state 'current))
+            (next 0))
+        (setf (plist-get a :run-id) "run-a"
+              (plist-get a :epoch) 1
+              (plist-get a :stream-generation) 1
+              (plist-get b :run-id) "run-b")
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue (list a b)
+                    emacsos-assist-web--stream-entry a
+                    emacsos-assist-web-git--current generation)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () nil))
+                  ((symbol-function 'emacsos-assist-web--start-next-observation)
+                   (lambda (&rest _) (cl-incf next))))
+          (if (eq kind 'terminal-sse)
+              (emacsos-assist-web--stream-finish (current-buffer))
+            (emacsos-assist-web--entry-observation-interrupted
+             a 1 "observation disconnected"))
+          (should emacsos-assist-web--reconcile-recovery-paused)
+          (should (= next 0))
+          (should (eq (plist-get a :observer-end-kind) kind))
+          (should (eq (emacsos-assist-web-git-generation-state generation)
+                      'cached)))))))
+
+(ert-deftest test-assist-web-git-disconnect-fences-before-status-quit ()
+  "A fallible chat status update cannot precede disconnect safety or save."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (generation (make-emacsos-assist-web-git-generation :state 'current))
+          saved)
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :epoch) 1)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web--stream-entry entry
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web--entry-replace-empty-assistant-status)
+                 (lambda (&rest _) (signal 'quit nil)))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () (setq saved t))))
+        (emacsos-assist-web--entry-observation-interrupted
+         entry 1 "observation disconnected")
+        (should saved)
+        (should (eq (plist-get entry :observer-end-kind) 'disconnect))
+        (should (eq (emacsos-assist-web-git-generation-state generation)
+                    'cached))))))
 
 (ert-deftest test-assist-web-git-stopped-run-needs-new-r-and-canonical-r3 ()
   "Only a later exact Run and post-conflict canonical T clear a stopped marker."
@@ -2042,7 +2249,9 @@
 
 (ert-deftest test-assist-web-git-raw-nondenial-still-downgrades-on-parse-error ()
   "Raw 200 or 503 does not pre-acknowledge later canonical failure."
-  (dolist (status '(200 503))
+  (dolist (trial '((200 . 1) (503 . 1) (200 . 2) (503 . 2)
+                   (200 . deferred) (503 . deferred)))
+    (let ((status (car trial)) (quit-at (cdr trial)))
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (let* ((metadata (test-assist-web-git--metadata
@@ -2065,9 +2274,14 @@
                        (lambda (&rest _) (signal 'quit nil)))
                       ((symbol-function 'emacsos-assist-web--git-http-status)
                        (lambda (&rest args)
-                         (if (= (cl-incf status-attempts) 1)
-                             (signal 'quit nil)
-                           (apply http-status args))))
+                         (let ((attempt (cl-incf status-attempts)))
+                           (cond
+                            ((and (numberp quit-at) (= attempt quit-at))
+                             (signal 'quit nil))
+                            (t (when (and (eq quit-at 'deferred)
+                                          (= attempt 2))
+                                 (setq quit-flag t))
+                               (apply http-status args))))))
                       ((symbol-function 'url-retrieve)
                        (lambda (_url callback &rest _)
                          (setq done callback
@@ -2079,7 +2293,9 @@
                          response)))
               (emacsos-assist-web--request
                "GET" "threads/thread-1" nil
-               (lambda (_value _problem) (cl-incf callbacks)))
+               (lambda (_value _problem)
+                 (cl-incf callbacks)
+                 (setq quit-flag nil)))
               (funcall (process-filter process) process
                        (format "HTTP/1.1 %d Test\r\nContent-Length: 7\r\n\r\n"
                                status))
@@ -2094,7 +2310,42 @@
               (should (= callbacks 1))
               (should (>= status-attempts 2))
               (should-not emacsos-assist-web-git--pending))
+          (setq quit-flag nil)
           (when (process-live-p process) (delete-process process))
+          (when (buffer-live-p response) (kill-buffer response))))))))
+
+(ert-deftest test-assist-web-git-noncanonical-get-failure-keeps-current ()
+  "History failure and an obsolete T request cannot downgrade another T."
+  (dolist (case '(("threads/thread-1/runs" . "thread-1")
+                  ("threads/thread-1" . "thread-2")))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((generation (make-emacsos-assist-web-git-generation :state 'current))
+            response done (callbacks 0))
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web-git--current generation)
+        (unwind-protect
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (_url callback &rest _)
+                         (setq done callback
+                               response (generate-new-buffer " *git-other-get*"))
+                         response)))
+              (emacsos-assist-web--request
+               "GET" (car case) nil
+               (lambda (_value _problem) (cl-incf callbacks)))
+              (setq-local emacsos-assist-web--thread-id (cdr case))
+              (with-current-buffer response
+                (insert "invalid")
+                (setq-local url-http-response-status 503
+                            url-http-content-type "application/json"
+                            url-http-end-of-headers (copy-marker (point-min)))
+                (funcall done nil))
+              (should (= callbacks 1))
+              (should (eq (emacsos-assist-web-git-generation-state generation)
+                          'current)))
           (when (buffer-live-p response) (kill-buffer response)))))))
 
 (ert-deftest test-assist-web-git-dead-origin-t403-fences-live-peer ()
