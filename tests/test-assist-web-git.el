@@ -367,6 +367,29 @@
       (should (equal emacsos-assist-web-git--unavailable
                      "invalid authenticated thread snapshot")))))
 
+(ert-deftest test-assist-web-git-command-denial-cannot-retain-current ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web-git--sync-keys)
+    (let* ((metadata (test-assist-web-git--metadata
+                      "ready" "topic/one" test-assist-web-git--head))
+           (generation (make-emacsos-assist-web-git-generation
+                        :metadata metadata :state 'current)))
+      (setq-local emacsos-assist-web-git--metadata metadata
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread callback)
+                   (funcall callback nil
+                            '(:kind http :status 403
+                              :text "Assist Web request failed (403)")))))
+        (emacsos-assist-web-git--command 'files))
+      (should-not emacsos-assist-web-git--metadata)
+      (should (equal emacsos-assist-web-git--unavailable
+                     "thread access denied (403); Git unavailable"))
+      (should-not (string-match-p " current"
+                                  (emacsos-assist-web-git--thread-header))))))
+
 (ert-deftest test-assist-web-git-metadata-error-tags-separate-thread-and-workspace ()
   (with-temp-buffer
     (setq-local emacsos-assist-web--thread-id "thread-1")

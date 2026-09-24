@@ -882,22 +882,62 @@ them."
                           (setq offset end))))))
               (funcall url-filter process bytes))))))))
 
+(defun emacsos-assist-web--git-http-status (origin method path status)
+  "Tell ORIGIN's optional Git projection about canonical thread denial.
+METHOD and PATH identify the exact thread GET.  STATUS is read before JSON
+parsing, so a malformed denial body cannot hide a 401, 403, or 404."
+  (when (and (buffer-live-p origin)
+             (equal method "GET")
+             (memq status '(401 403 404))
+             (stringp path)
+             (string-match "\\`threads/\\([^/]+\\)\\'" path))
+    (let ((tid (match-string 1 path)))
+      (with-current-buffer origin
+        (when (and (equal tid emacsos-assist-web--thread-id)
+                   (fboundp 'emacsos-assist-web-git--canonical-denied))
+          (condition-case nil
+              (emacsos-assist-web-git--canonical-denied status)
+            (error nil)))))))
+
+(defun emacsos-assist-web--git-request-error (_problem status kind)
+  "Return a bounded typed Git error for STATUS and KIND.
+The ordinary chat callback continues to receive its original error string."
+  (list :kind (if (and (integerp status) (<= 400 status 599)) 'http kind)
+        :status (and (integerp status) status)
+        :text (cond
+               ((and (integerp status) (<= 400 status 599))
+                (format "Assist Web request failed (%d)" status))
+               ((eq kind 'credentials) "Assist Web credentials unavailable")
+               ((eq kind 'parse) "Assist Web response invalid")
+               (t "Assist Web connection unavailable"))))
+
 (defun emacsos-assist-web--request
-    (method path payload callback &optional headers allow-status array-type object-type)
+    (method path payload callback &optional headers allow-status array-type object-type
+            git-typed-error)
   "Send METHOD to PATH with optional JSON PAYLOAD and HEADERS.
 
 Invoke CALLBACK with (VALUE ERROR).  Report network and parsing failures as
 ERROR rather than raising them from url-http's asynchronous callback.  Pass
 ALLOW-STATUS only for a bounded structured non-2xx response the caller owns.
-ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
+ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
+GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
+error instead of the legacy string."
   (let (token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
       (error (setq token-error (error-message-string error))))
     (if token-error
-        (funcall callback nil token-error)
+        (funcall callback nil
+                 (if git-typed-error
+                     (emacsos-assist-web--git-request-error
+                      token-error nil 'credentials)
+                   token-error))
       (if (not (emacsos-assist-web--safe-token-p token))
-        (funcall callback nil "Assist Web token is missing or invalid")
+        (funcall callback nil
+                 (if git-typed-error
+                     (emacsos-assist-web--git-request-error
+                      "Assist Web token is missing or invalid" nil 'credentials)
+                   "Assist Web token is missing or invalid"))
       ;; Invalid endpoints are a local, deterministic rejection.  Report one
       ;; even if unrelated requests presently consume the transport budget.
       (if (and (>= (length emacsos-assist-web--requests)
@@ -905,7 +945,12 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
                (condition-case nil
                    (progn (emacsos-assist-web--endpoint path) t)
                  (error nil)))
-          (funcall callback nil "Too many Assist Web requests are already running")
+          (funcall callback nil
+                   (if git-typed-error
+                       (emacsos-assist-web--git-request-error
+                        "Too many Assist Web requests are already running" nil
+                        'transport)
+                     "Too many Assist Web requests are already running"))
         (let* ((url-request-method method)
                (url-request-extra-headers
 		(append `(("Authorization" . ,(concat "Bearer " token))
@@ -915,16 +960,21 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
                (url-request-data
 		(and payload (encode-coding-string (json-encode payload) 'utf-8)))
                (url nil)
+               (origin (current-buffer))
                (finished nil)
                response process timer)
           (cl-labels
-              ((finish (value problem)
+              ((finish (value problem &optional status kind)
 		 (unless finished
                    (setq finished t)
                    (when (timerp timer) (cancel-timer timer))
                    (setq emacsos-assist-web--requests
 			 (delq response emacsos-assist-web--requests))
-                   (funcall callback value problem))))
+                   (funcall callback value
+                            (if (and git-typed-error problem)
+                                (emacsos-assist-web--git-request-error
+                                 problem status (or kind 'transport))
+                              problem)))))
             (condition-case error
 		(progn
                   (setq url (emacsos-assist-web--endpoint path))
@@ -939,7 +989,11 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
                           (url-retrieve
                            url
                            (lambda (_status)
-                             (let (value problem)
+                             (let (value problem
+                                         (status (and (boundp 'url-http-response-status)
+                                                      url-http-response-status)))
+                               (emacsos-assist-web--git-http-status
+                                origin method path status)
                                (unwind-protect
                                    (condition-case parse-error
                                        (setq value
@@ -950,7 +1004,7 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
                                       (setq problem
                                             (error-message-string parse-error))))
 				 (kill-buffer (current-buffer)))
-                               (finish value problem)))
+			       (finish value problem status 'parse)))
                            nil t t)))
                   (when (buffer-live-p response)
                     (with-current-buffer response
