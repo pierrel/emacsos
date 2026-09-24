@@ -1,0 +1,50 @@
+#+title: Assist Web concurrent request round-four evidence
+#+date: 2026-09-21
+
+* D5 public-path scenario matrix
+
+This is the current evidence index.  Rows unchanged in round four retain the
+named regression from round three; this record adds the bounds, action-lifetime,
+and legacy/queue coexistence evidence described below.
+
+| # | Evidence |
+|---+----------|
+| 1 | =test-assist-web-send-queues-one-same-thread-follow-up= and =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 2 | =test-assist-web-send-admits-a-different-web-buffer= and =test-assist-web-stale-post-callback-cannot-replace-a-newer-send= |
+| 3 | =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 4 | =test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key= and =test-assist-web-preaccept-abort-keeps-exact-retry-and-ignores-late-acceptance= |
+| 5 | =test-assist-web-send-retries-a-proven-429-with-its-exact-key= and =test-assist-web-invalid-send-response-releases-active-slot-for-retry= |
+| 6 | =test-assist-web-create-body-overflow-refuses-before-key-or-region=, =test-assist-web-over-64000-message-refuses-before-key-or-region=, and =test-assist-web-prospective-over-512k-cache-refuses-before-key-or-region= prove the actual body/cache bounds retain exact draft and point before key, region, or POST. |
+| 7 | =test-assist-web-send-exact-idempotency-conflict-fails-closed= |
+| 8 | =test-assist-web-restore-normalization-never-starts-network-before-save=, =test-assist-web-restored-accepted-run-gets-before-sse=, and =test-assist-web-restore-retains-entry-live-text-and-recovery-draft= |
+| 9 | =test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent=, =test-assist-web-queue-buffer-kill-releases-each-entry-token=, and =test-assist-web-preheader-budget-refuses-a-fifth-observer= |
+| 10 | =test-assist-web-abort-honors-structured-status-outcome-pairs= and =test-assist-web-unconfirmed-abort-retains-accepted-retry-state= |
+| 11 | =test-assist-web-terminal-does-not-release-an-unpersisted-state= and =test-assist-web-reconcile-persists-snapshot-before-retiring-entries= |
+| 12 | =test-assist-web-recovered-create-requires-restore-before-send=, =test-assist-web-source-recovery-action-remains-until-its-save-succeeds=, and =test-assist-web-restored-provisional-actions-survive-reload= |
+| 13 | =test-assist-web-send-adoption-holds-s1-until-its-exact-get-returns= drives public Send and POST adoption while C1 terminal cleanup precedes the withheld S1 GET. |
+| 14 | =test-assist-web-send-adoption-collision-contracts-after-reconcile= drives public S1/S2 Send and contraction; =test-assist-web-over-512k-adoption-keeps-both-drafts-and-caches= proves an oversized four-entry merge retains both buffers and nonempty tails. |
+| 15 | =test-assist-web-stale-reobserve-cannot-own-a-replaced-entry=, =test-assist-web-stale-delete-cannot-mutate-a-replaced-entry=, and =test-assist-web-pre-sse-store-error-survives-url-sentinel-ordering= |
+| 16 | =test-assist-web-delta-detach-and-terminal-remove-actions-not-text= and =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 17 | =test-assist-web-two-live-buffers-release-web-only-after-the-last= and =test-assist-web-legacy-in-flight-coexists-with-entry-owned-web-work= |
+
+* Round-four corrections
+
+Aggregate web activity now includes an in-flight legacy buffer only before that
+buffer adopts entry ownership.  Entry and retained-source actions have explicit
+ranges: reset, delta, status, redraw, terminal, interruption, and detach clear
+only their actions before changing assistant text.  A recovered-head Restore
+removes its action before its ready status, and the retained source Restore is
+removed only after its cache save succeeds.
+
+Queue admission validates the real endpoint body and a same-sized prospective
+cache identity before minting an idempotency key.  The added bounds tests cover
+the 64,000-character limit, actual create-body expansion, and a complete
+over-512KiB prospective record.  The adoption overflow regression retains both
+source and destination queues, tails, and cache ownership without a write.
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-21-assist-concurrent-request-running-fix-round-3-evidence.org=,
+  “D5 public-path scenario matrix”: this record keeps its full matrix while
+  replacing its incomplete bounds/action-lifetime account with round-four
+  regression evidence.

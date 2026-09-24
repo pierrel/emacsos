@@ -1,0 +1,31 @@
+#+title: Assist Web concurrent request round-seven evidence
+#+date: 2026-09-21
+
+* D5 collision and reconciliation correction
+
+An ordinary two-entry FIFO is not a collision.  Collision provenance belongs
+only to adoption that widened a resident queue above the normal two-entry
+bound.  A collision therefore remains set for 4→3→2 only when it was already
+set, and clears at one.  Restored records accept a noncollision queue of up to
+two entries, or a collision queue of two through four entries.
+
+| Behavior | Evidence |
+|----------+----------|
+| Ordinary two-entry recovery | =test-assist-web-restore-keeps-an-ordinary-two-entry-queue-open= |
+| One-plus-one adoption | =test-assist-web-one-plus-one-adoption-keeps-the-ordinary-queue-open= |
+| Adopted collision contraction | =test-assist-web-dismiss-contracts-a-public-adoption-collision= |
+| Failed reconcile transition | =test-assist-web-reconcile-save-failure-restores-terminals-before-retry= |
+
+The failed reconcile-transition case restores each tentative =reconciling=
+entry to =terminal-unreconciled=, retains FIFO order and a fixed retry status,
+and sends no GET until the next successful explicit reconciliation attempt.
+
+All other rows of the full D5 matrix remain as recorded in round six.
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-21-assist-concurrent-request-running-fix-round-6-evidence.org=,
+  “D5 public-path scenario matrix” rows 11 and 14 and “Round-six correction”:
+  that record incorrectly treated every two-entry queue as an adoption
+  collision.  This record restores the D5 provenance rule and adds the
+  failed-transition reconciliation evidence.

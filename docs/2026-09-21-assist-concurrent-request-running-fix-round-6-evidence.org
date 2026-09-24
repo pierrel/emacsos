@@ -1,0 +1,47 @@
+#+title: Assist Web concurrent request round-six evidence
+#+date: 2026-09-21
+
+* D5 public-path scenario matrix
+
+This current index carries unchanged rows from round five and corrects the
+collision boundary: Send remains closed at two resident entries and reopens only
+after contraction to one.
+
+| # | Evidence |
+|---+----------|
+| 1 | =test-assist-web-send-queues-one-same-thread-follow-up= and =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 2 | =test-assist-web-send-admits-a-different-web-buffer= and =test-assist-web-stale-post-callback-cannot-replace-a-newer-send= |
+| 3 | =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 4 | =test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key= and =test-assist-web-preaccept-abort-keeps-exact-retry-and-ignores-late-acceptance= |
+| 5 | =test-assist-web-send-retries-a-proven-429-with-its-exact-key= and =test-assist-web-public-pending-approval-retries-without-dismiss= |
+| 6 | =test-assist-web-create-body-overflow-refuses-before-key-or-region=, =test-assist-web-over-64000-message-refuses-before-key-or-region=, =test-assist-web-prospective-over-512k-cache-refuses-before-key-or-region=, and =test-assist-web-public-post-rejections-offer-dismiss-and-release-follower= cover pre-key bounds and public 413/422/harness-409 rejection/Dismiss. |
+| 7 | =test-assist-web-send-exact-idempotency-conflict-fails-closed= |
+| 8 | =test-assist-web-restore-normalization-never-starts-network-before-save=, =test-assist-web-restored-accepted-run-gets-before-sse=, and =test-assist-web-restore-retains-entry-live-text-and-recovery-draft= |
+| 9 | =test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent=, =test-assist-web-queue-buffer-kill-releases-each-entry-token=, and =test-assist-web-preheader-budget-refuses-a-fifth-observer= |
+| 10 | =test-assist-web-abort-honors-structured-status-outcome-pairs= and =test-assist-web-unconfirmed-abort-retains-accepted-retry-state= |
+| 11 | =test-assist-web-terminal-does-not-release-an-unpersisted-state=, =test-assist-web-reconcile-persists-snapshot-before-retiring-entries=, and =test-assist-web-reconcile-mixed-rejected-terminal-persists-and-reopens= |
+| 12 | =test-assist-web-recovered-create-requires-restore-before-send=, =test-assist-web-source-recovery-action-remains-until-its-save-succeeds=, and =test-assist-web-restored-provisional-actions-survive-reload= |
+| 13 | =test-assist-web-send-adoption-holds-s1-until-its-exact-get-returns= and =test-assist-web-send-adopts-source-run-before-destination-fifo= drive public Send/POST adoption: S1 stays behind its exact GET while C1 settles, and returned source work remains before destination FIFO work. |
+| 14 | =test-assist-web-send-adoption-collision-contracts-after-reconcile=, =test-assist-web-public-adoption-write-failure-keeps-dual-tails=, =test-assist-web-over-512k-adoption-keeps-both-drafts-and-caches=, and =test-assist-web-dismiss-contracts-a-public-adoption-collision= cover durable merge refusal, failed merge retention, and 4→3→2 blocked then 1-entry reopening. |
+| 15 | =test-assist-web-stale-reobserve-cannot-own-a-replaced-entry=, =test-assist-web-stale-delete-cannot-mutate-a-replaced-entry=, and =test-assist-web-pre-sse-store-error-survives-url-sentinel-ordering= |
+| 16 | =test-assist-web-delta-detach-and-terminal-remove-actions-not-text= and =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 17 | =test-assist-web-two-live-buffers-release-web-only-after-the-last=, =test-assist-web-legacy-in-flight-coexists-with-entry-owned-web-work=, and =test-assist-web-legacy-in-flight-send-retains-its-exact-draft= |
+
+* Round-six correction
+
+The adoption, restored-cache, dismissal, and reconciliation paths all derive
+collision from the same count rule: two or more resident entries remain a
+recovery collision.  The mixed rejected/terminal regression proves that exact
+reconciliation persists the retained rejected entry, removes only the terminal
+entry, and reopens the recovered one-entry queue with its Dismiss action.
+
+Entry action cleanup and retained-source recovery cleanup use the shared safe
+range remover.  The legacy restore docstring now identifies that separate
+nonqueue path rather than implying aggregate queue ownership.
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-21-assist-concurrent-request-running-fix-round-5-evidence.org=,
+  “D5 public-path scenario matrix”: this record corrects the row 13 and 14
+  evidence references and replaces the incorrect 4→3→2 reopening claim with
+  the required below-two collision boundary.

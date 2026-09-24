@@ -63,7 +63,11 @@ the budget and can run `emacsos--chat-abort' to cancel.  See design doc §6."
   "Non-nil while a stream is open.  Re-entrancy guard for SEND.")
 
 (defvar emacsos--assist-active-surface nil
-  "Owner of the phone-wide Assist request slot, or nil when it is free.")
+  "Active Assist transport: `chat', aggregate `web', or nil.
+
+The local CHAT transport is single-flight.  Canonical Assist Web buffers own
+their own requests, so `web' is an aggregate exclusion for CHAT rather than a
+buffer owner; web SEND remains available while another web buffer observes.")
 
 (defvar emacsos--chat-confirm-pending nil
   "Non-nil when New chat was invoked once and awaits a second invocation.
@@ -1560,7 +1564,10 @@ not `current-buffer' (safety-control renders can run with *keyboard* current)."
   (and (emacsos--chat-surface-on-top) t))
 
 (defun emacsos-conversation-primary-action ()
-  "Send when idle, or abort/detach when this conversation owns the stream."
+  "Send unless the local chat transport owns the one phone-wide stream.
+
+Canonical Assist Web buffers keep SEND available while observing: each observed
+Run exposes its own Abort/Detach control in the transcript."
   (interactive)
   (if (emacsos-conversation-owns-active-stream-p (current-buffer))
       (emacsos-conversation-abort)
@@ -1571,14 +1578,15 @@ not `current-buffer' (safety-control renders can run with *keyboard* current)."
       (emacsos--chat-send (current-buffer)))))
 
 (defun emacsos-conversation-owns-active-stream-p (buffer)
-  "Return non-nil only when BUFFER owns the phone-wide stream control."
+  "Return non-nil only when BUFFER owns the local chat stream control.
+
+`emacsos--assist-active-surface' is `chat', `web', or nil.  Web is aggregate
+exclusion for local chat, not ownership of the utility-row Abort action."
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
          (or (and emacsos--chat-in-flight
                   (eq emacsos--chat-stream-buffer buffer))
-             (and (boundp 'emacsos-assist-web--in-flight)
-                  emacsos-assist-web--in-flight
-                  (eq emacsos--assist-active-surface buffer))))))
+             nil))))
 
 (defun emacsos--chat-button ()
   "Utility-row Chat/SEND/ABORT button for the active Assist surface."

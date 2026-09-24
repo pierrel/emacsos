@@ -1,0 +1,61 @@
+#+title: Assist Web concurrent request correction
+#+date: 2026-09-20
+
+* Status
+
+This record materializes accepted design D5
+=0716675c69ffcc4254ed1a64def8337aa536304dbf4739f830055d71ec303040=.
+The current branch is an explicitly non-candidate checkpoint: it has only the
+first admission slice, not the accepted correction.  It introduces aggregate
+=web= activity and one durable same-buffer follow-up while preserving local
+=*chat*= exclusion.  Assist remains the authority for durable Run FIFO ordering
+and long-lived SSE capacity; no server protocol or Assist package change is
+part of this correction.
+
+Remaining required D5 work is the explicit resident-state/rejection model,
+exact-Run re-observation and restore normalization, entry-owned marker
+rendering, pre-header SSE request-budget tokens, pre-canonical recovered-head
+and destination-owned adoption, touch Abort/Detach alongside SEND, all bounds
+and fixed refusal status paths, and the complete regression matrix.  This
+checkpoint must not be reviewed, deployed, or offered as candidate-ready.
+
+* Design
+
+Each canonical thread buffer keeps an ordered, durable two-resident normal
+queue: its active or recoverable request and one follow-up.  Buffers admit
+independently.  A buffer serializes POST acknowledgements and observes one Run
+at a time, so a same-thread follow-up cannot overtake an uncertain predecessor.
+The local =*chat*= transport remains exclusive: the shared activity state is
+=chat=, =web=, or nil.  =web= is aggregate activity rather than a selected
+buffer owner, so canonical SEND stays available while any web Run is active.
+
+The completed correction must give every resident record its immutable
+idempotency key, submitted text, accepted Run identity, state, and rendering
+markers.  The accepted D5 state table covers queued, posting,
+acceptance-unknown, retryable and permanent rejection, identity conflict,
+accepted-unobserved, observing, terminal, reconciling, and pre-canonical
+recovered-head states.  It requires persist-before-network transitions,
+exact-Run recovery, bounded request and cache data, destination-owned
+new-thread adoption, and no text-based identity matching.  Errors use fixed
+local wording and never include draft text or credentials.
+
+* Verification contract
+
+Regression coverage exercises public Send and Refresh with withheld/reversed
+callbacks: a same-thread follow-up, a separate-thread submission, admission
+barriers, retry/rejection classification, restore normalization, pre-canonical
+recovery/adoption, stale callback isolation, request-budget cleanup, abort and
+SEND touch affordances, aggregate activity, deployed bindings, and manifest
+integrity.  The full ERT suite and the PinePhone OpenRC deployment checks are
+required before the candidate is reviewable.
+
+* Historical supersessions
+
+- =docs/2026-09-03-assist-web-thread-flow.org=, “Interaction and performance”,
+  “Step 2 implementation plan” item 2, and “Step 2 implementation”: canonical
+  web observation is bounded per buffer rather than phone-wide single-run
+  reservation; local =*chat*= exclusion remains.
+- =docs/2026-09-08-conversation-interface-streaming.org=, “Shared native buffer
+  contract” item 7 and the simultaneous-phone-stream clause in “Explicit
+  non-goals”: canonical web buffers may post and observe independently while
+  each keeps one observer and local chat stays single-flight.

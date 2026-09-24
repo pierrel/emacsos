@@ -1,0 +1,43 @@
+#+title: Assist Web concurrent request round-three evidence
+#+date: 2026-09-21
+
+* D5 public-path scenario matrix
+
+This is the current evidence index.  Rows not changed by round three carry
+forward the named passing regression from round one; they are not a claim that
+the test was added in this round.
+
+| # | Evidence |
+|---+----------|
+| 1 | =test-assist-web-send-queues-one-same-thread-follow-up= and =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 2 | =test-assist-web-send-admits-a-different-web-buffer= and =test-assist-web-stale-post-callback-cannot-replace-a-newer-send= |
+| 3 | =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 4 | =test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key= and =test-assist-web-preaccept-abort-keeps-exact-retry-and-ignores-late-acceptance= |
+| 5 | =test-assist-web-send-retries-a-proven-429-with-its-exact-key= and =test-assist-web-invalid-send-response-releases-active-slot-for-retry= |
+| 6 | =test-assist-web-create-body-overflow-refuses-before-key-or-region= proves the actual create body refuses before key mint, region, POST, or draft/point change. |
+| 7 | =test-assist-web-send-exact-idempotency-conflict-fails-closed= |
+| 8 | =test-assist-web-restore-normalization-never-starts-network-before-save=, =test-assist-web-restored-accepted-run-gets-before-sse=, and =test-assist-web-restore-retains-entry-live-text-and-recovery-draft= |
+| 9 | =test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent=, =test-assist-web-queue-buffer-kill-releases-each-entry-token=, and =test-assist-web-preheader-budget-refuses-a-fifth-observer= |
+| 10 | =test-assist-web-abort-honors-structured-status-outcome-pairs= and =test-assist-web-unconfirmed-abort-retains-accepted-retry-state= |
+| 11 | =test-assist-web-terminal-does-not-release-an-unpersisted-state= and =test-assist-web-reconcile-persists-snapshot-before-retiring-entries= |
+| 12 | =test-assist-web-recovered-create-requires-restore-before-send= and =test-assist-web-restored-provisional-actions-survive-reload= |
+| 13 | =test-assist-web-send-adoption-holds-s1-until-its-exact-get-returns= drives public Send and POST adoption while C1 terminal cleanup precedes the withheld S1 GET. |
+| 14 | =test-assist-web-send-adoption-collision-contracts-after-reconcile= drives public S1/S2 Send, adoption, collision refusal, and reconciliation contraction. |
+| 15 | =test-assist-web-stale-reobserve-cannot-own-a-replaced-entry=, =test-assist-web-stale-delete-cannot-mutate-a-replaced-entry=, and =test-assist-web-pre-sse-store-error-survives-url-sentinel-ordering= |
+| 16 | =test-assist-web-abort-detach-button-appears-only-for-observed-entry= and =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 17 | =test-assist-web-two-live-buffers-release-web-only-after-the-last= directly checks the first/last aggregate state and local-chat refusal. |
+
+* Round-three corrections
+
+Dismiss now preserves its exact original FIFO and rendered regions if its cache
+write fails.  Once durable, it removes only the dismissed region and action;
+the follower regression activates its actual Dismiss button.  Abort/Detach
+recomputes the aggregate surface after state transition on both durable and
+failed-save paths.  Successful recovered-create Restore removes its action.
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-21-assist-concurrent-request-running-fix-round-2-evidence.org=,
+  “Evidence”: this record replaces its partial four-row account with the full
+  current 1–17 matrix and records the round-three durable Dismiss, aggregate,
+  and public callback-path corrections.

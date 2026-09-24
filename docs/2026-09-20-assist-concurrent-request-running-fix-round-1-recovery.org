@@ -1,0 +1,59 @@
+#+title: Assist Web concurrent request round-one recovery
+#+date: 2026-09-20
+
+* Status
+
+This implementation record corrects the local-review gaps in the recovered D5
+implementation.  It keeps the accepted D5 design
+=0716675c69ffcc4254ed1a64def8337aa536304dbf4739f830055d71ec303040=:
+each durable submission owns its key, state, markers, callback epoch, and Run
+identity.  The queue is the only source of truth for canonical submission and
+observation.  The retained =--legacy-*= calls are an explicit nonqueue
+compatibility boundary for old no-queue buffers; a queue callback cannot enter
+them.
+
+The round-one corrections make failed admission restore the exact editable
+draft, persist observing and terminal truth before transport cleanup, validate
+complete cache records before restore, and construct the exact endpoint body
+and idempotency key before committing a user region.  Adoption persists the
+destination before retiring its source, re-observes S1 by exact Run, and rebuilds
+provisional entries in S1,C1,C2,S2 order.  A retained source draft has a visible
+Restore Draft action; established permanent rejection has its own Dismiss
+action after redraw and reconciliation.
+
+Re-observation GET and DELETE callbacks now retain entry identity and a
+generation/epoch.  A stale or reversed callback is inert.  The original URL
+sentinel remains the sole owner of its deferred completion; the entry sentinel
+only performs generic disconnect cleanup when there is no original sentinel.
+The aggregate =web= surface is true only while a canonical buffer has a live
+POST or observer, and is recomputed after cleanup and last-buffer kill.
+
+* D5 public-path scenario matrix
+
+| # | Public-path regression evidence |
+|---+---------------------------------|
+| 1 | =test-assist-web-send-queues-one-same-thread-follow-up= and =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 2 | =test-assist-web-send-admits-a-different-web-buffer= and =test-assist-web-stale-post-callback-cannot-replace-a-newer-send= |
+| 3 | =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 4 | =test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key= and =test-assist-web-preaccept-abort-keeps-exact-retry-and-ignores-late-acceptance= |
+| 5 | =test-assist-web-send-retries-a-proven-429-with-its-exact-key= and =test-assist-web-invalid-send-response-releases-active-slot-for-retry= |
+| 6 | =test-assist-web-enqueue-builds-the-real-create-body-before-post=, =test-assist-web-cache-failure-prevents-an-unrecoverable-send=, and =test-assist-web-edited-failed-retry-renders-a-fresh-pending-turn= |
+| 7 | =test-assist-web-send-exact-idempotency-conflict-fails-closed= |
+| 8 | =test-assist-web-restore-normalization-never-starts-network-before-save=, =test-assist-web-restored-accepted-run-gets-before-sse=, and =test-assist-web-restore-retains-entry-live-text-and-recovery-draft= |
+| 9 | =test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent=, =test-assist-web-queue-buffer-kill-releases-each-entry-token=, and =test-assist-web-preheader-budget-refuses-a-fifth-observer= |
+| 10 | =test-assist-web-abort-honors-structured-status-outcome-pairs= and =test-assist-web-unconfirmed-abort-retains-accepted-retry-state= |
+| 11 | =test-assist-web-terminal-does-not-release-an-unpersisted-state= and =test-assist-web-reconcile-persists-snapshot-before-retiring-entries= |
+| 12 | =test-assist-web-recovered-create-requires-restore-before-send= and =test-assist-web-restored-provisional-actions-survive-reload= |
+| 13 | =test-assist-web-send-adopts-source-run-before-destination-fifo= and =test-assist-web-restored-accepted-run-gets-before-sse= |
+| 14 | =test-assist-web-collision-refuses-every-new-send= and =test-assist-web-transfer-waits-for-the-final-owner-save= |
+| 15 | =test-assist-web-stale-reobserve-cannot-own-a-replaced-entry=, =test-assist-web-stale-delete-cannot-mutate-a-replaced-entry=, and =test-assist-web-pre-sse-store-error-survives-url-sentinel-ordering= |
+| 16 | =test-assist-web-abort-detach-button-appears-only-for-observed-entry= and =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 17 | =test-assist-web-killing-an-active-buffer-releases-the-global-run-slot= and the aggregate surface checks in =tests/test-chat.el= |
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-20-assist-concurrent-request-running-fix-recovery.org=,
+  “Status”, “Recovery construction”, and “D5 public-path scenario matrix”: its
+  recovery claim preceded the round-one findings.  This record supplies the
+  corrected persistence, adoption, callback, UI, active-surface, and explicit
+  scenario evidence without changing that historical record.

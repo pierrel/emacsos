@@ -1,0 +1,36 @@
+#+title: Confirmed cancellation correction for concurrent Assist requests
+#+date: 2026-09-22
+
+* Result
+
+Implementation successor =db24c3723c7489cd0e796ee2d5230a1da6435634=,
+tree =8cb8f7c09c3029e8b556e6fdbec1b0457bb67e4b=, retains the initial
+abort fence and adds a second fence only when DELETE confirms
+=200/cancelled=.  Thus an Abort, a later Refresh GET, that confirmed DELETE,
+and a delayed =running= GET leave the entry terminal rather than reviving an
+observer.  Error and unconfirmed DELETE outcomes do not receive that second
+fence, so Refresh can still progress.
+
+Queue-backed malformed-delta and raw-byte-overflow dispatch coverage now drives
+the entry-owned failure path directly: it retains partial assistant text,
+reports unverified observation status, returns the entry to
+=accepted-unobserved=, and clears its raw-byte and suffix state.
+
+* Verification
+
+- Focused queue interruption and confirmed-cancellation ERT: 4/4 passed.
+- Full =make test-elisp=: 704/705 passed.  The unchanged, independently
+  reproduced =emacsos-call-on-call-added-shows-already-active-call= baseline
+  expects =In progress= and receives =Status unknown=.
+- =make test-pinephone-scripts=: exit 0, with final ERT 76/76; the Assist Web
+  manifest entry and both trusted root manifest-hash pins match.
+- =make test-server= is not applicable to this Elisp/deployment-only successor:
+  the lane intentionally has no sibling =../assist= checkout, so make stops
+  before pytest while resolving =../assist/requirements.txt=.
+
+* Historical supersession
+
+This record supersedes only the =Result= and =Verification= sections of
+[[file:2026-09-22-assist-concurrent-request-current-main-stream-correction.org][the current-main stream correction record]].  Its cancellation result did not
+cover a Refresh GET started after Abort and before a confirmed DELETE, and its
+verification describes the preceding implementation successor.

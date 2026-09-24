@@ -549,15 +549,12 @@ UI in the in-flight/ABORT state with no process to clean it up."
   (let ((buf (get-buffer-create emacsos--chat-buffer-name)) requested)
     (emacsos--chat-init-buffer buf)
     (with-current-buffer buf (goto-char (point-max)) (insert "hello"))
-    (setq emacsos--assist-active-surface (generate-new-buffer " *web-owner*"))
-    (unwind-protect
-        (cl-letf (((symbol-function 'url-retrieve)
-                   (lambda (&rest _) (setq requested t))))
-          (emacsos--chat-send buf)
-          (should-not requested)
-          (should-not emacsos--chat-in-flight))
-      (kill-buffer emacsos--assist-active-surface)
-      (setq emacsos--assist-active-surface nil))))
+    (let ((emacsos--assist-active-surface 'web))
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos--chat-send buf)
+        (should-not requested)
+        (should-not emacsos--chat-in-flight)))))
 
 (ert-deftest chat-test-rollback-note-targets-chat-not-active-stream ()
   "An async /rollback result must land in *chat* (the legacy config flow),
@@ -693,22 +690,24 @@ bot line if a stream was open (start handler had run)."
   (cl-letf (((symbol-function 'emacsos--chat-on-top-p) (lambda () nil)))
     (should (equal (emacsos--chat-button-label) "Chat"))))
 
-(ert-deftest chat-test-button-label-and-action-follow-the-displayed-owner ()
-  "A keyboard-buffer current-buffer must not make another surface show SEND."
+(ert-deftest chat-test-button-keeps-send-available-during-web-observation ()
+  "Aggregate web activity does not turn a canonical SEND button into ABORT."
   (let ((owner (generate-new-buffer " *assist-web-owner*")) fired)
     (unwind-protect
         (progn
           (with-current-buffer owner
             (emacsos-conversation-install-actions
-             '((send . ignore) (abort . emacsos-assist-web-abort)))
+             '((send . emacsos-assist-web-send) (abort . emacsos-assist-web-abort)))
             (setq-local emacsos-assist-web--in-flight t))
-          (let ((emacsos--assist-active-surface owner))
+          (let ((emacsos--assist-active-surface 'web))
             (with-temp-buffer
               (cl-letf (((symbol-function 'emacsos--chat-surface-on-top) (lambda () owner))
                         ((symbol-function 'emacsos--chat-on-top-p) (lambda () t))
+                        ((symbol-function 'emacsos-assist-web-send)
+                         (lambda () (interactive) (setq fired (current-buffer))))
                         ((symbol-function 'emacsos-assist-web-abort)
                          (lambda () (interactive) (setq fired (current-buffer)))))
-                (should (equal (emacsos--chat-button-label) "ABORT"))
+                (should (equal (emacsos--chat-button-label) "SEND"))
                 (emacsos--chat-button)
                 (should (eq fired owner))))))
       (when (buffer-live-p owner) (kill-buffer owner)))))

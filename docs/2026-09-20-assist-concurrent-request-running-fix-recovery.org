@@ -1,0 +1,51 @@
+#+title: Assist Web concurrent request recovery implementation
+#+date: 2026-09-20
+
+* Status
+
+This is the recovery implementation record for accepted design D5
+=0716675c69ffcc4254ed1a64def8337aa536304dbf4739f830055d71ec303040=.
+It replaces the partial non-candidate implementation with durable per-entry
+submission, observation, parser, cleanup, and recovery ownership.  Assist
+remains the authority for Run FIFO and terminal truth; the client has no
+long-lived global observer capacity.
+
+* Recovery construction
+
+Queue callers enter =--start-observation= and =--observe-entry=.  The latter
+owns its exact entry key/epoch, process, response buffer, header timer, URL
+completion callback, sentinel, and stock-filter wrapper.  Response callbacks
+explicitly return to the owning thread buffer before consulting queue state.
+Late, removed, adopted, killed, or stale-generation callbacks are inert.
+Queue terminal, error, reset, delta, and status handling uses the captured
+entry; the retained =--legacy-*= constructor/filter/cleanup chain is an
+explicit nonqueue compatibility boundary.  Queue cleanup and reload never call
+that chain.
+
+* D5 public-path scenario matrix
+
+| # | Disposition | Primary public-path regression |
+|---+-------------+--------------------------------|
+| 1 | covered | =test-assist-web-send-queues-one-same-thread-follow-up= |
+| 2 | covered | =test-assist-web-send-admits-a-different-web-buffer= and reversed callback guard |
+| 3 | covered | same-thread FIFO withheld callback coverage |
+| 4 | covered | admission barrier, full queue, and exact retry coverage |
+| 5 | covered | structured retryable rejection and acceptance-unknown coverage |
+| 6 | covered | message/cache bounds and permanent-rejection coverage |
+| 7 | covered | identity-conflict classification coverage |
+| 8 | covered | restore normalization and recovered active-run coverage |
+| 9 | covered | =test-assist-web-handshake-cleanup-exits-are-exact-and-idempotent=; queue kill/reload tests |
+| 10 | covered | Abort/Detach structured 409 and exact Run recovery coverage |
+| 11 | covered | reconciliation persistence-before-retirement coverage |
+| 12 | covered | =test-assist-web-recovered-create-requires-restore-before-send= |
+| 13 | covered | =test-assist-web-send-adopts-source-run-before-destination-fifo= |
+| 14 | covered | collision-bound adoption/cache coverage |
+| 15 | covered | stale POST/filter, buffer-kill, reload, and adoption callback coverage |
+| 16 | covered | =test-assist-web-abort-detach-button-appears-only-for-observed-entry= |
+| 17 | covered | aggregate web sentinel and local-chat exclusion coverage |
+
+* Historical supersession
+
+- Supersedes =docs/2026-09-20-assist-concurrent-request-running-fix.org=,
+  “Status”: that record correctly described its checkpoint as partial and
+  non-candidate; this record describes the recovered full D5 implementation.
