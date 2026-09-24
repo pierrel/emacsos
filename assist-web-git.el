@@ -879,37 +879,53 @@ queue-free compatibility path."
       (force-mode-line-update t))))
 
 (defun emacsos-assist-web-git--canonical-denied-local (status)
-  "Latch canonical HTTP STATUS denial in this thread buffer."
+  "Latch canonical HTTP STATUS denial before fallible presentation."
   (cl-incf emacsos-assist-web-git--auth-epoch)
   (setq emacsos-assist-web-git--thread-denial-floor
         emacsos-assist-web-git--auth-epoch)
   (setq emacsos-assist-web-git--denied t
         emacsos-assist-web-git--run-recheck-needed nil)
+  (cl-incf emacsos-assist-web-git--observation)
+  (cl-incf emacsos-assist-web-git--epoch)
   (when emacsos-assist-web-git--current
     (setf (emacsos-assist-web-git-generation-state
            emacsos-assist-web-git--current) 'cached))
-  (let ((reason (if (= status 404)
-                    "thread unavailable (404); reopen and Retry"
-                  (format "thread access denied (%d); reauthorize and Retry"
-                          status))))
-    (emacsos-assist-web-git--invalidate reason)))
+  (setq emacsos-assist-web-git--metadata nil
+        emacsos-assist-web-git--unavailable
+        (if (= status 404)
+            "thread unavailable (404); reopen and Retry"
+          (format "thread access denied (%d); reauthorize and Retry"
+                  status))))
 
 (defun emacsos-assist-web-git--canonical-denied (status)
   "Fence every live buffer for this thread after definitive HTTP STATUS."
-  (let ((tid emacsos-assist-web--thread-id)
-        (source (current-buffer)))
-    (emacsos-assist-web-git--canonical-denied-local status)
-    (dolist (buffer (buffer-list))
-      (when (and tid (not (eq buffer source))
-                 (with-current-buffer buffer
-                   (and (derived-mode-p 'emacsos-assist-web-mode)
-                        (equal emacsos-assist-web--thread-id tid))))
+  (let* ((tid emacsos-assist-web--thread-id)
+         (source (current-buffer))
+         (targets
+          (cons source
+                (seq-filter
+                 (lambda (buffer)
+                   (and tid (not (eq buffer source))
+                        (with-current-buffer buffer
+                          (and (derived-mode-p 'emacsos-assist-web-mode)
+                               (equal emacsos-assist-web--thread-id tid)))))
+                 (buffer-list)))))
+    ;; The safety latch reaches every same-T buffer before any release,
+    ;; cancellation, header, or echo-area operation can signal.
+    (let ((inhibit-quit t))
+      (dolist (buffer targets)
+        (with-current-buffer buffer
+          (emacsos-assist-web-git--canonical-denied-local status))))
+    (dolist (buffer targets)
+      (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (condition-case nil
-              (emacsos-assist-web-git--canonical-denied-local status)
+              (emacsos-assist-web-git--invalidate
+               emacsos-assist-web-git--unavailable)
             ((error quit) nil)))))
-    (with-current-buffer source
-      (message "Thread Git: %s" emacsos-assist-web-git--unavailable))))
+    (when (buffer-live-p source)
+      (with-current-buffer source
+        (message "Thread Git: %s" emacsos-assist-web-git--unavailable)))))
 
 (defun emacsos-assist-web-git--run-record (tid run-id)
   "Return the outstanding safety record for exact TID and RUN-ID."
@@ -1237,7 +1253,7 @@ The caller owns both the exact Run GET and subsequent canonical commit."
                        (not (eql auth-start emacsos-assist-web-git--auth-epoch))
                        (emacsos-assist-web-git--run-read-superseded-p
                         tid run-id run-start))
-                   (progn
+                   (unless emacsos-assist-web-git--denied
                      (setq emacsos-assist-web-git--unavailable
                            "Run status; Refresh retries canonical check")
                      (emacsos-assist-web-git--canonical-failed

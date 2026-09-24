@@ -1976,6 +1976,80 @@
       (should-not (string-match-p " current"
                                   (emacsos-assist-web-git--thread-header))))))
 
+(ert-deftest test-assist-web-git-busy-thread-404-keeps-denial-reason ()
+  "A busy-check callback cannot replace a raw definitive T404 reason."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "fixture" 'accepted-unobserved "exact-key")))
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :reobserve-generation) 1)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                 (lambda () "token"))
+                ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   (let ((response (generate-new-buffer " *git-busy-404*")))
+                     (with-current-buffer response
+                       (insert "denied")
+                       (setq-local url-http-response-status 404
+                                   url-http-content-type "text/plain"
+                                   url-http-end-of-headers
+                                   (copy-marker (point-min)))
+                       (funcall callback nil))
+                     response))))
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web-git--confirm-active-run
+         "thread-1" "run-a" emacsos-assist-web-git--auth-epoch entry))
+      (should (eq emacsos-assist-web-git--denied t))
+      (should (equal emacsos-assist-web-git--unavailable
+                     "thread unavailable (404); reopen and Retry"))
+      (should (string-prefix-p
+               "Thread unavailable"
+               (substring-no-properties
+                (emacsos-assist-web-git--thread-header)))))))
+
+(ert-deftest test-assist-web-git-thread-denial-fences-peer-before-source-quit ()
+  "A source UI quit cannot leave another same-T buffer current."
+  (let ((source (generate-new-buffer " *git-denial-source*"))
+        (peer (generate-new-buffer " *git-denial-peer*")))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list source peer))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (let ((metadata (test-assist-web-git--metadata
+                               "ready" "topic/one"
+                               test-assist-web-git--head)))
+                (setq-local emacsos-assist-web--thread-id "thread-1"
+                            emacsos-assist-web-git--metadata metadata
+                            emacsos-assist-web-git--current
+                            (make-emacsos-assist-web-git-generation
+                             :metadata metadata :state 'current)))))
+          (cl-letf (((symbol-function 'emacsos-assist-web-git--release-intents)
+                     (lambda (&rest _)
+                       (when (eq (current-buffer) source)
+                         (signal 'quit nil)))))
+            (with-current-buffer source
+              (emacsos-assist-web-git--canonical-denied 403)))
+          (with-current-buffer peer
+            (should (eq emacsos-assist-web-git--denied t))
+            (should-not emacsos-assist-web-git--metadata)
+            (should (eq (emacsos-assist-web-git-generation-state
+                         emacsos-assist-web-git--current) 'cached))
+            (should-not (string= (emacsos-assist-web-git--view-state
+                                  emacsos-assist-web-git--current peer)
+                                 "current"))))
+          (with-current-buffer source
+            (should (eq emacsos-assist-web-git--denied t))
+            (should-not emacsos-assist-web-git--metadata)))
+      (kill-buffer source)
+      (kill-buffer peer)))
+
 (ert-deftest test-assist-web-git-denial-requires-new-accepted-chat-get ()
   (with-temp-buffer
     (let* ((snapshot (test-assist-web-git--snapshot "ready" "topic/one"))
