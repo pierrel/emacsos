@@ -2049,7 +2049,9 @@
                         "ready" "topic/one" test-assist-web-git--head))
              (generation (make-emacsos-assist-web-git-generation
                           :metadata metadata :state 'current))
-             response process done)
+             response process done
+             (http-status (symbol-function 'emacsos-assist-web--git-http-status))
+             (status-attempts 0) (callbacks 0))
         (setq-local emacsos-assist-web--thread-id "thread-1"
                     emacsos-assist-web-git--metadata metadata
                     emacsos-assist-web-git--current generation
@@ -2061,6 +2063,11 @@
                       ((symbol-function 'run-at-time) (lambda (&rest _) nil))
                       ((symbol-function 'emacsos-assist-web-git--release-intents)
                        (lambda (&rest _) (signal 'quit nil)))
+                      ((symbol-function 'emacsos-assist-web--git-http-status)
+                       (lambda (&rest args)
+                         (if (= (cl-incf status-attempts) 1)
+                             (signal 'quit nil)
+                           (apply http-status args))))
                       ((symbol-function 'url-retrieve)
                        (lambda (_url callback &rest _)
                          (setq done callback
@@ -2071,7 +2078,8 @@
                          (set-process-filter process #'ignore)
                          response)))
               (emacsos-assist-web--request
-               "GET" "threads/thread-1" nil (lambda (_value _problem) nil))
+               "GET" "threads/thread-1" nil
+               (lambda (_value _problem) (cl-incf callbacks)))
               (funcall (process-filter process) process
                        (format "HTTP/1.1 %d Test\r\nContent-Length: 7\r\n\r\n"
                                status))
@@ -2083,6 +2091,8 @@
                 (funcall done nil))
               (should (eq (emacsos-assist-web-git-generation-state generation)
                           'cached))
+              (should (= callbacks 1))
+              (should (>= status-attempts 2))
               (should-not emacsos-assist-web-git--pending))
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p response) (kill-buffer response)))))))
