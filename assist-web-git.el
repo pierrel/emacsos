@@ -67,6 +67,8 @@
 (defvar-local emacsos-assist-web-git--thread-denial-floor 0
   "Last definitive thread denial epoch superseding earlier exact Run reads.")
 (defvar-local emacsos-assist-web-git--denied nil)
+(defvar-local emacsos-assist-web-git--thread-denial-status nil
+  "Definitive canonical thread HTTP status, independent of cleanup messages.")
 (defvar-local emacsos-assist-web-git--run-outcome-uncertain nil
   "Outstanding (thread, Run, epoch) denial or superseded-read fences.
 Exact post-denial Run verification plus durable canonical acceptance removes
@@ -294,7 +296,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
               (emacsos-assist-web-git--details-link)))
      (emacsos-assist-web-git--denied
       (emacsos-assist-web-git--status-action
-       (if (string-match-p "404" (or emacsos-assist-web-git--unavailable ""))
+       (if (eql emacsos-assist-web-git--thread-denial-status 404)
            "Thread unavailable" "Reauthorize")))
      ((and manual
            (bound-and-true-p emacsos-assist-web--manual-recovery-active)
@@ -719,6 +721,8 @@ queue-free compatibility path."
 
 (defun emacsos-assist-web-git--invalidate (reason)
   "Make Git freshness unavailable for REASON without changing chat state."
+  (when (eq emacsos-assist-web-git--denied t)
+    (setq reason (emacsos-assist-web-git--thread-denial-reason)))
   (let ((intents (emacsos-assist-web-git--live-intents
                   (plist-get emacsos-assist-web-git--request :intents)
                   (cadr emacsos-assist-web-git--next)
@@ -736,19 +740,23 @@ queue-free compatibility path."
     (when emacsos-assist-web-git--current
       (setf (emacsos-assist-web-git-generation-state
              emacsos-assist-web-git--current) 'cached))
-    (emacsos-assist-web-git--release-intents intents reason))
-  (cl-incf emacsos-assist-web-git--observation)
-  (cl-incf emacsos-assist-web-git--epoch)
-  (condition-case nil (emacsos-assist-web-git--cancel) (error nil))
-  (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
+    (cl-incf emacsos-assist-web-git--observation)
+    (cl-incf emacsos-assist-web-git--epoch)
+    (condition-case nil (emacsos-assist-web-git--cancel) ((error quit) nil))
+    (condition-case nil
+        (emacsos-assist-web-git--release-intents intents reason)
+      ((error quit) nil)))
+  (condition-case nil (emacsos-assist-web-git--update-headers)
+    ((error quit) nil)))
 
 (defun emacsos-assist-web-git--release-intents (intents reason &optional quiet)
   "Give each live INTENT a reason-specific window result; message unless QUIET."
   (let (released)
     (dolist (intent intents)
-      (when (emacsos-assist-web-git--intent-live-p intent)
-        (setq released t)
-      (let* ((window (plist-get intent :window))
+      (condition-case nil
+          (when (emacsos-assist-web-git--intent-live-p intent)
+            (setq released t)
+            (let* ((window (plist-get intent :window))
              (thread (plist-get intent :buffer))
              (restart (string-match-p "restart to recover" reason))
              (run-status (string-match-p "\\`Run status unavailable" reason))
@@ -788,7 +796,8 @@ queue-free compatibility path."
         (setq emacsos-assist-web-git--feedback-windows
               (assq-delete-all window emacsos-assist-web-git--feedback-windows))
         (push (cons window header) emacsos-assist-web-git--feedback-windows)
-        (force-mode-line-update t))))
+              (force-mode-line-update t)))
+        ((error quit) nil)))
     (when (and released (not quiet))
       (message "Thread Git: %s" reason))))
 
@@ -828,7 +837,7 @@ queue-free compatibility path."
                   ((eq emacsos-assist-web-git--denied 'run)
                    "The exact Run status could not be verified. This does not prove the thread is gone. A thread access check is pending; then Refresh the exact Run before opening Git. Existing views are noncurrent.")
                   ((and emacsos-assist-web-git--denied
-                        (string-match-p "404" (or emacsos-assist-web-git--unavailable "")))
+                        (eql emacsos-assist-web-git--thread-denial-status 404))
                    "This thread is unavailable. Reopen it from the Assist thread list after checking access. Existing Git views are noncurrent; do not use them as the thread's latest state.")
                   (emacsos-assist-web-git--denied
                    "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are noncurrent.")
@@ -878,12 +887,20 @@ queue-free compatibility path."
             (assq-delete-all window emacsos-assist-web-git--feedback-windows))
       (force-mode-line-update t))))
 
+(defun emacsos-assist-web-git--thread-denial-reason ()
+  "Return the stable visible reason for this buffer's thread denial."
+  (if (eql emacsos-assist-web-git--thread-denial-status 404)
+      "thread unavailable (404); reopen and Retry"
+    (format "thread access denied (%d); reauthorize and Retry"
+            emacsos-assist-web-git--thread-denial-status)))
+
 (defun emacsos-assist-web-git--canonical-denied-local (status)
   "Latch canonical HTTP STATUS denial before fallible presentation."
   (cl-incf emacsos-assist-web-git--auth-epoch)
   (setq emacsos-assist-web-git--thread-denial-floor
         emacsos-assist-web-git--auth-epoch)
   (setq emacsos-assist-web-git--denied t
+        emacsos-assist-web-git--thread-denial-status status
         emacsos-assist-web-git--run-recheck-needed nil)
   (cl-incf emacsos-assist-web-git--observation)
   (cl-incf emacsos-assist-web-git--epoch)
@@ -892,37 +909,34 @@ queue-free compatibility path."
            emacsos-assist-web-git--current) 'cached))
   (setq emacsos-assist-web-git--metadata nil
         emacsos-assist-web-git--unavailable
-        (if (= status 404)
-            "thread unavailable (404); reopen and Retry"
-          (format "thread access denied (%d); reauthorize and Retry"
-                  status))))
+        (emacsos-assist-web-git--thread-denial-reason)))
 
 (defun emacsos-assist-web-git--canonical-denied (status)
   "Fence every live buffer for this thread after definitive HTTP STATUS."
   (let* ((tid emacsos-assist-web--thread-id)
          (source (current-buffer))
-         (targets
-          (cons source
-                (seq-filter
-                 (lambda (buffer)
-                   (and tid (not (eq buffer source))
-                        (with-current-buffer buffer
-                          (and (derived-mode-p 'emacsos-assist-web-mode)
-                               (equal emacsos-assist-web--thread-id tid)))))
-                 (buffer-list)))))
+         targets)
     ;; The safety latch reaches every same-T buffer before any release,
     ;; cancellation, header, or echo-area operation can signal.
     (let ((inhibit-quit t))
+      (emacsos-assist-web-git--canonical-denied-local status)
+      (setq targets (list source))
+      (dolist (buffer (buffer-list))
+        (when (and tid (not (eq buffer source))
+                   (equal (buffer-local-value
+                           'emacsos-assist-web--thread-id buffer) tid))
+          (push buffer targets)))
       (dolist (buffer targets)
-        (with-current-buffer buffer
-          (emacsos-assist-web-git--canonical-denied-local status))))
-    (dolist (buffer targets)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (condition-case nil
-              (emacsos-assist-web-git--invalidate
-               emacsos-assist-web-git--unavailable)
-            ((error quit) nil)))))
+        (unless (eq buffer source)
+          (with-current-buffer buffer
+            (emacsos-assist-web-git--canonical-denied-local status))))
+      (dolist (buffer targets)
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (condition-case nil
+                (emacsos-assist-web-git--invalidate
+                 emacsos-assist-web-git--unavailable)
+              ((error quit) nil))))))
     (when (buffer-live-p source)
       (with-current-buffer source
         (message "Thread Git: %s" emacsos-assist-web-git--unavailable)))))
@@ -1113,6 +1127,7 @@ An auth-only GET leaves exact Run outcome uncertain."
     (let ((thread-denial (eq emacsos-assist-web-git--denied t))
           (tid emacsos-assist-web--thread-id))
     (setq emacsos-assist-web-git--denied nil
+          emacsos-assist-web-git--thread-denial-status nil
           emacsos-assist-web-git--run-recheck-needed nil)
     (when thread-denial
       (dolist (buffer (buffer-list))
@@ -1121,7 +1136,8 @@ An auth-only GET leaves exact Run outcome uncertain."
             (when (and (derived-mode-p 'emacsos-assist-web-mode)
                        (equal emacsos-assist-web--thread-id tid)
                        (eq emacsos-assist-web-git--denied t))
-              (setq emacsos-assist-web-git--denied nil)
+              (setq emacsos-assist-web-git--denied nil
+                    emacsos-assist-web-git--thread-denial-status nil)
               (condition-case nil
                   (emacsos-assist-web-git--update-headers)
                 ((error quit) nil)))))))
