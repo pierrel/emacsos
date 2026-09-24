@@ -51,12 +51,18 @@
 (defvar-local emacsos-assist-web-git--next nil)
 (defvar-local emacsos-assist-web-git--canceling nil)
 (defvar-local emacsos-assist-web-git--epoch 0)
+(defvar-local emacsos-assist-web-git--success-watermark 0
+  "Count of exact successful Run IDs durably retired by queue-owned R2.")
 (defvar-local emacsos-assist-web-git--observation 0
   "Serial of the newest diagnostic Git metadata probe.")
 (defvar-local emacsos-assist-web-git--deferred-probes nil)
+(defvar-local emacsos-assist-web-git--active-probes nil
+  "Live window intents awaiting their own metadata GET callback.")
 (defvar-local emacsos-assist-web-git--latest-probe-result nil)
 (defvar-local emacsos-assist-web-git--pending nil
   "One unresolved canonical reconciliation after a conflicting probe.")
+(defvar-local emacsos-assist-web-git--r2-waiting nil
+  "A later diagnostic conflict awaiting this queue R2 and then a new R3.")
 (defvar-local emacsos-assist-web-git--auth-epoch 0)
 (defvar-local emacsos-assist-web-git--denied nil)
 (defvar-local emacsos-assist-web-git--intent-serial 0)
@@ -253,7 +259,11 @@
                  (t (or emacsos-assist-web-git--unavailable "remote pending")))))
     (cond
      (paused
-      "local recovery could not be saved; restart to recover")
+      (emacsos-assist-web-git--status-action "Restart to recover"))
+     (emacsos-assist-web-git--denied
+      (emacsos-assist-web-git--status-action
+       (if (string-match-p "404" (or emacsos-assist-web-git--unavailable ""))
+           "Thread unavailable" "Reauthorize")))
      (manual
       (propertize "Run recovery pending; Refresh"
                   'mouse-face 'highlight
@@ -308,7 +318,7 @@
     (switch-to-buffer view)))
 
 (defun emacsos-assist-web-git-display-details-back ()
-  "Return from saved-history details to its canonical thread."
+  "Return from a Git or saved-history explanation to its thread."
   (interactive)
   (let ((thread emacsos-assist-web-git--display-details-thread)
         (view (current-buffer)))
@@ -513,16 +523,27 @@ REASON is the visible retry or restart explanation."
          (queue-eligible
           (and queue-owner
                (eql queue-owner emacsos-assist-web--reconcile-generation)
-               (eql (plist-get token :epoch) emacsos-assist-web-git--epoch)))
-         (success (and queue-eligible
-                       (seq-some (lambda (cause)
-                                   (equal (cdr cause) "success"))
-                                 (plist-get token :outcomes))))
+               (not emacsos-assist-web-git--denied)))
+         (success-ids
+          (and queue-eligible
+               (delete-dups
+                (mapcar #'car
+                        (seq-filter (lambda (cause)
+                                      (equal (cdr cause) "success"))
+                                    (plist-get token :outcomes))))))
          (pending emacsos-assist-web-git--pending)
          (eligible (and pending pending-token
                         (eq pending-token (plist-get pending :request))
                         (= (car pending-token) emacsos-assist-web-git--epoch)))
          (intents (and eligible (plist-get pending :intents))))
+    (when success-ids
+      ;; The owner/generation gate admits each R2 once.  Every exact Run ID
+      ;; advances the cause watermark; one post-batch fetch can satisfy all.
+      (cl-incf emacsos-assist-web-git--success-watermark
+                (length success-ids))
+      (when emacsos-assist-web-git--current
+        (setf (emacsos-assist-web-git-generation-state
+               emacsos-assist-web-git--current) 'cached)))
     (emacsos-assist-web-git--note metadata nil)
     (when eligible
       (setq emacsos-assist-web-git--pending nil)
@@ -533,13 +554,64 @@ REASON is the visible retry or restart explanation."
             (emacsos-assist-web-git--enqueue metadata nil))
         (emacsos-assist-web-git--release-intents
          intents "no published thread branch; Retry")))
-    (when (and (or terminal success)
+    (when (and (or terminal success-ids)
+               (not emacsos-assist-web-git--r2-waiting)
                (not emacsos-assist-web-git--pending)
                (emacsos-assist-web-git--usable metadata))
       (emacsos-assist-web-git--enqueue metadata nil))))
 
+(defun emacsos-assist-web-git--r2-finished (owner committed)
+  "Complete OWNER's later diagnostic intents after its R2 COMMITTED or failed."
+  (when (eql owner (plist-get emacsos-assist-web-git--r2-waiting :owner))
+    (let ((waiting emacsos-assist-web-git--r2-waiting))
+      (setq emacsos-assist-web-git--r2-waiting nil)
+      (if committed
+          (progn
+            (setq emacsos-assist-web-git--pending
+                  (list :key (plist-get waiting :key)
+                        :epoch emacsos-assist-web-git--epoch
+                        :request nil :requires-durable nil
+                        :intents (plist-get waiting :intents)))
+            ;; R2 began before the diagnostic conflict.  Only this new
+            ;; post-barrier canonical GET may resolve its window intents.
+            (emacsos-assist-web--legacy-refresh-thread (current-buffer)))
+        (emacsos-assist-web-git--release-intents
+         (plist-get waiting :intents)
+         (cond
+          ((bound-and-true-p emacsos-assist-web--reconcile-recovery-paused)
+           "local recovery could not be saved; restart to recover")
+          ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
+           "Run recovery pending; Refresh")
+          (t "canonical reconciliation failed; Retry")))))))
+
+(defun emacsos-assist-web-git--conflict-during-r2 (metadata intent)
+  "Hold diagnostic METADATA and INTENT for one post-R2 canonical R3."
+  (let* ((prior emacsos-assist-web-git--r2-waiting)
+         (intents (emacsos-assist-web-git--live-intents
+                   (plist-get prior :intents)
+                   (plist-get emacsos-assist-web-git--pending :intents)
+                   (plist-get emacsos-assist-web-git--request :intents)
+                   (cadr emacsos-assist-web-git--next)
+                   (and intent (list intent)))))
+    (cl-incf emacsos-assist-web-git--epoch)
+    (when emacsos-assist-web-git--current
+      (setf (emacsos-assist-web-git-generation-state
+             emacsos-assist-web-git--current) 'cached))
+    (setq emacsos-assist-web-git--r2-waiting
+          (list :owner emacsos-assist-web--reconcile-generation
+                :key (emacsos-assist-web-git--request-key metadata)
+                :intents intents)
+          emacsos-assist-web-git--pending nil
+          emacsos-assist-web-git--next nil
+          emacsos-assist-web-git--unavailable "pending; Retry")
+    (when emacsos-assist-web-git--request
+      (emacsos-assist-web-git--cancel))
+    (emacsos-assist-web-git--update-headers)))
+
 (defun emacsos-assist-web-git--conflict (metadata intent)
   "Hold INTENT at a bounded canonical reconciliation for diagnostic METADATA."
+  (if (bound-and-true-p emacsos-assist-web--reconcile-generation)
+      (emacsos-assist-web-git--conflict-during-r2 metadata intent)
   (let* ((key (emacsos-assist-web-git--request-key metadata))
          (pending emacsos-assist-web-git--pending)
          (same (and pending
@@ -570,7 +642,7 @@ REASON is the visible retry or restart explanation."
       (emacsos-assist-web-git--update-headers)
       (if (plist-get emacsos-assist-web-git--pending :requires-durable)
           (emacsos-assist-web--reconcile-queue)
-        (emacsos-assist-web-refresh-thread (current-buffer))))))
+        (emacsos-assist-web-refresh-thread (current-buffer)))))))
 
 (defun emacsos-assist-web-git--invalidate (reason)
   "Make Git freshness unavailable for REASON without changing chat state."
@@ -578,11 +650,15 @@ REASON is the visible retry or restart explanation."
                   (plist-get emacsos-assist-web-git--request :intents)
                   (cadr emacsos-assist-web-git--next)
                   (plist-get emacsos-assist-web-git--pending :intents)
+                  (plist-get emacsos-assist-web-git--r2-waiting :intents)
+                  emacsos-assist-web-git--active-probes
                   (mapcar #'car emacsos-assist-web-git--deferred-probes))))
     (setq emacsos-assist-web-git--metadata nil
           emacsos-assist-web-git--unavailable reason
           emacsos-assist-web-git--next nil
           emacsos-assist-web-git--pending nil
+          emacsos-assist-web-git--r2-waiting nil
+          emacsos-assist-web-git--active-probes nil
           emacsos-assist-web-git--deferred-probes nil)
     (when emacsos-assist-web-git--current
       (setf (emacsos-assist-web-git-generation-state
@@ -594,7 +670,7 @@ REASON is the visible retry or restart explanation."
   (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
 
 (defun emacsos-assist-web-git--release-intents (intents reason &optional quiet)
-  "Give each live INTENT a window-local Retry; message REASON unless QUIET."
+  "Give each live INTENT a reason-specific window result; message unless QUIET."
   (let (released)
     (dolist (intent intents)
       (when (emacsos-assist-web-git--intent-live-p intent)
@@ -602,13 +678,19 @@ REASON is the visible retry or restart explanation."
       (let* ((window (plist-get intent :window))
              (thread (plist-get intent :buffer))
              (restart (string-match-p "restart to recover" reason))
+             (missing (string-match-p "thread unavailable (404)" reason))
+             (denial (or missing
+                         (string-match-p
+                          "thread access denied\\|reauthorize" reason)))
              (manual (string-match-p "Run recovery pending" reason))
-             (label (cond (restart "Git recovery paused")
+             (label (cond (restart "Restart to recover")
+                          (missing "Thread unavailable")
+                          (denial "Reauthorize")
                           (manual "Run recovery pending")
                           ((string-match-p "pending\\|changed" reason)
                            "Git pending")
                           (t "Git unavailable")))
-             (retry (if restart ""
+             (retry (if (or restart denial) ""
                       (propertize
                        (if manual " [Refresh]" " [Retry]")
                        'mouse-face 'highlight
@@ -618,17 +700,58 @@ REASON is the visible retry or restart explanation."
                            (if manual #'emacsos-assist-web-refresh-thread
                              #'emacsos-assist-web-git-refresh))
                          map))))
+             (details (if (or restart denial)
+                          (emacsos-assist-web-git--details-link)
+                        ""))
              (header `(:eval (if (eq (current-buffer) ,thread)
-                                 ,(concat label retry)
+                                 ,(concat label retry details)
                                header-line-format))))
         (set-window-parameter window 'assist-web-git-intent
                               (1+ (plist-get intent :serial)))
         (set-window-parameter window 'assist-web-git-feedback header)
         (set-window-parameter window 'header-line-format header)
+        (setq emacsos-assist-web-git--feedback-windows
+              (assq-delete-all window emacsos-assist-web-git--feedback-windows))
         (push (cons window header) emacsos-assist-web-git--feedback-windows)
         (force-mode-line-update t))))
     (when (and released (not quiet))
       (message "Thread Git: %s" reason))))
+
+(defun emacsos-assist-web-git--details-link ()
+  "Return a short clickable explanation affordance."
+  (propertize " [?]" 'mouse-face 'highlight
+              'local-map
+              (let ((map (make-sparse-keymap)))
+                (define-key map [header-line mouse-1]
+                  #'emacsos-assist-web-git-status-details)
+                map)))
+
+(defun emacsos-assist-web-git--status-action (label)
+  "Return compact LABEL and a clickable explanation affordance."
+  (concat label (emacsos-assist-web-git--details-link)))
+
+(defun emacsos-assist-web-git-status-details ()
+  "Explain a Git recovery or access gate without offering an unsafe Retry."
+  (interactive)
+  (let* ((thread (current-buffer))
+         (paused (bound-and-true-p emacsos-assist-web--reconcile-recovery-paused))
+         (reason (cond
+                  (paused
+                   "The local Run reconciliation record could not be saved. Git is paused. Restart Emacs, reopen this thread, then use Refresh to recover the exact Run. Do not retry Git in this session.")
+                  ((and emacsos-assist-web-git--denied
+                        (string-match-p "404" (or emacsos-assist-web-git--unavailable "")))
+                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. Existing Git views are noncurrent; do not use them as the thread's latest state.")
+                  (emacsos-assist-web-git--denied
+                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are noncurrent.")
+                  (t "Git state needs a fresh canonical thread check. Refresh before opening another view.")))
+         (view (generate-new-buffer " *Assist Web Git status*")))
+    (with-current-buffer view
+      (insert reason "\n\nPress q to return.\n")
+      (special-mode)
+      (visual-line-mode 1)
+      (setq-local emacsos-assist-web-git--display-details-thread thread)
+      (local-set-key (kbd "q") #'emacsos-assist-web-git-display-details-back))
+    (switch-to-buffer view)))
 
 (defun emacsos-assist-web-git--clear-feedback (window)
   "Remove only the Git-owned feedback header from WINDOW."
@@ -637,6 +760,8 @@ REASON is the visible retry or restart explanation."
       (when (eq header (window-parameter window 'header-line-format))
         (set-window-parameter window 'header-line-format nil))
       (set-window-parameter window 'assist-web-git-feedback nil)
+      (setq emacsos-assist-web-git--feedback-windows
+            (assq-delete-all window emacsos-assist-web-git--feedback-windows))
       (force-mode-line-update t))))
 
 (defun emacsos-assist-web-git--canonical-denied (status)
@@ -652,6 +777,14 @@ REASON is the visible retry or restart explanation."
                           status))))
     (emacsos-assist-web-git--invalidate reason)
     (message "Thread Git: %s" reason)))
+
+(defun emacsos-assist-web-git--run-access-uncertain (status)
+  "Fence Git after exact Run GET receives STATUS before its body is parsed.
+A later accepted canonical thread GET distinguishes a missing Run from denial."
+  (cl-incf emacsos-assist-web-git--auth-epoch)
+  (setq emacsos-assist-web-git--denied 'run)
+  (emacsos-assist-web-git--invalidate
+   (format "Run status unavailable (%d); Refresh thread" status)))
 
 (defun emacsos-assist-web-git--canonical-uncertain ()
   "Downgrade freshness after a failed chat-owned canonical refresh attempt."
@@ -764,9 +897,19 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
            (equal (emacsos-assist-web-git--request-key
                    (plist-get request :metadata))
                   (emacsos-assist-web-git--request-key metadata)))
-      (when intent
-        (setf (plist-get request :intents)
-              (append (plist-get request :intents) (list intent)))))
+      (if (< (or (plist-get request :cause-at-start) 0)
+             emacsos-assist-web-git--success-watermark)
+          (progn
+            (setq emacsos-assist-web-git--next
+                  (list metadata
+                        (emacsos-assist-web-git--live-intents
+                         (plist-get request :intents)
+                         (and intent (list intent))
+                         (cadr emacsos-assist-web-git--next))))
+            (emacsos-assist-web-git--cancel))
+        (when intent
+          (setf (plist-get request :intents)
+                (append (plist-get request :intents) (list intent))))))
      (emacsos-assist-web-git--canceling
       (setq emacsos-assist-web-git--next
             (list metadata (append (cadr emacsos-assist-web-git--next)
@@ -785,6 +928,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
          (epoch emacsos-assist-web-git--epoch)
          (request (list :id id :epoch epoch :metadata metadata
                         :intents intents :process nil
+                        :cause-at-start emacsos-assist-web-git--success-watermark
                         :final-attempts 0 :verified-epoch nil)))
     (setq emacsos-assist-web-git--request request
           emacsos-assist-web-git--unavailable nil)
@@ -947,8 +1091,14 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                               emacsos-assist-web--reconcile-recovery-paused))
                         (= (plist-get request :epoch)
                            emacsos-assist-web-git--epoch))
-               (if (not (eql (plist-get request :verified-epoch)
-                             emacsos-assist-web-git--epoch))
+               (if (< (or (plist-get request :cause-at-start) 0)
+                      emacsos-assist-web-git--success-watermark)
+                   ;; A final read begun before an exact successful Run cannot
+                   ;; install even if the branch and OID did not change.
+                   (emacsos-assist-web-git--enqueue
+                    emacsos-assist-web-git--metadata nil)
+                 (if (not (eql (plist-get request :verified-epoch)
+                               emacsos-assist-web-git--epoch))
                    (if (< (or (plist-get request :final-attempts) 0) 2)
                        (emacsos-assist-web-git--final-check request result)
                      (emacsos-assist-web-git--cleanup
@@ -1014,7 +1164,10 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                           (emacsos-assist-web-git--release-intents
                            (list intent)
                            (format "view unavailable: %s; Retry"
-                                   (error-message-string error)))))))))))))
+                                   (error-message-string error))))
+                         (quit
+                         (emacsos-assist-web-git--release-intents
+                           (list intent) "view cancelled; Retry"))))))))))))
         (if prior
             (emacsos-assist-web-git--cleanup
              (emacsos-assist-web-git-generation-id prior) "generations"
@@ -1045,8 +1198,14 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
       (emacsos-assist-web-git--release-intents
        (list intent) emacsos-assist-web-git--unavailable t))
      (emacsos-assist-web-git--denied
-      (emacsos-assist-web-git--release-intents
+     (emacsos-assist-web-git--release-intents
        (list intent) "thread access unavailable; reauthorize and Retry"))
+     ((and (consp problem) (memq (car problem) '(canonical git)))
+      ;; A parsed authenticated 200 with invalid canonical/Git fields is not
+      ;; an offline probe.  Its old mirror cannot remain marked current.
+      (emacsos-assist-web-git--invalidate "Git state unavailable")
+      (emacsos-assist-web-git--release-intents
+       (list intent) "Git state unavailable; Retry"))
      (problem
       (message "Thread Git metadata unavailable: %s"
                (emacsos-assist-web-git--problem-text problem))
@@ -1082,6 +1241,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
     (serial intent metadata problem start-epoch)
   "Complete SERIAL's diagnostic probe, retaining independent window INTENT."
   (cond
+   ((not (emacsos-assist-web-git--intent-live-p intent)) nil)
    ((< serial emacsos-assist-web-git--observation)
     (let ((latest emacsos-assist-web-git--latest-probe-result))
       (if (and latest
@@ -1128,12 +1288,15 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                        :serial serial)))
     (emacsos-assist-web-git--clear-feedback window)
     (set-window-parameter window 'assist-web-git-intent serial)
+    (push intent emacsos-assist-web-git--active-probes)
     (message "Refreshing thread Git…")
     (emacsos-assist-web-git--read-metadata
      thread
      (lambda (metadata problem)
        (when (buffer-live-p thread)
          (with-current-buffer thread
+           (setq emacsos-assist-web-git--active-probes
+                 (delq intent emacsos-assist-web-git--active-probes))
            (emacsos-assist-web-git--probe-complete
             observation intent metadata problem start-epoch)))))))
 
@@ -1154,9 +1317,6 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
     (user-error "local recovery could not be saved; restart to recover"))
   (when (bound-and-true-p emacsos-assist-web--manual-recovery-required)
     (user-error "Run recovery pending; Refresh"))
-  (when emacsos-assist-web-git--request
-    (setq emacsos-assist-web-git--next nil)
-    (emacsos-assist-web-git--cancel))
   (emacsos-assist-web-git--command 'refresh))
 
 (defun emacsos-assist-web-git--literal-file-view (file root thread generation)
