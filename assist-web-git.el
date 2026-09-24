@@ -51,7 +51,8 @@
 (defvar-local emacsos-assist-web-git--next nil)
 (defvar-local emacsos-assist-web-git--canceling nil)
 (defvar-local emacsos-assist-web-git--epoch 0)
-(defvar-local emacsos-assist-web-git--observation 0)
+(defvar-local emacsos-assist-web-git--observation 0
+  "Serial that makes older Git metadata responses inert.")
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
 (defvar-local emacsos-assist-web-git--view-thread nil)
@@ -660,7 +661,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
   (let* ((thread (current-buffer))
          (window (selected-window))
          (serial (1+ (or (window-parameter window 'assist-web-git-intent) 0)))
-         (observation emacsos-assist-web-git--observation)
+         (observation (cl-incf emacsos-assist-web-git--observation))
          (intent (list :action action :buffer thread :window window
                        :serial serial)))
     (set-window-parameter window 'assist-web-git-intent serial)
