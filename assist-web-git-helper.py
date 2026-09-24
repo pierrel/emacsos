@@ -253,9 +253,9 @@ def refresh(request: dict) -> dict:
         raise Refusal("Git staging generation already exists")
     stage.mkdir(mode=0o700)
     env = git_environment(key, hosts)
-    if branch == "main":
+    if branch in ("main", "HEAD"):
         shutil.rmtree(stage)
-        raise Refusal("thread is checked out on main")
+        raise Refusal("thread is not on a published branch")
     try:
         git(["check-ref-format", "refs/heads/" + branch], env)
     except Refusal as exc:

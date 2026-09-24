@@ -36,6 +36,9 @@
   :type 'file
   :group 'emacsos-assist-web-git)
 
+(defconst emacsos-assist-web-git--file-view-limit (* 1024 1024)
+  "Largest committed file opened synchronously in a mirror view.")
+
 (cl-defstruct emacsos-assist-web-git-generation
   id path metadata oid main state views)
 
@@ -652,6 +655,14 @@
 (defun emacsos-assist-web-git--literal-file-view (file root thread generation)
   "Return a read-only FILE from ROOT for THREAD and GENERATION.
 Do not interpret repository-local code."
+  (let ((resolved (file-truename file)))
+    (unless (and (file-regular-p resolved)
+                 (file-in-directory-p resolved (file-truename root))
+                 (not (file-in-directory-p
+                       resolved (file-truename (expand-file-name ".git" root))))
+                 (<= (file-attribute-size (file-attributes resolved))
+                     emacsos-assist-web-git--file-view-limit))
+      (error "Git file is outside the committed display limit")))
   (let* ((relative (file-relative-name file root))
          (view (generate-new-buffer
                 (format "*Git %s %s*"
@@ -697,10 +708,7 @@ Do not interpret repository-local code."
                                  '(:eval (emacsos-assist-web-git--chooser-header))))
                               minibuffer-setup-hook)))
                    (read-file-name prompt default-directory nil t))))
-           (when (and (file-regular-p choice)
-                      (file-in-directory-p (file-truename choice)
-                                           (file-truename root))
-                      (emacsos-assist-web-git--intent-live-p intent))
+           (when (emacsos-assist-web-git--intent-live-p intent)
              (let ((view (emacsos-assist-web-git--literal-file-view
                           choice root thread generation)))
                (set-window-buffer window view)))))
