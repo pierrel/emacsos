@@ -2549,7 +2549,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
           (let ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
                 (generation (cl-incf emacsos-assist-web--refresh-generation))
                 (send-generation emacsos-assist-web--send-generation)
-                (git-observation emacsos-assist-web-git--observation))
+                (git-observation
+                 (cl-incf emacsos-assist-web-git--observation)))
             (emacsos-assist-web--request
              "GET" (concat "threads/" tid) nil
              (lambda (value error)
@@ -4264,7 +4265,8 @@ write leaves the provisional records available for the next exact refresh."
     (let* ((buffer (current-buffer))
            (thread-id emacsos-assist-web--thread-id)
            (generation (cl-incf emacsos-assist-web--refresh-generation))
-           (git-observation emacsos-assist-web-git--observation)
+           (git-observation
+            (cl-incf emacsos-assist-web-git--observation))
            (keys (mapcar (lambda (entry) (plist-get entry :key))
                          (seq-filter (lambda (entry)
                                        (eq (emacsos-assist-web--entry-state entry)

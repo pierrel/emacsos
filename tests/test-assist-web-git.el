@@ -444,6 +444,40 @@
         (should-not emacsos-assist-web-git--metadata)
         (should-not enqueued)))))
 
+(ert-deftest test-assist-web-git-newer-started-command-wins-reverse-completion ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web-git--sync-keys)
+    (let* ((old (test-assist-web-git--metadata
+                 "ready" "topic/old" test-assist-web-git--head))
+           (new (test-assist-web-git--metadata
+                 "ready" "topic/new" test-assist-web-git--published))
+           (generation (make-emacsos-assist-web-git-generation
+                        :metadata old :state 'current))
+           callbacks enqueued)
+      (setq-local emacsos-assist-web-git--metadata old
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread done) (push done callbacks)))
+                ((symbol-function 'emacsos-assist-web-git--enqueue)
+                 (lambda (metadata intent)
+                   (setq enqueued (list metadata intent)))))
+        (emacsos-assist-web-git--command 'files)
+        (emacsos-assist-web-git--command 'diff)
+        (let ((newer (car callbacks))
+              (older (cadr callbacks)))
+          (funcall older old nil)
+          (funcall older nil "offline")
+          (should (eq (emacsos-assist-web-git-generation-state generation)
+                      'current))
+          (should (equal emacsos-assist-web-git--metadata old))
+          (should-not enqueued)
+          (funcall newer new nil)
+          (should (equal emacsos-assist-web-git--metadata new))
+          (should (equal (car enqueued) new))
+          (should (eq (plist-get (cadr enqueued) :action) 'diff)))))))
+
 (ert-deftest test-assist-web-git-old-chat-refresh-cannot-overwrite-newer-git-probe ()
   (with-temp-buffer
     (emacsos-assist-web-mode)
