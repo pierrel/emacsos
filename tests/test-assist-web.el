@@ -752,6 +752,8 @@
        (lambda (_value error) (setq problem error))
        nil nil nil nil t))
     (should (eq (plist-get problem :kind) 'transport))
+    (should (equal (plist-get problem :text)
+                   "Assist Web request budget is busy"))
     (should-not (plist-get problem :offline))))
 
 (ert-deftest test-assist-web-git-tls-error-is-not-parse-or-offline ()
@@ -770,6 +772,8 @@
        (lambda (_value error) (setq problem error))
        nil nil nil nil t))
     (should (eq (plist-get problem :kind) 'transport))
+    (should (equal (plist-get problem :text)
+                   "Assist Web TLS/trust failed"))
     (should-not (plist-get problem :offline))
     (should-not (plist-get problem :status))))
 
@@ -790,6 +794,8 @@
            nil nil nil nil t)
           (funcall timer)
           (should (eq (plist-get problem :kind) 'transport))
+          (should (equal (plist-get problem :text)
+                         "Assist Web request timed out"))
           (should-not (plist-get problem :offline)))
       (when (buffer-live-p response) (kill-buffer response)))))
 

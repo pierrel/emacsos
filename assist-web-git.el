@@ -403,7 +403,7 @@
     (message "Thread Git: %s" reason)))
 
 (defun emacsos-assist-web-git--canonical-uncertain ()
-  "Downgrade freshness after an unclassified canonical transport failure."
+  "Downgrade freshness after a failed chat-owned canonical GET."
   (unless emacsos-assist-web-git--denied
     (when emacsos-assist-web-git--current
       (setf (emacsos-assist-web-git-generation-state
@@ -753,7 +753,9 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                        "metadata unavailable; no cached mirror; Retry"))
                (emacsos-assist-web-git--update-headers))
              (message "Thread Git metadata unavailable: %s"
-                      (emacsos-assist-web-git--problem-text problem)))
+                      (emacsos-assist-web-git--problem-text problem))
+             (emacsos-assist-web-git--release-intents
+              (list intent) "metadata unavailable; Retry"))
             (t
              (emacsos-assist-web-git--note metadata)
              (emacsos-assist-web-git--enqueue metadata intent)))))))))
