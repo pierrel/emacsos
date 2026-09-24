@@ -42,7 +42,7 @@
   "Largest mirror worktree file opened synchronously in a view.")
 
 (cl-defstruct emacsos-assist-web-git-generation
-  id path metadata oid main state views)
+  id path metadata oid main state views auth-epoch)
 
 (defvar-local emacsos-assist-web-git--metadata nil)
 (defvar-local emacsos-assist-web-git--current nil)
@@ -380,7 +380,7 @@
   (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
 
 (defun emacsos-assist-web-git--release-intents (intents reason)
-  "Visibly release live INTENTS after terminal Git failure REASON."
+  "Release live INTENTS and message terminal Git failure REASON."
   (dolist (intent intents)
     (when (emacsos-assist-web-git--intent-live-p intent)
       (set-window-parameter
@@ -562,18 +562,9 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
       (setf (emacsos-assist-web-git-generation-state
              emacsos-assist-web-git--current) 'cached))
     (emacsos-assist-web-git--update-headers)
-    (dolist (intent (plist-get request :intents))
-      (when (emacsos-assist-web-git--intent-live-p intent)
-        (if (and (equal reason "Git operation timed out")
-                 (eq (plist-get intent :action) 'files)
-                 emacsos-assist-web-git--current
-                 (emacsos-assist-web-git--same-identity
-                  emacsos-assist-web-git--metadata
-                  (emacsos-assist-web-git-generation-metadata
-                   emacsos-assist-web-git--current)))
-            (emacsos-assist-web-git--open
-             intent emacsos-assist-web-git--current)
-          (message "Thread Git: %s; Refresh to retry" reason))))))
+    (emacsos-assist-web-git--release-intents
+     (plist-get request :intents)
+     (format "%s; Refresh to retry" reason))))
 
 (defun emacsos-assist-web-git--final-check (request result)
   "Reread canonical metadata for REQUEST before promoting RESULT."
@@ -655,7 +646,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                         :metadata (plist-get request :metadata)
                         :oid (plist-get result :thread_oid)
                         :main (plist-get result :main_oid)
-                        :state state))
+                        :state state
+                        :auth-epoch emacsos-assist-web-git--auth-epoch))
                       (installed nil))
                  (condition-case error
                      (progn
@@ -739,7 +731,9 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                   (/= observation emacsos-assist-web-git--observation))
              (emacsos-assist-web-git--release-intents
               (list intent) "metadata observation superseded; Retry"))
-            ((/= observation emacsos-assist-web-git--observation) nil)
+            ((/= observation emacsos-assist-web-git--observation)
+             (emacsos-assist-web-git--release-intents
+              (list intent) "thread state changed; Retry"))
             (emacsos-assist-web-git--denied
              (emacsos-assist-web-git--release-intents
               (list intent) "thread access unavailable; reauthorize and Retry"))
@@ -844,6 +838,12 @@ interpret repository-local code."
     (when (emacsos-assist-web-git--intent-live-p intent)
       (when (with-current-buffer thread emacsos-assist-web-git--denied)
         (user-error "Thread Git access denied; reauthorize and Retry"))
+      (when (with-current-buffer thread
+              (and (> emacsos-assist-web-git--auth-epoch 0)
+                   (not (eql emacsos-assist-web-git--auth-epoch
+                             (emacsos-assist-web-git-generation-auth-epoch
+                              generation)))))
+        (user-error "Thread Git mirror predates authorization; Retry"))
       (pcase (plist-get intent :action)
         ('files
          (let* ((prompt (format "Git %s %s file: "
