@@ -2366,8 +2366,47 @@
           (should-not (alist-get 'run_id
                                  (emacsos-assist-web--read-cache
                                   "drafts/thread-1.json")))
-          (should (string-match-p "Run saved; Refresh"
+          (should (string-match-p "Saved; Refresh"
                                   emacsos-assist-web--stream-status)))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-legacy-postcommit-git-note-quit-keeps-receipt-retired ()
+  "Optional Git projection quit cannot roll back durable legacy retirement."
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-legacy-note-quit-" t))
+        run-callback chat-callback)
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (emacsos-assist-web--write-prompt)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--run-id "run-1"
+                emacsos-assist-web--pending-key
+                "emacsos-0123456789abcdef0123456789abcdef"
+                emacsos-assist-web--submitted-text "hello"
+                emacsos-assist-web--pending-accepted-p t)
+          (should (emacsos-assist-web--save-draft))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method path _payload callback &rest _)
+                       (if (string-match-p "/runs/" path)
+                           (setq run-callback callback)
+                         (setq chat-callback callback))))
+                    ((symbol-function 'emacsos-assist-web-git--note-snapshot)
+                     (lambda (&rest _) (signal 'quit nil)))
+                    ((symbol-function 'emacsos-assist-web--render)
+                     (lambda (&rest _) nil)))
+            (emacsos-assist-web-refresh-thread)
+            (funcall run-callback
+                     '((id . "run-1") (thread_id . "thread-1")
+                       (status . "success")) nil)
+            (funcall chat-callback test-assist-web--snapshot nil))
+          (should-not emacsos-assist-web--run-id)
+          (should-not emacsos-assist-web--pending-accepted-p)
+          (should-not (alist-get 'run_id
+                                 (emacsos-assist-web--read-cache
+                                  "drafts/thread-1.json")))
+          (should (string-match-p "Git state unavailable"
+                                  emacsos-assist-web-git--unavailable)))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-legacy-follow-up-claim-survives-restart ()
@@ -2410,7 +2449,7 @@
                        (lambda (method _path _payload _callback &optional headers &rest _)
                          (when (equal method "POST")
                            (push (cdr (assoc "Idempotency-Key" headers)) posts)))))
-              (emacsos-assist-web-refresh-thread)
+              (emacsos-assist-web-send)
               (should (equal posts (list key)))
               (should (equal emacsos-assist-web--pending-key key))
               (should (equal (emacsos-assist-web--input) "third"))
@@ -2419,6 +2458,79 @@
                                       (emacsos-assist-web--read-cache
                                        "drafts/thread-1.json"))
                              key)))))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-legacy-claimed-unsent-follower-retries-after-crash ()
+  "A crash after claim restores visible text and Send uses its original key."
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-legacy-claimed-" t))
+        (key "emacsos-0123456789abcdef0123456789abcdef")
+        posts)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--write-prompt)
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--follow-ups
+                  `(((text . "next") (key . ,key))))
+            (insert "third")
+            (should (emacsos-assist-web--save-draft))
+            ;; Stop exactly after the prospective claim was saved.
+            (cl-letf (((symbol-function 'emacsos-assist-web--legacy-send)
+                       #'ignore))
+              (emacsos-assist-web--start-follow-up)))
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--write-prompt)
+            (setq emacsos-assist-web--thread-id "thread-1")
+            (emacsos-assist-web--legacy-restore-draft)
+            (should (equal emacsos-assist-web--pending-key key))
+            (should (equal emacsos-assist-web--submitted-text "next"))
+            (should (= (how-many "you> next" (point-min) (point-max)) 1))
+            (should (equal (emacsos-assist-web--input) "third"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload _callback
+                                &optional headers &rest _)
+                         (when (equal method "POST")
+                           (push (cdr (assoc "Idempotency-Key" headers)) posts)))))
+              (emacsos-assist-web-send))
+            (should (equal posts (list key)))))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-legacy-follower-save-failure-retries-exact-key ()
+  "A failed pre-POST save leaves a reachable same-key Send without a POST."
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-legacy-save-fail-" t))
+        (key "emacsos-0123456789abcdef0123456789abcdef")
+        (writes 0) posts)
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (emacsos-assist-web--write-prompt)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--follow-ups
+                `(((text . "next") (key . ,key))))
+          (should (emacsos-assist-web--save-draft))
+          (let ((real-save
+                 (symbol-function 'emacsos-assist-web--legacy-save-draft)))
+            (cl-letf (((symbol-function 'emacsos-assist-web--legacy-save-draft)
+                       (lambda ()
+                         (cl-incf writes)
+                         (if (= writes 2) nil (funcall real-save))))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload _callback
+                                &optional headers &rest _)
+                         (when (equal method "POST")
+                           (push (cdr (assoc "Idempotency-Key" headers)) posts)))))
+              (emacsos-assist-web--start-follow-up)
+              (should-not posts)
+              (should (equal emacsos-assist-web--pending-key key))
+              (should (equal emacsos-assist-web--submitted-text "next"))
+              (should (string-match-p "follow-up ready"
+                                      emacsos-assist-web--stream-status))
+              (emacsos-assist-web-send)
+              (should (equal posts (list key))))))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-busy-refresh-keeps-live-provisional-markers ()
