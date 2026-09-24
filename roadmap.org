@@ -119,6 +119,299 @@ harness, authenticated lab recovery, later locked fallback, promotion gates,
 and stop conditions are in
 [[file:docs/2026-08-31-pinephone-emacsos-session.org][2026-08-31-pinephone-emacsos-session.org]].
 
+* TODO Reach Assist Web functionality parity on the phone
+
+This is a source-grounded inventory and path to phone access to the functions
+currently offered by Assist Web. The baseline is Assist =2d8ec13a= and EmacsOS
+=7b2ccf1= (2026-09-24). Parity means the same canonical Assist thread and
+server-owned decisions, presented in a form usable on the PinePhone. It does
+not require copying browser layout or running a second agent on the phone.
+Keep this inventory current as either project changes. The stages below are
+ordered by user impact; each remaining function stays visible until completed
+or a specific later decision changes its disposition.
+
+** Already implemented or partly implemented
+
+- *Canonical threads and runs: implemented.* The phone has an authenticated
+  HTTPS Assist API, canonical thread list and chooser, repository and harness
+  choice, create/send, recent snapshot and older history, finite SSE Run
+  observation and cancellation. It preserves local drafts, bounded caches,
+  idempotency keys, pending work and recovery across interruption. It renders
+  cached content as cached rather than claiming it is live. See
+  =README.org:207-238=, =assist-web.el:417-478=,
+  =assist-web.el:1520-1621=, =assist-web.el:1815-1924=,
+  =assist-web.el:2119-2308=, =assist-web.el:2919-3025= and
+  =assist/manage/web/phone_api.py:1103-1293=. These contracts are the base for
+  later parity work, not features to rebuild.
+- *List search and repository context: partly implemented.* Web filters the
+  already loaded list by its displayed title (which can be a pending-message
+  snippet while busy) and shows status pills plus a Pi-preview
+  or engine-error label (=assist/manage/web/threads.py:261-468=); repository
+  and domain context appear on the thread page. Phone completion searches
+  description, normalized title, repository and status; its touch list shows
+  title, repository and raw status (=assist-web.el:1531-1579=,
+  =assist-web.el:2119-2230=). New-thread repository and harness selection
+  works (=assist-web.el:2919-3011=). The phone list has no native in-list
+  search with a visible match count or no-match state, no engine label,
+  and none of Web's attention badges.
+- *Thread content: partly implemented.* Assist's phone snapshot already
+  supplies each visible message's =kind= and optional timestamp, plus
+  thread-level workspace metadata; safe file references are included only
+  for eligible ordinary assistant replies
+  (=assist/manage/web/phone_api.py:535-619=); the
+  EmacsOS validator retains only id, role, text and state, then renders a
+  text transcript with basic Markdown links (=assist-web.el:524-585=,
+  =assist-web.el:1815-1912=, =chat.el:340-489=). Assist also offers bounded
+  diff, manifest and regular-file archive APIs, but the native client does
+  not use them (=assist/manage/web/phone_api.py:1002-1100=,
+  =assist/manage/web/phone_api.py:1295-1310=).
+
+** P1: Match Web list status, urgency and unread behavior
+
+The Web list ranks urgent first, then active work except queued, then queued,
+then unread/new, then idle; activity age breaks ties. Its visible pill priority
+is queued, active stage, error, urgent, new, unmerged. A continuation uses
+"following up" as its active label and keeps a simultaneous "new" pill when
+the first answer is unread. Pi preview and engine error are independent
+engine labels. =awaiting_approval= has no separate list pill; the unread
+signal and the in-thread approval card surface it. See
+=assist/manage/web/threads.py:243-357= and
+=assist/manage/web/state.py:405-441=.
+
+Assist's catalog already returns stage, unread, activity time and Web-ranked
+rows, but it omits urgent and unmerged; on a thread-engine error it skips the
+row altogether (=assist/manage/web/phone_api.py:633-660=). EmacsOS drops the
+unread and activity fields, keeps only the raw stage and repository, and does
+not draw any pill (=assist-web.el:432-478=,
+=assist-web.el:2119-2274=). Extend the authenticated catalog with the
+missing server-owned signals and an engine-error representation. Preserve the
+server's row order in both touch list and chooser. Show all the pill cases
+above, including urgent rank when a live-state pill masks the urgent pill, and
+show stale/cache state separately from thread status. The current API slices
+=MANAGER.list()[:MAX_THREADS]= before applying attention rank, so canonical
+threads beyond the first 500 are undiscoverable through the catalog and
+chooser, including older urgent or unread threads
+(=assist/manage/web/phone_api.py:633-655=). They remain accessible when the
+caller already knows their IDs; the current list offers no way to discover
+those IDs. Provide bounded pagination or server-ranked search without an
+unbounded client catalog. Page traversal must remain stable or recover when
+attention ranking changes between pages, including after restart. Every
+canonical thread must be discoverable, with urgent/unread precedence tested
+separately. The existing README's claim that both entry points share the
+"same complete ... catalog" (=README.org:216=) is stale because of this cap.
+Add a discoverable search action in the touch list itself, with a visible
+match count and explicit no-match result, matching Web's list search feedback
+(=assist/manage/web/threads.py:433-466=).
+
+The current server marks unseen on *every* transition to =ready= or
+=awaiting_approval=, including cancellation paths that produce no answer.
+Ordinary errors do not mark it, but continuation failures explicitly mark
+unseen while retaining the higher-priority error status. This differs from
+the intended "unseen response" meaning and must be reconciled in the server
+before the phone relies on the bit as a response badge
+(=assist/manage/web/state.py:459-467=,
+=assist/manage/web/threads.py:1619-1634=,
+=assist/manage/web/threads.py:3120-3131=,
+=assist/manage/web/phone_api.py:966-973=). The agent's =notify()= marks a
+separate stronger urgent bit. Both bits have best-effort restart markers, and
+Web clears both when its thread page opens (=assist/manage/web/state.py:512-619=,
+=assist/manage/web/threads.py:3316-3329=). Marker-file writes can fail, so
+attention bits normally restore across restart but reliable persistence remains
+an acceptance requirement. A phone snapshot GET currently clears neither
+(=assist/manage/web/phone_api.py:535-619=). Give the phone an authoritative
+seen acknowledgment tied to a freshly displayed canonical
+snapshot. Cached/offline display must never clear server attention, and an
+acknowledgment of an older view must not erase a later reply or urgent mark.
+Refresh the catalog on list entry and after wake; the phone must report when
+status is cached or stale. A compact global Assist indicator can summarize
+known attention, while the thread rows remain the detailed source; fit it
+after the existing call and SMS badges on the small modeline
+(=os.el:96-127=). Do not promise instant Internet notifications while the
+PinePhone is in deep sleep; its power roadmap explicitly requires an SMS/call
+wake path or waiting for the next wake (=roadmap.org:57-76=).
+
+Acceptance: queued/processing/paused/setup/error/urgent/new/unmerged,
+following-up-plus-new, ordinary successful =ready= unseen marking, unseen
+continuation failure with its visible error pill, Pi preview and engine-error
+cases render with Web precedence and ordering. Unread and urgent reliably
+survive service and phone restart, clear after a fresh opened view, and remain
+when only cached content was shown or a newer response arrived before
+acknowledgment. An urgent thread still sorts first when its visible pill
+describes current processing. Every canonical thread beyond the first catalog
+page remains reachable by list navigation or search. Touch-list search reports
+a matching count or a clear no-match state.
+
+** P2: Complete conversation and decision flows
+
+Render the snapshot's message =id= and =kind=, which distinguish background
+continuations, tasks and mid-turn interjections, plus its optional timestamp
+and filtered safe file references. Add bounded API projections where absent
+for collapsed tool/activity trace, completed-turn duration, pending
+continuation and approval details, without treating provisional SSE text as
+canonical.
+Web already renders these distinctions, timing badges, pending messages,
+errors and approval cards (=assist/manage/web/threads.py:760-787=,
+=assist/manage/web/threads.py:867-1097=); the phone currently has only
+generic status and user/assistant text (=assist-web.el:1815-1912=). Give a
+failed setup or turn a safe, actionable explanation and recovery path: Web
+shows the actual error banner, while the phone snapshot currently replaces
+it with the same generic "Thread failed; inspect Assist Web for details"
+message (=assist/manage/web/threads.py:1019-1030=,
+=assist/manage/web/phone_api.py:603-613=). Do not expose secrets or an
+unbounded traceback in the phone response.
+
+Add phone actions for rename, delete with a native two-tap confirmation,
+and copy/view thread ID; show harness, domain and Pi availability. For a
+Pi preview thread, preserve read-only behavior when that preview is
+disabled and offer its explicit "Continue in Deep Agents" flow with an
+optional summary and a clear warning that neither its transcript nor its
+workspace transfers. Web already has these controls (=assist/manage/web/threads.py:720-744=,
+=assist/manage/web/threads.py:1207-1234=,
+=assist/manage/web/threads.py:1337-1373=,
+=assist/manage/web/threads.py:4459-4470=,
+=assist/manage/web/threads.py:5091-5136=); the native action set currently
+contains send, abort, refresh, older history, open-object and catalog only
+(=assist-web.el:3013-3025=).
+
+Make decisions that stop a thread actionable on the phone: approve, edit or
+reject SMS replies and email; approve for one hour, allow for the thread or
+decline an exact host/port egress request; approve or decline geo downloads
+and show import/failure progress. Each compact card must show the material
+target, content and scope before action: SMS recipient and full proposed
+reply; email sender, recipients, subject and body; exact egress host/port,
+reason and duration/scope; geo region, size and download effect. After an
+action, show its accepted, rejected, stale or error result in the same
+thread context on the 320x240 display. Reuse server authority and
+stale-decision checks; do not let cached cards authorize an obsolete request.
+These Web cards and routes exist at =assist/manage/web/threads.py:1031-1205=,
+=assist/manage/web/threads.py:3709-3769=,
+=assist/manage/web/geo.py:90-144= and
+=assist/manage/web/egress.py:87-118=; the current phone API has no
+decision route (=assist/manage/web/phone_api.py:1103-1310=).
+
+Acceptance: a phone user can read an agent answer and its origin, recover
+an interrupted Run, identify and act on every pending thread decision,
+rename/delete a thread intentionally, and distinguish a disabled Pi preview
+from a failing ordinary thread. Setup and turn errors give safe next actions
+on the phone. Approval cards disclose the exact decision and show its
+outcome in place. Refreshed state supersedes any stale card.
+
+** P3: Open thread work and rich responses
+
+Offer phone-sized access to the thread's repository/branch/dirty state,
+file references, safe workspace files and =render= content (Org, Markdown,
+images and PDF), map blocks, diff/conflict state, and local pinned replies.
+Web currently renders those file/map blocks and full-page views and has a
+browser-local pin list (=assist/manage/web/threads.py:903-937=,
+=assist/manage/web/threads.py:1498-1550=,
+=assist/manage/web/threads.py:4581-5090=). Its diff, review form and
+Merge & Push flow are at =assist/manage/web/threads.py:809-865=,
+=assist/manage/web/review.py:352-386= and
+=assist/manage/web/threads.py:5223-5287=. Add phone review annotations
+and merge/push controls through explicit authenticated server contracts,
+showing merge conflict details and requiring a native confirmation for
+destructive effects. Establish shared per-thread write exclusion for canonical
+Runs and merge/push before comparing the current branch with
+the exact revision/tree the server reviewed and the phone displayed, including
+the full diff and untracked files. Keep it through the merge/push effect, and
+wait for or reject while another writer is active. If content changed, reject
+the stale action, refresh the review, and require new confirmation; matching
+the branch name alone is insufficient. A phone send should supply appropriate
+local time zone and location context when authorized, matching the browser's
+context rider
+(=assist/manage/web/threads.py:183-187=); the current phone send body carries
+only message text (=assist/manage/web/phone_api.py:122-130=).
+
+The separate =emacsos-thread-git-sync= effort is *in flight*, not shipped.
+Its accepted scope is a clean, committed, thread-specific branch with a
+separate Git credential and standard device fetch/pull after a successful
+turn; it adds =C-x C-f= browsing and thread-local =C-c d= Magit against a
+labeled, remote-published =main=, while preserving terminal =C-c d= elsewhere.
+This Git-sync path does not itself provide Web diff, dirty-worktree, or
+untracked-file parity.
+The present phone archive excludes =.git= and provides bounded regular files;
+the diff endpoint is bounded text, not a full Git synchronization protocol
+(=assist/manage/web/phone_api.py:339-391=,
+=assist/manage/web/phone_api.py:1002-1100=). Its current =git diff main...=
+projection omits untracked files, whereas Web's =main_diff= includes them
+as additions (=assist/domain_manager.py:205-265=). P1 and P2 proceed
+independently. At P3 implementation/integration, reconcile this roadmap with
+that effort's reviewed Git contract and avoid a second competing mirror or
+diff path.
+
+Web's render pages can also expose artifacts saved under a thread's sandbox
+=/tmp= mount. Provide authenticated, bounded access to those per-thread
+artifacts, including PDF, as well as workspace files; the current phone
+manifest and archive cover only the workspace
+(=assist/manage/web/threads.py:4518-4531=,
+=assist/manage/web/threads.py:4717-4725=,
+=assist/manage/web/phone_api.py:1002-1100=,
+=assist/manage/web/phone_api.py:1295-1310=).
+
+Acceptance: exact thread file and diff actions open safely on the phone,
+review/merge decisions act on the same canonical branch shown to the user,
+and diff changed-file/content coverage matches Web, including untracked
+files, with bounded/truncated content labeled rather than presented as complete.
+Map, workspace and sandbox =/tmp= artifact content, including PDF, has a
+usable phone view or a safe explicit external-view action. Merge & Push is
+rejected whenever the reviewed revision/tree or full diff changes before the
+atomic operation against Run and merge writers. Thread-local Git navigation
+follows the accepted Git-sync contract when it lands, while Web diff parity
+still covers dirty and untracked work.
+
+** P4: Make remaining Web operator and evaluation functions reachable
+
+These are lower-priority phone milestones, not silent exclusions. They
+require compact phone views and additional authenticated API contracts:
+
+- Scheduled prompts: show each item's owning thread, prompt, cadence,
+  paused state and next fire before offering deletion
+  (=assist/manage/web/schedules.py:22-44=,
+  =assist/manage/web/schedules.py:65-77=).
+- Global egress and geo management: show live egress grants and support
+  revocation; pending egress approvals remain in-thread. The geo page lists
+  regions and pending proposals, with approve, decline, deletion and transit
+  actions (=assist/manage/web/egress.py:87-118=,
+  =assist/manage/web/geo.py:87-144=). These global controls complement,
+  rather than replace, P2's in-thread egress cards.
+- Judged live captures: capture recent or full visible conversation, record
+  pass/fail calibration, inspect and dismiss capture cards, preserving the
+  distinction between private stored evidence and browser-local dismissal
+  (=assist/manage/web/threads.py:1390-1420=,
+  =assist/manage/web/threads.py:5181-5221=,
+  =assist/README.md:445-449=). This is an operator workflow, so it follows
+  core chat and approval use.
+- Eval history and run detail: read the existing evaluation pages through
+  a phone-sized view (=assist/manage/web/evals.py:251-256=). This is a
+  diagnostic view rather than a prerequisite for a conversation.
+- Pi preview activity trace: expose its bounded, redacted diagnostic events
+  without implying they are agent messages (=assist/README.md:89-97=,
+  =assist/manage/web/threads.py:487-510=). Keep its diagnostic character.
+
+Assist's inbound SMS route and =notify()= outbound urgent SMS are server
+transports, already shared rather than phone-client controls
+(=assist/manage/web/threads.py:3661-3689=,
+=assist/README.md:429-436=). P1 covers the phone's display of their
+resulting attention state. Browser favicon and Apple touch icon routes are
+browser chrome, with no native phone action to reproduce
+(=assist/manage/web/threads.py:3207-3223=). These are the only intentionally
+phone-unsuitable entries in this inventory; they remain recorded here so
+the comparison is explicit.
+
+** Verification and closure
+
+For each milestone, update this section's =implemented=, =partial= or
+=missing= status for both the phone API and native client, and refresh the
+source revision. Tests must prove badge rank/display independently, unread
+and urgent acknowledgment across cached/live/restart/newer-result cases,
+protected stale-decision rejection, serialized stale-merge rejection, and
+safe/truncated file, artifact and Git views. Run ERT and Assist API tests
+for each implemented slice, then exercise
+the list, one normal and one Pi thread, an interrupted Run, approval cards,
+file/diff views and wake/reconnect on the PinePhone or simulator. A milestone
+is complete only when the live phone can perform its named flow against the
+canonical Assist state.
+
 * Ergonomics iteration
 
 Live testing of PR #6 (assist-import) surfaced several rough edges
