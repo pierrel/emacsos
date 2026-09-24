@@ -917,7 +917,8 @@ them.  STATUS-OBSERVER sees a bounded raw status prefix before any refusal."
   "Tell ORIGIN's optional Git projection about canonical GET failure.
 METHOD and PATH identify the exact thread GET.  STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
-EARLY-FAILURE without a denial status downgrades freshness conservatively."
+EARLY-FAILURE belongs only to a chat-owned canonical request; a Git probe's
+nondiagnostic failure must not invalidate another window's accepted state."
   (when (and (buffer-live-p origin)
              (equal method "GET")
              (or (memq status '(401 403 404)) early-failure)
@@ -957,7 +958,8 @@ ERROR rather than raising them from url-http's asynchronous callback.  Pass
 ALLOW-STATUS only for a bounded structured non-2xx response the caller owns.
 ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
 GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
-error instead of the legacy string."
+error instead of the legacy string.  A Git probe's nondiagnostic failure
+does not downgrade a separate chat-accepted Git observation."
   (let (token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
@@ -965,7 +967,7 @@ error instead of the legacy string."
     (if token-error
         (progn
           (emacsos-assist-web--git-http-status
-           (current-buffer) method path nil t)
+           (current-buffer) method path nil (not git-typed-error))
           (funcall callback nil
                    (if git-typed-error
                        (emacsos-assist-web--git-request-error
@@ -974,7 +976,7 @@ error instead of the legacy string."
       (if (not (emacsos-assist-web--safe-token-p token))
         (progn
           (emacsos-assist-web--git-http-status
-           (current-buffer) method path nil t)
+           (current-buffer) method path nil (not git-typed-error))
           (funcall callback nil
                    (if git-typed-error
                        (emacsos-assist-web--git-request-error
@@ -989,7 +991,7 @@ error instead of the legacy string."
                  (error nil)))
           (progn
             (emacsos-assist-web--git-http-status
-             (current-buffer) method path nil t)
+             (current-buffer) method path nil (not git-typed-error))
             (funcall callback nil
                      (if git-typed-error
                          (emacsos-assist-web--git-request-error
@@ -1016,7 +1018,7 @@ error instead of the legacy string."
                    (when (and problem (not git-failure-notified))
                      (setq git-failure-notified t)
                      (emacsos-assist-web--git-http-status
-                      origin method path status t))
+                      origin method path status (not git-typed-error)))
                    (when (timerp timer) (cancel-timer timer))
                    (setq emacsos-assist-web--requests
 			 (delq response emacsos-assist-web--requests))
@@ -1099,7 +1101,8 @@ error instead of the legacy string."
 			  (unless (memq observed-http-status '(401 403 404))
                             (setq git-failure-notified t)
                             (emacsos-assist-web--git-http-status
-                             origin method path observed-http-status t))
+                             origin method path observed-http-status
+                             (not git-typed-error)))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))

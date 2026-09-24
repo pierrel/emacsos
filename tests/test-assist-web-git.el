@@ -597,11 +597,9 @@
                      (lambda (_delay _repeat callback) (setq timer callback))))
             (emacsos-assist-web--request
              "GET" "threads/thread-1" nil
-             (lambda (_value error) (setq problem error))
-             nil nil nil nil t)
+             (lambda (_value error) (setq problem error)))
             (funcall timer)
-            (should (equal (plist-get problem :text)
-                           "Assist Web request timed out"))
+            (should (equal problem "Assist Web request timed out"))
             (should-not emacsos-assist-web-git--metadata)
             (should (eq (emacsos-assist-web-git-generation-state generation)
                         'cached)))
@@ -634,15 +632,70 @@
                        response))))
           (emacsos-assist-web--request
            "GET" "threads/thread-1" nil
-           (lambda (_value error) (setq problem error))
-           nil nil nil nil t))
-        (should (equal (plist-get problem :text)
+           (lambda (_value error) (setq problem error))))
+        (should (equal problem
                        (if (eq failure 'tls)
-                           "Assist Web TLS/trust failed"
-                         "Assist Web request budget is busy")))
+                           "Assist Web connection unavailable"
+                         "Too many Assist Web requests are already running")))
         (should-not emacsos-assist-web-git--metadata)
         (should (eq (emacsos-assist-web-git-generation-state generation)
                     'cached))))))
+
+(ert-deftest test-assist-web-git-probe-failure-preserves-other-window-fetch ()
+  (dolist (failure '(busy tls timeout))
+    (save-window-excursion
+      (let* ((thread (generate-new-buffer " *git-probe-owner*"))
+             (first (selected-window))
+             (second (split-window-right))
+             (emacsos-assist-web--requests (and (eq failure 'busy)
+                                                '(one two)))
+             (emacsos-assist-web-max-concurrent-requests 2)
+             response timer)
+        (unwind-protect
+            (progn
+              (set-window-buffer first thread)
+              (set-window-buffer second thread)
+              (set-window-parameter first 'assist-web-git-intent 1)
+              (with-current-buffer thread
+                (emacsos-assist-web-mode)
+                (setq-local emacsos-assist-web--thread-id "thread-1")
+                (emacsos-assist-web-git--sync-keys)
+                (let ((metadata (test-assist-web-git--metadata
+                                 "ready" "topic/one" test-assist-web-git--head)))
+                  (setq-local
+                   emacsos-assist-web-git--metadata metadata
+                   emacsos-assist-web-git--request
+                   (list :id "stage" :metadata metadata :process nil
+                         :intents
+                         (list (list :buffer thread :window first :serial 1
+                                     :action 'files))))))
+              (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                         (lambda () "token"))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_delay _repeat callback)
+                           (setq timer callback)))
+                        ((symbol-function 'url-retrieve)
+                         (lambda (_url callback &rest _)
+                           (setq response (generate-new-buffer
+                                           " *git-probe-response*"))
+                           (when (eq failure 'tls)
+                             (with-current-buffer response
+                               (funcall callback
+                                        '(:error (tls "bad certificate")))))
+                           response)))
+                (with-selected-window second
+                  (emacsos-assist-web-git--command 'files))
+                (when (eq failure 'timeout) (funcall timer)))
+              (with-current-buffer thread
+                (should (equal (plist-get emacsos-assist-web-git--metadata
+                                         :branch)
+                               "topic/one"))
+                (should (equal (plist-get emacsos-assist-web-git--request :id)
+                               "stage")))
+              (should (= (window-parameter first 'assist-web-git-intent) 1))
+              (should (= (window-parameter second 'assist-web-git-intent) 2)))
+          (when (buffer-live-p response) (kill-buffer response))
+          (kill-buffer thread))))))
 
 (ert-deftest test-assist-web-git-metadata-error-tags-separate-thread-and-workspace ()
   (with-temp-buffer
