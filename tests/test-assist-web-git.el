@@ -136,10 +136,14 @@
                         :metadata metadata :state 'current))
            (start-epoch 0))
       (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--run-id "run-a"
+                  emacsos-assist-web--pending-accepted-p t
                   emacsos-assist-web-git--metadata metadata
                   emacsos-assist-web-git--current generation)
       (emacsos-assist-web--git-http-status
-       (current-buffer) "GET" "threads/thread-1/runs/run-a" 404)
+       (current-buffer) "GET" "threads/thread-1/runs/run-a" 404 nil
+       (emacsos-assist-web--run-http-owner
+        "GET" "threads/thread-1/runs/run-a"))
       (should (eq emacsos-assist-web-git--denied 'run))
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'cached))
@@ -162,6 +166,50 @@
       ;; Reauthorization alone never promotes the old generation.
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'cached)))))
+
+(ert-deftest test-assist-web-git-retired-run-late-404-cannot-relatch ()
+  "An old exact R denial header after durable retirement is not authority."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--run-id "run-a"
+                emacsos-assist-web--pending-accepted-p t)
+    (let ((owner (emacsos-assist-web--run-http-owner
+                  "GET" "threads/thread-1/runs/run-a")))
+      (should owner)
+      (setq emacsos-assist-web--run-id nil
+            emacsos-assist-web--pending-accepted-p nil)
+      (emacsos-assist-web--git-http-status
+       (current-buffer) "GET" "threads/thread-1/runs/run-a" 404 nil owner)
+      (should-not emacsos-assist-web-git--denied)
+      (should-not emacsos-assist-web-git--run-outcome-uncertain)
+      (should (= emacsos-assist-web-git--auth-epoch 0)))))
+
+(ert-deftest test-assist-web-git-superseded-queue-run-404-is-ignored ()
+  "An older queue GET header cannot fence the newer exact R generation."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let ((entry (emacsos-assist-web--entry
+                  "fixture" 'accepted-unobserved "exact-key")))
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :reobserve-in-flight) t
+            (plist-get entry :reobserve-generation) 1)
+      (setq emacsos-assist-web--queue (list entry))
+      (let ((owner (emacsos-assist-web--run-http-owner
+                    "GET" "threads/thread-1/runs/run-a")))
+        (setf (plist-get entry :reobserve-generation) 2)
+        (emacsos-assist-web--git-http-status
+         (current-buffer) "GET" "threads/thread-1/runs/run-a" 404 nil
+         owner)
+        (should-not emacsos-assist-web-git--denied)
+        (should-not emacsos-assist-web-git--run-outcome-uncertain)
+        (should (= emacsos-assist-web-git--auth-epoch 0))
+        (emacsos-assist-web--git-http-status
+         (current-buffer) "GET" "threads/thread-1/runs/run-a" 404 nil
+         (emacsos-assist-web--run-http-owner
+          "GET" "threads/thread-1/runs/run-a"))
+        (should (eq emacsos-assist-web-git--denied 'run))))))
 
 (ert-deftest test-assist-web-git-run-denial-starts-one-chat-owned-recheck ()
   "A Run 404 schedules one auth-only canonical thread GET."
@@ -267,6 +315,23 @@
                                   (emacsos-assist-web-git-status-details)
                                   (prog1 (buffer-string)
                                     (emacsos-assist-web-git-display-details-back)))))))))
+
+(ert-deftest test-assist-web-git-durable-run-clear-survives-header-quit ()
+  "A postcommit header C-g cannot abort exact Run clearance or its caller."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      (emacsos-assist-web-git--run-access-uncertain 404 "run-a"))
+    (let ((epoch emacsos-assist-web-git--auth-epoch)
+          continued)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--update-headers)
+                 (lambda () (signal 'quit nil))))
+        (emacsos-assist-web-git--run-status-confirmed
+         "thread-1" "run-a" epoch)
+        (setq continued t))
+      (should continued)
+      (should-not emacsos-assist-web-git--run-outcome-uncertain))))
 
 (ert-deftest test-assist-web-git-active-run-needs-saved-status-and-newer-busy-t ()
   "An active Run opens no Git gate until its saved state and fresh busy T GET."
@@ -376,6 +441,40 @@
         (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
         (should (eq (emacsos-assist-web--entry-state entry)
                     'accepted-unobserved))))))
+
+(ert-deftest test-assist-web-git-thread-denial-supersedes-old-run-get ()
+  "A pre-403 exact A response stays inert even after a newer T 200."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry
+                  "fixture" 'accepted-unobserved "exact-key"))
+          old-run newer-run)
+      (setf (plist-get entry :run-id) "run-a")
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (when (string-match-p "/runs/" path)
+                     (if old-run (setq newer-run done)
+                       (setq old-run done))))))
+        (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (emacsos-assist-web--reobserve-entry entry)
+        (emacsos-assist-web-git--canonical-denied 403)
+        (emacsos-assist-web-git--canonical-authorized
+         emacsos-assist-web-git--auth-epoch)
+        (funcall old-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "success")) nil)
+        (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
+        (should (eq (emacsos-assist-web--entry-state entry)
+                    'accepted-unobserved))
+        (emacsos-assist-web--reobserve-entry entry)
+        (should newer-run)
+        (should-not (emacsos-assist-web-git--run-read-superseded-p
+                     "thread-1" "run-a" emacsos-assist-web-git--auth-epoch))))))
 
 (ert-deftest test-assist-web-git-active-run-ready-t-cannot-clear-gate ()
   "An active exact Run contradicted by ready T stays unavailable."

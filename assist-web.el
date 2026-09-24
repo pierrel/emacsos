@@ -956,12 +956,60 @@ them.  STATUS-OBSERVER sees a bounded raw status prefix before any refusal."
                           (setq offset end))))))
               (funcall url-filter process bytes))))))))
 
-(defun emacsos-assist-web--git-http-status (origin method path status &optional early-failure)
+(defun emacsos-assist-web--run-http-owner (method path)
+  "Capture the exact resident Run owner of a GET before HTTP starts."
+  (when (and (equal method "GET")
+             (stringp path)
+             (string-match "\\`threads/\\([^/]+\\)/runs/\\([^/]+\\)\\'" path))
+    (let ((tid (match-string 1 path))
+          (run-id (match-string 2 path)))
+      (when (equal tid emacsos-assist-web--thread-id)
+        (if-let ((entry (seq-find
+                         (lambda (candidate)
+                           (and (equal run-id (plist-get candidate :run-id))
+                                (plist-get candidate :reobserve-in-flight)))
+                         emacsos-assist-web--queue)))
+            (list :kind 'queue :buffer (current-buffer) :tid tid :run-id run-id
+                  :entry entry :generation
+                  (plist-get entry :reobserve-generation))
+          (when (and emacsos-assist-web--pending-accepted-p
+                     (equal run-id emacsos-assist-web--run-id))
+            (list :kind 'legacy :buffer (current-buffer) :tid tid :run-id run-id
+                  :send-generation emacsos-assist-web--send-generation
+                  :terminal-generation
+                  emacsos-assist-web--legacy-terminal-generation)))))))
+
+(defun emacsos-assist-web--run-http-owner-current-p (owner tid run-id)
+  "Whether OWNER still holds the exact TID/RUN-ID at the HTTP header."
+  (and owner
+       (eq (plist-get owner :buffer) (current-buffer))
+       (equal (plist-get owner :tid) tid)
+       (equal (plist-get owner :run-id) run-id)
+       (equal emacsos-assist-web--thread-id tid)
+       (pcase (plist-get owner :kind)
+         ('queue
+          (let ((entry (plist-get owner :entry)))
+            (and (memq entry emacsos-assist-web--queue)
+                 (equal run-id (plist-get entry :run-id))
+                 (plist-get entry :reobserve-in-flight)
+                 (eql (plist-get owner :generation)
+                      (plist-get entry :reobserve-generation)))))
+         ('legacy
+          (and emacsos-assist-web--pending-accepted-p
+               (equal run-id emacsos-assist-web--run-id)
+               (eql (plist-get owner :send-generation)
+                    emacsos-assist-web--send-generation)
+               (eql (plist-get owner :terminal-generation)
+                    emacsos-assist-web--legacy-terminal-generation))))))
+
+(defun emacsos-assist-web--git-http-status
+    (origin method path status &optional early-failure run-owner)
   "Tell ORIGIN's optional Git projection about thread or Run GET failure.
 METHOD and PATH identify the exact endpoint.  STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE belongs only to a chat-owned canonical request; a Git probe's
-nondiagnostic failure must not invalidate another window's accepted state."
+nondiagnostic failure must not invalidate another window's accepted state.
+RUN-OWNER prevents a retired or superseded exact Run GET from relatching Git."
   (when (and (buffer-live-p origin)
              (equal method "GET")
              (or (memq status '(401 403 404)) early-failure)
@@ -979,8 +1027,11 @@ nondiagnostic failure must not invalidate another window's accepted state."
         (when (and tid (equal tid emacsos-assist-web--thread-id))
           (condition-case nil
               (cond
-               (run-id
+               ((and run-id
+                     (emacsos-assist-web--run-http-owner-current-p
+                      run-owner tid run-id))
                 (emacsos-assist-web-git--run-access-uncertain status run-id))
+               (run-id nil)
                ((memq status '(401 403 404))
                 (emacsos-assist-web-git--canonical-denied status))
                (t (emacsos-assist-web-git--canonical-uncertain)))
@@ -1015,14 +1066,15 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
 GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
 error instead of the legacy string.  A Git probe's nondiagnostic failure
 does not downgrade a separate chat-accepted Git observation."
-  (let (token token-error)
+  (let ((run-owner (emacsos-assist-web--run-http-owner method path))
+        token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
       (error (setq token-error (error-message-string error))))
     (if token-error
         (progn
           (emacsos-assist-web--git-http-status
-           (current-buffer) method path nil (not git-typed-error))
+           (current-buffer) method path nil (not git-typed-error) run-owner)
           (funcall callback nil
                    (if git-typed-error
                        (emacsos-assist-web--git-request-error
@@ -1031,7 +1083,7 @@ does not downgrade a separate chat-accepted Git observation."
       (if (not (emacsos-assist-web--safe-token-p token))
         (progn
           (emacsos-assist-web--git-http-status
-           (current-buffer) method path nil (not git-typed-error))
+           (current-buffer) method path nil (not git-typed-error) run-owner)
           (funcall callback nil
                    (if git-typed-error
                        (emacsos-assist-web--git-request-error
@@ -1046,7 +1098,7 @@ does not downgrade a separate chat-accepted Git observation."
                  (error nil)))
           (progn
             (emacsos-assist-web--git-http-status
-             (current-buffer) method path nil (not git-typed-error))
+             (current-buffer) method path nil (not git-typed-error) run-owner)
             (funcall callback nil
                      (if git-typed-error
                          (emacsos-assist-web--git-request-error
@@ -1073,7 +1125,8 @@ does not downgrade a separate chat-accepted Git observation."
                    (when (and problem (not git-failure-notified))
                      (setq git-failure-notified t)
                      (emacsos-assist-web--git-http-status
-                      origin method path status (not git-typed-error)))
+                      origin method path status (not git-typed-error)
+                      run-owner))
                    (when (timerp timer) (cancel-timer timer))
                    (setq emacsos-assist-web--requests
 			 (delq response emacsos-assist-web--requests))
@@ -1103,7 +1156,7 @@ does not downgrade a separate chat-accepted Git observation."
                                  (when (memq status '(401 403 404))
                                    (setq git-failure-notified t))
                                  (emacsos-assist-web--git-http-status
-                                  origin method path status))
+                                  origin method path status nil run-owner))
                                (unwind-protect
                                    (if (plist-get transport-status :error)
                                        (setq problem "Assist Web connection unavailable")
@@ -1157,7 +1210,7 @@ does not downgrade a separate chat-accepted Git observation."
                             (setq git-failure-notified t)
                             (emacsos-assist-web--git-http-status
                              origin method path observed-http-status
-                             (not git-typed-error)))
+                             (not git-typed-error) run-owner))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
@@ -1171,7 +1224,7 @@ does not downgrade a separate chat-accepted Git observation."
                           (when (memq status '(401 403 404))
                             (setq git-failure-notified t))
                           (emacsos-assist-web--git-http-status
-                           origin method path status)))))))
+                           origin method path status nil run-owner)))))))
               (error (finish nil (error-message-string error)))))))))))
 
 (defun emacsos-assist-web--display-status (status)
@@ -4730,13 +4783,8 @@ restoration pauses this buffer until restart."
                            (progn
                              (emacsos-assist-web--require-snapshot value thread-id)
                              (emacsos-assist-web--snapshot-active-p value)
-                             (when (and (seq-some
-                                         (lambda (entry)
-                                           (emacsos-assist-web-git--run-record
-                                            thread-id (plist-get entry :run-id)))
-                                         current)
-                                        (not (eql git-auth-start-epoch
-                                                  emacsos-assist-web-git--auth-epoch)))
+                             (unless (eql git-auth-start-epoch
+                                          emacsos-assist-web-git--auth-epoch)
                                (error "thread access changed during exact Run reconciliation"))
                              (when (seq-some
                                     (lambda (entry)

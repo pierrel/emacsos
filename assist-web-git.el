@@ -64,6 +64,8 @@
 (defvar-local emacsos-assist-web-git--r2-waiting nil
   "A later diagnostic conflict awaiting this queue R2 and then a new R3.")
 (defvar-local emacsos-assist-web-git--auth-epoch 0)
+(defvar-local emacsos-assist-web-git--thread-denial-floor 0
+  "Last definitive thread denial epoch superseding earlier exact Run reads.")
 (defvar-local emacsos-assist-web-git--denied nil)
 (defvar-local emacsos-assist-web-git--run-outcome-uncertain nil
   "Outstanding (thread, Run, denial epoch) access failures.
@@ -845,6 +847,11 @@ queue-free compatibility path."
 (defun emacsos-assist-web-git--canonical-denied (status)
   "Latch canonical HTTP STATUS denial across old Git callbacks and views."
   (cl-incf emacsos-assist-web-git--auth-epoch)
+  (setq emacsos-assist-web-git--thread-denial-floor
+        emacsos-assist-web-git--auth-epoch)
+  ;; Reauthorization of T does not make any earlier exact Run read fresh.
+  (dolist (record emacsos-assist-web-git--run-outcome-uncertain)
+    (setf (plist-get record :epoch) emacsos-assist-web-git--auth-epoch))
   (setq emacsos-assist-web-git--denied t
         emacsos-assist-web-git--run-recheck-needed nil)
   (when emacsos-assist-web-git--current
@@ -865,10 +872,13 @@ queue-free compatibility path."
             emacsos-assist-web-git--run-outcome-uncertain))
 
 (defun emacsos-assist-web-git--run-read-superseded-p (tid run-id start-epoch)
-  "Whether a newer denial superseded TID/RUN-ID's exact GET."
-  (when-let ((record (emacsos-assist-web-git--run-record tid run-id)))
-    (or (not (integerp start-epoch))
-        (< start-epoch (plist-get record :epoch)))))
+  "Whether a later thread or Run denial superseded TID/RUN-ID's GET."
+  (or (and (> emacsos-assist-web-git--thread-denial-floor 0)
+           (or (not (integerp start-epoch))
+               (< start-epoch emacsos-assist-web-git--thread-denial-floor)))
+      (when-let ((record (emacsos-assist-web-git--run-record tid run-id)))
+        (or (not (integerp start-epoch))
+            (< start-epoch (plist-get record :epoch))))))
 
 (defun emacsos-assist-web-git--run-access-uncertain (status run-id)
   "Fence Git for exact RUN-ID after HTTP STATUS, preserving stronger denial."
@@ -976,10 +986,15 @@ An auth-only GET leaves exact Run outcome uncertain."
   "Clear TID/RUN-ID's warning only after post-denial durable acceptance.
 The caller owns both the exact Run GET and subsequent canonical commit."
   (when-let ((record (emacsos-assist-web-git--run-record tid run-id)))
-    (when (<= (plist-get record :epoch) start-epoch)
+    (when (and (integerp start-epoch)
+               (>= start-epoch emacsos-assist-web-git--thread-denial-floor)
+               (<= (plist-get record :epoch) start-epoch))
       (setq emacsos-assist-web-git--run-outcome-uncertain
             (delq record emacsos-assist-web-git--run-outcome-uncertain))
-      (emacsos-assist-web-git--update-headers))))
+      ;; Presentation must not interrupt an already durable Run retirement.
+      (condition-case nil
+          (emacsos-assist-web-git--update-headers)
+        ((error quit) nil)))))
 
 (defun emacsos-assist-web-git--confirm-active-run (tid run-id start-epoch)
   "After durable active RUN-ID state, read a fresh nonready TID snapshot.
