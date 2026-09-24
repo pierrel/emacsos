@@ -751,7 +751,7 @@
        "GET" "threads/thread-1" nil
        (lambda (_value error) (setq problem error))
        nil nil nil nil t))
-    (should (eq (plist-get problem :kind) 'transport))
+    (should (eq (plist-get problem :kind) 'busy))
     (should (equal (plist-get problem :text)
                    "Assist Web request budget is busy"))
     (should-not (plist-get problem :offline))))
@@ -771,7 +771,7 @@
        "GET" "threads/thread-1" nil
        (lambda (_value error) (setq problem error))
        nil nil nil nil t))
-    (should (eq (plist-get problem :kind) 'transport))
+    (should (eq (plist-get problem :kind) 'trust))
     (should (equal (plist-get problem :text)
                    "Assist Web TLS/trust failed"))
     (should-not (plist-get problem :offline))
@@ -793,7 +793,7 @@
            (lambda (_value error) (setq problem error))
            nil nil nil nil t)
           (funcall timer)
-          (should (eq (plist-get problem :kind) 'transport))
+          (should (eq (plist-get problem :kind) 'timeout))
           (should (equal (plist-get problem :text)
                          "Assist Web request timed out"))
           (should-not (plist-get problem :offline)))
@@ -5128,8 +5128,11 @@
               (emacsos-assist-web-send))
             (should-not requested)
             (should (equal (emacsos-assist-web--input) "must wait"))
-            (dolist (entry emacsos-assist-web--queue)
-              (setf (plist-get entry :state) 'terminal-unreconciled))
+            (cl-loop for entry in emacsos-assist-web--queue
+                     for n from 1
+                     do (setf (plist-get entry :state) 'terminal-unreconciled
+                              (plist-get entry :run-id) (format "run-%d" n)
+                              (plist-get entry :verified-outcome) "success"))
             (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                       ((symbol-function 'emacsos-assist-web--request)
                        (lambda (method _path _payload callback &rest _)
@@ -5456,7 +5459,9 @@
             (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                       ((symbol-function 'emacsos-assist-web--observe-entry)
                        (lambda (entry) (setq observed (plist-get entry :text)))))
-              (funcall (car callbacks) '((status . "running")) nil))
+              (funcall (car callbacks)
+                       '((id . "run-s1") (thread_id . "thread-new")
+                         (status . "running")) nil))
             (should (equal observed "S1"))
             (should (equal requests
                            '(("GET" "threads/thread-new/runs/run-s1"))))
@@ -5550,7 +5555,9 @@
         (emacsos-assist-web--reobserve-entry c1)
         (let ((get (car requests)))
           (should (equal (butlast get) '("GET" "threads/thread-new/runs/run-c1")))
-          (funcall (nth 2 get) '((status . "success")) nil))
+          (funcall (nth 2 get)
+                   '((id . "run-c1") (thread_id . "thread-new")
+                     (status . "success")) nil))
         (should (equal (mapcar #'butlast (nreverse requests))
                        '(("GET" "threads/thread-new/runs/run-c1")
                          ("POST" "threads/thread-new/messages"))))
@@ -5762,7 +5769,9 @@
                     ((symbol-function 'emacsos-assist-web--observe-entry)
                      (lambda (entry) (push (list (current-buffer)
                                                  (plist-get entry :text)) observers))))
-            (funcall (nth 2 (car requests)) '((status . "running")) nil))
+            (funcall (nth 2 (car requests))
+                     '((id . "run-s1") (thread_id . "thread-new")
+                       (status . "running")) nil))
           (should (equal observers (list (list source "S1"))))
           (with-current-buffer canonical
             (should-not emacsos-assist-web--stream-entry)))
@@ -5898,8 +5907,14 @@
                        (lambda (&rest _) (setq requested t))))
               (emacsos-assist-web-send))
             (should-not requested)
-            (dolist (entry emacsos-assist-web--queue)
-              (setf (plist-get entry :state) 'terminal-unreconciled))
+            (cl-loop for entry in emacsos-assist-web--queue
+                     for n from 1
+                     do
+              ;; Simulate exact Run verification for every recovered entry.
+              (setf (plist-get entry :state) 'terminal-unreconciled
+                    (plist-get entry :run-id) (format "run-%d" n)
+                    (plist-get entry :requires-reobserve) nil
+                    (plist-get entry :verified-outcome) "success"))
             (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
                       ((symbol-function 'emacsos-assist-web--request)
                        (lambda (method _path _payload callback &rest _)
@@ -5956,6 +5971,196 @@
     (should (string-match-p "source draft saved: Restore Draft" (buffer-string)))
     (should (equal (emacsos-assist-web--input) "tail"))))
 
+(ert-deftest test-assist-web-restored-reconciliation-gets-exact-run-before-history ()
+  "A durable reconciling claim cannot retire on startup without its exact Run."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        run-callback canonical-requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                 (lambda (&rest _)
+                   '((text . "") (collision . nil)
+                     (queue . (((text . "A")
+                                (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                (state . "reconciling") (run_id . "run-a")))))))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload callback &rest _)
+                   (if (string-match-p "/runs/" path)
+                       (setq run-callback callback)
+                     (setq canonical-requested t)))))
+        (emacsos-assist-web--restore-draft)
+        (should-not run-callback)
+        (should-not canonical-requested)
+        (should (eq (plist-get (car emacsos-assist-web--queue) :state)
+                    'terminal-unreconciled))
+        (should (plist-get (car emacsos-assist-web--queue)
+                           :requires-reobserve))
+        (emacsos-assist-web-refresh-thread (current-buffer))
+        (should run-callback)
+        (should-not canonical-requested)))))
+
+(ert-deftest test-assist-web-restored-terminal-needs-refresh-on-every-reopen ()
+  "Reopening a terminal cache never silently starts an exact Run read."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        requested)
+    (dotimes (_ 2)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (emacsos-assist-web--write-prompt)
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                   (lambda (&rest _)
+                     '((text . "") (collision . nil)
+                       (queue . (((text . "A")
+                                  (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                  (state . "terminal-unreconciled")
+                                  (run_id . "run-a")))))))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (setq requested t))))
+          (emacsos-assist-web--restore-draft)
+          (should emacsos-assist-web--manual-recovery-required)
+          (should-not emacsos-assist-web--manual-recovery-active)
+          (should (plist-get (car emacsos-assist-web--queue)
+                             :requires-reobserve))
+          (should-not requested))))))
+
+(ert-deftest test-assist-web-normalized-reconciliation-save-failure-pauses ()
+  "A failed startup normalization cannot begin Run, chat, or Git transport."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil)
+        requested)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web--write-prompt)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                 (lambda (&rest _)
+                   '((text . "") (collision . nil)
+                     (queue . (((text . "A")
+                                (key . "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                (state . "reconciling") (run_id . "run-a")))))))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (setq requested t))))
+        (emacsos-assist-web--restore-draft)
+        (should emacsos-assist-web--reconcile-recovery-paused)
+        (should-not requested)
+        (emacsos-assist-web-refresh-thread (current-buffer))
+        (should-not requested)))))
+
+(ert-deftest test-assist-web-manual-run-recovery-stops-and-retries-exact-get ()
+  "One Refresh chains exact Run reads; a later failure needs another Refresh."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (let* ((first (emacsos-assist-web--entry "A" 'terminal-unreconciled "key-a"))
+           (second (emacsos-assist-web--entry "B" 'terminal-unreconciled "key-b"))
+           callbacks canonical fail-save)
+      (setf (plist-get first :run-id) "run-a"
+            (plist-get first :requires-reobserve) t
+            (plist-get second :run-id) "run-b"
+            (plist-get second :requires-reobserve) t)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list first second))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (if (string-match-p "/runs/" path)
+                       (push (cons path done) callbacks)
+                     (setq canonical done))))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () (not fail-save)))
+                ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore))
+        (emacsos-assist-web--manual-recovery-activate)
+        (emacsos-assist-web-refresh-thread (current-buffer))
+        (should (string-suffix-p "/runs/run-a" (caar callbacks)))
+        (funcall (cdar callbacks)
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "success")) nil)
+        (should (string-suffix-p "/runs/run-b" (caar callbacks)))
+        (funcall (cdar callbacks) nil '((:kind . timeout)))
+        (should-not emacsos-assist-web--manual-recovery-active)
+        (should (plist-get second :requires-reobserve))
+        (should-not canonical)
+        (should (string-match-p "Run recovery pending; Refresh"
+                                (or emacsos-assist-web--stream-status "")))
+        (emacsos-assist-web-refresh-thread (current-buffer))
+        (should (string-suffix-p "/runs/run-b" (caar callbacks)))
+        (setq fail-save t)
+        (funcall (cdar callbacks)
+                 '((id . "run-b") (thread_id . "thread-1")
+                   (status . "success")) nil)
+        (should-not emacsos-assist-web--manual-recovery-active)
+        (should (eq (plist-get second :state) 'terminal-unreconciled))
+        (should (plist-get second :requires-reobserve))
+        (should-not canonical)
+        (setq fail-save nil)
+        (emacsos-assist-web-refresh-thread (current-buffer))
+        (funcall (cdar callbacks)
+                 '((id . "run-b") (thread_id . "thread-1")
+                   (status . "success")) nil)
+        (should canonical)
+        (should (eq (plist-get second :state) 'reconciling))))))
+
+(ert-deftest test-assist-web-manual-r2-failure-reopens-refresh-gate ()
+  "A failed R2 after exact recovery must not leave Refresh stuck in progress."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--write-prompt)
+    (let ((entry (emacsos-assist-web--entry "A" 'reconciling "key-a"))
+          requested)
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :reconcile-owner) 3)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload _done &rest _)
+                   (setq requested path))))
+        (emacsos-assist-web--manual-recovery-activate)
+        (setq emacsos-assist-web--manual-recovery-active t)
+        (emacsos-assist-web--restore-reconciliation
+         (list entry) 3 "unverified; Refresh retries")
+        (should-not emacsos-assist-web--manual-recovery-active)
+        (emacsos-assist-web-refresh-thread (current-buffer))
+        (should (equal requested "threads/thread-1/runs/run-a"))))))
+
+(ert-deftest test-assist-web-exact-run-rejects-mismatched-response-identity ()
+  "A terminal status for another Run or thread cannot authorize R2."
+  (dolist (response '(((id . "run-other") (thread_id . "thread-1")
+                       (status . "success"))
+                      ((id . "run-a") (thread_id . "thread-other")
+                       (status . "success"))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web--write-prompt)
+      (let ((entry (emacsos-assist-web--entry
+                    "A" 'terminal-unreconciled "key-a"))
+            callback canonical)
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :requires-reobserve) t)
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method path _payload done &rest _)
+                     (if (string-match-p "/runs/" path)
+                         (setq callback done)
+                       (setq canonical t)))))
+          (emacsos-assist-web--manual-recovery-activate)
+          (emacsos-assist-web-refresh-thread (current-buffer))
+          (funcall callback response nil)
+          (should-not canonical)
+          (should-not (plist-get entry :verified-outcome))
+          (should (plist-get entry :requires-reobserve))
+          (should-not emacsos-assist-web--manual-recovery-active))))))
+
 (ert-deftest test-assist-web-restored-accepted-run-gets-before-sse ()
   "Reloaded accepted work verifies its exact Run before opening an SSE."
   (let ((emacsos--assist-active-surface nil)
@@ -5982,7 +6187,9 @@
         (emacsos-assist-web--restore-draft)
         (should get-callback)
         (should-not observed)
-        (funcall get-callback '((status . "running")) nil)
+        (funcall get-callback
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
         (should observed)))))
 
 (ert-deftest test-assist-web-stale-reobserve-cannot-own-a-replaced-entry ()
@@ -6004,7 +6211,9 @@
                    (lambda (&rest _) (setq observed t))))
           (emacsos-assist-web--reobserve-entry old)
           (setq emacsos-assist-web--queue (list new))
-          (funcall callback '((status . "running")) nil))
+          (funcall callback
+                   '((id . "run-a") (thread_id . "thread-1")
+                     (status . "running")) nil))
         (should-not observed)
         (should (eq (plist-get new :state) 'accepted-unobserved))))))
 
@@ -6045,7 +6254,9 @@
           (should get-callback)
           (should (plist-get entry :reobserve-in-flight))
           ;; GET2 proves running and starts a new observer at a later epoch.
-          (funcall get-callback '((status . "running")) nil)
+          (funcall get-callback
+                   '((id . "run-a") (thread_id . "thread-1")
+                     (status . "running")) nil)
           (should observed)
           (should (eq emacsos--assist-active-surface 'web))
           (let ((current (emacsos-assist-web--queue-entry
@@ -6098,7 +6309,9 @@
                     ((symbol-function 'emacsos-assist-web--observe-entry) #'ignore))
             (emacsos-assist-web--abort-entry (plist-get entry :key))
             (emacsos-assist-web-refresh-thread)
-            (funcall get-callback '((status . "running")) nil)
+            (funcall get-callback
+                     '((id . "run-a") (thread_id . "thread-1")
+                       (status . "running")) nil)
             (let ((current (emacsos-assist-web--queue-entry
                             (plist-get entry :key))))
               ;; GET2 starts a real new observer and adds its live Abort action
@@ -6260,7 +6473,8 @@
       (let ((entry (emacsos-assist-web--entry
                     "A" 'terminal-unreconciled
                     "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
-        (setf (plist-get entry :run-id) "run-a")
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :verified-outcome) "success")
         (setq emacsos-assist-web--queue (list entry))
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
                    (lambda () (push 'queue events) t))
@@ -6289,7 +6503,9 @@
                      "second" 'terminal-unreconciled
                      "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
         (setf (plist-get first :run-id) "run-a"
-              (plist-get second :run-id) "run-b")
+              (plist-get first :verified-outcome) "success"
+              (plist-get second :run-id) "run-b"
+              (plist-get second :verified-outcome) "success")
         (setq emacsos-assist-web--queue (list first second))
         (emacsos-assist-web--write-prompt)
         (emacsos-assist-web--entry-render first)
@@ -6378,7 +6594,8 @@
             (terminal (emacsos-assist-web--entry
                        "done" 'terminal-unreconciled
                        "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
-        (setf (plist-get terminal :run-id) "run-b")
+        (setf (plist-get terminal :run-id) "run-b"
+              (plist-get terminal :verified-outcome) "success")
         (setq emacsos-assist-web--queue (list rejected terminal))
         (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
                    (lambda ()
