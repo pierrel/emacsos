@@ -570,7 +570,7 @@
                   emacsos-assist-web-git--current generation)
       (emacsos-assist-web--git-http-status
        (current-buffer) "GET" "threads/thread-1" 200 t)
-      (should-not emacsos-assist-web-git--metadata)
+      (should (eq emacsos-assist-web-git--metadata metadata))
       (should-not emacsos-assist-web-git--denied)
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'cached))
@@ -584,10 +584,12 @@
                       "ready" "topic/one" test-assist-web-git--head))
            (generation (make-emacsos-assist-web-git-generation
                         :metadata metadata :state 'current))
+           (request (list :id "stage" :metadata metadata))
            (response (generate-new-buffer " *git-canonical-timeout*"))
            timer problem)
       (setq-local emacsos-assist-web-git--metadata metadata
-                  emacsos-assist-web-git--current generation)
+                  emacsos-assist-web-git--current generation
+                  emacsos-assist-web-git--request request)
       (unwind-protect
           (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
                      (lambda () "token"))
@@ -600,7 +602,8 @@
              (lambda (_value error) (setq problem error)))
             (funcall timer)
             (should (equal problem "Assist Web request timed out"))
-            (should-not emacsos-assist-web-git--metadata)
+            (should (eq emacsos-assist-web-git--metadata metadata))
+            (should (eq emacsos-assist-web-git--request request))
             (should (eq (emacsos-assist-web-git-generation-state generation)
                         'cached)))
         (when (buffer-live-p response) (kill-buffer response))))))
@@ -613,12 +616,14 @@
                         "ready" "topic/one" test-assist-web-git--head))
              (generation (make-emacsos-assist-web-git-generation
                           :metadata metadata :state 'current))
+             (request (list :id "stage" :metadata metadata))
              (emacsos-assist-web--requests (and (eq failure 'busy)
                                                   '(one two)))
              (emacsos-assist-web-max-concurrent-requests 2)
              problem)
         (setq-local emacsos-assist-web-git--metadata metadata
-                    emacsos-assist-web-git--current generation)
+                    emacsos-assist-web-git--current generation
+                    emacsos-assist-web-git--request request)
         (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
                    (lambda () "token"))
                   ((symbol-function 'run-at-time)
@@ -637,7 +642,8 @@
                        (if (eq failure 'tls)
                            "Assist Web connection unavailable"
                          "Too many Assist Web requests are already running")))
-        (should-not emacsos-assist-web-git--metadata)
+        (should (eq emacsos-assist-web-git--metadata metadata))
+        (should (eq emacsos-assist-web-git--request request))
         (should (eq (emacsos-assist-web-git-generation-state generation)
                     'cached))))))
 
@@ -650,6 +656,7 @@
              (emacsos-assist-web--requests (and (eq failure 'busy)
                                                 '(one two)))
              (emacsos-assist-web-max-concurrent-requests 2)
+             (cache (make-temp-file "git-probe-owner-cache-" t))
              response timer)
         (unwind-protect
             (progn
@@ -665,7 +672,7 @@
                   (setq-local
                    emacsos-assist-web-git--metadata metadata
                    emacsos-assist-web-git--request
-                   (list :id "stage" :metadata metadata :process nil
+                   (list :id "stage" :epoch 0 :metadata metadata :process nil
                          :intents
                          (list (list :buffer thread :window first :serial 1
                                      :action 'files))))))
@@ -691,11 +698,24 @@
                                          :branch)
                                "topic/one"))
                 (should (equal (plist-get emacsos-assist-web-git--request :id)
-                               "stage")))
+                               "stage"))
+                (make-directory (expand-file-name "staging/stage" cache) t)
+                (make-directory (expand-file-name "generations" cache) t)
+                (let ((emacsos-assist-web-git-cache-directory cache))
+                  (cl-letf (((symbol-function 'emacsos-assist-web-git--open)
+                             #'ignore))
+                    (emacsos-assist-web-git--promote
+                     emacsos-assist-web-git--request
+                     (list :thread_oid test-assist-web-git--head
+                           :main_oid test-assist-web-git--published))))
+                (should-not emacsos-assist-web-git--unavailable)
+                (should (string-match-p
+                         " current" (emacsos-assist-web-git--thread-header))))
               (should (= (window-parameter first 'assist-web-git-intent) 1))
               (should (= (window-parameter second 'assist-web-git-intent) 2)))
           (when (buffer-live-p response) (kill-buffer response))
-          (kill-buffer thread))))))
+          (kill-buffer thread)
+          (delete-directory cache t))))))
 
 (ert-deftest test-assist-web-git-metadata-error-tags-separate-thread-and-workspace ()
   (with-temp-buffer
