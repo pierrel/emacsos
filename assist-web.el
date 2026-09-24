@@ -253,9 +253,13 @@ The normal resident bound is the active request plus one follow-up."
                 emacsos-assist-web--run-id nil
                 emacsos-assist-web--pending-rendered-p nil)
           (emacsos-assist-web--legacy-send)
+          (when (and (not emacsos-assist-web--in-flight)
+                     (equal emacsos-assist-web--pending-key key))
+            (emacsos-assist-web--set-status
+             "follow-up ready; Send retries after local save failure"))
           t)
       (emacsos-assist-web--set-status
-       "follow-up not sent; local save failed; Send retries"))))
+       "follow-up ready; Send retries after local save failure"))))
 
 (defun emacsos-assist-web--cache-path (&optional name)
   "Return the cache path for NAME without changing the filesystem."
@@ -675,9 +679,21 @@ post-conflict canonical read."
             (setq emacsos-assist-web-git--unavailable
                   "detached HEAD; Git unavailable")
             (emacsos-assist-web-git--update-headers))))
-    (error (unless emacsos-assist-web-git--denied
-             (emacsos-assist-web-git--invalidate
-              "Git state unavailable")))))
+    (error
+     (unless emacsos-assist-web-git--denied
+       (condition-case nil
+           (emacsos-assist-web-git--invalidate "Git state unavailable")
+         ((error quit) nil))))))
+
+(defun emacsos-assist-web--git-note-safely (&rest args)
+  "Project optional Git state from ARGS without undoing committed chat state."
+  (condition-case nil
+      (apply #'emacsos-assist-web-git--note-snapshot args)
+    ((error quit)
+     (unless emacsos-assist-web-git--denied
+       (condition-case nil
+           (emacsos-assist-web-git--invalidate "Git state unavailable")
+         ((error quit) nil))))))
 
 (defun emacsos-assist-web--require-history-page (page thread-id current before)
   "Return PAGE after validating its identity and progress from CURRENT/BEFORE."
@@ -2261,6 +2277,7 @@ suppressing a genuine repeated submission."
                        (error "invalid Assist run identity"))
                      (unless (stringp status)
                        (error "invalid Assist run status"))
+                     (emacsos-assist-web-git--run-status-confirmed)
                      (cond
                       ((member status '("pending" "running" "transitioning"))
                        (unless emacsos-assist-web--pending-rendered-p
@@ -2340,6 +2357,12 @@ suppressing a genuine repeated submission."
             (when (and (stringp text)
                        (not (equal text submitted)))
               (insert text)))
+        (when (and emacsos-assist-web--pending-key
+                   emacsos-assist-web--submitted-text)
+          (unless emacsos-assist-web--pending-rendered-p
+            (emacsos-assist-web--append-pending
+             emacsos-assist-web--submitted-text))
+          (emacsos-assist-web--set-status "unsent message ready; Send retries"))
         (when (stringp text) (insert text))))))
 
 (defun emacsos-assist-web--thread-for-id (id)
@@ -2781,10 +2804,14 @@ COMPLETED-RUN-ID is retired only with its exact VERIFIED-OUTCOME."
                                (when busy
                                  (setq emacsos-assist-web--stream-status nil))
                                (when retiring
-                                 (emacsos-assist-web-git--note-snapshot
+                                 (emacsos-assist-web--git-note-safely
                                   value (and (equal verified-outcome "success")
                                              completed-run-id)
                                   git-auth-start-epoch git-reconcile-token))
+                               (when (and cached (not retiring))
+                                 (emacsos-assist-web--git-note-safely
+                                  value nil git-auth-start-epoch
+                                  git-reconcile-token))
                                ;; While this buffer owns a live observer, the
                                ;; existing provisional markers remain the only
                                ;; safe insertion target.  Cache a still-busy
@@ -2796,17 +2823,20 @@ COMPLETED-RUN-ID is retired only with its exact VERIFIED-OUTCOME."
                                        (emacsos-assist-web--render value)
                                        (setq emacsos-assist-web--display-recovery nil)
                                        (force-mode-line-update t))
-                                     (unless retiring
-                                       (emacsos-assist-web-git--note-snapshot
+                                     (unless (or retiring cached)
+                                       (emacsos-assist-web--git-note-safely
                                         value nil git-auth-start-epoch
                                         git-reconcile-token)))
                                  ((error quit)
-                                  (if retiring
+                                  (if (or retiring cached)
                                       (condition-case nil
-                                          (emacsos-assist-web--set-status
-                                           "Run saved; Refresh to display")
+                                          (progn
+                                            (setq emacsos-assist-web--display-recovery t)
+                                            (emacsos-assist-web-git--show-display-recovery)
+                                            (emacsos-assist-web--set-status
+                                             "Saved; Refresh to display"))
                                         ((error quit)
-                                         (message "Run saved; Refresh to display")))
+                                         (message "Saved; Refresh to display")))
                                     (signal (car display-problem)
                                             (cdr display-problem)))))
                                (when (and retiring emacsos-assist-web--follow-ups)
@@ -4675,7 +4705,7 @@ restoration pauses this buffer until restart."
                          (when emacsos-assist-web--manual-recovery-required
                            (setq emacsos-assist-web--manual-recovery-required nil
                                  emacsos-assist-web--manual-recovery-active nil))
-                         (emacsos-assist-web-git--note-snapshot
+                         (emacsos-assist-web--git-note-safely
                           value nil git-auth-start-epoch git-reconcile-token)
                          (condition-case nil
                              (progn
@@ -4739,6 +4769,7 @@ restoration pauses this buffer until restart."
                           (error nil))))
                    (cond
                     ((member status '("pending" "running" "transitioning" "awaiting_approval"))
+                     (emacsos-assist-web-git--run-status-confirmed)
                      (let ((previous (emacsos-assist-web--entry-state current)))
                        (setf (plist-get current :state) 'accepted-unobserved
                              (plist-get current :requires-reobserve) nil
@@ -4768,6 +4799,7 @@ restoration pauses this buffer until restart."
                           current "local Run status could not be saved"))))
                     ((member status '("success" "error" "timeout" "interrupted"
                                              "cancelled"))
+                     (emacsos-assist-web-git--run-status-confirmed)
                      (let ((previous (emacsos-assist-web--entry-state current)))
                        (setf (plist-get current :state) 'terminal-unreconciled
                              (plist-get current :requires-reobserve) nil
@@ -4816,6 +4848,7 @@ restoration pauses this buffer until restart."
                                               "awaiting_approval" "success" "error"
                                               "timeout" "interrupted" "cancelled")))
                          (error "invalid exact Run response"))
+                       (emacsos-assist-web-git--run-status-confirmed)
                        (emacsos-assist-web--legacy-refresh-thread
                         buffer
                         (and (member status
@@ -5275,6 +5308,15 @@ ACCEPTED-RUN-ID is its already validated Run identity."
          emacsos-assist-web--in-flight)
     (emacsos-assist-web--set-prompt-refusal
      "current Assist Web request is still running; message remains in draft"))
+   ((and (emacsos-assist-web--legacy-compatibility-p)
+         emacsos-assist-web--pending-key
+         emacsos-assist-web--submitted-text
+         (not emacsos-assist-web--pending-accepted-p))
+    (emacsos-assist-web--legacy-send))
+   ((and (emacsos-assist-web--legacy-compatibility-p)
+         emacsos-assist-web--follow-ups
+         (not emacsos-assist-web--pending-key))
+    (emacsos-assist-web--start-follow-up))
    ((eq (emacsos-assist-web--entry-state (emacsos-assist-web--queue-head))
         'identity-conflict)
     (message "Submission identity conflict; repair required"))
