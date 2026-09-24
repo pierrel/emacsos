@@ -68,6 +68,9 @@
     (with-temp-buffer
       (emacsos-assist-web-git--note-snapshot snapshot)
       (should (equal emacsos-assist-web-git--unavailable
+                     "detached HEAD; Git unavailable"))
+      (emacsos-assist-web-git--enqueue metadata nil)
+      (should (equal emacsos-assist-web-git--unavailable
                      "detached HEAD; Git unavailable"))))
   (let ((snapshot (test-assist-web-git--snapshot
                    "processing" "main" "HEAD")))
@@ -257,16 +260,37 @@
             (insert "((nil . ((eval . (setq test-assist-web-git--executed t)))))"))
           (with-temp-file file
             (insert "-*- eval: (setq test-assist-web-git--executed t) -*-\n"
-                    "committed content\n"))
+                    "worktree content\n"))
           (let ((view (emacsos-assist-web-git--literal-file-view
                        file root thread generation)))
             (unwind-protect
                 (with-current-buffer view
                   (should buffer-read-only)
                   (should-not buffer-file-name)
-                  (should (string-match-p "committed content" (buffer-string)))
+                  (should (string-match-p "worktree content" (buffer-string)))
                   (should-not test-assist-web-git--executed))
               (kill-buffer view))))
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-file-read-is-bounded-after-size-precheck ()
+  (let* ((root (make-temp-file "assist-git-read-bound-" t))
+         (file (expand-file-name "growing.txt" root))
+         (generation (make-emacsos-assist-web-git-generation
+                      :path root :oid test-assist-web-git--head))
+         read-end)
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "small at precheck"))
+          (cl-letf (((symbol-function 'insert-file-contents-literally)
+                     (lambda (_path _visit _start end &rest _)
+                       (setq read-end end)
+                       (insert (make-string
+                                (1+ emacsos-assist-web-git--file-view-limit) ?x)))))
+            (should (equal (cadr (should-error
+                                 (emacsos-assist-web-git--literal-file-view
+                                  file root (current-buffer) generation)))
+                           "Git file exceeds 1 MiB display limit")))
+          (should (= read-end (1+ emacsos-assist-web-git--file-view-limit))))
       (delete-directory root t))))
 
 (ert-deftest test-assist-web-git-file-view-rejects-internals-symlinks-and-large-file ()
@@ -293,15 +317,23 @@
             (insert "nested"))
           (make-symbolic-link small linked)
           (make-symbolic-link nested linked-dir)
-          (should-error (emacsos-assist-web-git--literal-file-view
-                         internal root (current-buffer) generation))
-          (should-error (emacsos-assist-web-git--literal-file-view
-                         large root (current-buffer) generation))
-          (should-error (emacsos-assist-web-git--literal-file-view
-                         linked root (current-buffer) generation))
-          (should-error (emacsos-assist-web-git--literal-file-view
-                         (expand-file-name "file.txt" linked-dir)
-                         root (current-buffer) generation)))
+          (should (equal (cadr (should-error
+                               (emacsos-assist-web-git--literal-file-view
+                                internal root (current-buffer) generation)))
+                         "Git internals are not browseable"))
+          (should (equal (cadr (should-error
+                               (emacsos-assist-web-git--literal-file-view
+                                large root (current-buffer) generation)))
+                         "Git file exceeds 1 MiB display limit"))
+          (should (equal (cadr (should-error
+                               (emacsos-assist-web-git--literal-file-view
+                                linked root (current-buffer) generation)))
+                         "Git symbolic-link paths cannot be opened"))
+          (should (equal (cadr (should-error
+                               (emacsos-assist-web-git--literal-file-view
+                                (expand-file-name "file.txt" linked-dir)
+                                root (current-buffer) generation)))
+                         "Git symbolic-link paths cannot be opened")))
       (delete-directory root t))))
 
 (ert-deftest test-assist-web-git-command-probe-failure-downgrades-freshness ()
@@ -323,11 +355,119 @@
       (should-not (string-match-p " current" (emacsos-assist-web-git--thread-header)))
       (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
                  (lambda (_thread callback)
-                   (funcall callback nil '(invalid . "bad Git fields")))))
+                   (funcall callback nil '(git . "bad Git fields")))))
         (emacsos-assist-web-git--command 'files))
       (should-not emacsos-assist-web-git--metadata)
       (should (equal emacsos-assist-web-git--unavailable
-                     "invalid authenticated Git metadata")))))
+                     "invalid Git workspace metadata"))
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread callback)
+                   (funcall callback nil '(canonical . "bad thread status")))))
+        (emacsos-assist-web-git--command 'files))
+      (should (equal emacsos-assist-web-git--unavailable
+                     "invalid authenticated thread snapshot")))))
+
+(ert-deftest test-assist-web-git-metadata-error-tags-separate-thread-and-workspace ()
+  (with-temp-buffer
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let ((snapshot (test-assist-web-git--snapshot "future-state" "topic/one"))
+          problem)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil))))
+        (emacsos-assist-web-git--read-metadata
+         (current-buffer) (lambda (_metadata error) (setq problem error))))
+      (should (eq (car problem) 'canonical)))
+    (let ((snapshot (test-assist-web-git--snapshot "ready" "topic/one"))
+          problem)
+      (setf (alist-get 'published_revision
+                      (alist-get 'workspace (alist-get 'thread snapshot)))
+            test-assist-web-git--published)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload callback &rest _)
+                   (funcall callback snapshot nil))))
+        (emacsos-assist-web-git--read-metadata
+         (current-buffer) (lambda (_metadata error) (setq problem error))))
+      (should (eq (car problem) 'git)))))
+
+(ert-deftest test-assist-web-git-dedicated-window-refusal-releases-file-pin ()
+  (let* ((root (make-temp-file "assist-git-window-" t))
+         (file (expand-file-name "file.txt" root))
+         (window (selected-window))
+         (original (window-buffer window))
+         (dedicated (window-dedicated-p window))
+         (thread (generate-new-buffer " *assist-git-window-thread*"))
+         (generation (make-emacsos-assist-web-git-generation
+                      :path root :oid test-assist-web-git--head))
+         (intent (list :action 'files :buffer thread :window window :serial 1)))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "worktree content"))
+          (set-window-dedicated-p window nil)
+          (set-window-buffer window thread)
+          (set-window-parameter window 'assist-web-git-intent 1)
+          (set-window-dedicated-p window t)
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) file)))
+            (should-error (emacsos-assist-web-git--open intent generation)))
+          (should (eq (window-buffer window) thread))
+          (should-not (emacsos-assist-web-git-generation-views generation)))
+      (set-window-dedicated-p window nil)
+      (set-window-buffer window original)
+      (set-window-dedicated-p window dedicated)
+      (set-window-parameter window 'assist-web-git-intent nil)
+      (kill-buffer thread)
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-superseded-command-probe-cannot-restore-current ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web-git--sync-keys)
+    (let ((old (test-assist-web-git--metadata
+                "ready" "topic/old" test-assist-web-git--head))
+          (new (test-assist-web-git--metadata
+                "ready" "topic/new" test-assist-web-git--published))
+          callback enqueued)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread done) (setq callback done)))
+                ((symbol-function 'emacsos-assist-web-git--enqueue)
+                 (lambda (&rest _) (setq enqueued t))))
+        (emacsos-assist-web-git--command 'files)
+        (emacsos-assist-web-git--note new)
+        (funcall callback old nil)
+        (should (equal emacsos-assist-web-git--metadata new))
+        (should-not enqueued)
+        (emacsos-assist-web-git--command 'files)
+        (emacsos-assist-web-git--invalidate "invalid Git workspace metadata")
+        (funcall callback old nil)
+        (should-not emacsos-assist-web-git--metadata)
+        (should-not enqueued)))))
+
+(ert-deftest test-assist-web-git-old-chat-refresh-cannot-overwrite-newer-git-probe ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web-git--sync-keys)
+    (let ((snapshot (test-assist-web-git--snapshot "ready" "topic/old"))
+          (new (test-assist-web-git--metadata
+                "ready" "topic/new" test-assist-web-git--published))
+          refresh-callback rendered)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload done &rest _)
+                   (setq refresh-callback done)))
+                ((symbol-function 'emacsos-assist-web-git--read-metadata)
+                 (lambda (_thread done) (funcall done new nil)))
+                ((symbol-function 'emacsos-assist-web-git--enqueue) #'ignore)
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--render)
+                 (lambda (value &rest _) (setq rendered value))))
+        (emacsos-assist-web--legacy-refresh-thread (current-buffer))
+        (emacsos-assist-web-git--command 'files)
+        (funcall refresh-callback snapshot nil)
+        (should (equal emacsos-assist-web-git--metadata new))
+        (should (eq rendered snapshot))))))
 
 (ert-deftest test-assist-web-git-view-refusal-after-promotion-keeps-generation ()
   (let* ((cache (make-temp-file "assist-git-promote-" t))

@@ -2548,7 +2548,8 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
         (when emacsos-assist-web--thread-id
           (let ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
                 (generation (cl-incf emacsos-assist-web--refresh-generation))
-                (send-generation emacsos-assist-web--send-generation))
+                (send-generation emacsos-assist-web--send-generation)
+                (git-observation emacsos-assist-web-git--observation))
             (emacsos-assist-web--request
              "GET" (concat "threads/" tid) nil
              (lambda (value error)
@@ -2574,13 +2575,15 @@ COMPLETED-RUN-ID identifies a run whose terminal event initiated this refresh."
                              (emacsos-assist-web--require-snapshot value tid)
                              (let ((busy
                                     (emacsos-assist-web--snapshot-active-p value)))
-                               (emacsos-assist-web-git--note-snapshot
-                                value
-                                (and completed-run-id
-                                     (not busy)
-                                     (equal (alist-get 'status
-                                                       (alist-get 'thread value))
-                                            "ready")))
+                               (when (= git-observation
+                                        emacsos-assist-web-git--observation)
+                                 (emacsos-assist-web-git--note-snapshot
+                                  value
+                                  (and completed-run-id
+                                       (not busy)
+                                       (equal (alist-get 'status
+                                                         (alist-get 'thread value))
+                                              "ready"))))
                                (emacsos-assist-web--try-write-cache
                                 (emacsos-assist-web--snapshot-cache-name tid) value)
                                (when (or (and completed-run-id
@@ -4261,6 +4264,7 @@ write leaves the provisional records available for the next exact refresh."
     (let* ((buffer (current-buffer))
            (thread-id emacsos-assist-web--thread-id)
            (generation (cl-incf emacsos-assist-web--refresh-generation))
+           (git-observation emacsos-assist-web-git--observation)
            (keys (mapcar (lambda (entry) (plist-get entry :key))
                          (seq-filter (lambda (entry)
                                        (eq (emacsos-assist-web--entry-state entry)
@@ -4289,10 +4293,12 @@ write leaves the provisional records available for the next exact refresh."
                          (progn
                            (emacsos-assist-web--require-snapshot value thread-id)
                            (emacsos-assist-web--snapshot-active-p value)
-                           (emacsos-assist-web-git--note-snapshot
-                            value
-                            (equal (alist-get 'status (alist-get 'thread value))
-                                   "ready"))
+                           (when (= git-observation
+                                    emacsos-assist-web-git--observation)
+                             (emacsos-assist-web-git--note-snapshot
+                              value
+                              (equal (alist-get 'status (alist-get 'thread value))
+                                     "ready")))
                            (unless (emacsos-assist-web--try-write-cache
                                     (emacsos-assist-web--snapshot-cache-name thread-id) value)
                              (error "canonical snapshot could not be saved"))

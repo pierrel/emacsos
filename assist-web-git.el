@@ -1,7 +1,8 @@
 ;;; assist-web-git.el --- Committed Assist thread Git views -*- lexical-binding: t -*-
 
 ;;; Commentary:
-;; This module presents exact remote-verified thread Git generations in Emacs.
+;; This module presents fetched thread Git generations.  File views read
+;; bounded local worktree paths, not verified committed blobs.
 
 ;;; Code:
 
@@ -50,6 +51,7 @@
 (defvar-local emacsos-assist-web-git--next nil)
 (defvar-local emacsos-assist-web-git--canceling nil)
 (defvar-local emacsos-assist-web-git--epoch 0)
+(defvar-local emacsos-assist-web-git--observation 0)
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
 (defvar-local emacsos-assist-web-git--view-thread nil)
@@ -336,6 +338,7 @@
 
 (defun emacsos-assist-web-git--note (metadata &optional terminal)
   "Accept validated METADATA and refresh after a TERMINAL turn."
+  (cl-incf emacsos-assist-web-git--observation)
   (let ((changed (not (equal (emacsos-assist-web-git--request-key metadata)
                              (emacsos-assist-web-git--request-key
                               emacsos-assist-web-git--metadata)))))
@@ -358,6 +361,7 @@
   (setq emacsos-assist-web-git--metadata nil
         emacsos-assist-web-git--unavailable reason
         emacsos-assist-web-git--next nil)
+  (cl-incf emacsos-assist-web-git--observation)
   (cl-incf emacsos-assist-web-git--epoch)
   (condition-case nil (emacsos-assist-web-git--cancel) (error nil))
   (condition-case nil (emacsos-assist-web-git--update-headers) (error nil)))
@@ -367,7 +371,8 @@
   (if (consp problem) (cdr problem) problem))
 
 (defun emacsos-assist-web-git--read-metadata (thread callback)
-  "Read THREAD's authenticated canonical metadata and call CALLBACK."
+  "Read THREAD's canonical and Git metadata and call CALLBACK.
+Canonical snapshot errors and Git-only projection errors retain distinct tags."
   (with-current-buffer thread
     (let ((tid (emacsos-assist-web--require-id emacsos-assist-web--thread-id)))
       (emacsos-assist-web--request
@@ -377,18 +382,24 @@
            (with-current-buffer thread
              (if problem
                  (funcall callback nil problem)
-               (let ((result
+               (let ((canonical
                       (condition-case error
                           (progn
                             (emacsos-assist-web--require-snapshot value tid)
                             (emacsos-assist-web--snapshot-active-p value)
-                            (cons 'valid
-                                  (emacsos-assist-web-git--metadata-from-snapshot
-                                   value)))
-                        (error (cons 'invalid (error-message-string error))))))
-                 (if (eq (car result) 'valid)
-                     (funcall callback (cdr result) nil)
-                   (funcall callback nil result)))))))))))
+                            t)
+                        (error (cons 'canonical (error-message-string error))))))
+                 (if (consp canonical)
+                     (funcall callback nil canonical)
+                   (let ((result
+                          (condition-case error
+                              (cons 'valid
+                                    (emacsos-assist-web-git--metadata-from-snapshot
+                                     value))
+                            (error (cons 'git (error-message-string error))))))
+                     (if (eq (car result) 'valid)
+                         (funcall callback (cdr result) nil)
+                       (funcall callback nil result)))))))))))))
 
 (defun emacsos-assist-web-git--intent-live-p (intent)
   "Return non-nil while INTENT still owns its original thread window."
@@ -405,7 +416,9 @@
     (cond
      ((not (emacsos-assist-web-git--usable metadata))
       (setq emacsos-assist-web-git--unavailable
-            "no repository, detached HEAD, or main checkout")
+            (if (equal (plist-get metadata :actual-branch) "HEAD")
+                "detached HEAD; Git unavailable"
+              "no repository or published thread branch"))
       (emacsos-assist-web-git--update-headers)
       (when intent (message "Thread Git is unavailable: %s"
                             emacsos-assist-web-git--unavailable)))
@@ -647,6 +660,7 @@
   (let* ((thread (current-buffer))
          (window (selected-window))
          (serial (1+ (or (window-parameter window 'assist-web-git-intent) 0)))
+         (observation emacsos-assist-web-git--observation)
          (intent (list :action action :buffer thread :window window
                        :serial serial)))
     (set-window-parameter window 'assist-web-git-intent serial)
@@ -656,11 +670,14 @@
      (lambda (metadata problem)
        (when (buffer-live-p thread)
          (with-current-buffer thread
-           (if problem
+           (when (= observation emacsos-assist-web-git--observation)
+             (if problem
                (progn
                  (if (consp problem)
                      (emacsos-assist-web-git--invalidate
-                      "invalid authenticated Git metadata")
+                      (if (eq (car problem) 'canonical)
+                          "invalid authenticated thread snapshot"
+                        "invalid Git workspace metadata"))
                    (when emacsos-assist-web-git--current
                      (setf (emacsos-assist-web-git-generation-state
                             emacsos-assist-web-git--current) 'cached))
@@ -670,10 +687,10 @@
                  (message "Thread Git metadata unavailable: %s"
                           (emacsos-assist-web-git--problem-text problem)))
              (emacsos-assist-web-git--note metadata)
-             (emacsos-assist-web-git--enqueue metadata intent))))))))
+             (emacsos-assist-web-git--enqueue metadata intent)))))))))
 
 (defun emacsos-assist-web-git-find-file ()
-  "Browse committed files from this canonical Assist thread's Git branch."
+  "Browse bounded worktree files from this thread's fetched Git mirror."
   (interactive)
   (emacsos-assist-web-git--command 'files))
 
@@ -692,7 +709,8 @@
 
 (defun emacsos-assist-web-git--literal-file-view (file root thread generation)
   "Return a read-only FILE from ROOT for THREAD and GENERATION.
-Do not interpret repository-local code."
+Read a bounded worktree path, not a verified committed blob.  Do not
+interpret repository-local code."
   (let ((resolved (file-truename file))
         (cursor (expand-file-name file))
         (base (expand-file-name root))
@@ -702,15 +720,19 @@ Do not interpret repository-local code."
                 (file-in-directory-p cursor base))
       (setq symlink (file-symlink-p cursor)
             cursor (directory-file-name (file-name-directory cursor))))
-    (unless (and (file-regular-p resolved)
-                 (not symlink)
-                 (not (file-symlink-p base))
-                 (file-in-directory-p resolved (file-truename root))
-                 (not (file-in-directory-p
-                       resolved (file-truename (expand-file-name ".git" root))))
-                 (<= (file-attribute-size (file-attributes resolved))
-                     emacsos-assist-web-git--file-view-limit))
-      (error "Git worktree file is outside the display limit")))
+    (cond
+     ((or symlink (file-symlink-p base))
+      (error "Git symbolic-link paths cannot be opened"))
+     ((not (file-in-directory-p resolved (file-truename root)))
+      (error "Git file is outside this mirror"))
+     ((file-in-directory-p
+       resolved (file-truename (expand-file-name ".git" root)))
+      (error "Git internals are not browseable"))
+     ((not (file-regular-p resolved))
+      (error "Git path is not a regular worktree file"))
+     ((> (file-attribute-size (file-attributes resolved))
+         emacsos-assist-web-git--file-view-limit)
+      (error "Git file exceeds 1 MiB display limit"))))
   (let* ((relative (file-relative-name file root))
          (view (generate-new-buffer
                 (format "*Git %s %s*"
@@ -720,7 +742,10 @@ Do not interpret repository-local code."
     (condition-case error
         (with-current-buffer view
           (setq default-directory (file-name-as-directory root))
-          (insert-file-contents-literally file)
+          (insert-file-contents-literally
+           file nil 0 (1+ emacsos-assist-web-git--file-view-limit))
+          (when (> (buffer-size) emacsos-assist-web-git--file-view-limit)
+            (error "Git file exceeds 1 MiB display limit"))
           (setq buffer-read-only t)
           (emacsos-assist-web-git--pin view thread generation)
           (use-local-map (make-composed-keymap
@@ -759,7 +784,11 @@ Do not interpret repository-local code."
            (when (emacsos-assist-web-git--intent-live-p intent)
              (let ((view (emacsos-assist-web-git--literal-file-view
                           choice root thread generation)))
-               (set-window-buffer window view)))))
+               (condition-case error
+                   (set-window-buffer window view)
+                 (error
+                  (kill-buffer view)
+                  (signal (car error) (cdr error))))))))
         ('diff
          (if (not (require 'magit nil t))
              (message "Magit is not installed on this phone")
@@ -781,7 +810,7 @@ Do not interpret repository-local code."
                            (emacsos-assist-web-git-generation-oid generation)))))))
 
 (defun emacsos-assist-web-git--pin (view thread generation)
-  "Pin VIEW to immutable GENERATION and THREAD until VIEW is closed."
+  "Pin VIEW to GENERATION and THREAD until VIEW is closed."
   (with-current-buffer view
     (setq-local emacsos-assist-web-git--view-thread thread
                 emacsos-assist-web-git--view-generation generation
