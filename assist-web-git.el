@@ -1320,23 +1320,22 @@ The caller owns both the exact Run GET and subsequent canonical commit."
                          (setf (plist-get token :stage) 'r3
                                (plist-get token :candidate-key) key)
                          (emacsos-assist-web-git--update-headers))
-                       (if (not (emacsos-assist-web--try-write-cache
-                                 (emacsos-assist-web--snapshot-cache-name tid)
-                                 snapshot))
-                           (progn
-                             (setq emacsos-assist-web-git--unavailable
-                                   "canonical cache unavailable; Refresh")
-                             (emacsos-assist-web-git--canonical-failed
-                              canonical-token "canonical cache unavailable; Refresh"))
-                         (cond
-                          (drift
-                           (emacsos-assist-web-git--canonical-failed
-                            canonical-token "repository changed again; Refresh"))
-                          ((and changed (eq (plist-get token :stage) 'r3)
-                                (not (plist-get token :post-barrier)))
-                           (setf (plist-get token :post-barrier) t)
-                           (emacsos-assist-web-git--busy-check-start token))
-                          (t
+                       (cond
+                        (drift
+                         (emacsos-assist-web-git--canonical-failed
+                          canonical-token "repository changed again; Refresh"))
+                        ((and changed (eq (plist-get token :stage) 'r3)
+                              (not (plist-get token :post-barrier)))
+                         (setf (plist-get token :post-barrier) t)
+                         (emacsos-assist-web-git--busy-check-start token))
+                        ((not (emacsos-assist-web--try-write-cache
+                               (emacsos-assist-web--snapshot-cache-name tid)
+                               snapshot))
+                         (setq emacsos-assist-web-git--unavailable
+                               "canonical cache unavailable; Refresh")
+                         (emacsos-assist-web-git--canonical-failed
+                          canonical-token "canonical cache unavailable; Refresh"))
+                        (t
                            (setq emacsos-assist-web--snapshot snapshot)
                            (emacsos-assist-web-git--canonical-authorized
                             auth-start)
@@ -1351,7 +1350,7 @@ The caller owns both the exact Run GET and subsequent canonical commit."
                             tid run-id run-start)
                            (setq emacsos-assist-web-git--busy-check nil)
                            (emacsos-assist-web-git--canonical-accepted
-                            metadata nil canonical-token)))))
+                            metadata nil canonical-token))))
                    ((error quit)
                     (emacsos-assist-web-git--invalidate
                      "Run status or Git projection unavailable; Retry")

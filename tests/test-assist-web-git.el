@@ -495,8 +495,8 @@
             (set-window-parameter window 'assist-web-git-intent
                                   original-intent)))))))
 
-(ert-deftest test-assist-web-git-active-run-key-change-cache-failure-needs-r3 ()
-  "A changed busy key downgrades old Git before cache and needs a later T read."
+(ert-deftest test-assist-web-git-active-run-provisional-key-skips-cache ()
+  "A provisional changed key starts R3 without writing canonical cache."
   (with-temp-buffer
     (emacsos-assist-web-mode)
     (let ((entry (emacsos-assist-web--entry
@@ -522,12 +522,17 @@
         (funcall (car requests)
                  (test-assist-web-git--snapshot
                   "processing" "main" "topic/new") nil)
-        (should (= (length requests) 1))
+        (should (= (length requests) 2))
         (should (eq (plist-get emacsos-assist-web-git--busy-check :stage) 'r3))
+        (should emacsos-assist-web-git--run-outcome-uncertain)
+        ;; Only R3 attempts the canonical write; its failure remains pending.
+        (funcall (car requests)
+                 (test-assist-web-git--snapshot
+                  "processing" "main" "topic/new") nil)
         (should emacsos-assist-web-git--run-outcome-uncertain)
         (setq cache-ok t)
         (emacsos-assist-web-git--retry-busy-check)
-        (should (= (length requests) 2))
+        (should (= (length requests) 3))
         (funcall (car requests)
                  (test-assist-web-git--snapshot
                   "processing" "main" "topic/new") nil)
@@ -642,7 +647,7 @@
     (emacsos-assist-web-mode)
     (let ((entry (emacsos-assist-web--entry
                   "fixture" 'accepted-unobserved "exact-key"))
-          requests)
+          requests (writes 0))
       (setf (plist-get entry :run-id) "run-a"
             (plist-get entry :reobserve-generation) 1)
       (setq-local emacsos-assist-web--thread-id "thread-1"
@@ -651,7 +656,7 @@
                  (lambda (_method _path _payload done &rest _)
                    (push done requests)))
                 ((symbol-function 'emacsos-assist-web--try-write-cache)
-                 (lambda (&rest _) t))
+                 (lambda (&rest _) (cl-incf writes)))
                 ((symbol-function 'emacsos-assist-web-git--begin) #'ignore))
         (emacsos-assist-web-git--run-access-uncertain 404 "run-a")
         (emacsos-assist-web-git--canonical-authorized
@@ -662,10 +667,12 @@
                  (test-assist-web-git--snapshot
                   "processing" "main" "topic/two") nil)
         (should (= (length requests) 2))
+        (should (= writes 0))
         (funcall (car requests)
                  (test-assist-web-git--snapshot
                   "processing" "main" "topic/three") nil)
         (should (= (length requests) 2))
+        (should (= writes 0))
         (should emacsos-assist-web-git--run-outcome-uncertain)
         (should-not emacsos-assist-web--snapshot)
         (emacsos-assist-web-git--retry-busy-check)
@@ -673,6 +680,7 @@
         (funcall (car requests)
                  (test-assist-web-git--snapshot
                   "processing" "main" "topic/three") nil)
+        (should (= writes 1))
         (should-not emacsos-assist-web-git--run-outcome-uncertain)))))
 
 (ert-deftest test-assist-web-git-active-run-postcache-git-quit-invalidates ()
@@ -2032,6 +2040,90 @@
     (funcall filter nil "")
     (should (= attempts 2))))
 
+(ert-deftest test-assist-web-git-raw-nondenial-still-downgrades-on-parse-error ()
+  "Raw 200 or 503 does not pre-acknowledge later canonical failure."
+  (dolist (status '(200 503))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let* ((metadata (test-assist-web-git--metadata
+                        "ready" "topic/one" test-assist-web-git--head))
+             (generation (make-emacsos-assist-web-git-generation
+                          :metadata metadata :state 'current))
+             response process done)
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web-git--metadata metadata
+                    emacsos-assist-web-git--current generation)
+        (unwind-protect
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (_url callback &rest _)
+                         (setq done callback
+                               response (generate-new-buffer " *git-raw-nondenial*"))
+                         (setq process (make-pipe-process
+                                        :name "git-raw-nondenial"
+                                        :buffer response :noquery t))
+                         (set-process-filter process #'ignore)
+                         response)))
+              (emacsos-assist-web--request
+               "GET" "threads/thread-1" nil (lambda (_value _problem) nil))
+              (funcall (process-filter process) process
+                       (format "HTTP/1.1 %d Test\r\nContent-Length: 7\r\n\r\n"
+                               status))
+              (with-current-buffer response
+                (insert "invalid")
+                (setq-local url-http-response-status status
+                            url-http-content-type "application/json"
+                            url-http-end-of-headers (copy-marker (point-min)))
+                (funcall done nil))
+              (should (eq (emacsos-assist-web-git-generation-state generation)
+                          'cached)))
+          (when (process-live-p process) (delete-process process))
+          (when (buffer-live-p response) (kill-buffer response)))))))
+
+(ert-deftest test-assist-web-git-dead-origin-t403-fences-live-peer ()
+  "A definitive T denial outlives the originating request buffer."
+  (let ((source (generate-new-buffer " *git-dead-origin*"))
+        (peer (generate-new-buffer " *git-live-peer*"))
+        response done)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1"))
+          (with-current-buffer peer
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--current
+                        (make-emacsos-assist-web-git-generation
+                         :state 'current)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                     (lambda () "token"))
+                    ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                    ((symbol-function 'url-retrieve)
+                     (lambda (_url callback &rest _)
+                       (setq done callback
+                             response (generate-new-buffer " *git-dead-response*"))
+                       response)))
+            (with-current-buffer source
+              (emacsos-assist-web--request
+               "GET" "threads/thread-1" nil (lambda (_value _problem) nil)))
+            (kill-buffer source)
+            (with-current-buffer response
+              (insert "denied")
+              (setq-local url-http-response-status 403
+                          url-http-content-type "text/plain"
+                          url-http-end-of-headers (copy-marker (point-min)))
+              (funcall done nil)))
+          (with-current-buffer peer
+            (should (eq emacsos-assist-web-git--denied t))
+            (should (eq (emacsos-assist-web-git-generation-state
+                         emacsos-assist-web-git--current) 'cached))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p peer) (kill-buffer peer))
+      (when (buffer-live-p response) (kill-buffer response)))))
+
 (ert-deftest test-assist-web-git-busy-thread-404-keeps-denial-reason ()
   "A busy-check callback cannot replace a raw definitive T404 reason."
   (with-temp-buffer
@@ -2130,9 +2222,11 @@
                        (when (eq buffer peer) (setq quit-flag t))
                        (funcall reader symbol buffer))))
             (with-current-buffer source
-              (let ((inhibit-quit t))
-                (emacsos-assist-web-git--canonical-denied 403)
-                (setq quit-flag nil))))
+              (condition-case nil
+                  (progn
+                    (emacsos-assist-web-git--canonical-denied 403)
+                    (setq quit-flag nil))
+                (quit (setq quit-flag nil)))))
           (with-current-buffer peer
             (should (eq emacsos-assist-web-git--denied t))
             (should (eq (emacsos-assist-web-git-generation-state
