@@ -1775,6 +1775,47 @@
         (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response) (kill-buffer response))))))
 
+(ert-deftest test-assist-web-git-admitted-200-sse-has-no-body-deadline ()
+  "The 503 deadline must not end an admitted long-lived event stream."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (response (generate-new-buffer " *long-sse-200*"))
+          process timer)
+      (unwind-protect
+          (progn
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :epoch) 1)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--queue-model-p t
+                        emacsos-assist-web--queue (list entry)
+                        emacsos-assist-web--stream-entry entry)
+            (setq process (make-pipe-process :name "long-sse-200"
+                                             :buffer response :noquery t))
+            (with-current-buffer response
+              (setq-local url-http-response-status 200
+                          url-http-end-of-headers (copy-marker (point-min))
+                          url-http-content-type "text/event-stream"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (&rest _) response))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_delay _repeat callback &rest _)
+                         (setq timer callback)))
+                      ((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () t)))
+              (emacsos-assist-web--observe-entry entry)
+              (funcall (emacsos-assist-web--entry-event-filter
+                        #'ignore (current-buffer) entry 1)
+                       process "")
+              (should-not (plist-get entry :stream-header-timer))
+              (funcall timer)
+              (should (eq emacsos-assist-web--stream-entry entry))
+              (should (process-live-p process))))
+        (when (process-live-p process) (delete-process process))
+        (when (buffer-live-p response) (kill-buffer response))))))
+
 (ert-deftest test-assist-web-git-stock-sse-sentinel-quit-defers-disconnect ()
   "A quitting URL sentinel cannot leave an ended queue observer occupied."
   (with-temp-buffer
