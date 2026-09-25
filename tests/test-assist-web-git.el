@@ -1732,6 +1732,69 @@
       (when (buffer-live-p reopened) (kill-buffer reopened))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
+(ert-deftest test-assist-web-git-definitive-denial-overrides-operator-repair ()
+  "Stored repair guidance cannot hide a later thread 403 or 404."
+  (dolist (status '(403 404))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "A" 'accepted-unobserved "key-a")))
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :observer-end-kind) 'operator-repair
+              (plist-get entry :requires-reobserve) t)
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue (list entry))
+        (emacsos-assist-web-git-thread-mode 1)
+        (emacsos-assist-web-git--canonical-denied status)
+        (should (string-match-p
+                 (if (= status 404) "Thread unavailable" "Reauthorize")
+                 (substring-no-properties
+                  (emacsos-assist-web-git--thread-header))))
+        (should-error (emacsos-assist-web-git--command 'files)
+                      :type 'user-error)
+        (save-window-excursion
+          (emacsos-assist-web-git-status-details)
+          (should (string-match-p
+                   (if (= status 404) "thread is unavailable" "denied access")
+                   (buffer-string)))
+          (emacsos-assist-web-git-display-details-back))))))
+
+(ert-deftest test-assist-web-git-repaired-run-replaces-observer-repair-label ()
+  "An exact saved approval or terminal result supersedes old 503 guidance."
+  (dolist (status '("awaiting_approval" "success"))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "A" 'accepted-unobserved "key-a"))
+            callback)
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :observer-end-kind) 'operator-repair
+              (plist-get entry :observer-end-generation) 1
+              (plist-get entry :requires-reobserve) t)
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue-model-p t
+                    emacsos-assist-web--queue (list entry))
+        (emacsos-assist-web-git--stop-reobserve entry 'operator-repair)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload done &rest _)
+                     (setq callback done)))
+                  ((symbol-function 'emacsos-assist-web--start-next-observation)
+                   #'ignore)
+                  ((symbol-function 'emacsos-assist-web--pump-posts)
+                   #'ignore)
+                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
+                   #'ignore))
+          (emacsos-assist-web--reobserve-entry entry)
+          (funcall callback
+                   `((id . "run-a") (thread_id . "thread-1")
+                     (status . ,status)) nil)
+          (should-not (emacsos-assist-web-git--operator-repair-p))
+          (should (string-match-p
+                   (if (equal status "awaiting_approval")
+                       "Approval pending" "Run reconciling")
+                   (substring-no-properties
+                    (emacsos-assist-web-git--thread-header)))))))))
+
 (ert-deftest test-assist-web-git-sse-503-headers-have-a-body-deadline ()
   "A stalled 503 body cannot occupy a queue observer indefinitely."
   (with-temp-buffer
@@ -1759,7 +1822,8 @@
                        (lambda (&rest _) response))
                       ((symbol-function 'run-at-time)
                        (lambda (_delay _repeat callback &rest _)
-                         (setq timer callback)))
+                         (setq timer callback)
+                         (timer-create)))
                       ((symbol-function 'emacsos-assist-web--save-draft)
                        (lambda () t)))
               (emacsos-assist-web--observe-entry entry)
@@ -1802,7 +1866,8 @@
                        (lambda (&rest _) response))
                       ((symbol-function 'run-at-time)
                        (lambda (_delay _repeat callback &rest _)
-                         (setq timer callback)))
+                         (setq timer callback)
+                         (timer-create)))
                       ((symbol-function 'emacsos-assist-web--save-draft)
                        (lambda () t)))
               (emacsos-assist-web--observe-entry entry)
@@ -1813,6 +1878,54 @@
               (funcall timer)
               (should (eq emacsos-assist-web--stream-entry entry))
               (should (process-live-p process))))
+        (when (process-live-p process) (delete-process process))
+        (when (buffer-live-p response) (kill-buffer response))))))
+
+(ert-deftest test-assist-web-git-completed-503-beats-queued-body-timeout ()
+  "A completed classified 503 keeps its repair cause at the deadline edge."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (response (generate-new-buffer " *completed-sse-503*"))
+          process deadline deferred)
+      (unwind-protect
+          (progn
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :epoch) 1)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--queue-model-p t
+                        emacsos-assist-web--queue (list entry)
+                        emacsos-assist-web--stream-entry entry)
+            (setq process (make-pipe-process :name "completed-sse-503"
+                                             :buffer response :noquery t))
+            (with-current-buffer response
+              (insert "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\r\n")
+              (setq-local url-http-response-status 503
+                          url-http-end-of-headers (copy-marker (point))
+                          url-http-content-type "application/json")
+              (insert "{\"detail\":\"run-store-unavailable\"}"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (&rest _) response))
+                      ((symbol-function 'run-at-time)
+                       (lambda (delay _repeat callback &rest args)
+                         (if (zerop delay)
+                             (setq deferred (cons callback args))
+                           (setq deadline callback)
+                           (timer-create))))
+                      ((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () t)))
+              (emacsos-assist-web--observe-entry entry)
+              (should deadline)
+              (emacsos-assist-web--entry-finish-observation-response
+               (current-buffer) entry 1 response)
+              (should-not (plist-get entry :stream-header-timer))
+              (funcall deadline)
+              (should (eq emacsos-assist-web--stream-entry entry))
+              (apply (car deferred) (cdr deferred))
+              (should (eq (plist-get entry :observer-end-kind)
+                          'operator-repair))))
         (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response) (kill-buffer response))))))
 
