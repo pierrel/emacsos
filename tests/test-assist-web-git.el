@@ -1156,6 +1156,79 @@
         (emacsos-assist-web-refresh-thread)
         (should (eq observed b))))))
 
+(ert-deftest test-assist-web-git-observer-launch-precedes-fallible-actions ()
+  "UI C-g cannot leave a saved observing claim without launching its SSE."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "B" 'accepted-unobserved "key-b"))
+            launched)
+        (setf (plist-get entry :run-id) "run-b")
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue-model-p t
+                    emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--observe-entry)
+                   (lambda (_entry) (setq launched t)))
+                  ((symbol-function 'emacsos-assist-web--sync-active-surface)
+                   (lambda () (should launched) (signal 'quit nil))))
+          (emacsos-assist-web--start-observation entry)
+          (should launched)
+          (should (eq emacsos-assist-web--stream-entry entry))
+          (should (plist-get entry :handshake-token)))))))
+
+(ert-deftest test-assist-web-git-observer-prelaunch-quit-releases-b-token ()
+  "A failed SSE launch rearms B instead of reserving its slot forever."
+  (let ((emacsos--assist-active-surface nil)
+        (emacsos-assist-web--requests nil))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "B" 'accepted-unobserved "key-b")))
+        (setf (plist-get entry :run-id) "run-b")
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--queue-model-p t
+                    emacsos-assist-web--queue (list entry))
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                   (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--observe-entry)
+                   (lambda (_entry) (signal 'quit nil))))
+          (emacsos-assist-web--start-observation entry)
+          (should-not emacsos-assist-web--stream-entry)
+          (should-not emacsos-assist-web--requests)
+          (should-not (plist-get entry :handshake-token))
+          (should (eq (plist-get entry :state) 'accepted-unobserved))
+          (should (plist-get entry :requires-reobserve)))))))
+
+(ert-deftest test-assist-web-git-run-recheck-header-quit-does-not-stick-in-flight ()
+  "Pre-request header C-g leaves exact Run Refresh able to retry one GET."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'accepted-unobserved "key-a"))
+          (updates 0) (requests 0))
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :reobserve-generation) 1)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web-git-thread-mode t)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--update-headers)
+                 (lambda ()
+                   (when (= (cl-incf updates) 1)
+                     (signal 'quit nil))))
+                ((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest _) (cl-incf requests))))
+        (emacsos-assist-web--reobserve-entry entry)
+        (should (= requests 0))
+        (should-not (plist-get entry :reobserve-in-flight))
+        (should (plist-get entry :requires-reobserve))
+        (emacsos-assist-web-refresh-thread)
+        (should (= requests 1))
+        (should (plist-get entry :reobserve-in-flight))))))
+
 (ert-deftest test-assist-web-git-duplicate-exact-run-fields-cannot-admit-b ()
   "Duplicate authenticated Run keys do not create a terminal queue proof."
   (dolist (field '(id thread_id status))
@@ -1327,26 +1400,67 @@
         (should (eq (emacsos-assist-web-git-generation-state generation)
                     'cached))))))
 
-(ert-deftest test-assist-web-git-terminal-tail-quit-fences-before-render ()
-  "C-g in the final SSE text cannot leave the old Git view current."
+(ert-deftest test-assist-web-git-manual-disconnect-save-quit-pauses ()
+  "A failed recovered disconnect save cannot leave Refresh in an active pass."
   (with-temp-buffer
     (emacsos-assist-web-mode)
     (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
           (generation (make-emacsos-assist-web-git-generation :state 'current)))
       (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :epoch) 1)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web--stream-entry entry
+                  emacsos-assist-web--manual-recovery-required t
+                  emacsos-assist-web--manual-recovery-active t
+                  emacsos-assist-web-git--current generation)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () (signal 'quit nil))))
+        (emacsos-assist-web--entry-observation-interrupted
+         entry 1 "observation disconnected")
+        (should emacsos-assist-web--reconcile-recovery-paused)
+        (should-not emacsos-assist-web--manual-recovery-active)
+        (should-not emacsos-assist-web--stream-entry)
+        (should (eq (emacsos-assist-web-git-generation-state generation)
+                    'cached))
+        (should (string-match-p "Restart"
+                                (substring-no-properties
+                                 (emacsos-assist-web-git--thread-header))))))))
+
+(ert-deftest test-assist-web-git-terminal-tail-quit-fences-before-render ()
+  "C-g in terminal text retains terminal provenance and exact Run recheck."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (generation (make-emacsos-assist-web-git-generation :state 'current))
+          exact-run)
+      (setf (plist-get entry :run-id) "run-a"
             (plist-get entry :epoch) 1
             (plist-get entry :stream-undecided-suffix) "\r")
       (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
                   emacsos-assist-web--queue (list entry)
                   emacsos-assist-web--stream-entry entry
                   emacsos-assist-web-git--current generation)
       (cl-letf (((symbol-function 'emacsos-assist-web--entry-append-rendered-delta)
                  (lambda (&rest _) (signal 'quit nil)))
                 ((symbol-function 'emacsos-assist-web--save-draft)
-                 (lambda () t)))
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (should (string-match-p "/runs/run-a" path))
+                   (setq exact-run done)))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 (lambda (&rest _) (ert-fail "SSE reattached"))))
         (emacsos-assist-web--dispatch-event (current-buffer) "terminal" "{}")
         (should (eq (emacsos-assist-web-git-generation-state generation)
                     'cached))
+        (should (eq (plist-get entry :observer-end-kind) 'terminal-sse))
+        (should exact-run)
+        (funcall exact-run
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
         (should (plist-get entry :requires-reobserve))
         (should-not emacsos-assist-web--stream-entry)))))
 
@@ -1390,6 +1504,31 @@
         (emacsos-assist-web-git-status-details)
         (should (string-match-p (cl-caddr case) (buffer-string)))
         (emacsos-assist-web-git-display-details-back)))))
+
+(ert-deftest test-assist-web-git-terminal-sse-status-follows-run-proof ()
+  "Raw terminal evidence is checking, not an active contradiction."
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry
+                    "A" 'terminal-unreconciled "key-a")))
+        (setf (plist-get entry :run-id) "run-a")
+        (setq-local emacsos-assist-web-git--stopped-reobserve
+                    (list :entry entry :kind 'terminal-sse))
+        (should (string-match-p "Run checking"
+                                (substring-no-properties
+                                 (emacsos-assist-web-git--thread-header))))
+        (emacsos-assist-web-git-status-details)
+        (should (string-match-p "not yet verified" (buffer-string)))
+        (emacsos-assist-web-git-display-details-back)
+        (setf (plist-get entry :verified-outcome) "success")
+        (should (string-match-p "Run reconciling"
+                                (substring-no-properties
+                                 (emacsos-assist-web-git--thread-header))))
+        (setf (plist-get entry :observer-end-checked) t)
+        (should (string-match-p "Run changed; Refresh"
+                                (substring-no-properties
+                                 (emacsos-assist-web-git--thread-header))))))))
 
 (ert-deftest test-assist-web-git-manual-stop-quit-rearms-refresh ()
   "A status renderer's C-g cannot leave the manual pass active."
@@ -1447,6 +1586,71 @@
                 (should-not emacsos-assist-web--stream-entry)
                 (should (eq (emacsos-assist-web-git-generation-state generation)
                             'cached))))
+          (when (process-live-p process) (delete-process process))
+          (when (buffer-live-p response) (kill-buffer response)))))))
+
+(ert-deftest test-assist-web-git-ended-sse-classifier-quit-still-schedules-stop ()
+  "A 503 classifier's C-g cannot skip the queue owner's disconnect fence."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (generation (make-emacsos-assist-web-git-generation :state 'current))
+          (response (generate-new-buffer " *ended-sse-classifier*"))
+          scheduled)
+      (unwind-protect
+          (progn
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :epoch) 1)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--queue-model-p t
+                        emacsos-assist-web--queue (list entry)
+                        emacsos-assist-web--stream-entry entry
+                        emacsos-assist-web-git--current generation)
+            (cl-letf (((symbol-function 'emacsos-assist-web--run-store-unavailable-response-p)
+                       (lambda (&rest _) (signal 'quit nil)))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat callback &rest args)
+                         (unless scheduled (setq scheduled (cons callback args)))))
+                      ((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () t)))
+              (emacsos-assist-web--entry-finish-observation-response
+               (current-buffer) entry 1 response)
+              (should scheduled)
+              (apply (car scheduled) (cdr scheduled))
+              (should-not emacsos-assist-web--stream-entry)
+              (should (eq (emacsos-assist-web-git-generation-state generation)
+                          'cached))))
+        (when (buffer-live-p response) (kill-buffer response))))))
+
+(ert-deftest test-assist-web-git-bad-legacy-sse-http-status-interrupts ()
+  "Malformed legacy HTTP status cannot leave its accepted observer live."
+  (dolist (status '(nil malformed))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((response (generate-new-buffer " *bad-legacy-sse-http*"))
+            process)
+        (unwind-protect
+            (progn
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web--run-id "run-a"
+                          emacsos-assist-web--pending-accepted-p t
+                          emacsos-assist-web--stream-generation 1)
+              (setq process (make-pipe-process :name "bad-legacy-sse-http"
+                                               :buffer response :noquery t))
+              (setq-local emacsos-assist-web--stream-process process
+                          emacsos-assist-web--stream-response response)
+              (with-current-buffer response
+                (setq-local url-http-end-of-headers (copy-marker (point-min))
+                            url-http-response-status status
+                            url-http-content-type "text/event-stream"))
+              (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                         (lambda () t)))
+                (funcall (emacsos-assist-web--event-filter
+                          #'ignore (current-buffer) 1)
+                         process "")
+                (should-not emacsos-assist-web--stream-process)
+                (should (equal emacsos-assist-web--stream-status
+                               "Assist observation was rejected"))))
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p response) (kill-buffer response)))))))
 
@@ -2397,6 +2601,49 @@
       (should (eq emacsos-assist-web-git--metadata metadata))
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'current)))))
+
+(ert-deftest test-assist-web-git-phone-view-actions-precede-state ()
+  "Back/Close and padded Details remain before clipped 320px status text."
+  (save-window-excursion
+    (let ((thread (generate-new-buffer " *git-phone-thread*"))
+          (view (generate-new-buffer " *git-phone-view*")))
+      (unwind-protect
+          (let* ((metadata (test-assist-web-git--metadata
+                            "ready" "topic/one" test-assist-web-git--head))
+                 (generation (make-emacsos-assist-web-git-generation
+                              :metadata metadata :oid test-assist-web-git--head
+                              :state 'cached)))
+            (with-current-buffer thread
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--metadata metadata
+                          emacsos-assist-web-git--previous generation))
+            (with-current-buffer view
+              (setq-local emacsos-assist-web-git--view-thread thread
+                          emacsos-assist-web-git--view-generation generation)
+              (let* ((header (emacsos-assist-web-git--view-header))
+                     (back (string-match (regexp-quote "[Close old]") header))
+                     (details (string-match (regexp-quote "[?]") header)))
+                (should back)
+                (should details)
+                (should (< back details))
+                (should (< details 40))
+                (should (equal (get-text-property (- details 1) 'display header)
+                               '(space :width (20) :height (40))))
+                (should (eq (lookup-key emacsos-assist-web-git-view-map
+                                        (kbd "C-c ?"))
+                            #'emacsos-assist-web-git-view-details))
+                (emacsos-assist-web-git-view-details)
+                (should (string-match-p test-assist-web-git--head
+                                        (buffer-string)))
+                (kill-buffer (current-buffer))))
+            (with-current-buffer view
+              (setq-local emacsos-assist-web-git--chooser-thread thread
+                          emacsos-assist-web-git--chooser-generation generation)
+              (should (< (string-width (emacsos-assist-web-git--chooser-header))
+                         25))))
+        (when (buffer-live-p view) (kill-buffer view))
+        (when (buffer-live-p thread) (kill-buffer thread))))))
 
 (ert-deftest test-assist-web-git-command-denial-cannot-retain-current ()
   (with-temp-buffer
