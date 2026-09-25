@@ -3609,7 +3609,7 @@ callbacks even after reconciliation leaves the resident list empty."
         :epoch 0 :run-id nil :live-text nil :rendered nil
         :recovered-ready nil
         :stream-process nil :stream-response nil :stream-header-timer nil
-        :stream-generation 0 :handshake-token nil
+        :stream-generation 0 :stream-admitted nil :handshake-token nil
         :reobserve-generation 0 :reobserve-in-flight nil
         :observer-end-kind nil :observer-end-generation nil
         :observer-end-checked nil :approval-stopped nil
@@ -4217,6 +4217,7 @@ older observer cannot consume the token reserved by a later retry of ENTRY."
         (setf (plist-get entry :stream-process) nil
               (plist-get entry :stream-response) nil
               (plist-get entry :stream-header-timer) nil
+              (plist-get entry :stream-admitted) nil
               (plist-get entry :stream-raw-bytes) nil
               (plist-get entry :stream-undecided-suffix) nil)
         (setq emacsos-assist-web--stream-entry nil)
@@ -4450,6 +4451,7 @@ could release a pre-header SSE reservation later."
           (push token emacsos-assist-web--requests)
           (setf (plist-get entry :handshake-token) token
                 (plist-get entry :state) 'observing
+                (plist-get entry :stream-admitted) nil
                 (plist-get entry :epoch) (1+ (plist-get entry :epoch)))
           (setq emacsos-assist-web--stream-entry entry)
           (if (condition-case nil (emacsos-assist-web--save-draft)
@@ -4616,8 +4618,7 @@ this one transport.  No late callback can select a successor from globals."
                  (emacsos-assist-web--entry-current-in-buffer-p target entry epoch))
         (with-current-buffer response
           (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
-            (if (not (and (integerp url-http-response-status)
-                          (<= 200 url-http-response-status 299)
+            (if (not (and (eql url-http-response-status 200)
                           (stringp url-http-content-type)
                           (string-match-p "\\`text/event-stream\\(?:[ ;]\\|\\'\\)"
                                           (downcase url-http-content-type))))
@@ -4656,7 +4657,14 @@ this one transport.  No late callback can select a successor from globals."
                  ((> pending-bytes emacsos-assist-web-max-header-bytes)
                   (emacsos-assist-web--interrupt-entry-in-buffer
                    target entry epoch "Assist stream transport framing is too large"))
-                 (t (emacsos-assist-web--drain-events target epoch decoded-end entry)))))))))
+                 (t
+                  (emacsos-assist-web--drain-events target epoch decoded-end entry)
+                  (when (and (emacsos-assist-web--entry-current-in-buffer-p
+                              target entry epoch)
+                             (eq process (plist-get entry :stream-process)))
+                    (with-current-buffer target
+                      (setf (plist-get entry :stream-admitted) t)
+                      (emacsos-assist-web-git--finish-active-join entry)))))))))))
       ((error quit)
        (emacsos-assist-web--interrupt-entry-in-buffer
         target entry epoch (error-message-string problem))))))
@@ -5255,7 +5263,6 @@ The start epoch proves freshness after any earlier definitive thread denial."
                            (approval-stopped (plist-get current :approval-stopped)))
                        (setf (plist-get current :state) 'accepted-unobserved
                              (plist-get current :requires-reobserve) nil
-                             (plist-get current :approval-stopped) nil
                              (plist-get current :verified-outcome) nil)
                        (if (emacsos-assist-web--save-draft)
                            (progn
@@ -6028,6 +6035,10 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                         run-id))
                            (let ((entry (emacsos-assist-web--entry body state key)))
                              (setf (plist-get entry :run-id) run-id
+                                   ;; The first observer after reopen must be
+                                   ;; newer than the durable ended observer.
+                                   (plist-get entry :epoch)
+                                   (or end-generation 0)
                                    (plist-get entry :observer-end-kind)
                                    (and end-kind (intern end-kind))
                                    (plist-get entry :observer-end-generation)
