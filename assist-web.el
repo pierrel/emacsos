@@ -750,6 +750,14 @@ An unknown bounded display string is not proof that an accepted Run settled."
                         (equal (alist-get 'detail value) "run-store-unavailable"))))
              (error nil))))))
 
+(defun emacsos-assist-web--sse-content-type-p (value)
+  "Return whether VALUE is the supported SSE media type.
+Only an optional UTF-8 charset parameter may follow the exact subtype."
+  (and (stringp value)
+       (string-match-p
+        "\\`text/event-stream\\(?:[ \t]*;[ \t]*charset=\\(?:utf-8\\|\\\"utf-8\\\"\\)\\)?[ \t]*\\'"
+        (downcase value))))
+
 (defun emacsos-assist-web--response-json
     (buffer &optional allow-status array-type object-type)
   "Return BUFFER's JSON value or signal a useful local error.
@@ -1822,9 +1830,8 @@ addressed by the stock chunk decoder."
           (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
             (if (not (and (integerp url-http-response-status)
                           (<= 200 url-http-response-status 299)
-                          (stringp url-http-content-type)
-                          (string-match-p "\\`text/event-stream\\(?:[ ;]\\|\\'\\)"
-                                          (downcase url-http-content-type))))
+                          (emacsos-assist-web--sse-content-type-p
+                           url-http-content-type)))
                 (when (and (buffer-live-p target)
                          (with-current-buffer target
                            (= generation emacsos-assist-web--stream-generation)))
@@ -4619,9 +4626,8 @@ this one transport.  No late callback can select a successor from globals."
         (with-current-buffer response
           (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
             (if (not (and (eql url-http-response-status 200)
-                          (stringp url-http-content-type)
-                          (string-match-p "\\`text/event-stream\\(?:[ ;]\\|\\'\\)"
-                                          (downcase url-http-content-type))))
+                          (emacsos-assist-web--sse-content-type-p
+                           url-http-content-type)))
                 ;; Keep the sanitized 503 body until its URL completion
                 ;; callback classifies durable-observation unavailability.
                 (unless (eql url-http-response-status 503)

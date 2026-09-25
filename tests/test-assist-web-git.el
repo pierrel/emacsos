@@ -112,10 +112,51 @@
                   '(:kind active-check :run-id "run-a"))
       (should (equal (emacsos-assist-web-git--view-state
                       old-generation (current-buffer)) "stale"))
+      (setq-local emacsos-assist-web--manual-recovery-required t)
+      (should (equal (emacsos-assist-web-git--view-state
+                      old-generation (current-buffer)) "stale"))
+      (setq-local emacsos-assist-web--manual-recovery-required nil)
       (should (string-match-p
                "canonical check pending"
                (emacsos-assist-web-git--view-state
                 new-generation (current-buffer)))))))
+
+(ert-deftest test-assist-web-git-connecting-observer-is-not-labeled-observing ()
+  "A launched Run socket is not an admitted observer before SSE headers."
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a")))
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--manual-recovery-required t
+                    emacsos-assist-web--manual-recovery-active t
+                    emacsos-assist-web--stream-entry entry)
+        (should (string-match-p "Run observer connecting"
+                                (emacsos-assist-web-git--thread-header)))
+        (emacsos-assist-web-git-status-details)
+        (should (string-match-p "headers have not been admitted"
+                                (buffer-string)))
+        (emacsos-assist-web-git-display-details-back)
+        (setf (plist-get entry :stream-admitted) t)
+        (should (string-match-p "Run active; observing"
+                                (emacsos-assist-web-git--thread-header)))))))
+
+(ert-deftest test-assist-web-git-active-check-copy-advances-after-t-acceptance ()
+  "Waiting for SSE admission does not still claim the T check is pending."
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a")))
+        (setq-local emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web-git--stopped-reobserve
+                    (list :entry entry :kind 'active-check)
+                    emacsos-assist-web-git--busy-check
+                    (list :entry entry :t-accepted t))
+        (should (equal (emacsos-assist-web-git--stopped-label)
+                       "Run observer connecting"))
+        (emacsos-assist-web-git-status-details)
+        (should (string-match-p "canonical thread state was accepted"
+                                (buffer-string)))))))
 
 (ert-deftest test-assist-web-git-invalid-authenticated-probe-fences-current ()
   "Malformed authenticated 200 projection is a shared safety failure."
@@ -2048,6 +2089,7 @@
   "A live socket, 503, wrong MIME, or non-200 cannot clear stopped approval."
   (dolist (case '((503 "application/json")
                   (200 "text/plain")
+                  (200 "text/event-stream evil")
                   (204 "text/event-stream")))
     (with-temp-buffer
       (emacsos-assist-web-mode)
@@ -2107,6 +2149,17 @@
                 (should (emacsos-assist-web-git--run-gated-p))))
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p response) (kill-buffer response)))))))
+
+(ert-deftest test-assist-web-git-sse-media-type-requires-exact-subtype ()
+  "Only the exact SSE subtype and optional UTF-8 charset admit a Run."
+  (should (emacsos-assist-web--sse-content-type-p "text/event-stream"))
+  (should (emacsos-assist-web--sse-content-type-p
+           "Text/Event-Stream; charset=UTF-8"))
+  (should (emacsos-assist-web--sse-content-type-p
+           "text/event-stream; charset=\"utf-8\""))
+  (dolist (type '("text/event-stream evil" "text/event-stream; evil=1"
+                  "text/event-streaming" "text/event-stream; charset=latin1"))
+    (should-not (emacsos-assist-web--sse-content-type-p type))))
 
 (ert-deftest test-assist-web-git-restored-approval-new-sse-exceeds-old-generation ()
   "A reopened stopped Run clears only after N+1 SSE admission and saved join."
@@ -2204,7 +2257,19 @@
                                    "drafts/thread-1.json"))
                            (saved-entry (car (alist-get 'queue draft))))
                       (should saved-entry)
-                      (should-not (alist-get 'approval_stopped saved-entry)))
+                      (should-not (alist-get 'approval_stopped saved-entry))
+                      (should (equal (alist-get 'observer_end_kind saved-entry)
+                                     "disconnect"))
+                      (should (= (alist-get 'observer_end_generation saved-entry)
+                                 (1+ ended-generation))))
+                    (with-temp-buffer
+                      (emacsos-assist-web-mode)
+                      (setq-local emacsos-assist-web--thread-id "thread-1")
+                      (emacsos-assist-web--restore-draft)
+                      (should-not (emacsos-assist-web-git--operator-repair-p))
+                      (should (emacsos-assist-web-git--run-gated-p))
+                      (should-not (plist-get (car emacsos-assist-web--queue)
+                                             :approval-stopped)))
                     (should-not emacsos-assist-web-git--current))))))
         (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response) (kill-buffer response))
