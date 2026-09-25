@@ -4559,6 +4559,13 @@ could release a pre-header SSE reservation later."
              (and (buffer-live-p response)
                   (emacsos-assist-web--run-store-unavailable-response-p response))
            ((error quit) nil))))
+    ;; Full URL completion wins over the 503 body deadline.  Its deferred
+    ;; classifier still lets the event filter dispatch a final terminal.
+    (when (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
+      (with-current-buffer target
+        (when-let ((timer (plist-get entry :stream-header-timer)))
+          (when (timerp timer) (cancel-timer timer))
+          (setf (plist-get entry :stream-header-timer) nil))))
     ;; url-http runs this from its final filter call.  Defer so that filter can
     ;; still dispatch a final terminal or error event first.
     (condition-case nil
@@ -4723,6 +4730,7 @@ this one transport.  No late callback can select a successor from globals."
                   (run-at-time emacsos-assist-web-request-timeout nil
                                (lambda ()
                                  (when (and (emacsos-assist-web--entry-current-in-buffer-p buffer entry epoch)
+                                            (plist-get entry :stream-header-timer)
                                             (buffer-live-p (plist-get entry :stream-response))
                                             (with-current-buffer (plist-get entry :stream-response)
                                               (or (not (and (boundp 'url-http-end-of-headers)
@@ -5251,6 +5259,10 @@ The start epoch proves freshness after any earlier definitive thread denial."
                            (progn
                              (emacsos-assist-web--entry-run-read-committed
                               current run-auth-start)
+                             (when (eq (plist-get current :observer-end-kind)
+                                       'operator-repair)
+                               (emacsos-assist-web-git--stop-reobserve
+                                current 'active-check))
                              (emacsos-assist-web-git--confirm-active-run
                               tid run-id run-auth-start current)
                              (condition-case nil
@@ -5289,6 +5301,10 @@ The start epoch proves freshness after any earlier definitive thread denial."
                            (setf (plist-get current :verified-outcome) status)
                            (emacsos-assist-web--entry-run-read-committed
                             current run-auth-start)
+                           (when (eq (plist-get current :observer-end-kind)
+                                     'operator-repair)
+                             (emacsos-assist-web-git--stop-reobserve
+                              current 'terminal-verified))
                            (emacsos-assist-web--start-next-observation t)
                            (emacsos-assist-web--pump-posts)
                            (emacsos-assist-web--reconcile-when-settled))
