@@ -5251,24 +5251,26 @@ The start epoch proves freshness after any earlier definitive thread denial."
                          (emacsos-assist-web--entry-status
                           current "local Run status could not be saved; restart to recover"))))
                     ((member status '("pending" "running" "transitioning" "awaiting_approval"))
-                     (let ((previous (emacsos-assist-web--entry-state current)))
+                     (let ((previous (emacsos-assist-web--entry-state current))
+                           (approval-stopped (plist-get current :approval-stopped)))
                        (setf (plist-get current :state) 'accepted-unobserved
                              (plist-get current :requires-reobserve) nil
+                             (plist-get current :approval-stopped) nil
                              (plist-get current :verified-outcome) nil)
                        (if (emacsos-assist-web--save-draft)
                            (progn
                              (emacsos-assist-web--entry-run-read-committed
                               current run-auth-start)
-                             (when (eq (plist-get current :observer-end-kind)
-                                       'operator-repair)
-                               (emacsos-assist-web-git--stop-reobserve
-                                current 'active-check t))
+                             (emacsos-assist-web-git--stop-reobserve
+                              current 'active-check t)
                              (emacsos-assist-web-git--confirm-active-run
-                              tid run-id run-auth-start current)
+                              tid run-id run-auth-start current approval-stopped)
                              (condition-case nil
                                  (emacsos-assist-web--start-observation current)
                                (error nil)
                                (quit nil))
+                             (emacsos-assist-web-git--finish-active-join
+                              current)
                              (when (and emacsos-assist-web--manual-recovery-active
                                         (not (and (process-live-p
                                                    (plist-get current :stream-process))
@@ -5283,7 +5285,9 @@ The start epoch proves freshness after any earlier definitive thread denial."
                                  (emacsos-assist-web--manual-recovery-rearm
                                   current "observation unavailable"))))
                          (setf (plist-get current :state) previous
-                               (plist-get current :requires-reobserve) t)
+                               (plist-get current :requires-reobserve) t
+                               (plist-get current :approval-stopped)
+                               approval-stopped)
                          (setq emacsos-assist-web--reconcile-recovery-paused t
                                emacsos-assist-web--manual-recovery-active nil)
                          (emacsos-assist-web-git--invalidate
@@ -5292,19 +5296,19 @@ The start epoch proves freshness after any earlier definitive thread denial."
                           current "local Run status could not be saved; restart to recover"))))
                     ((member status '("success" "error" "timeout" "interrupted"
                                              "cancelled"))
-                     (let ((previous (emacsos-assist-web--entry-state current)))
+                     (let ((previous (emacsos-assist-web--entry-state current))
+                           (approval-stopped (plist-get current :approval-stopped)))
                        (setf (plist-get current :state) 'terminal-unreconciled
                              (plist-get current :requires-reobserve) nil
+                             (plist-get current :approval-stopped) nil
                              (plist-get current :verified-outcome) nil)
                      (if (emacsos-assist-web--save-draft)
                          (progn
                            (setf (plist-get current :verified-outcome) status)
                            (emacsos-assist-web--entry-run-read-committed
                             current run-auth-start)
-                           (when (eq (plist-get current :observer-end-kind)
-                                     'operator-repair)
-                             (emacsos-assist-web-git--stop-reobserve
-                              current 'terminal-verified t))
+                           (emacsos-assist-web-git--stop-reobserve
+                            current 'terminal-verified t)
                            (emacsos-assist-web--start-next-observation t)
                            (emacsos-assist-web--pump-posts)
                            (emacsos-assist-web--reconcile-when-settled))
@@ -5312,6 +5316,8 @@ The start epoch proves freshness after any earlier definitive thread denial."
                          ;; Run.  The next explicit Refresh repeats its GET.
                          (setf (plist-get current :state) previous
                                (plist-get current :requires-reobserve) t
+                               (plist-get current :approval-stopped)
+                               approval-stopped
                                (plist-get current :verified-outcome) nil)
                          (setq emacsos-assist-web--reconcile-recovery-paused t
                                emacsos-assist-web--manual-recovery-active nil)

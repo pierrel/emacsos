@@ -78,7 +78,8 @@ one record; definitive thread denial preserves it for later reauthorization.")
 (defvar-local emacsos-assist-web-git--busy-check nil
   "One post-save active-Run thread check, owned by its exact receipt.")
 (defvar-local emacsos-assist-web-git--stopped-reobserve nil
-  "Local projection of a Run stopped by SSE end, approval, repair, or recheck.")
+  "Local projection of a Run stopped by SSE end, disconnect, approval, or repair.
+It also fences an exact active Run's T check and terminal Run's R2 commit.")
 
 (defun emacsos-assist-web-git--operator-repair-p ()
   "Return non-nil while an exact saved Run requires operator repair."
@@ -249,6 +250,12 @@ one record; definitive thread denial preserves it for later reauthorization.")
     "Approval pending; approve first, then Refresh")
    ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
     "Run recovery pending; Refresh")
+   ((eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+        'active-check)
+    "Run status saved; canonical thread check pending")
+   ((eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+        'terminal-verified)
+    "Run outcome saved; canonical reconciliation pending")
    ((emacsos-assist-web-git--run-gated-p)
     "Run status unavailable; Refresh thread")))
 
@@ -259,20 +266,20 @@ one record; definitive thread denial preserves it for later reauthorization.")
     (with-current-buffer thread
       (let ((latest emacsos-assist-web-git--metadata))
         (cond
-         ((or (eq emacsos-assist-web-git--denied 'run)
-              (and (not emacsos-assist-web-git--denied)
-                   (emacsos-assist-web-git--run-gated-p)))
+         ((eq emacsos-assist-web-git--denied 'run)
           "unavailable; exact Run status needs Refresh")
          (emacsos-assist-web-git--denied "unavailable; reauthorize and Retry")
          ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
           "cached / Run recovery pending")
+         (emacsos-assist-web-git--stopped-reobserve
+          (concat "cached / "
+                  (emacsos-assist-web-git--stopped-label)))
+         ((emacsos-assist-web-git--run-gated-p)
+          "unavailable; exact Run status needs Refresh")
          ((not (emacsos-assist-web-git--same-identity
                 latest (emacsos-assist-web-git-generation-metadata generation)))
           "stale")
          ((not (eq generation emacsos-assist-web-git--current)) "stale")
-         (emacsos-assist-web-git--stopped-reobserve
-          (concat "cached / "
-                  (emacsos-assist-web-git--stopped-label)))
          ((not (equal (emacsos-assist-web-git--request-key latest)
                       (emacsos-assist-web-git--request-key
                        (emacsos-assist-web-git-generation-metadata generation))))
@@ -402,9 +409,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
      ((emacsos-assist-web-git--operator-repair-p)
       (emacsos-assist-web-git--status-action "Operator repair"))
      ((emacsos-assist-web-git--approval-stopped-p)
-      (concat (emacsos-assist-web-git--run-refresh-link
-               "Approval pending; Refresh")
-              (emacsos-assist-web-git--details-link)))
+      (emacsos-assist-web-git--status-action "Approval needed"))
      ((and manual
            (bound-and-true-p emacsos-assist-web--manual-recovery-active)
            (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -1332,6 +1337,9 @@ The caller owns both the exact Run GET and subsequent canonical commit."
   "Make ENTRY's stopped Run KIND noncurrent until committed Run/T recheck.
 PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
   (let ((inhibit-quit t))
+    ;; A disconnect or a newer exact status supersedes any earlier T join.
+    ;; Its callback must not clear this newly established stop.
+    (setq emacsos-assist-web-git--busy-check nil)
     (setq emacsos-assist-web-git--stopped-reobserve
           (list :entry entry :tid emacsos-assist-web--thread-id
                 :run-id (plist-get entry :run-id)
@@ -1360,6 +1368,7 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
     ('disconnect "Observation lost; Refresh")
     ('operator-repair "Operator repair")
     ('active-check "Run canonical check pending")
+    ('terminal-verified "Run reconciling")
     ('approval "Approval pending; Refresh")
     (_ (cond
         ((and entry (not (plist-get entry :observer-end-checked))
@@ -1494,18 +1503,13 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
                            (setq emacsos-assist-web--snapshot snapshot)
                            (emacsos-assist-web-git--canonical-authorized
                             auth-start)
-                           (when (and (plist-get token :entry)
-                                      (emacsos-assist-web-git--stopped-reobserve-owner-p
-                                       (plist-get token :entry)))
-                             (setq emacsos-assist-web-git--stopped-reobserve nil)
-                             (when (equal emacsos-assist-web-git--unavailable
-                                          "Run changed; Refresh")
-                               (setq emacsos-assist-web-git--unavailable nil)))
                            (emacsos-assist-web-git--run-status-confirmed
                             tid run-id run-start)
-                           (setq emacsos-assist-web-git--busy-check nil)
                            (emacsos-assist-web-git--canonical-accepted
-                            metadata nil canonical-token))))
+                            metadata nil canonical-token)
+                           (setf (plist-get token :t-accepted) t)
+                           (emacsos-assist-web-git--finish-active-join
+                            (plist-get token :entry)))))
                    ((error quit)
                     (emacsos-assist-web-git--invalidate
                      "Run status or Git projection unavailable; Retry")
@@ -1514,9 +1518,10 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
                (emacsos-assist-web-git--update-headers)))))))))
 
 (defun emacsos-assist-web-git--confirm-active-run
-    (tid run-id start-epoch &optional entry)
+    (tid run-id start-epoch &optional entry approval-resume)
   "After a durable active RUN-ID read, reconcile one nonready TID snapshot.
-ENTRY is the exact queue owner, or nil for a legacy accepted receipt."
+ENTRY is the exact queue owner, or nil for a legacy accepted receipt.
+APPROVAL-RESUME also requires a new live observer before opening Git."
   (when (or (emacsos-assist-web-git--run-record tid run-id)
             (and entry
                  (emacsos-assist-web-git--stopped-reobserve-owner-p entry)))
@@ -1527,18 +1532,43 @@ ENTRY is the exact queue owner, or nil for a legacy accepted receipt."
                        :send-generation emacsos-assist-web--send-generation
                        :terminal-generation
                        emacsos-assist-web--legacy-terminal-generation
+                       :approval-resume approval-resume :t-accepted nil
                        :stage 'initial :post-barrier nil :candidate-key nil
                        :in-flight nil :serial 0)))
       (setq emacsos-assist-web-git--busy-check token)
       (emacsos-assist-web-git--busy-check-start token))))
 
+(defun emacsos-assist-web-git--finish-active-join (entry)
+  "Release ENTRY's active Run fence after T acceptance and required SSE attach."
+  (let ((token emacsos-assist-web-git--busy-check))
+    (when (and token (eq entry (plist-get token :entry))
+               (plist-get token :t-accepted)
+               (emacsos-assist-web-git--busy-check-owner-p token)
+               (or (not (plist-get token :approval-resume))
+                   (and (eq entry emacsos-assist-web--stream-entry)
+                        (process-live-p (plist-get entry :stream-process))
+                        (buffer-live-p (plist-get entry :stream-response))
+                        (> (or (plist-get entry :stream-generation) 0)
+                           (or (plist-get entry :observer-end-generation) 0)))))
+      (let ((inhibit-quit t))
+        (when (emacsos-assist-web-git--stopped-reobserve-owner-p entry)
+          (setq emacsos-assist-web-git--stopped-reobserve nil))
+        (setq emacsos-assist-web-git--busy-check nil)
+        (when (equal emacsos-assist-web-git--unavailable
+                     "Run canonical check pending")
+          (setq emacsos-assist-web-git--unavailable nil)))
+      (condition-case nil (emacsos-assist-web-git--update-headers)
+        ((error quit) nil)))))
+
 (defun emacsos-assist-web-git--retry-busy-check ()
   "Retry or join this active exact Run's post-save T check, if any."
   (when-let ((token emacsos-assist-web-git--busy-check))
     (when (emacsos-assist-web-git--busy-check-owner-p token)
-      (if (plist-get token :in-flight)
+      (if (plist-get token :t-accepted)
+          (message "Run observer reconnecting; Refresh retries exact status")
+        (if (plist-get token :in-flight)
           (message "Run canonical check in progress; result will appear here")
-        (emacsos-assist-web-git--busy-check-start token))
+          (emacsos-assist-web-git--busy-check-start token)))
       t)))
 
 (defun emacsos-assist-web-git--problem-text (problem)

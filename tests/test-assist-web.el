@@ -6759,7 +6759,7 @@
   "Reloaded accepted work verifies its exact Run before opening an SSE."
   (let ((emacsos--assist-active-surface nil)
         (emacsos-assist-web--requests nil)
-        get-callback observed)
+        get-callback observed thread-check)
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1")
@@ -6774,8 +6774,12 @@
                 ((symbol-function 'emacsos-assist-web--request)
                  (lambda (method path _payload callback &rest _)
                    (should (equal method "GET"))
-                   (should (equal path "threads/thread-1/runs/run-a"))
-                   (setq get-callback callback)))
+                   (pcase path
+                     ("threads/thread-1/runs/run-a"
+                      (setq get-callback callback))
+                     ("threads/thread-1"
+                      (setq thread-check callback))
+                     (_ (ert-fail path)))))
                 ((symbol-function 'emacsos-assist-web--observe-entry)
                  (lambda (_entry) (setq observed t))))
         (emacsos-assist-web--restore-draft)
@@ -6784,6 +6788,7 @@
         (funcall get-callback
                  '((id . "run-a") (thread_id . "thread-1")
                    (status . "running")) nil)
+        (should thread-check)
         (should observed)))))
 
 (ert-deftest test-assist-web-stale-reobserve-cannot-own-a-replaced-entry ()
@@ -6815,7 +6820,7 @@
   "Confirmed DELETE wins after Refresh starts a new exact observer."
   (let ((emacsos-assist-web--requests nil)
         (emacsos--assist-active-surface nil)
-        get-callback delete-callback observed reconciled)
+        get-callback delete-callback observed reconciled thread-check)
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1"
@@ -6831,8 +6836,12 @@
                    (lambda (method path _payload callback &rest _)
                      (pcase method
                        ("GET"
-                        (should (equal path "threads/thread-1/runs/run-a"))
-                        (setq get-callback callback))
+                        (pcase path
+                          ("threads/thread-1/runs/run-a"
+                           (setq get-callback callback))
+                          ("threads/thread-1"
+                           (setq thread-check callback))
+                          (_ (ert-fail path))))
                        ("DELETE"
                         (should (equal path "threads/thread-1/runs/run-a"))
                         (setq delete-callback callback)))))
@@ -6851,6 +6860,7 @@
           (funcall get-callback
                    '((id . "run-a") (thread_id . "thread-1")
                      (status . "running")) nil)
+          (should thread-check)
           (should observed)
           (should (eq emacsos--assist-active-surface 'web))
           (let ((current (emacsos-assist-web--queue-entry
