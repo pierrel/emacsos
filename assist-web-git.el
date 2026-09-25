@@ -78,7 +78,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
 (defvar-local emacsos-assist-web-git--busy-check nil
   "One post-save active-Run thread check, owned by its exact receipt.")
 (defvar-local emacsos-assist-web-git--stopped-reobserve nil
-  "Local projection of a Run stopped by SSE end, approval, disconnect, or repair.")
+  "Local projection of a Run stopped by SSE end, approval, repair, or recheck.")
 
 (defun emacsos-assist-web-git--operator-repair-p ()
   "Return non-nil while an exact saved Run requires operator repair."
@@ -89,6 +89,15 @@ one record; definitive thread denial preserves it for later reauthorization.")
                            'operator-repair)
                        (plist-get entry :requires-reobserve)
                        (not (plist-get entry :approval-stopped))))
+                (bound-and-true-p emacsos-assist-web--queue))))
+
+(defun emacsos-assist-web-git--approval-stopped-p ()
+  "Return non-nil for an exact Run durably stopped awaiting approval."
+  (or (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+          'approval)
+      (seq-some (lambda (entry)
+                  (and (plist-get entry :approval-stopped)
+                       (plist-get entry :requires-reobserve)))
                 (bound-and-true-p emacsos-assist-web--queue))))
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
@@ -214,8 +223,34 @@ one record; definitive thread denial preserves it for later reauthorization.")
             (with-current-buffer buffer
               (and (equal emacsos-assist-web--thread-id tid)
                    (or emacsos-assist-web-git--run-outcome-uncertain
-                       (emacsos-assist-web-git--operator-repair-p)))))
+                       emacsos-assist-web-git--stopped-reobserve
+                       (seq-some (lambda (entry)
+                                   (and (plist-get entry :requires-reobserve)
+                                        (memq (plist-get entry :state)
+                                              '(accepted-unobserved
+                                                terminal-unreconciled))))
+                                 (bound-and-true-p emacsos-assist-web--queue))))))
           (buffer-list)))))
+
+(defun emacsos-assist-web-git--gate-reason ()
+  "Return the strongest current refusal for a fresh Git action, or nil."
+  (cond
+   ((bound-and-true-p emacsos-assist-web--reconcile-recovery-paused)
+    "local recovery could not be saved; restart to recover")
+   ((eq emacsos-assist-web-git--denied t)
+    (if (eql emacsos-assist-web-git--thread-denial-status 404)
+        "Thread unavailable; reopen from the thread list"
+      "Thread Git access denied; reauthorize and Retry"))
+   ((eq emacsos-assist-web-git--denied 'run)
+    "Run status unavailable; Refresh thread")
+   ((emacsos-assist-web-git--operator-repair-p)
+    "Operator repair required before Refresh")
+   ((emacsos-assist-web-git--approval-stopped-p)
+    "Approval pending; approve first, then Refresh")
+   ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
+    "Run recovery pending; Refresh")
+   ((emacsos-assist-web-git--run-gated-p)
+    "Run status unavailable; Refresh thread")))
 
 (defun emacsos-assist-web-git--view-state (generation thread)
   "Return live state for GENERATION as seen from THREAD."
@@ -366,6 +401,10 @@ one record; definitive thread denial preserves it for later reauthorization.")
            "Thread unavailable" "Reauthorize")))
      ((emacsos-assist-web-git--operator-repair-p)
       (emacsos-assist-web-git--status-action "Operator repair"))
+     ((emacsos-assist-web-git--approval-stopped-p)
+      (concat (emacsos-assist-web-git--run-refresh-link
+               "Approval pending; Refresh")
+              (emacsos-assist-web-git--details-link)))
      ((and manual
            (bound-and-true-p emacsos-assist-web--manual-recovery-active)
            (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -908,6 +947,8 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                    "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are noncurrent.")
                   ((emacsos-assist-web-git--operator-repair-p)
                    "The exact Run observer reported a server-side failure. Ask the operator to repair Assist first. Then Refresh to check this Run. Existing Git views are noncurrent.")
+                  ((emacsos-assist-web-git--approval-stopped-p)
+                   "The exact Run is awaiting approval. Approve it first, then Refresh to check its status. Existing Git views are noncurrent; no observer reattaches automatically.")
                   ((and (bound-and-true-p
                          emacsos-assist-web--manual-recovery-active)
                         (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -1286,13 +1327,22 @@ The caller owns both the exact Run GET and subsequent canonical commit."
           (emacsos-assist-web-git--update-headers)
         ((error quit) nil)))))
 
-(defun emacsos-assist-web-git--stop-reobserve (entry &optional kind)
-  "Make ENTRY's stopped Run KIND noncurrent until committed Run/T recheck."
+(defun emacsos-assist-web-git--stop-reobserve
+    (entry &optional kind preserve-generation)
+  "Make ENTRY's stopped Run KIND noncurrent until committed Run/T recheck.
+PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
   (let ((inhibit-quit t))
     (setq emacsos-assist-web-git--stopped-reobserve
           (list :entry entry :tid emacsos-assist-web--thread-id
                 :run-id (plist-get entry :run-id)
-                :generation (plist-get entry :reobserve-generation)
+                :generation (if preserve-generation
+                                (if (eq entry
+                                        (plist-get emacsos-assist-web-git--stopped-reobserve
+                                                   :entry))
+                                    (plist-get emacsos-assist-web-git--stopped-reobserve
+                                               :generation)
+                                  (1- (or (plist-get entry :reobserve-generation) 0)))
+                              (plist-get entry :reobserve-generation))
                 :kind kind))
     (cl-incf emacsos-assist-web-git--epoch)
     (when emacsos-assist-web-git--current
@@ -1984,19 +2034,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
   (unless (and emacsos-assist-web-git-thread-mode
                emacsos-assist-web--thread-id)
     (user-error "Git views require a canonical Assist thread"))
-  (when (bound-and-true-p emacsos-assist-web--reconcile-recovery-paused)
-    (user-error "local recovery could not be saved; restart to recover"))
-  (when (bound-and-true-p emacsos-assist-web--manual-recovery-required)
-    (user-error "Run recovery pending; Refresh"))
-  (when (or emacsos-assist-web-git--denied
-            (emacsos-assist-web-git--run-gated-p))
-    (user-error "%s"
-                (cond
-                 ((eq emacsos-assist-web-git--denied t)
-                  "Thread Git access denied; reauthorize or reopen")
-                 ((emacsos-assist-web-git--operator-repair-p)
-                  "Operator repair required before Refresh")
-                 (t "Run status unavailable; Refresh thread"))))
+  (when-let ((reason (emacsos-assist-web-git--gate-reason)))
+    (user-error "%s" reason))
   (let* ((thread (current-buffer))
          (window (selected-window))
          (serial (1+ (or (window-parameter window 'assist-web-git-intent) 0)))
@@ -2097,21 +2136,9 @@ interpret repository-local code."
          (safety-epoch (with-current-buffer thread
                          emacsos-assist-web-git--epoch)))
     (when (emacsos-assist-web-git--intent-live-p intent)
-      (when (with-current-buffer thread
-              emacsos-assist-web--reconcile-recovery-paused)
-        (user-error "local recovery could not be saved; restart to recover"))
-      (when (with-current-buffer thread
-              emacsos-assist-web--manual-recovery-required)
-        (user-error "Run recovery pending; Refresh"))
-      (when (with-current-buffer thread
-              (or emacsos-assist-web-git--denied
-                  (emacsos-assist-web-git--run-gated-p)))
-        (user-error "%s"
-                    (if (with-current-buffer thread
-                          (or (eq emacsos-assist-web-git--denied 'run)
-                              (emacsos-assist-web-git--run-gated-p)))
-                        "Run status unavailable; Refresh thread"
-                      "Thread Git access denied; reauthorize and Retry")))
+      (when-let ((reason (with-current-buffer thread
+                          (emacsos-assist-web-git--gate-reason))))
+        (user-error "%s" reason))
       (when (with-current-buffer thread emacsos-assist-web-git--pending)
         (user-error "Thread Git repository change pending; Retry"))
       (when (with-current-buffer thread emacsos-assist-web-git--r2-waiting)

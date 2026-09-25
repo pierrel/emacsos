@@ -1795,6 +1795,155 @@
                    (substring-no-properties
                     (emacsos-assist-web-git--thread-header)))))))))
 
+(ert-deftest test-assist-web-git-repaired-running-run-starts-t-check-and-stays-gated ()
+  "A first exact running read retains its older stop floor through T join."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'accepted-unobserved "key-a"))
+          run-callback (thread-gets 0))
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :observer-end-kind) 'operator-repair
+            (plist-get entry :observer-end-generation) 1
+            (plist-get entry :requires-reobserve) t)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue (list entry))
+      (emacsos-assist-web-git--stop-reobserve entry 'operator-repair)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method path _payload done &rest _)
+                   (if (string-match-p "/runs/" path)
+                       (setq run-callback done)
+                     (cl-incf thread-gets))))
+                ((symbol-function 'emacsos-assist-web--start-observation)
+                 #'ignore))
+        (emacsos-assist-web--reobserve-entry entry)
+        (funcall run-callback
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "running")) nil)
+        (should (= thread-gets 1))
+        (should (emacsos-assist-web-git--run-gated-p))
+        (should (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+                    'active-check))
+        (emacsos-assist-web-git-thread-mode 1)
+        (should-error (emacsos-assist-web-git--command 'files)
+                      :type 'user-error)))))
+
+(ert-deftest test-assist-web-git-repaired-terminal-run-stays-gated-until-r2 ()
+  "The old 503 is superseded, but terminal R cannot open Git before R2."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'accepted-unobserved "key-a"))
+          run-callback)
+      (setf (plist-get entry :run-id) "run-a"
+            (plist-get entry :observer-end-kind) 'operator-repair
+            (plist-get entry :observer-end-generation) 1
+            (plist-get entry :requires-reobserve) t)
+      (setq-local emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue-model-p t
+                  emacsos-assist-web--queue (list entry))
+      (emacsos-assist-web-git--stop-reobserve entry 'operator-repair)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload done &rest _)
+                   (setq run-callback done)))
+                ((symbol-function 'emacsos-assist-web--start-next-observation)
+                 #'ignore)
+                ((symbol-function 'emacsos-assist-web--pump-posts)
+                 #'ignore)
+                ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
+                 #'ignore))
+        (emacsos-assist-web--reobserve-entry entry)
+        (funcall run-callback
+                 '((id . "run-a") (thread_id . "thread-1")
+                   (status . "success")) nil)
+        (should (emacsos-assist-web-git--run-gated-p))
+        (should (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+                    'terminal-verified))
+        (emacsos-assist-web-git-thread-mode 1)
+        (should-error (emacsos-assist-web-git--command 'diff)
+                      :type 'user-error)))))
+
+(ert-deftest test-assist-web-git-restored-approval-receipt-gates-git ()
+  "A saved accepted approval still fences Git after its volatile stop dies."
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-web-approval-gate-" t))
+        (source (generate-new-buffer " *approval-source*"))
+        (reopened (generate-new-buffer " *approval-reopened*"))
+        (requests 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (let ((entry (emacsos-assist-web--entry
+                          "A" 'accepted-unobserved
+                          "emacsos-0123456789abcdef0123456789abcdef")))
+              (setf (plist-get entry :run-id) "run-a"
+                    (plist-get entry :observer-end-kind) 'operator-repair
+                    (plist-get entry :observer-end-generation) 1
+                    (plist-get entry :approval-stopped) t
+                    (plist-get entry :requires-reobserve) t)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web--queue-model-p t
+                          emacsos-assist-web--queue (list entry))
+              (should (emacsos-assist-web--save-draft))))
+          (kill-buffer source)
+          (with-current-buffer reopened
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (cl-incf requests))))
+              (emacsos-assist-web--restore-draft)
+              (should (= requests 0))
+              (should-not emacsos-assist-web-git--stopped-reobserve)
+              (should (emacsos-assist-web-git--run-gated-p))
+              (should (string-match-p
+                       "Approval pending"
+                       (substring-no-properties
+                        (emacsos-assist-web-git--thread-header))))
+              (emacsos-assist-web-git-thread-mode 1)
+              (should-error (emacsos-assist-web-git--command 'files)
+                            :type 'user-error))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p reopened) (kill-buffer reopened))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-git-delayed-open-uses-current-denial-before-repair ()
+  "A queued Git action cannot open through a later, stronger T denial."
+  (let* ((thread (generate-new-buffer " *git-gate-thread*"))
+         (window (selected-window))
+         (original (window-buffer window))
+         (serial (1+ (or (window-parameter window 'assist-web-git-intent) 0)))
+         (intent (list :action 'diff :buffer thread :window window
+                       :serial serial))
+         (generation (make-emacsos-assist-web-git-generation
+                      :path default-directory :oid test-assist-web-git--head)))
+    (unwind-protect
+        (progn
+          (set-window-buffer window thread)
+          (set-window-parameter window 'assist-web-git-intent serial)
+          (with-current-buffer thread
+            (emacsos-assist-web-mode)
+            (let ((entry (emacsos-assist-web--entry
+                          "A" 'accepted-unobserved "key-a")))
+              (setf (plist-get entry :run-id) "run-a"
+                    (plist-get entry :observer-end-kind) 'operator-repair
+                    (plist-get entry :requires-reobserve) t)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web--queue (list entry))
+              (emacsos-assist-web-git--canonical-denied 404)))
+          (let ((message (condition-case err
+                             (progn (emacsos-assist-web-git--open
+                                     intent generation)
+                                    nil)
+                           (user-error (error-message-string err)))))
+            (should (string-match-p "Thread unavailable" message))))
+      (set-window-buffer window original)
+      (set-window-parameter window 'assist-web-git-intent nil)
+      (when (buffer-live-p thread) (kill-buffer thread)))))
+
 (ert-deftest test-assist-web-git-sse-503-headers-have-a-body-deadline ()
   "A stalled 503 body cannot occupy a queue observer indefinitely."
   (with-temp-buffer

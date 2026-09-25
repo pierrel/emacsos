@@ -5262,7 +5262,7 @@ The start epoch proves freshness after any earlier definitive thread denial."
                              (when (eq (plist-get current :observer-end-kind)
                                        'operator-repair)
                                (emacsos-assist-web-git--stop-reobserve
-                                current 'active-check))
+                                current 'active-check t))
                              (emacsos-assist-web-git--confirm-active-run
                               tid run-id run-auth-start current)
                              (condition-case nil
@@ -5304,7 +5304,7 @@ The start epoch proves freshness after any earlier definitive thread denial."
                            (when (eq (plist-get current :observer-end-kind)
                                      'operator-repair)
                              (emacsos-assist-web-git--stop-reobserve
-                              current 'terminal-verified))
+                              current 'terminal-verified t))
                            (emacsos-assist-web--start-next-observation t)
                            (emacsos-assist-web--pump-posts)
                            (emacsos-assist-web--reconcile-when-settled))
