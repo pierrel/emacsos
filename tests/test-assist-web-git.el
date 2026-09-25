@@ -1557,7 +1557,7 @@
   (save-window-excursion
     (with-temp-buffer
       (emacsos-assist-web-mode)
-      (dolist (case '((disconnect "Observation lost; Refresh" "outcome was known")
+      (dolist (case '((disconnect "Observation unavailable; Refresh" "outcome was known")
                       (approval "Approval needed" "Approve this Run")
                       (terminal-sse "Run changed; Refresh" "stream ended")))
         (setq-local emacsos-assist-web-git--stopped-reobserve
@@ -2090,6 +2090,10 @@
 (ert-deftest test-assist-web-git-approval-join-rejects-unadmitted-sse ()
   "A live socket, 503, wrong MIME, or non-200 cannot clear stopped approval."
   (dolist (case '((503 "application/json")
+                  (401 "text/plain")
+                  (403 "text/plain")
+                  (404 "text/plain")
+                  (429 "text/plain")
                   (200 "text/plain")
                   (200 "text/event-stream evil")
                   (204 "text/event-stream")))
@@ -2127,7 +2131,9 @@
                 (setq-local url-http-response-status (car case)
                             url-http-end-of-headers (copy-marker (point-min))
                             url-http-content-type (cadr case)))
-              (cl-letf (((symbol-function 'emacsos-assist-web--request)
+              (cl-letf (((symbol-function 'run-at-time)
+                         (lambda (&rest _) nil))
+                        ((symbol-function 'emacsos-assist-web--request)
                          (lambda (_method _path _payload done &rest _)
                            (setq thread-check done)))
                         ((symbol-function 'emacsos-assist-web--save-draft)
@@ -2153,6 +2159,16 @@
                   (should (eq (plist-get entry :observer-end-kind)
                               'operator-repair))
                   (should (string-match-p "Operator repair"
+                                          (emacsos-assist-web-git--thread-header))))
+                (when (memq (car case) '(401 403 404))
+                  (should (eq emacsos-assist-web-git--denied 'run))
+                  (should (eq (plist-get entry :observer-end-kind) 'disconnect))
+                  (should (string-match-p "Run status; Refresh"
+                                          (emacsos-assist-web-git--thread-header))))
+                (when (eql (car case) 429)
+                  (should-not emacsos-assist-web-git--denied)
+                  (should (eq (plist-get entry :observer-end-kind) 'disconnect))
+                  (should (string-match-p "Observation unavailable"
                                           (emacsos-assist-web-git--thread-header))))))
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p response) (kill-buffer response)))))))
@@ -2816,6 +2832,92 @@
         ;; the stopped Run's Git opening gate disappear on its own.
         (should emacsos-assist-web-git--stopped-reobserve)
         (should (emacsos-assist-web-git--run-gated-p))))))
+
+(ert-deftest test-assist-web-git-stopped-run-fences-same-thread-peer-after-owner-kill ()
+  "A durable stopped Run remains a same-T gate while its peer is live."
+  (let ((source (generate-new-buffer " *stopped-source*"))
+        (peer (generate-new-buffer " *stopped-peer*"))
+        (generation (make-emacsos-assist-web-git-generation :state 'current)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (with-current-buffer peer
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git-thread-mode t
+                          emacsos-assist-web-git--current generation))
+            (let ((entry (emacsos-assist-web--entry "A" 'accepted-unobserved
+                                                    "key-a")))
+              (setf (plist-get entry :run-id) "run-a")
+              (emacsos-assist-web-git--stop-reobserve entry 'disconnect)))
+          (with-current-buffer peer
+            (should (eq (emacsos-assist-web-git-generation-state generation)
+                        'cached))
+            (should (emacsos-assist-web-git--run-gated-p))
+            (should-error (emacsos-assist-web-git--command 'files)
+                          :type 'user-error))
+          (kill-buffer source)
+          (with-current-buffer peer
+            (should (emacsos-assist-web-git--run-gated-p))
+            (should (emacsos-assist-web-git--shared-stop
+                     "thread-1" "run-a"))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p peer) (kill-buffer peer)))))
+
+(ert-deftest test-assist-web-git-stopped-run-clear-keeps-another-run-gate ()
+  "Durable A retirement must not discharge independent stopped Run B."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq-local emacsos-assist-web--thread-id "thread-1")
+    (let ((a (emacsos-assist-web--entry "A" 'terminal-unreconciled "key-a"))
+          (b (emacsos-assist-web--entry "B" 'accepted-unobserved "key-b")))
+      (setf (plist-get a :run-id) "run-a"
+            (plist-get b :run-id) "run-b")
+      (emacsos-assist-web-git--stop-reobserve a 'terminal-verified)
+      (emacsos-assist-web-git--stop-reobserve b 'approval)
+      (should (emacsos-assist-web-git--shared-stop "thread-1" "run-a"))
+      (should (emacsos-assist-web-git--shared-stop "thread-1" "run-b"))
+      (emacsos-assist-web-git--retire-stopped-reobserve "thread-1" "run-a")
+      (should-not (emacsos-assist-web-git--shared-stop "thread-1" "run-a"))
+      (should (emacsos-assist-web-git--shared-stop "thread-1" "run-b"))
+      (should (emacsos-assist-web-git--run-gated-p)))))
+
+(ert-deftest test-assist-web-git-shared-stop-fences-peer-before-fallible-ui ()
+  "A source header failure cannot leave an existing or newly opened peer current."
+  (let ((source (generate-new-buffer " *stop-header-source*"))
+        (peer (generate-new-buffer " *stop-header-peer*"))
+        (late (generate-new-buffer " *stop-header-late*"))
+        (old (make-emacsos-assist-web-git-generation :state 'current))
+        (later (make-emacsos-assist-web-git-generation :state 'current)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (with-current-buffer peer
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--current old))
+            (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a")))
+              (setf (plist-get entry :run-id) "run-a")
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--update-headers)
+                         (lambda () (signal 'quit nil))))
+                (emacsos-assist-web-git--stop-reobserve entry 'disconnect))))
+          (with-current-buffer peer
+            (should (eq (emacsos-assist-web-git-generation-state old)
+                        'cached))
+            (should (emacsos-assist-web-git--run-gated-p)))
+          (with-current-buffer late
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--current later)
+            (should (emacsos-assist-web-git--run-gated-p))
+            (should (eq (emacsos-assist-web-git-generation-state later)
+                        'cached))))
+      (dolist (buffer (list source peer late))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest test-assist-web-git-run-denial-fences-same-thread-destination ()
   "A source exact Run denial makes another live T buffer's Git noncurrent."

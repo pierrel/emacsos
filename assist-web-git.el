@@ -81,6 +81,55 @@ one record; definitive thread denial preserves it for later reauthorization.")
   "Local projection of a Run stopped by SSE end, disconnect, approval, or repair.
 It also fences an exact active Run's T check and terminal Run's R2 commit.")
 
+(defvar emacsos-assist-web-git--thread-safety (make-hash-table :test 'equal)
+  "In-process safety records keyed by exact authenticated thread ID.")
+
+(defun emacsos-assist-web-git--thread-safety-record (tid &optional create)
+  "Return TID's live shared safety record, creating it when CREATE is non-nil.
+When every buffer known to a record has died, a later buffer is a cold open;
+its durable receipts must establish safety again before Git can become current."
+  (when tid
+    (let ((record (gethash tid emacsos-assist-web-git--thread-safety)))
+      (when (and record
+                 (not (seq-some #'buffer-live-p (plist-get record :buffers))))
+        (remhash tid emacsos-assist-web-git--thread-safety)
+        (setq record nil))
+      (when (and create (not record))
+        (setq record (list :buffers nil :stops nil))
+        (puthash tid record emacsos-assist-web-git--thread-safety))
+      (when record
+        (let ((buffers (plist-get record :buffers)))
+          (dolist (buffer (buffer-list))
+            (when (and (buffer-live-p buffer)
+                       (equal (buffer-local-value
+                               'emacsos-assist-web--thread-id buffer) tid)
+                       (not (memq buffer buffers)))
+              (push buffer buffers)
+              (when (plist-get record :stops)
+                (with-current-buffer buffer
+                  (cl-incf emacsos-assist-web-git--epoch)
+                  (when emacsos-assist-web-git--current
+                    (setf (emacsos-assist-web-git-generation-state
+                           emacsos-assist-web-git--current) 'cached))))))
+          (setf (plist-get record :buffers) buffers)))
+      record)))
+
+(defun emacsos-assist-web-git--shared-stop (tid run-id)
+  "Return the in-process stopped owner of exact TID/RUN-ID, if any."
+  (seq-find (lambda (stop) (equal (plist-get stop :run-id) run-id))
+            (plist-get (emacsos-assist-web-git--thread-safety-record tid)
+                       :stops)))
+
+(defun emacsos-assist-web-git--shared-stop-clear (tid run-id entry)
+  "Clear only ENTRY's durably resolved exact TID/RUN-ID stop."
+  (when-let* ((record (emacsos-assist-web-git--thread-safety-record tid))
+              (stop (emacsos-assist-web-git--shared-stop tid run-id)))
+    (when (and (eq (plist-get stop :entry) entry)
+               (eq (plist-get stop :owner) (current-buffer))
+               (equal (plist-get stop :key) (plist-get entry :key)))
+      (setf (plist-get record :stops)
+            (delq stop (plist-get record :stops))))))
+
 (defun emacsos-assist-web-git--operator-repair-p ()
   "Return non-nil while an exact saved Run requires operator repair."
   (or (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
@@ -97,8 +146,7 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
 Its durable flag remains set during a later active Run/T/observer join."
   (or (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
           'approval)
-      (and (not (eq (plist-get emacsos-assist-web-git--stopped-reobserve
-                               :kind) 'active-check))
+      (and (not emacsos-assist-web-git--stopped-reobserve)
            (seq-some (lambda (entry)
                        (and (plist-get entry :approval-stopped)
                             (plist-get entry :requires-reobserve)))
@@ -222,7 +270,9 @@ Its durable flag remains set during a later active Run/T/observer join."
   "Whether any live buffer for this canonical thread holds an exact Run gate."
   (let ((tid emacsos-assist-web--thread-id))
     (and tid
-         (seq-some
+         (or (plist-get (emacsos-assist-web-git--thread-safety-record tid)
+                        :stops)
+             (seq-some
           (lambda (buffer)
             (with-current-buffer buffer
               (and (equal emacsos-assist-web--thread-id tid)
@@ -234,7 +284,7 @@ Its durable flag remains set during a later active Run/T/observer join."
                                               '(accepted-unobserved
                                                 terminal-unreconciled))))
                                  (bound-and-true-p emacsos-assist-web--queue))))))
-          (buffer-list)))))
+          (buffer-list))))))
 
 (defun emacsos-assist-web-git--gate-reason ()
   "Return the strongest current refusal for a fresh Git action, or nil."
@@ -984,7 +1034,7 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                    (let ((entry (plist-get emacsos-assist-web-git--stopped-reobserve
                                            :entry)))
                      (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
-                     ('disconnect "The observation disconnected before the exact Run outcome was known. The old Git view is noncurrent. Refresh to check this Run; a running Run may attach a new observer.")
+                     ('disconnect "The Run observation ended or could not connect before its exact outcome was known. The old Git view is noncurrent. Refresh to check this Run; a running Run may attach a new observer.")
                      ('operator-repair "The Run observer reported a server-side failure. Ask the operator to repair Assist, then Refresh to check this exact Run. The old Git view is noncurrent.")
                      ('active-check
                       (if (plist-get emacsos-assist-web-git--busy-check :t-accepted)
@@ -1343,6 +1393,9 @@ The caller owns both the exact Run GET and subsequent canonical commit."
 (defun emacsos-assist-web-git--retire-stopped-reobserve (tid run-id)
   "Clear a stopped observer only after exact TID/RUN-ID durable retirement."
   (let ((inhibit-quit t))
+    (when-let ((stop (emacsos-assist-web-git--shared-stop tid run-id)))
+      (emacsos-assist-web-git--shared-stop-clear
+       tid run-id (plist-get stop :entry)))
     (when (and (equal tid (plist-get emacsos-assist-web-git--stopped-reobserve :tid))
                (equal run-id
                       (plist-get emacsos-assist-web-git--stopped-reobserve :run-id)))
@@ -1371,6 +1424,26 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
                                   (1- (or (plist-get entry :reobserve-generation) 0)))
                               (plist-get entry :reobserve-generation))
                 :kind kind))
+    (when-let* ((tid emacsos-assist-web--thread-id)
+                (run-id (plist-get entry :run-id))
+                (record (emacsos-assist-web-git--thread-safety-record
+                         tid t)))
+      (setf (plist-get record :stops)
+            (cons (list :run-id run-id :entry entry :owner (current-buffer)
+                        :key (plist-get entry :key))
+                  (seq-remove (lambda (stop)
+                                (equal (plist-get stop :run-id) run-id))
+                              (plist-get record :stops))))
+      ;; The shared record is authoritative even if one peer's presentation
+      ;; later signals.  Every pre-stop final/fetch sees its old local epoch.
+      (dolist (buffer (plist-get record :buffers))
+        (when (and (buffer-live-p buffer)
+                   (not (eq buffer (current-buffer))))
+          (with-current-buffer buffer
+            (cl-incf emacsos-assist-web-git--epoch)
+            (when emacsos-assist-web-git--current
+              (setf (emacsos-assist-web-git-generation-state
+                     emacsos-assist-web-git--current) 'cached))))))
     (cl-incf emacsos-assist-web-git--epoch)
     (when emacsos-assist-web-git--current
       (setf (emacsos-assist-web-git-generation-state
@@ -1384,7 +1457,7 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
   "Return the short, evidence-specific stopped-observer label."
   (let ((entry (plist-get emacsos-assist-web-git--stopped-reobserve :entry)))
     (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
-    ('disconnect "Observation lost; Refresh")
+    ('disconnect "Observation unavailable; Refresh")
     ('operator-repair "Operator repair")
     ('active-check
      (if (plist-get emacsos-assist-web-git--busy-check :t-accepted)
@@ -1611,6 +1684,8 @@ is durably superseded before the opening gate is removed."
                 (when (and entry
                            (emacsos-assist-web-git--stopped-reobserve-owner-p
                             entry))
+                  (emacsos-assist-web-git--shared-stop-clear
+                   (plist-get token :tid) (plist-get token :run-id) entry)
                   (setq emacsos-assist-web-git--stopped-reobserve nil))
                 (setq emacsos-assist-web-git--busy-check nil)
                 (when (equal emacsos-assist-web-git--unavailable

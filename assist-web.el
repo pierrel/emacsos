@@ -4633,8 +4633,23 @@ this one transport.  No late callback can select a successor from globals."
                 ;; Keep the sanitized 503 body until its URL completion
                 ;; callback classifies durable-observation unavailability.
                 (unless (eql url-http-response-status 503)
-                  (emacsos-assist-web--interrupt-entry-in-buffer
-                   target entry epoch "Assist observation was rejected"))
+                  (let ((http-status url-http-response-status))
+                    (when (memq http-status '(401 403 404))
+                      ;; An SSE endpoint denial does not establish whether T
+                      ;; or only this Run was denied.  Fence exact R, then use
+                      ;; its bounded auth-only canonical T distinction.
+                      (condition-case nil
+                          (with-current-buffer target
+                            (emacsos-assist-web-git--run-access-uncertain
+                             http-status (plist-get entry :run-id)))
+                        ((error quit) nil)))
+                    (emacsos-assist-web--interrupt-entry-in-buffer
+                     target entry epoch
+                     (cond ((memq http-status '(401 403 404))
+                            "Run observer access unavailable")
+                           ((eql http-status 429)
+                            "observation unavailable; Refresh")
+                           (t "Assist observation was rejected")))))
               (with-current-buffer target
                 (when-let ((timer (plist-get entry :stream-header-timer)))
                   (when (timerp timer) (cancel-timer timer))
