@@ -96,10 +96,12 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
   "Return non-nil for an exact Run durably stopped awaiting approval."
   (or (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
           'approval)
-      (seq-some (lambda (entry)
-                  (and (plist-get entry :approval-stopped)
-                       (plist-get entry :requires-reobserve)))
-                (bound-and-true-p emacsos-assist-web--queue))))
+      (and (not (eq (plist-get emacsos-assist-web-git--stopped-reobserve
+                               :kind) 'active-check))
+           (seq-some (lambda (entry)
+                       (and (plist-get entry :approval-stopped)
+                            (plist-get entry :requires-reobserve)))
+                     (bound-and-true-p emacsos-assist-web--queue)))))
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
 (defvar-local emacsos-assist-web-git--feedback-windows nil)
@@ -271,15 +273,15 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
          (emacsos-assist-web-git--denied "unavailable; reauthorize and Retry")
          ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
           "cached / Run recovery pending")
+         ((not (emacsos-assist-web-git--same-identity
+                latest (emacsos-assist-web-git-generation-metadata generation)))
+          "stale")
+         ((not (eq generation emacsos-assist-web-git--current)) "stale")
          (emacsos-assist-web-git--stopped-reobserve
           (concat "cached / "
                   (emacsos-assist-web-git--stopped-label)))
          ((emacsos-assist-web-git--run-gated-p)
           "unavailable; exact Run status needs Refresh")
-         ((not (emacsos-assist-web-git--same-identity
-                latest (emacsos-assist-web-git-generation-metadata generation)))
-          "stale")
-         ((not (eq generation emacsos-assist-web-git--current)) "stale")
          ((not (equal (emacsos-assist-web-git--request-key latest)
                       (emacsos-assist-web-git--request-key
                        (emacsos-assist-web-git-generation-metadata generation))))
@@ -953,7 +955,7 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                   ((emacsos-assist-web-git--operator-repair-p)
                    "The exact Run observer reported a server-side failure. Ask the operator to repair Assist first. Then Refresh to check this Run. Existing Git views are noncurrent.")
                   ((emacsos-assist-web-git--approval-stopped-p)
-                   "The exact Run is awaiting approval. Approve it first, then Refresh to check its status. Existing Git views are noncurrent; no observer reattaches automatically.")
+                   "Approve this Run in Assist first, then Refresh to recheck. Refresh before approval cannot resume observation. Existing Git views are noncurrent; no observer reattaches automatically.")
                   ((and (bound-and-true-p
                          emacsos-assist-web--manual-recovery-active)
                         (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -1521,7 +1523,8 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
     (tid run-id start-epoch &optional entry approval-resume)
   "After a durable active RUN-ID read, reconcile one nonready TID snapshot.
 ENTRY is the exact queue owner, or nil for a legacy accepted receipt.
-APPROVAL-RESUME also requires a new live observer before opening Git."
+Every queue ENTRY requires admitted HTTP 200 SSE headers before opening Git.
+APPROVAL-RESUME also requires durable clearance of its approval stop."
   (when (or (emacsos-assist-web-git--run-record tid run-id)
             (and entry
                  (emacsos-assist-web-git--stopped-reobserve-owner-p entry)))
@@ -1539,24 +1542,46 @@ APPROVAL-RESUME also requires a new live observer before opening Git."
       (emacsos-assist-web-git--busy-check-start token))))
 
 (defun emacsos-assist-web-git--finish-active-join (entry)
-  "Release ENTRY's active Run fence after T acceptance and required SSE attach."
+  "Release ENTRY's active Run fence after T acceptance and SSE admission.
+A stopped approval is durably cleared before its opening gate is removed."
   (let ((token emacsos-assist-web-git--busy-check))
     (when (and token (eq entry (plist-get token :entry))
                (plist-get token :t-accepted)
                (emacsos-assist-web-git--busy-check-owner-p token)
-               (or (not (plist-get token :approval-resume))
+               (or (not entry)
                    (and (eq entry emacsos-assist-web--stream-entry)
                         (process-live-p (plist-get entry :stream-process))
                         (buffer-live-p (plist-get entry :stream-response))
+                        (plist-get entry :stream-admitted)
                         (> (or (plist-get entry :stream-generation) 0)
                            (or (plist-get entry :observer-end-generation) 0)))))
       (let ((inhibit-quit t))
-        (when (emacsos-assist-web-git--stopped-reobserve-owner-p entry)
-          (setq emacsos-assist-web-git--stopped-reobserve nil))
-        (setq emacsos-assist-web-git--busy-check nil)
-        (when (equal emacsos-assist-web-git--unavailable
-                     "Run canonical check pending")
-          (setq emacsos-assist-web-git--unavailable nil)))
+        (let ((saved
+               (if (and entry (plist-get token :approval-resume))
+                   (progn
+                     (setf (plist-get entry :approval-stopped) nil)
+                     (if (condition-case nil
+                             (emacsos-assist-web--save-draft)
+                           ((error quit) nil))
+                         t
+                       (setf (plist-get entry :approval-stopped) t)
+                       nil))
+                 t)))
+          (if saved
+              (progn
+                (when (and entry
+                           (emacsos-assist-web-git--stopped-reobserve-owner-p
+                            entry))
+                  (setq emacsos-assist-web-git--stopped-reobserve nil))
+                (setq emacsos-assist-web-git--busy-check nil)
+                (when (equal emacsos-assist-web-git--unavailable
+                             "Run canonical check pending")
+                  (setq emacsos-assist-web-git--unavailable nil)))
+            (setq emacsos-assist-web--reconcile-recovery-paused t)
+            (condition-case nil
+                (emacsos-assist-web-git--invalidate
+                 "local approval recovery could not be saved; restart to recover")
+              ((error quit) nil)))))
       (condition-case nil (emacsos-assist-web-git--update-headers)
         ((error quit) nil)))))
 
@@ -1565,7 +1590,7 @@ APPROVAL-RESUME also requires a new live observer before opening Git."
   (when-let ((token emacsos-assist-web-git--busy-check))
     (when (emacsos-assist-web-git--busy-check-owner-p token)
       (if (plist-get token :t-accepted)
-          (message "Run observer reconnecting; Refresh retries exact status")
+          (message "Run observer connecting; result will appear here")
         (if (plist-get token :in-flight)
           (message "Run canonical check in progress; result will appear here")
           (emacsos-assist-web-git--busy-check-start token)))
