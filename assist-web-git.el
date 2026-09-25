@@ -85,7 +85,7 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
   "In-process safety records keyed by exact authenticated thread ID.")
 
 (defvar-local emacsos-assist-web-git--thread-safety-tid nil
-  "Exact shared safety record watched by this buffer's local kill hook.")
+  "Exact thread ID whose shared safety record the local kill hook updates.")
 
 (defun emacsos-assist-web-git--thread-safety-enroll (record tid buffer)
   "Enroll exact TID BUFFER in RECORD and apply an existing stop fence."
@@ -112,31 +112,23 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
                    (buffer-live-p buffer)
                    (equal (buffer-local-value
                            'emacsos-assist-web--thread-id buffer) tid))
-          (emacsos-assist-web-git--thread-safety-enroll record tid buffer)))
-      (setf (plist-get record :buffers)
-            (seq-filter (lambda (buffer)
-                          (and (not (eq buffer (current-buffer)))
-                               (buffer-live-p buffer)))
-                        (plist-get record :buffers)))
-      (when (null (plist-get record :buffers))
-        (setf (plist-get record :empty) t)))))
+          (emacsos-assist-web-git--thread-safety-enroll record tid buffer))))))
 
 (defun emacsos-assist-web-git--thread-safety-record (tid &optional create)
   "Return TID's live shared safety record, creating it when CREATE is non-nil.
-The local kill hook enrolls already-open peers before marking a record empty;
-a later buffer after that observed empty interval is a cold open."
+The local kill hook enrolls already-open peers without assuming a kill succeeds;
+a later buffer after all enrolled buffers actually died is a cold open."
   (when tid
     (let ((record (gethash tid emacsos-assist-web-git--thread-safety)))
       ;; Buffers destroyed without their kill hook cannot establish a live
       ;; handoff; ordinary kills enroll already-open peers before this check.
       (when (and record
-                 (or (plist-get record :empty)
-                     (not (seq-some #'buffer-live-p
-                                    (plist-get record :buffers)))))
+                 (not (seq-some #'buffer-live-p
+                                (plist-get record :buffers))))
         (remhash tid emacsos-assist-web-git--thread-safety)
         (setq record nil))
       (when (and create (not record))
-        (setq record (list :buffers nil :stops nil :empty nil))
+        (setq record (list :buffers nil :stops nil))
         (puthash tid record emacsos-assist-web-git--thread-safety))
       (when record
         (setf (plist-get record :buffers)
@@ -303,7 +295,7 @@ Its durable flag remains set during a later active Run/T/observer join."
 
 (defun emacsos-assist-web-git--run-gated-p ()
   "Whether this thread has a shared stop or live exact Run gate.
-A shared stop may outlive its original buffer until a validated owner claims it."
+A shared stop may outlive its original buffer pending exact durable recovery."
   (let ((tid emacsos-assist-web--thread-id))
     (and tid
          (or (plist-get (emacsos-assist-web-git--thread-safety-record tid)

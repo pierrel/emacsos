@@ -2951,6 +2951,39 @@
       (when (buffer-live-p source) (kill-buffer source))
       (when (buffer-live-p peer) (kill-buffer peer)))))
 
+(ert-deftest test-assist-web-git-aborted-owner-kill-keeps-shared-stop ()
+  "A later failing kill hook cannot mark a still-live owner's gate empty."
+  (let ((source (generate-new-buffer " *stop-aborted-owner*"))
+        (peer (generate-new-buffer " *stop-aborted-peer*"))
+        (abort-hook (lambda () (error "simulated later kill failure"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a")))
+              (setf (plist-get entry :run-id) "run-a")
+              (emacsos-assist-web-git--stop-reobserve entry 'disconnect))
+            (add-hook 'kill-buffer-hook abort-hook t t))
+          (should-error (kill-buffer source))
+          (should (buffer-live-p source))
+          (with-current-buffer source
+            (should (emacsos-assist-web-git--run-gated-p)))
+          (with-current-buffer peer
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1"))
+          (with-current-buffer source
+            (remove-hook 'kill-buffer-hook abort-hook t))
+          (kill-buffer source)
+          (with-current-buffer peer
+            (should (emacsos-assist-web-git--run-gated-p))
+            (should (emacsos-assist-web-git--shared-stop "thread-1" "run-a"))))
+      (when (buffer-live-p source)
+        (with-current-buffer source
+          (remove-hook 'kill-buffer-hook abort-hook t))
+        (kill-buffer source))
+      (when (buffer-live-p peer) (kill-buffer peer)))))
+
 (ert-deftest test-assist-web-git-run-denial-fences-same-thread-destination ()
   "A source exact Run denial makes another live T buffer's Git noncurrent."
   (with-temp-buffer
