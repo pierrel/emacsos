@@ -5173,7 +5173,9 @@ The start epoch proves freshness after any earlier definitive thread denial."
   "Query ENTRY's exact Run before reopening its stream or retiring its queue."
   (when (and entry emacsos-assist-web--thread-id (plist-get entry :run-id)
              (not emacsos-assist-web--reconcile-recovery-paused)
-             (not (plist-get entry :reobserve-in-flight)))
+             (not (plist-get entry :reobserve-in-flight))
+             (emacsos-assist-web-git--claim-shared-stop
+              emacsos-assist-web--thread-id entry))
     (let* ((buffer (current-buffer)) (key (plist-get entry :key))
           (run-id (plist-get entry :run-id))
           (end-checked (plist-get entry :observer-end-checked))
@@ -5404,17 +5406,29 @@ The start epoch proves freshness after any earlier definitive thread denial."
                      "exact Run response invalid; Refresh retries"))))))))))))
 
 (defun emacsos-assist-web-refresh-thread
-    (&optional buffer completed-run-id verified-outcome verified-start-epoch)
+    (&optional buffer completed-run-id verified-outcome verified-start-epoch explicit)
   "Refresh exact queue state first, or verify a legacy Run before chat history.
 COMPLETED-RUN-ID, VERIFIED-OUTCOME, and VERIFIED-START-EPOCH come only from
-an exact Run GET; the epoch fences later Run access denial."
-  (interactive)
+an exact Run GET; the epoch fences later Run access denial.  EXPLICIT is the
+user's Refresh action and may claim a validated dormant same-thread receipt."
+  (interactive (list nil nil nil nil t))
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (let* ((head (emacsos-assist-web--queue-head))
+        (let* ((shared-claim
+                (and explicit
+                     (not emacsos-assist-web--passive-recovery-invalid-p)
+                     (not emacsos-assist-web--reconcile-recovery-paused)
+                     (not emacsos-assist-web--reconcile-generation)
+                     (emacsos-assist-web-git--shared-stop-refresh)))
+               (head (emacsos-assist-web--queue-head))
                (recovery (emacsos-assist-web--manual-recovery-next)))
           (cond
+           ((eq shared-claim 'blocked) nil)
+           ((and shared-claim (not (eq shared-claim 'blocked)))
+            (when emacsos-assist-web--manual-recovery-required
+              (setq emacsos-assist-web--manual-recovery-active t))
+            (emacsos-assist-web--reobserve-entry shared-claim))
            (emacsos-assist-web--passive-recovery-invalid-p
             (message "Canonical recovery needs repair; cached state is preserved"))
            (emacsos-assist-web--reconcile-recovery-paused

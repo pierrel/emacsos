@@ -84,6 +84,9 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
 (defvar emacsos-assist-web-git--thread-safety (make-hash-table :test 'equal)
   "In-process safety records keyed by exact authenticated thread ID.")
 
+(defvar emacsos-assist-web-git--claiming-shared-stop nil
+  "Dynamically bind while an empty peer passively loads an exact stop receipt.")
+
 (defvar-local emacsos-assist-web-git--thread-safety-tid nil
   "Exact thread ID whose shared safety record the local kill hook updates.")
 
@@ -158,6 +161,187 @@ may open one after the owner's own hook ran but before the kill completed."
                (equal (plist-get stop :key) (plist-get entry :key)))
       (setf (plist-get record :stops)
             (delq stop (plist-get record :stops))))))
+
+(defun emacsos-assist-web-git--saved-stop-entry (draft tid stop)
+  "Return DRAFT's unique queue entry matching TID and STOP, or nil.
+The saved exact key, Run, and ended-observer provenance must all agree."
+  (when (and (listp draft)
+             (= (seq-count (lambda (pair) (eq (car-safe pair) 'thread_id))
+                           draft) 1)
+             (equal (alist-get 'thread_id draft) tid)
+             (= (seq-count (lambda (pair) (eq (car-safe pair) 'queue))
+                           draft) 1)
+             (listp (alist-get 'queue draft)))
+    (let* ((matches (seq-filter
+                     (lambda (saved)
+                       (and (listp saved)
+                            (equal (alist-get 'run_id saved)
+                                   (plist-get stop :run-id))
+                            (equal (alist-get 'key saved)
+                                   (plist-get stop :key))))
+                     (alist-get 'queue draft)))
+           (saved (car matches))
+           (old (plist-get stop :entry)))
+      (when (and (= (length matches) 1)
+                 (seq-every-p
+                  (lambda (field)
+                    (= (seq-count (lambda (pair)
+                                    (eq (car-safe pair) field)) saved) 1))
+                  '(key run_id state observer_end_kind
+                    observer_end_generation approval_stopped))
+                 (member (alist-get 'state saved)
+                         '("accepted-unobserved" "observing"
+                           "terminal-unreconciled" "reconciling"))
+                 (equal (alist-get 'observer_end_kind saved)
+                        (and (plist-get old :observer-end-kind)
+                             (symbol-name (plist-get old :observer-end-kind))))
+                 (equal (alist-get 'observer_end_generation saved)
+                        (plist-get old :observer-end-generation))
+                 (equal (and (alist-get 'approval_stopped saved) t)
+                        (and (plist-get old :approval-stopped) t)))
+        saved))))
+
+(defun emacsos-assist-web-git--shared-stop-cache-status (tid stop)
+  "Classify STOP's named durable receipt as canonical, source-only, or repair."
+  (let* ((canonical (concat "drafts/" (emacsos-assist-web--require-id tid)
+                            ".json"))
+         (canonical-path (emacsos-assist-web--cache-path canonical))
+         (source "drafts/new-thread.json")
+         (source-path (emacsos-assist-web--cache-path source))
+         (canonical-draft (and (file-exists-p canonical-path)
+                               (emacsos-assist-web--read-cache canonical)))
+         (source-draft (and (file-exists-p source-path)
+                            (emacsos-assist-web--read-cache source))))
+    (cond
+     ((emacsos-assist-web-git--saved-stop-entry canonical-draft tid stop)
+      'canonical)
+     ((and (emacsos-assist-web-git--saved-stop-entry source-draft tid stop)
+           (or (not (file-exists-p canonical-path))
+               (and (listp canonical-draft)
+                    (equal (alist-get 'thread_id canonical-draft) tid)
+                    (equal (alist-get 'text canonical-draft) "")
+                    (null (alist-get 'queue canonical-draft))
+                    (null (alist-get 'recovery_draft canonical-draft))
+                    (null (alist-get 'collision canonical-draft)))))
+      'source-adoption)
+     (t 'repair))))
+
+(defun emacsos-assist-web-git--claim-shared-stop (tid entry)
+  "Claim dead STOP's exact durable TID/ENTRY receipt before a Run GET.
+Return non-nil only for the existing owner or a validated canonical claim."
+  (let* ((run-id (plist-get entry :run-id))
+         (stop (emacsos-assist-web-git--shared-stop tid run-id))
+         (owner (plist-get stop :owner)))
+    (cond
+     ((null stop) t)
+     ((and (eq owner (current-buffer))
+           (eq (plist-get stop :entry) entry)) t)
+     ((buffer-live-p owner)
+      (setf (plist-get stop :recovery) 'other-owner)
+      nil)
+     (t
+      (let ((status (condition-case nil
+                        (emacsos-assist-web-git--shared-stop-cache-status
+                         tid stop)
+                      ((error quit) 'repair))))
+        (if (and emacsos-assist-web-git--claiming-shared-stop
+                 (eq status 'canonical)
+                 (memq entry emacsos-assist-web--queue)
+                 (equal (plist-get entry :key) (plist-get stop :key))
+                 (plist-get entry :requires-reobserve))
+            (let ((inhibit-quit t))
+              (setf (plist-get stop :owner) (current-buffer)
+                    (plist-get stop :entry) entry
+                    (plist-get stop :recovery) nil)
+              (setq emacsos-assist-web-git--stopped-reobserve
+                    (list :entry entry :tid tid :run-id run-id
+                          :generation (1- (or (plist-get entry
+                                                       :reobserve-generation) 0))
+                          :kind (plist-get stop :kind)))
+              t)
+          (setf (plist-get stop :recovery) status)
+          nil))))))
+
+(defun emacsos-assist-web-git--shared-recovery-state ()
+  "Return the strongest pending shared stop repair state for this thread."
+  (when-let* ((tid emacsos-assist-web--thread-id)
+              (record (emacsos-assist-web-git--thread-safety-record tid)))
+    (let ((states (mapcar (lambda (stop) (plist-get stop :recovery))
+                          (plist-get record :stops))))
+      (cond ((memq 'repair states) 'repair)
+            ((memq 'source-adoption states) 'source-adoption)
+            ((memq 'other-owner states) 'other-owner)))))
+
+(defun emacsos-assist-web-git--shared-stop-blocked (stop state notice)
+  "Keep STOP gated with visible STATE and NOTICE after a refused claim."
+  (setf (plist-get stop :recovery) state)
+  (condition-case nil (emacsos-assist-web-git--update-headers)
+    ((error quit) nil))
+  (message "%s" notice)
+  'blocked)
+
+(defun emacsos-assist-web-git--empty-claim-peer-p ()
+  "Whether this canonical view has no mutable state a passive claim could replace."
+  (and (null emacsos-assist-web--queue)
+       (not emacsos-assist-web--post-entry)
+       (not emacsos-assist-web--stream-entry)
+       (not emacsos-assist-web--in-flight)
+       (not emacsos-assist-web--recovery-draft)
+       (not emacsos-assist-web--draft-id)
+       (let ((input (emacsos-assist-web--input)))
+         (or (null input) (string-empty-p input)))))
+
+(defun emacsos-assist-web-git--shared-stop-refresh ()
+  "Return a claimed dormant entry, `blocked', or nil on explicit Refresh.
+An empty canonical peer may passively restore the named draft before one
+exact Run GET.  This never imports a SOURCE-only precommit receipt."
+  (when-let* ((tid emacsos-assist-web--thread-id)
+              (record (emacsos-assist-web-git--thread-safety-record tid))
+              (stops (plist-get record :stops))
+              (stop (car (sort (copy-sequence stops)
+                               (lambda (a b)
+                                 (< (or (plist-get a :ordinal) 0)
+                                    (or (plist-get b :ordinal) 0)))))))
+    (unless (eq (plist-get stop :owner) (current-buffer))
+      (cond
+       ((buffer-live-p (plist-get stop :owner))
+        (emacsos-assist-web-git--shared-stop-blocked
+         stop 'other-owner "Run recovery is active in another thread view"))
+       ((not (emacsos-assist-web-git--empty-claim-peer-p))
+        (emacsos-assist-web-git--shared-stop-blocked
+         stop 'repair "Run recovery needs repair; local state conflicts with saved receipt"))
+       (t
+        (let ((status (condition-case nil
+                          (emacsos-assist-web-git--shared-stop-cache-status
+                           tid stop)
+                        ((error quit) 'repair))))
+          (if (not (eq status 'canonical))
+              (emacsos-assist-web-git--shared-stop-blocked
+               stop status
+               (if (eq status 'source-adoption)
+                   "Source adoption pending; Retry adoption before Refresh"
+                 "Run recovery needs repair; saved receipt is unavailable"))
+            (let ((emacsos-assist-web-git--claiming-shared-stop t))
+              (condition-case nil
+                  (progn
+                    (emacsos-assist-web--restore-draft t)
+                    (let ((entry (seq-find
+                                  (lambda (candidate)
+                                    (and (equal (plist-get candidate :run-id)
+                                                (plist-get stop :run-id))
+                                         (equal (plist-get candidate :key)
+                                                (plist-get stop :key))))
+                                  emacsos-assist-web--queue)))
+                      (if (and entry
+                               (not emacsos-assist-web--passive-recovery-invalid-p)
+                               (not emacsos-assist-web--reconcile-recovery-paused)
+                               (emacsos-assist-web-git--claim-shared-stop tid entry))
+                          entry
+                        (emacsos-assist-web-git--shared-stop-blocked
+                         stop 'repair "Run recovery needs repair; restored receipt conflicts"))))
+                ((error quit)
+                 (emacsos-assist-web-git--shared-stop-blocked
+                  stop 'repair "Run recovery needs repair; passive restore failed")))))))))))
 
 (defun emacsos-assist-web-git--operator-repair-p ()
   "Return non-nil while an exact saved Run requires operator repair."
@@ -298,10 +482,10 @@ Its durable flag remains set during a later active Run/T/observer join."
 (defun emacsos-assist-web-git--run-gated-p ()
   "Whether this thread has a shared stop or live exact Run gate.
 A shared stop may outlive its original buffer pending exact durable recovery."
-  (let ((tid emacsos-assist-web--thread-id))
+  (let* ((tid emacsos-assist-web--thread-id)
+         (record (emacsos-assist-web-git--thread-safety-record tid)))
     (and tid
-         (or (plist-get (emacsos-assist-web-git--thread-safety-record tid)
-                        :stops)
+         (or (plist-get record :stops)
              (seq-some
           (lambda (buffer)
             (with-current-buffer buffer
@@ -314,7 +498,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                                               '(accepted-unobserved
                                                 terminal-unreconciled))))
                                  (bound-and-true-p emacsos-assist-web--queue))))))
-          (buffer-list))))))
+          (if record (plist-get record :buffers) (buffer-list)))))))
 
 (defun emacsos-assist-web-git--gate-reason ()
   "Return the strongest current refusal for a fresh Git action, or nil."
@@ -327,6 +511,12 @@ A shared stop may outlive its original buffer pending exact durable recovery."
       "Thread Git access denied; reauthorize and Retry"))
    ((eq emacsos-assist-web-git--denied 'run)
     "Run status unavailable; Refresh thread")
+   ((eq (emacsos-assist-web-git--shared-recovery-state) 'repair)
+    "Run recovery needs repair; inspect Details")
+   ((eq (emacsos-assist-web-git--shared-recovery-state) 'source-adoption)
+    "Source adoption pending; Retry adoption before Refresh")
+   ((eq (emacsos-assist-web-git--shared-recovery-state) 'other-owner)
+    "Run recovery is active in another thread view")
    ((emacsos-assist-web-git--operator-repair-p)
     "Operator repair required before Refresh")
    ((emacsos-assist-web-git--approval-stopped-p)
@@ -497,6 +687,12 @@ A shared stop may outlive its original buffer pending exact durable recovery."
       (emacsos-assist-web-git--status-action
        (if (eql emacsos-assist-web-git--thread-denial-status 404)
            "Thread unavailable" "Reauthorize")))
+     ((eq (emacsos-assist-web-git--shared-recovery-state) 'repair)
+      (emacsos-assist-web-git--status-action "Repair needed"))
+     ((eq (emacsos-assist-web-git--shared-recovery-state) 'source-adoption)
+      (emacsos-assist-web-git--status-action "Source adoption pending"))
+     ((eq (emacsos-assist-web-git--shared-recovery-state) 'other-owner)
+      (emacsos-assist-web-git--status-action "Run recovery in another view"))
      ((emacsos-assist-web-git--operator-repair-p)
       (emacsos-assist-web-git--status-action "Operator repair"))
      ((emacsos-assist-web-git--approval-stopped-p)
@@ -1043,6 +1239,14 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                    "This thread is unavailable. Reopen it from the Assist thread list after checking access. Existing Git views are noncurrent; do not use them as the thread's latest state.")
                   (emacsos-assist-web-git--denied
                    "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are noncurrent.")
+                  ((eq (emacsos-assist-web-git--shared-recovery-state) 'repair)
+                   "The named exact Run receipt is missing, invalid, or conflicts with this thread view. Repair the saved draft before Refresh; no Run GET or POST was sent. Git remains noncurrent.")
+                  ((eq (emacsos-assist-web-git--shared-recovery-state)
+                       'source-adoption)
+                   "A valid accepted source draft still owns this Run. Retry no-POST adoption into the canonical thread first, then separately Refresh its exact Run. Git remains noncurrent.")
+                  ((eq (emacsos-assist-web-git--shared-recovery-state)
+                       'other-owner)
+                   "Another live thread view still owns the saved exact Run. This view did not send another Run GET. Return to the owning view or wait for its result; Git remains noncurrent.")
                   ((emacsos-assist-web-git--operator-repair-p)
                    "The exact Run observer reported a server-side failure. Ask the operator to repair Assist first. Then Refresh to check this Run. Existing Git views are noncurrent.")
                   ((emacsos-assist-web-git--approval-stopped-p)
@@ -1460,7 +1664,10 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
                          tid t)))
       (setf (plist-get record :stops)
             (cons (list :run-id run-id :entry entry :owner (current-buffer)
-                        :key (plist-get entry :key))
+                        :key (plist-get entry :key) :kind kind
+                        :ordinal (or (cl-position entry emacsos-assist-web--queue)
+                                     0)
+                        :recovery nil)
                   (seq-remove (lambda (stop)
                                 (equal (plist-get stop :run-id) run-id))
                               (plist-get record :stops))))
