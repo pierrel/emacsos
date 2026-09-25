@@ -92,6 +92,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
     (define-key map (kbd "C-c b") #'emacsos-assist-web-git-back)
     (define-key map (kbd "C-c s") #'emacsos-assist-web-git-show-sha)
     (define-key map (kbd "C-c r") #'emacsos-assist-web-git-close-old-view)
+    (define-key map (kbd "C-c ?") #'emacsos-assist-web-git-view-details)
     map))
 
 (defvar emacsos-assist-web-git-magit-map
@@ -101,6 +102,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
                     ("C-c b" . emacsos-assist-web-git-back)
                     ("C-c s" . emacsos-assist-web-git-show-sha)
                     ("C-c r" . emacsos-assist-web-git-close-old-view)
+                    ("C-c ?" . emacsos-assist-web-git-view-details)
                     ("TAB" . magit-section-toggle)
                     ("RET" . magit-section-toggle)
                     ("n" . magit-section-forward)
@@ -229,7 +231,7 @@ one record; definitive thread denial preserves it for later reauthorization.")
          (t "cached / remote update pending"))))))
 
 (defun emacsos-assist-web-git--view-header ()
-  "Build the compact, live header for a pinned file or Magit buffer."
+  "Build a pinned-view header with Back/Close and Details before state."
   (let* ((generation emacsos-assist-web-git--view-generation)
          (thread emacsos-assist-web-git--view-thread)
          (state (emacsos-assist-web-git--view-state generation thread))
@@ -240,23 +242,34 @@ one record; definitive thread denial preserves it for later reauthorization.")
          (command (if old #'emacsos-assist-web-git-close-old-view
                     #'emacsos-assist-web-git-back)))
     (concat
-     (format "Git %s %s" (emacsos-assist-web-git--short
-                          (emacsos-assist-web-git-generation-oid generation))
-             state)
+     (format "Git %s" (emacsos-assist-web-git--short
+                        (emacsos-assist-web-git-generation-oid generation)))
      (propertize action 'mouse-face 'highlight
                  'local-map (let ((map (make-sparse-keymap)))
                               (define-key map [header-line mouse-1] command)
-                              map)))))
+                              map))
+     (emacsos-assist-web-git--details-link
+      #'emacsos-assist-web-git-view-details)
+     " " (emacsos-assist-web-git--short-state state))))
+
+(defun emacsos-assist-web-git--short-state (state)
+  "Return a phone-width status code for full explanation STATE."
+  (cond ((string-prefix-p "current" state) "current")
+        ((string-prefix-p "fetched remote" state) "remote")
+        ((string-prefix-p "cached" state) "cached")
+        ((string-prefix-p "unavailable" state) "unavailable")
+        (t "stale")))
 
 (defun emacsos-assist-web-git--chooser-header ()
-  "Show the selected SHA and latest freshness while choosing a mirror file."
+  "Show selected SHA and short freshness while choosing a mirror file."
   (format "Git %s %s"
           (emacsos-assist-web-git--short
            (emacsos-assist-web-git-generation-oid
             emacsos-assist-web-git--chooser-generation))
-          (emacsos-assist-web-git--view-state
-           emacsos-assist-web-git--chooser-generation
-           emacsos-assist-web-git--chooser-thread)))
+          (emacsos-assist-web-git--short-state
+           (emacsos-assist-web-git--view-state
+            emacsos-assist-web-git--chooser-generation
+            emacsos-assist-web-git--chooser-thread))))
 
 (defun emacsos-assist-web-git--thread-header ()
   "Return a compact, actionable mirror state for the thread header."
@@ -855,10 +868,18 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                        'changed)
                    "The Run was still active after its stream ended. The observation may have changed. Refresh to make one new exact Run check; this pass will not reattach automatically. Press q to return.")
                   (emacsos-assist-web-git--stopped-reobserve
-                   (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+                   (let ((entry (plist-get emacsos-assist-web-git--stopped-reobserve
+                                           :entry)))
+                     (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
                      ('disconnect "The observation disconnected before the exact Run outcome was known. The old Git view is noncurrent. Refresh to check this Run; a running Run may attach a new observer.")
                      ('approval "The exact Run is awaiting approval. Approve it first, then Refresh to check its status. The old Git view is noncurrent; this observer will not reattach automatically.")
-                     (_ "The stream ended but the exact Run was still active. The old Git view is noncurrent. Refresh to check this Run; this observer will not reattach automatically.")))
+                     (_ (cond
+                         ((and entry (not (plist-get entry :observer-end-checked))
+                               (plist-get entry :verified-outcome))
+                          "The exact terminal Run outcome was saved. Canonical reconciliation is pending; the old Git view remains noncurrent.")
+                         ((and entry (not (plist-get entry :observer-end-checked)))
+                          "The stream ended. An exact Run status check is pending; its outcome is not yet verified. The old Git view remains noncurrent.")
+                         (t "The stream ended but the exact Run was still active. The old Git view is noncurrent. Refresh to check this Run; this observer will not reattach automatically."))))))
                   ((emacsos-assist-web-git--run-gated-p)
                    "Thread access was confirmed, but the exact Run outcome is still unverified. Refresh the Assist thread to check that Run before opening Git. Existing views are noncurrent.")
                   (t "Git state needs a fresh canonical thread check. Refresh before opening another view.")))
@@ -1228,10 +1249,17 @@ The caller owns both the exact Run GET and subsequent canonical commit."
 
 (defun emacsos-assist-web-git--stopped-label ()
   "Return the short, evidence-specific stopped-observer label."
-  (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+  (let ((entry (plist-get emacsos-assist-web-git--stopped-reobserve :entry)))
+    (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
     ('disconnect "Observation lost; Refresh")
     ('approval "Approval pending; Refresh")
-    (_ "Run changed; Refresh")))
+    (_ (cond
+        ((and entry (not (plist-get entry :observer-end-checked))
+              (plist-get entry :verified-outcome))
+         "Run reconciling")
+        ((and entry (not (plist-get entry :observer-end-checked)))
+         "Run checking")
+        (t "Run changed; Refresh"))))))
 
 (defun emacsos-assist-web-git--stopped-reobserve-owner-p (entry)
   "Whether ENTRY is a fresh exact recheck of the stopped observer."
@@ -2032,11 +2060,9 @@ interpret repository-local code."
         (user-error "Thread Git mirror predates authorization; Retry"))
       (pcase (plist-get intent :action)
         ('files
-         (let* ((prompt (format "Git %s %s file: "
+         (let* ((prompt (format "Git %s file: "
                                 (emacsos-assist-web-git--short
-                                 (emacsos-assist-web-git-generation-oid generation))
-                                (emacsos-assist-web-git--view-state
-                                 generation thread)))
+                                 (emacsos-assist-web-git-generation-oid generation))))
                 (choice
                  (let ((minibuffer-setup-hook
                         (cons (lambda ()
@@ -2110,6 +2136,29 @@ interpret repository-local code."
     (if (buffer-live-p thread)
         (switch-to-buffer thread)
       (message "The originating Assist thread is closed"))))
+
+(defun emacsos-assist-web-git-view-details ()
+  "Explain this pinned view's exact commit and live freshness state."
+  (interactive)
+  (let* ((generation emacsos-assist-web-git--view-generation)
+         (thread emacsos-assist-web-git--view-thread)
+         (state (and generation
+                     (emacsos-assist-web-git--view-state generation thread))))
+    (unless generation (user-error "This is not a pinned Git view"))
+    (let ((view (generate-new-buffer " *Assist Web Git view details*")))
+      (with-current-buffer view
+        (insert (format "Commit: %s\nBranch: %s\nState: %s\n\n"
+                        (emacsos-assist-web-git-generation-oid generation)
+                        (or (plist-get
+                             (emacsos-assist-web-git-generation-metadata generation)
+                             :branch)
+                            "unknown")
+                        state)
+                "A noncurrent pinned view remains historical. Press q to return.\n")
+        (special-mode)
+        (visual-line-mode 1)
+        (local-set-key (kbd "q") #'quit-window))
+      (switch-to-buffer view))))
 
 (defun emacsos-assist-web-git-close-old-view ()
   "Close a pinned older view so a pending refresh can be retried."

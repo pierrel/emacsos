@@ -1472,21 +1472,32 @@ terminal event."
 
 (defun emacsos-assist-web--finish-observation-response (target generation response)
   "Settle TARGET after RESPONSE closes without a completed SSE observation."
-  (let ((unavailable (and (buffer-live-p response)
-                          (emacsos-assist-web--run-store-unavailable-response-p response))))
+  (let* ((inhibit-quit t)
+        (unavailable
+         (condition-case nil
+             (and (buffer-live-p response)
+                  (emacsos-assist-web--run-store-unavailable-response-p response))
+           ((error quit) nil))))
     ;; url-http may run its final callback inside the last filter invocation.
     ;; Defer cleanup so an error event in that callback remains authoritative.
-    (run-at-time
-     0 nil
-     (lambda (buffer expected-generation store-unavailable)
-       (when (and (buffer-live-p buffer)
-                  (with-current-buffer buffer
-                    (= expected-generation emacsos-assist-web--stream-generation)))
-         (if store-unavailable
-             (emacsos-assist-web--run-store-unavailable buffer)
-           (emacsos-assist-web--stream-interrupted
-            buffer "observation disconnected"))))
-     target generation unavailable)))
+    (condition-case nil
+        (run-at-time
+         0 nil
+         (lambda (buffer expected-generation store-unavailable)
+           (when (and (buffer-live-p buffer)
+                      (with-current-buffer buffer
+                        (= expected-generation emacsos-assist-web--stream-generation)))
+             (if store-unavailable
+                 (emacsos-assist-web--run-store-unavailable buffer)
+               (emacsos-assist-web--stream-interrupted
+                buffer "observation disconnected"))))
+         target generation unavailable)
+      ((error quit)
+       (when (and (buffer-live-p target)
+                  (with-current-buffer target
+                    (= generation emacsos-assist-web--stream-generation)))
+         (emacsos-assist-web--stream-interrupted
+          target "observation disconnected"))))))
 
 (defun emacsos-assist-web--stream-sentinel (url-sentinel target generation)
   "Run URL-SENTINEL; it owns final observation settlement when installed."
@@ -1763,9 +1774,10 @@ addressed by the stock chunk decoder."
 (defun emacsos-assist-web--event-filter (url-filter target generation)
   "Wrap URL-FILTER and dispatch SSE records to TARGET for GENERATION."
   (lambda (process bytes)
-    ;; The stock filter may detach PROCESS from its buffer on the final chunk.
-    ;; Retain the response first so a terminal event in that chunk is not lost.
-    (let ((response (process-buffer process)))
+    (condition-case problem
+      ;; The stock filter may detach PROCESS from its buffer on the final
+      ;; chunk.  Retain the response so its terminal event is not lost.
+      (let ((response (process-buffer process)))
       (when (functionp url-filter) (funcall url-filter process bytes))
       (when (buffer-live-p response)
         (with-current-buffer response
@@ -1782,7 +1794,7 @@ addressed by the stock chunk decoder."
                   ;; only after url-http has received it all.  Its completion
                   ;; callback below preserves the accepted identity and reports
                   ;; operator repair rather than a generic retry.
-                  (unless (= url-http-response-status 503)
+                  (unless (eql url-http-response-status 503)
                     (emacsos-assist-web--stream-interrupted
                      target "Assist observation was rejected")))
               (when (and (buffer-live-p target)
@@ -1820,7 +1832,13 @@ addressed by the stock chunk decoder."
                    target "Assist stream transport framing is too large"))
                  (t
                   (emacsos-assist-web--drain-events
-                   target generation decoded-end)))))))))))
+                   target generation decoded-end)))))))))
+      ((error quit)
+       (when (and (buffer-live-p target)
+                  (with-current-buffer target
+                    (= generation emacsos-assist-web--stream-generation)))
+         (emacsos-assist-web--stream-interrupted
+          target (error-message-string problem)))))))
 
 (defun emacsos-assist-web--observe-run (buffer)
   "Open BUFFER's authenticated status stream for its current run.
@@ -4066,23 +4084,22 @@ when the provisional buffer is killed."
   "Fence ENTRY at EPOCH, then flush its safe suffix before Run reconciliation."
   (when (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
     (with-current-buffer target
-      ;; A valid terminal event ends currentness before the tail renderer can
-      ;; signal or run a user hook.  The exact Run GET still owns the outcome.
-      (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
-        (emacsos-assist-web-git--stop-reobserve entry 'terminal-sse))
-      (let ((suffix (plist-get entry :stream-undecided-suffix)))
-        (cond
-         ((or (null suffix) (string-empty-p suffix))
-          (emacsos-assist-web--stream-finish target))
-         ((equal suffix "\r")
-          (emacsos-assist-web--entry-append-rendered-delta entry "\n")
-          (setf (plist-get entry :stream-undecided-suffix) "")
-          (emacsos-assist-web--stream-finish target))
-         ((equal suffix (string #x1f3f4))
-          (emacsos-assist-web--entry-append-rendered-delta entry suffix)
-          (setf (plist-get entry :stream-undecided-suffix) "")
-          (emacsos-assist-web--stream-finish target))
-         (t (error "invalid Assist delta")))))))
+      (let ((inhibit-quit t)
+            (suffix (plist-get entry :stream-undecided-suffix)))
+        ;; A terminal SSE is evidence of an ended observer even when its
+        ;; optional provisional text suffix cannot be displayed.  Do not
+        ;; reinterpret a renderer failure as a network disconnect.
+        (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
+          (emacsos-assist-web-git--stop-reobserve entry 'terminal-sse))
+        (condition-case nil
+            (cond
+             ((equal suffix "\r")
+              (emacsos-assist-web--entry-append-rendered-delta entry "\n"))
+             ((equal suffix (string #x1f3f4))
+              (emacsos-assist-web--entry-append-rendered-delta entry suffix)))
+          ((error quit) nil))
+        (setf (plist-get entry :stream-undecided-suffix) "")
+        (emacsos-assist-web--stream-finish target)))))
 
 (defun emacsos-assist-web--dispatch-event (target event data)
   "Dispatch SSE EVENT only to TARGET's exact observed queue entry."
@@ -4397,12 +4414,24 @@ could release a pre-header SSE reservation later."
                 (plist-get entry :state) 'observing
                 (plist-get entry :epoch) (1+ (plist-get entry :epoch)))
           (setq emacsos-assist-web--stream-entry entry)
-          (if (emacsos-assist-web--save-draft)
+          (if (condition-case nil (emacsos-assist-web--save-draft)
+                ((error quit) nil))
               (progn
-                (emacsos-assist-web--sync-active-surface)
-                (emacsos-assist-web--entry-add-action
-                 entry "Abort/Detach" #'emacsos-assist-web--abort-entry)
-                (emacsos-assist-web--observe-entry entry))
+                ;; Launch the owned SSE before optional UI can signal.  A
+                ;; prelaunch failure must retire its token and rearm Refresh.
+                (condition-case problem
+                    (emacsos-assist-web--observe-entry entry)
+                  ((error quit)
+                   (emacsos-assist-web--entry-observation-interrupted
+                    entry (plist-get entry :epoch)
+                    (error-message-string problem))))
+                (when (eq entry emacsos-assist-web--stream-entry)
+                  (condition-case nil
+                      (progn
+                        (emacsos-assist-web--sync-active-surface)
+                        (emacsos-assist-web--entry-add-action
+                         entry "Abort/Detach" #'emacsos-assist-web--abort-entry))
+                    ((error quit) nil))))
             ;; No observer may outlive an unpersisted observing claim.
             (emacsos-assist-web--release-handshake entry)
             (setf (plist-get entry :state) 'accepted-unobserved)
@@ -4457,7 +4486,9 @@ could release a pre-header SSE reservation later."
     ;; Provisional text and status are presentation; their hooks cannot undo
     ;; the persisted interruption or leave this observer occupying the slot.
     (condition-case nil
-        (progn
+        (if emacsos-assist-web--reconcile-recovery-paused
+            (emacsos-assist-web--entry-status
+             entry "local observation could not be saved; restart to recover")
           (emacsos-assist-web--entry-replace-empty-assistant-status entry status)
           (emacsos-assist-web--set-unverified-status status)
           (emacsos-assist-web--sync-active-surface))
@@ -4478,21 +4509,30 @@ could release a pre-header SSE reservation later."
 
 (defun emacsos-assist-web--entry-finish-observation-response (target entry epoch response)
   "Settle exact ENTRY/EPOCH when RESPONSE ends without a terminal event."
-  (let ((unavailable (and (buffer-live-p response)
-                          (emacsos-assist-web--run-store-unavailable-response-p response))))
+  (let* ((inhibit-quit t)
+        (unavailable
+         (condition-case nil
+             (and (buffer-live-p response)
+                  (emacsos-assist-web--run-store-unavailable-response-p response))
+           ((error quit) nil))))
     ;; url-http runs this from its final filter call.  Defer so that filter can
     ;; still dispatch a final terminal or error event first.
-    (run-at-time
-     0 nil
-     (lambda (expected expected-epoch store-unavailable)
-       (when (emacsos-assist-web--entry-current-in-buffer-p
-              target expected expected-epoch)
+    (condition-case nil
+        (run-at-time
+         0 nil
+         (lambda (expected expected-epoch store-unavailable)
+           (when (emacsos-assist-web--entry-current-in-buffer-p
+                  target expected expected-epoch)
+             (emacsos-assist-web--interrupt-entry-in-buffer
+              target expected expected-epoch
+              (if store-unavailable
+                  "observation unavailable; operator repair required"
+                "observation disconnected"))))
+         entry epoch unavailable)
+      ((error quit)
+       (when (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
          (emacsos-assist-web--interrupt-entry-in-buffer
-          target expected expected-epoch
-          (if store-unavailable
-              "observation unavailable; operator repair required"
-            "observation disconnected"))))
-     entry epoch unavailable)))
+          target entry epoch "observation disconnected"))))))
 
 (defun emacsos-assist-web--entry-stream-sentinel (url-sentinel target entry epoch)
   "Preserve URL-SENTINEL and retire only the captured ENTRY/EPOCH on close."
@@ -4865,7 +4905,7 @@ Every restored Run needs a new exact status read before another retirement."
   (setf (plist-get entry :requires-reobserve) t
         (plist-get entry :verified-outcome) nil)
   (if (condition-case nil (emacsos-assist-web--save-draft)
-        (error nil))
+        ((error quit) nil))
       (emacsos-assist-web--manual-recovery-stop entry reason kind)
     (setq emacsos-assist-web--reconcile-recovery-paused t
           emacsos-assist-web--manual-recovery-active nil)
@@ -5034,11 +5074,36 @@ The start epoch proves freshness after any earlier definitive thread denial."
            (progn
              (emacsos-assist-web-git--claim-orphaned-run-gate tid run-id)
              emacsos-assist-web-git--auth-epoch))
-          (generation (1+ (plist-get entry :reobserve-generation))))
-      (setf (plist-get entry :reobserve-generation) generation
-            (plist-get entry :reobserve-in-flight) t)
+          (generation (1+ (plist-get entry :reobserve-generation)))
+          preflight-failed)
+      ;; The Git safety latch can signal during header presentation.  Do not
+      ;; claim a live exact GET until that fallible preflight has returned.
       (when (and (> generation 1) emacsos-assist-web-git-thread-mode)
-        (emacsos-assist-web-git--run-recheck-start tid run-id))
+        (setq preflight-failed
+              (not (condition-case nil
+                       (progn
+                         (emacsos-assist-web-git--run-recheck-start tid run-id)
+                         t)
+                     ((error quit) nil)))))
+      (when preflight-failed
+        (setf (plist-get entry :requires-reobserve) t)
+        (if emacsos-assist-web--manual-recovery-active
+            (emacsos-assist-web--manual-recovery-rearm
+             entry "Run recheck unavailable; Refresh")
+          (unless (condition-case nil (emacsos-assist-web--save-draft)
+                    ((error quit) nil))
+            (setq emacsos-assist-web--reconcile-recovery-paused t)
+            (emacsos-assist-web-git--invalidate
+             "local Run recheck could not be saved; restart to recover"))
+          (condition-case nil
+              (emacsos-assist-web--entry-status
+               entry (if emacsos-assist-web--reconcile-recovery-paused
+                         "local Run recheck could not be saved; restart to recover"
+                       "Run recheck unavailable; Refresh"))
+            ((error quit) nil))))
+      (unless preflight-failed
+        (setf (plist-get entry :reobserve-generation) generation
+              (plist-get entry :reobserve-in-flight) t)
       (emacsos-assist-web--request
        "GET" (format "threads/%s/runs/%s"
                       (emacsos-assist-web--require-id emacsos-assist-web--thread-id)
@@ -5170,7 +5235,7 @@ The start epoch proves freshness after any earlier definitive thread denial."
                          (emacsos-assist-web--entry-status
                           current "local Run status could not be saved; restart to recover"))))
                     (t (emacsos-assist-web--manual-recovery-stop
-                        current "exact Run status invalid"))))))))))))))
+                        current "exact Run status invalid")))))))))))))))
 
 (defun emacsos-assist-web--legacy-terminal-probe (buffer run-id)
   "Check BUFFER's exact legacy RUN-ID before canonical reconciliation."
