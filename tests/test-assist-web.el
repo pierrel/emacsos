@@ -6887,6 +6887,7 @@
                          (cons '((outcome . "running")) nil)
                          (cons '((outcome . "transitioning")) nil)
                          (cons '((outcome . "unknown")) nil)))
+    (setq emacsos-assist-web-git--thread-safety (make-hash-table :test 'equal))
     (let ((emacsos-assist-web--requests nil)
           (emacsos--assist-active-surface nil)
           get-callback delete-callback)
