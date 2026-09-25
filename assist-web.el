@@ -1265,11 +1265,19 @@ does not downgrade a separate chat-accepted Git observation."
 			 emacsos-assist-web-request-timeout nil
 			 (lambda ()
                            (unless finished
-                             (when (process-live-p process)
-                               (set-process-filter process nil)
-                               (set-process-sentinel process nil)
-                               (delete-process process))
-                             (when (buffer-live-p response) (kill-buffer response))
+                             ;; Response hooks are not part of the request
+                             ;; outcome.  A C-g there must still deliver the
+                             ;; timeout to the exact Run owner once.
+                             (let ((inhibit-quit t))
+                               (condition-case nil
+                                   (progn
+                                     (when (process-live-p process)
+                                       (set-process-filter process nil)
+                                       (set-process-sentinel process nil)
+                                       (delete-process process))
+                                     (when (buffer-live-p response)
+                                       (kill-buffer response)))
+                                 ((error quit) nil)))
                              (finish nil "Assist Web request timed out"
                                      nil 'transport 'timeout)))))
 		  (when (process-live-p process)
@@ -1305,7 +1313,8 @@ does not downgrade a separate chat-accepted Git observation."
                             ;; not evidence that malformed JSON or transport
                             ;; failure has already downgraded Git freshness.
                             t)))))))
-              (error (finish nil (error-message-string error)))))))))))
+              ((error quit)
+               (finish nil (error-message-string error)))))))))))
 
 (defun emacsos-assist-web--display-status (status)
   "Replace the visible STATUS without changing its durable state source."
@@ -4541,7 +4550,11 @@ could release a pre-header SSE reservation later."
         ;; url-retrieve's sentinel schedules the final response completion;
         ;; it must remain the sole owner so a generic disconnect cannot race
         ;; a terminal event or sanitized 503 classification.
-        (funcall url-sentinel ended event)
+        (condition-case nil
+            (funcall url-sentinel ended event)
+          ((error quit)
+           (emacsos-assist-web--entry-finish-observation-response
+            target entry epoch (process-buffer ended))))
       (when (and (not (process-live-p ended))
                  (emacsos-assist-web--entry-current-in-buffer-p target entry epoch)
                  (eq ended (plist-get entry :stream-process)))
@@ -4612,7 +4625,8 @@ this one transport.  No late callback can select a successor from globals."
          (epoch (plist-get entry :epoch))
          (token (condition-case nil
                     (emacsos-assist-web--read-token)
-                  ((error quit) nil))))
+                  ((error quit) nil)))
+         response process)
     (if (not (emacsos-assist-web--safe-token-p token))
         (emacsos-assist-web--entry-observation-interrupted entry epoch
                                                             "token missing or invalid")
@@ -4624,29 +4638,34 @@ this one transport.  No late callback can select a successor from globals."
                        (format "threads/%s/runs/%s/events"
                                (emacsos-assist-web--require-id emacsos-assist-web--thread-id)
                                (emacsos-assist-web--require-id (plist-get entry :run-id)))))
-                 (response
-                  (let ((url-mime-encoding-string "identity")
-                        (url-debug nil)
-                        (url-automatic-caching nil)
-                        (url-http-attempt-keepalives nil)
-                        (gnutls-trustfiles (emacsos-assist-web--trustfiles)))
-                    (emacsos-assist-web--close-idle-origin-connections)
+                 )
+            ;; Transfer acquired response/process ownership without a quit
+            ;; gap.  The interruption path can then close both exact handles.
+            (let ((inhibit-quit t)
+                  (url-mime-encoding-string "identity")
+                  (url-debug nil)
+                  (url-automatic-caching nil)
+                  (url-http-attempt-keepalives nil)
+                  (gnutls-trustfiles (emacsos-assist-web--trustfiles)))
+              (emacsos-assist-web--close-idle-origin-connections)
+              (setq response
                     (url-retrieve
                      url
                      (lambda (_status)
                        (emacsos-assist-web--entry-finish-observation-response
                         buffer entry epoch (current-buffer)))
-                     nil t t)))
-                 (process (and (buffer-live-p response) (get-buffer-process response))))
+                     nil t t))
+              (setf (plist-get entry :stream-response) response
+                    (plist-get entry :stream-generation) epoch)
+              (setq process (and (buffer-live-p response)
+                                 (get-buffer-process response)))
+              (setf (plist-get entry :stream-process) process))
             (unless process (error "observation unavailable"))
             (with-current-buffer response
               (setq-local url-max-redirections 0
                           url-http-no-retry t
                           url-debug nil
                           url-automatic-caching nil))
-            (setf (plist-get entry :stream-response) response
-                  (plist-get entry :stream-process) process
-                  (plist-get entry :stream-generation) epoch)
             ;; Keep url-http's stock decoding/filtering in front of our exact
             ;; entry filter.  The wrapper captures ENTRY/EPOCH, so delayed
             ;; bytes cannot select another queue record.
@@ -4675,8 +4694,18 @@ this one transport.  No late callback can select a successor from globals."
                                                         url-http-end-of-headers))))
                                    (emacsos-assist-web--interrupt-entry-in-buffer
                                     buffer entry epoch "Assist observation timed out"))))))
-        (error (emacsos-assist-web--entry-observation-interrupted
-                entry epoch (error-message-string problem)))))))
+        ((error quit)
+         ;; A response may exist even if process lookup signaled before its
+         ;; handle was stored.  Reclaim the process attached to that exact
+         ;; response, not an unrelated observer's process.
+         (when (and (buffer-live-p response)
+                    (not (plist-get entry :stream-process)))
+           (setf (plist-get entry :stream-process)
+                 (seq-find (lambda (candidate)
+                             (eq (process-buffer candidate) response))
+                           (process-list))))
+         (emacsos-assist-web--entry-observation-interrupted
+          entry epoch (error-message-string problem)))))))
 
 (defun emacsos-assist-web--event-filter (url-filter target generation)
   "Bind legacy SSE parsing to its captured queue entry, never selected buffer state."
@@ -5117,7 +5146,7 @@ The start epoch proves freshness after any earlier definitive thread denial."
                           (equal run-id (plist-get current :run-id)))
                  (setf (plist-get current :reobserve-in-flight) nil)
                  (if error
-                   (emacsos-assist-web--manual-recovery-stop
+                   (emacsos-assist-web--manual-recovery-rearm
                     current "exact Run status unavailable")
                  (let ((status
                         (condition-case nil
