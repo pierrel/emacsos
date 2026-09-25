@@ -116,23 +116,25 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
 
 (defun emacsos-assist-web-git--thread-safety-record (tid &optional create)
   "Return TID's live shared safety record, creating it when CREATE is non-nil.
-The local kill hook enrolls already-open peers without assuming a kill succeeds;
-a later buffer after all enrolled buffers actually died is a cold open."
+Scan live same-thread peers before pruning a dead owner: a later kill hook
+may open one after the owner's own hook ran but before the kill completed."
   (when tid
     (let ((record (gethash tid emacsos-assist-web-git--thread-safety)))
-      ;; Buffers destroyed without their kill hook cannot establish a live
-      ;; handoff; ordinary kills enroll already-open peers before this check.
-      (when (and record
-                 (not (seq-some #'buffer-live-p
-                                (plist-get record :buffers))))
-        (remhash tid emacsos-assist-web-git--thread-safety)
-        (setq record nil))
-      (when (and create (not record))
-        (setq record (list :buffers nil :stops nil))
-        (puthash tid record emacsos-assist-web-git--thread-safety))
       (when record
         (setf (plist-get record :buffers)
               (seq-filter #'buffer-live-p (plist-get record :buffers)))
+        (dolist (buffer (buffer-list))
+          (when (and (buffer-live-p buffer)
+                     (equal (buffer-local-value
+                             'emacsos-assist-web--thread-id buffer) tid))
+            (emacsos-assist-web-git--thread-safety-enroll
+             record tid buffer)))
+        (unless (plist-get record :buffers)
+          (remhash tid emacsos-assist-web-git--thread-safety)
+          (setq record nil)))
+      (when (and create (not record))
+        (setq record (list :buffers nil :stops nil))
+        (puthash tid record emacsos-assist-web-git--thread-safety)
         (dolist (buffer (buffer-list))
           (when (and (buffer-live-p buffer)
                      (equal (buffer-local-value
