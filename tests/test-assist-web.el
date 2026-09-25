@@ -641,6 +641,63 @@
           (should (equal trustfiles '("assist-ca" "system-ca"))))
       (when (buffer-live-p response) (kill-buffer response)))))
 
+(ert-deftest test-assist-web-json-callback-kill-hook-cannot-switch-cleanup-target ()
+  "A signaling response hook must never make cleanup kill the thread buffer."
+  (let ((emacsos-assist-web--requests nil)
+        (origin (generate-new-buffer " *assist-origin*"))
+        response result)
+    (unwind-protect
+        (with-current-buffer origin
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                     (lambda () "token"))
+                    ((symbol-function 'emacsos-assist-web--response-json)
+                     (lambda (&rest _) '((ok . t))))
+                    ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                    ((symbol-function 'url-retrieve)
+                     (lambda (_url callback &rest _)
+                       (setq response (generate-new-buffer " *assist-response*"))
+                       (with-current-buffer response
+                         (add-hook 'kill-buffer-hook
+                                   (lambda ()
+                                     (setq kill-buffer-hook nil)
+                                     (kill-buffer (current-buffer))
+                                     (error "hook failed")) nil t)
+                         (funcall callback nil))
+                       response)))
+            (emacsos-assist-web--request
+             "GET" "threads" nil
+             (lambda (value problem) (setq result (list value problem)))))
+          (should (buffer-live-p origin))
+          (should-not (buffer-live-p response))
+          (should (stringp (cadr result))))
+      (when (buffer-live-p response) (kill-buffer response))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
+(ert-deftest test-assist-web-json-callback-kill-veto-is-forced-on-exact-response ()
+  "A response query veto cannot leave an untracked live HTTP buffer."
+  (let ((emacsos-assist-web--requests nil) response result)
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                   (lambda () "token"))
+                  ((symbol-function 'emacsos-assist-web--response-json)
+                   (lambda (&rest _) '((ok . t))))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (_url callback &rest _)
+                     (setq response (generate-new-buffer " *assist-response*"))
+                     (with-current-buffer response
+                       (add-hook 'kill-buffer-query-functions
+                                 (lambda () nil) nil t)
+                       (funcall callback nil))
+                     response)))
+          (emacsos-assist-web--request
+           "GET" "threads" nil
+           (lambda (value problem) (setq result (list value problem))))
+          (should (equal (car result) '((ok . t))))
+          (should-not (cadr result))
+          (should-not (buffer-live-p response)))
+      (when (buffer-live-p response) (kill-buffer response)))))
+
 (ert-deftest test-assist-web-json-request-has-a-global-concurrency-bound ()
   (let ((emacsos-assist-web--requests '(one two))
         (emacsos-assist-web-max-concurrent-requests 2)

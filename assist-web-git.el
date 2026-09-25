@@ -907,6 +907,7 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                                            :entry)))
                      (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
                      ('disconnect "The observation disconnected before the exact Run outcome was known. The old Git view is noncurrent. Refresh to check this Run; a running Run may attach a new observer.")
+                     ('operator-repair "The Run observer reported a server-side failure. Ask the operator to repair Assist, then Refresh to check this exact Run. The old Git view is noncurrent.")
                      ('approval "The exact Run is awaiting approval. Approve it first, then Refresh to check its status. The old Git view is noncurrent; this observer will not reattach automatically.")
                      (_ (cond
                          ((and entry (not (plist-get entry :observer-end-checked))
@@ -1290,6 +1291,7 @@ The caller owns both the exact Run GET and subsequent canonical commit."
   (let ((entry (plist-get emacsos-assist-web-git--stopped-reobserve :entry)))
     (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
     ('disconnect "Observation lost; Refresh")
+    ('operator-repair "Operator repair; Refresh")
     ('approval "Approval pending; Refresh")
     (_ (cond
         ((and entry (not (plist-get entry :observer-end-checked))
@@ -2286,7 +2288,7 @@ otherwise the header follows THREAD's live state while the pinned view stays."
                         (or (plist-get selected :expected) "unavailable")))
         (unless (emacsos-assist-web-git--same-identity metadata selected)
           (insert (if selected-fetched
-                      "The newer selection has been fetched in another view; this pinned fetch is historical.\n"
+                      "The newer selection has already been fetched; this pinned fetch is historical.\n"
                     "The selection differs from this pinned fetch. Return to the thread for its live fetch state.\n"))))
       (when (not (equal (plist-get metadata :status) "ready"))
         (insert "\nThis is a last-published committed revision, not proof of the server's current working HEAD.")

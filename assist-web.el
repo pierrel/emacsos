@@ -1212,7 +1212,8 @@ does not downgrade a separate chat-accepted Git observation."
                           (url-retrieve
                            url
                            (lambda (transport-status)
-                             (let (value problem
+                             (let ((response-buffer (current-buffer))
+                                   value problem
                                          (status (and (boundp 'url-http-response-status)
                                                       url-http-response-status)))
                                (unless (and (eql observed-http-status status)
@@ -1229,7 +1230,7 @@ does not downgrade a separate chat-accepted Git observation."
 				 (condition-case parse-error
 				     (setq value
 					   (emacsos-assist-web--response-json
-					    (current-buffer) allow-status
+					    response-buffer allow-status
 					    array-type object-type))
 				   ((error quit)
 				    (setq problem
@@ -1238,12 +1239,16 @@ does not downgrade a separate chat-accepted Git observation."
 			       ;; one signals, finish must fence a failed canonical read and
 			       ;; deliver its callback exactly once.
 		       (condition-case cleanup-error
-			   (kill-buffer (current-buffer))
+			   (kill-buffer response-buffer)
 			 ((error quit)
 			  (setq value nil
-				problem (error-message-string cleanup-error))
-                          (emacsos-assist-web--kill-internal-response
-                           (current-buffer))))
+				problem (error-message-string cleanup-error))))
+                               (when (buffer-live-p response-buffer)
+                                 (emacsos-assist-web--kill-internal-response
+                                  response-buffer))
+                               (when (buffer-live-p response-buffer)
+                                 (setq value nil
+                                       problem "Assist Web response cleanup failed"))
 			       (finish value problem status
                                        (if (plist-get transport-status :error)
                                            'transport 'parse)
@@ -4477,11 +4482,14 @@ could release a pre-header SSE reservation later."
   (when (and (emacsos-assist-web--entry-callback-current-p entry epoch)
              (eq entry emacsos-assist-web--stream-entry)
              (eq (emacsos-assist-web--entry-state entry) 'observing))
-    (let ((inhibit-quit t))
+    (let ((inhibit-quit t)
+          (kind (if (equal status
+                           "observation unavailable; operator repair required")
+                    'operator-repair 'disconnect)))
       ;; Fence before any mutable end state, cleanup, or provisional render.
       (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
-        (emacsos-assist-web-git--stop-reobserve entry 'disconnect)
-        (setf (plist-get entry :observer-end-kind) 'disconnect
+        (emacsos-assist-web-git--stop-reobserve entry kind)
+        (setf (plist-get entry :observer-end-kind) kind
               (plist-get entry :observer-end-generation) epoch
               (plist-get entry :observer-end-checked) nil))
       (when-let ((timer (plist-get entry :stream-header-timer)))
@@ -4523,7 +4531,9 @@ could release a pre-header SSE reservation later."
             (emacsos-assist-web--entry-status
              entry "local observation could not be saved; restart to recover")
           (emacsos-assist-web--entry-replace-empty-assistant-status entry status)
-          (emacsos-assist-web--set-unverified-status status)
+          (if (eq (plist-get entry :observer-end-kind) 'operator-repair)
+              (emacsos-assist-web--set-status "Operator repair; then Refresh")
+            (emacsos-assist-web--set-unverified-status status))
           (emacsos-assist-web--sync-active-surface))
       ((error quit) nil))))
 
@@ -5974,7 +5984,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                              (null end-generation)
                                              (null end-checked))
                                         (and (member end-kind
-                                                     '("terminal-sse" "disconnect"))
+                                                     '("terminal-sse" "disconnect"
+                                                       "operator-repair"))
                                              (natnump end-generation)
                                              (memq end-checked '(nil t))
                                              run-id))
