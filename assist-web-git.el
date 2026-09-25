@@ -79,6 +79,16 @@ one record; definitive thread denial preserves it for later reauthorization.")
   "One post-save active-Run thread check, owned by its exact receipt.")
 (defvar-local emacsos-assist-web-git--stopped-reobserve nil
   "Local projection of a Run stopped by SSE end, disconnect, or approval.")
+
+(defun emacsos-assist-web-git--operator-repair-p ()
+  "Return non-nil while an exact saved Run requires operator repair."
+  (or (eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
+          'operator-repair)
+      (seq-some (lambda (entry)
+                  (and (eq (plist-get entry :observer-end-kind)
+                           'operator-repair)
+                       (plist-get entry :requires-reobserve)))
+                (bound-and-true-p emacsos-assist-web--queue))))
 (defvar-local emacsos-assist-web-git--intent-serial 0)
 (defvar-local emacsos-assist-web-git--unavailable nil)
 (defvar-local emacsos-assist-web-git--feedback-windows nil)
@@ -202,7 +212,8 @@ one record; definitive thread denial preserves it for later reauthorization.")
           (lambda (buffer)
             (with-current-buffer buffer
               (and (equal emacsos-assist-web--thread-id tid)
-                   emacsos-assist-web-git--run-outcome-uncertain)))
+                   (or emacsos-assist-web-git--run-outcome-uncertain
+                       (emacsos-assist-web-git--operator-repair-p)))))
           (buffer-list)))))
 
 (defun emacsos-assist-web-git--view-state (generation thread)
@@ -345,6 +356,8 @@ one record; definitive thread denial preserves it for later reauthorization.")
     (cond
      (paused
       (emacsos-assist-web-git--status-action "Restart to recover"))
+     ((emacsos-assist-web-git--operator-repair-p)
+      (emacsos-assist-web-git--status-action "Operator repair"))
      ((eq emacsos-assist-web-git--denied 'run)
       (concat (emacsos-assist-web-git--run-refresh-link)
               (emacsos-assist-web-git--details-link)))
@@ -885,6 +898,8 @@ A definitive thread denial keeps its endpoint-specific reason instead."
          (reason (cond
                   (paused
                    "The local Run reconciliation record could not be saved. Git is paused. Restart Emacs, reopen this thread, then use Refresh to recover the exact Run. Do not retry Git in this session.")
+                  ((emacsos-assist-web-git--operator-repair-p)
+                   "The exact Run observer reported a server-side failure. Ask the operator to repair Assist first. Then Refresh to check this Run. Existing Git views are noncurrent.")
                   ((eq emacsos-assist-web-git--denied 'run)
                    "The exact Run status could not be verified. This does not prove the thread is gone. A thread access check is pending; then Refresh the exact Run before opening Git. Existing views are noncurrent.")
                   ((and emacsos-assist-web-git--denied
@@ -1291,7 +1306,7 @@ The caller owns both the exact Run GET and subsequent canonical commit."
   (let ((entry (plist-get emacsos-assist-web-git--stopped-reobserve :entry)))
     (pcase (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
     ('disconnect "Observation lost; Refresh")
-    ('operator-repair "Operator repair; Refresh")
+    ('operator-repair "Operator repair")
     ('approval "Approval pending; Refresh")
     (_ (cond
         ((and entry (not (plist-get entry :observer-end-checked))

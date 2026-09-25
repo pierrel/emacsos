@@ -4478,7 +4478,7 @@ could release a pre-header SSE reservation later."
              entry "accepted; local recovery could not be saved")))))))
 
 (defun emacsos-assist-web--entry-observation-interrupted (entry epoch status)
-  "Stop and save ENTRY's disconnected observer at EPOCH, or pause recovery."
+  "Stop and save ENTRY's observer at EPOCH, or pause recovery."
   (when (and (emacsos-assist-web--entry-callback-current-p entry epoch)
              (eq entry emacsos-assist-web--stream-entry)
              (eq (emacsos-assist-web--entry-state entry) 'observing))
@@ -4532,7 +4532,8 @@ could release a pre-header SSE reservation later."
              entry "local observation could not be saved; restart to recover")
           (emacsos-assist-web--entry-replace-empty-assistant-status entry status)
           (if (eq (plist-get entry :observer-end-kind) 'operator-repair)
-              (emacsos-assist-web--set-status "Operator repair; then Refresh")
+              (emacsos-assist-web--set-status
+               "unverified; operator repair; then Refresh")
             (emacsos-assist-web--set-unverified-status status))
           (emacsos-assist-web--sync-active-surface))
       ((error quit) nil))))
@@ -4724,8 +4725,12 @@ this one transport.  No late callback can select a successor from globals."
                                  (when (and (emacsos-assist-web--entry-current-in-buffer-p buffer entry epoch)
                                             (buffer-live-p (plist-get entry :stream-response))
                                             (with-current-buffer (plist-get entry :stream-response)
-                                              (not (and (boundp 'url-http-end-of-headers)
-                                                        url-http-end-of-headers))))
+                                              (or (not (and (boundp 'url-http-end-of-headers)
+                                                            url-http-end-of-headers))
+                                                  ;; A 503 is not an admitted
+                                                  ;; long-lived SSE.  Bound its
+                                                  ;; JSON error-body completion.
+                                                  (eql url-http-response-status 503))))
                                    (emacsos-assist-web--interrupt-entry-in-buffer
                                     buffer entry epoch "Assist observation timed out"))))))
         ((error quit)
@@ -4844,7 +4849,8 @@ observer instead waits for explicit Refresh."
       ;; the next explicit Refresh may recheck it.  Do not skip it to B.
       (unless (and (eq (emacsos-assist-web--entry-state entry)
                        'accepted-unobserved)
-                   (or (eq (plist-get entry :observer-end-kind) 'disconnect)
+                   (or (memq (plist-get entry :observer-end-kind)
+                             '(disconnect operator-repair))
                        (plist-get entry :observer-end-checked)
                        (plist-get entry :approval-stopped)))
         (if (plist-get entry :requires-reobserve)
@@ -6088,8 +6094,10 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                             ;; The source stayed authoritative.  Its restored
                             ;; receipt must exact-GET, never reopen SSE directly.
                             (dolist (entry emacsos-assist-web--queue)
-                              (when (eq (emacsos-assist-web--entry-state entry)
-                                        'accepted-unobserved)
+                              (when (and (eq (emacsos-assist-web--entry-state entry)
+                                             'accepted-unobserved)
+                                         (not (memq (plist-get entry :observer-end-kind)
+                                                    '(disconnect operator-repair))))
                                 (emacsos-assist-web--reobserve-entry entry)))))
                       (emacsos-assist-web--pump-posts)
                       (emacsos-assist-web--start-next-observation)

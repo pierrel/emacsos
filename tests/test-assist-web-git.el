@@ -1671,7 +1671,7 @@
                                      :kind)
                           'operator-repair))
               (should (equal (emacsos-assist-web-git--stopped-label)
-                             "Operator repair; Refresh"))
+                             "Operator repair"))
               (should (string-match-p "Operator repair"
                                       emacsos-assist-web--stream-status))
               (save-window-excursion
@@ -1679,6 +1679,100 @@
                 (should (string-match-p "operator to repair"
                                         (buffer-string)))
                 (emacsos-assist-web-git-display-details-back))))
+        (when (buffer-live-p response) (kill-buffer response))))))
+
+(ert-deftest test-assist-web-git-restored-operator-repair-needs-explicit-refresh ()
+  "A saved queue 503 shows repair guidance and starts no automatic Run GET."
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-web-operator-repair-" t))
+        (source (generate-new-buffer " *operator-source*"))
+        (reopened (generate-new-buffer " *operator-reopened*"))
+        (requests 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (let ((entry (emacsos-assist-web--entry
+                          "A" 'accepted-unobserved
+                          "emacsos-0123456789abcdef0123456789abcdef")))
+              (setf (plist-get entry :run-id) "run-a"
+                    (plist-get entry :observer-end-kind) 'operator-repair
+                    (plist-get entry :observer-end-generation) 1
+                    (plist-get entry :requires-reobserve) t)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web--queue-model-p t
+                          emacsos-assist-web--queue (list entry))
+              (should (emacsos-assist-web--save-draft))))
+          (kill-buffer source)
+          (with-current-buffer reopened
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (cl-incf requests)))
+                      ((symbol-function 'emacsos-assist-web--observe-entry)
+                       (lambda (&rest _) (ert-fail "SSE auto-attached"))))
+              (emacsos-assist-web--restore-draft)
+              (should (= requests 0))
+              (should (eq (plist-get (car emacsos-assist-web--queue)
+                                     :observer-end-kind)
+                          'operator-repair))
+              (should (emacsos-assist-web-git--run-gated-p))
+              (should (string-match-p
+                       "Operator repair"
+                       (substring-no-properties
+                        (emacsos-assist-web-git--thread-header))))
+              (save-window-excursion
+                (emacsos-assist-web-git-status-details)
+                (should (string-match-p "operator to repair"
+                                        (buffer-string)))
+                (emacsos-assist-web-git-display-details-back))
+              (emacsos-assist-web-refresh-thread)
+              (should (= requests 1)))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p reopened) (kill-buffer reopened))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-git-sse-503-headers-have-a-body-deadline ()
+  "A stalled 503 body cannot occupy a queue observer indefinitely."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a"))
+          (response (generate-new-buffer " *stalled-sse-503*"))
+          process timer)
+      (unwind-protect
+          (progn
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :epoch) 1)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--queue-model-p t
+                        emacsos-assist-web--queue (list entry)
+                        emacsos-assist-web--stream-entry entry)
+            (setq process (make-pipe-process :name "stalled-sse-503"
+                                             :buffer response :noquery t))
+            (with-current-buffer response
+              (setq-local url-http-response-status 503
+                          url-http-end-of-headers (copy-marker (point-min))
+                          url-http-content-type "application/json"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (&rest _) response))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_delay _repeat callback &rest _)
+                         (setq timer callback)))
+                      ((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () t)))
+              (emacsos-assist-web--observe-entry entry)
+              (should timer)
+              (funcall (emacsos-assist-web--entry-event-filter
+                        #'ignore (current-buffer) entry 1)
+                       process "")
+              (should (eq emacsos-assist-web--stream-entry entry))
+              (funcall timer)
+              (should-not emacsos-assist-web--stream-entry)
+              (should (plist-get entry :requires-reobserve))
+              (should-not (process-live-p process))))
+        (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response) (kill-buffer response))))))
 
 (ert-deftest test-assist-web-git-stock-sse-sentinel-quit-defers-disconnect ()
