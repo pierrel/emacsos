@@ -2919,6 +2919,38 @@
       (dolist (buffer (list source peer late))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest test-assist-web-git-owner-kill-enrolls-late-unqueried-peer ()
+  "A peer opened after the stop cannot miss it by querying only after owner death."
+  (let ((source (generate-new-buffer " *stop-late-owner*"))
+        (peer (generate-new-buffer " *stop-late-peer*"))
+        (generation (make-emacsos-assist-web-git-generation :state 'current)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a")))
+              (setf (plist-get entry :run-id) "run-a")
+              (emacsos-assist-web-git--stop-reobserve entry 'disconnect)))
+          ;; The peer has not yet queried Git, so only the owner's kill hook
+          ;; can enroll and fence it before the owner disappears.
+          (with-current-buffer peer
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--current generation))
+          (kill-buffer source)
+          (with-current-buffer peer
+            (should (emacsos-assist-web-git--run-gated-p))
+            (should (eq (emacsos-assist-web-git-generation-state generation)
+                        'cached))
+            (should (emacsos-assist-web-git--shared-stop
+                     "thread-1" "run-a"))
+            (let ((record (emacsos-assist-web-git--thread-safety-record
+                           "thread-1")))
+              (should (equal (plist-get record :buffers) (list peer))))))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p peer) (kill-buffer peer)))))
+
 (ert-deftest test-assist-web-git-run-denial-fences-same-thread-destination ()
   "A source exact Run denial makes another live T buffer's Git noncurrent."
   (with-temp-buffer
