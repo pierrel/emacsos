@@ -268,9 +268,10 @@ The normal resident bound is the active request plus one follow-up."
   (expand-file-name (or name emacsos-assist-web--catalog-file)
                     emacsos-assist-web-cache-directory))
 
-(defun emacsos-assist-web--write-cache (name value)
-  "Atomically save VALUE as JSON cache NAME."
-  (let ((encoded (json-encode value))
+(defun emacsos-assist-web--write-cache (name value &optional encoded-value)
+  "Atomically save VALUE as JSON cache NAME.
+ENCODED-VALUE, when supplied, is the exact precomputed JSON to install."
+  (let ((encoded (or encoded-value (json-encode value)))
         (path (emacsos-assist-web--cache-path name))
         (temporary nil))
     (when (> (string-bytes encoded) emacsos-assist-web-max-cache-bytes)
@@ -290,10 +291,15 @@ The normal resident bound is the active request plus one follow-up."
       (when (and temporary (file-exists-p temporary))
         (delete-file temporary)))))
 
-(defun emacsos-assist-web--try-write-cache (name value)
-  "Write cache NAME as VALUE, returning nil after a visible local failure."
+(defun emacsos-assist-web--try-write-cache (name value &optional encoded-value)
+  "Write cache NAME as VALUE, returning nil after a visible local failure.
+ENCODED-VALUE is passed through as the exact precomputed JSON when supplied."
   (condition-case error
-      (progn (emacsos-assist-web--write-cache name value) t)
+      (progn
+        (if encoded-value
+            (emacsos-assist-web--write-cache name value encoded-value)
+          (emacsos-assist-web--write-cache name value))
+        t)
     (error
      (message "Assist Web could not update its local cache: %s"
               (error-message-string error))
@@ -3732,16 +3738,34 @@ consulted; selected-buffer state is never a fallback owner."
 
 An invalid passive recovery retains its original cache unchanged until explicit
 repair; reload also preserves and re-enters that fail-closed state, including
-when the provisional buffer is killed."
+when the provisional buffer is killed.  A queue owner's stopped-Run image is
+published only after its exact draft bytes are durably saved."
   (if emacsos-assist-web--passive-recovery-invalid-p
       t
     (if (emacsos-assist-web--legacy-compatibility-p)
         (emacsos-assist-web--legacy-save-draft)
     (if-let ((name (emacsos-assist-web--draft-cache-name)))
-        (and (emacsos-assist-web--queue-cache-fits-p emacsos-assist-web--queue
-                                                     (emacsos-assist-web--input))
-             (emacsos-assist-web--try-write-cache
-              name (emacsos-assist-web--queue-cache-value)))
+        (let ((stops (emacsos-assist-web-git--owned-stops))
+              (inhibit-quit t))
+          ;; A failed later save must not let another view import the
+          ;; previous image while this owner holds newer unsaved text.
+          (dolist (stop stops)
+            (setf (plist-get stop :draft-digest) nil))
+          (let* ((value (emacsos-assist-web--queue-cache-value))
+                 (encoded (json-encode value))
+                 (digest (secure-hash 'sha256 encoded)))
+            (and (<= (string-bytes encoded) emacsos-assist-web-max-cache-bytes)
+                 (when (emacsos-assist-web--try-write-cache name value encoded)
+                   (dolist (stop stops)
+                     (setf (plist-get stop :draft-name) name
+                           (plist-get stop :draft-digest) digest
+                           (plist-get stop :queue-entries)
+                           (copy-sequence emacsos-assist-web--queue))
+                     (when-let ((position
+                                 (cl-position (plist-get stop :entry)
+                                              emacsos-assist-web--queue)))
+                       (setf (plist-get stop :ordinal) position)))
+                   t))))
       t))))
 
 (defun emacsos-assist-web--entry-set-assistant-status (entry status)
