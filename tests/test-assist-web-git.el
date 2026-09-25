@@ -1665,8 +1665,20 @@
               (apply (car scheduled) (cdr scheduled))
               (should (eq entry (car emacsos-assist-web--queue)))
               (should (plist-get entry :requires-reobserve))
-              (should (string-match-p "operator repair"
-                                      emacsos-assist-web--stream-status))))
+              (should (eq (plist-get entry :observer-end-kind)
+                          'operator-repair))
+              (should (eq (plist-get emacsos-assist-web-git--stopped-reobserve
+                                     :kind)
+                          'operator-repair))
+              (should (equal (emacsos-assist-web-git--stopped-label)
+                             "Operator repair; Refresh"))
+              (should (string-match-p "Operator repair"
+                                      emacsos-assist-web--stream-status))
+              (save-window-excursion
+                (emacsos-assist-web-git-status-details)
+                (should (string-match-p "operator to repair"
+                                        (buffer-string)))
+                (emacsos-assist-web-git-display-details-back))))
         (when (buffer-live-p response) (kill-buffer response))))))
 
 (ert-deftest test-assist-web-git-stock-sse-sentinel-quit-defers-disconnect ()
@@ -2836,7 +2848,7 @@
               (emacsos-assist-web-git-view-details))
             (setq details (window-buffer (selected-window)))
             (with-current-buffer details
-              (should (string-match-p "fetched in another view"
+              (should (string-match-p "already been fetched"
                                       (buffer-string)))
               (should-not (string-match-p "pending here"
                                           (buffer-string)))))
