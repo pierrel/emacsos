@@ -861,15 +861,8 @@ A definitive thread denial keeps its endpoint-specific reason instead."
 
 (defun emacsos-assist-web-git--details-link (&optional command)
   "Return a 40-pixel-high, at least 40-pixel-wide link invoking COMMAND."
-  (let* ((map (make-sparse-keymap))
-         (edge (propertize " " 'mouse-face 'highlight
-                           'local-map map
-                           'display '(space :width (20) :height (40)))))
-    (define-key map [header-line mouse-1]
-      (or command #'emacsos-assist-web-git-status-details))
-    (concat edge
-            (propertize "[?]" 'mouse-face 'highlight 'local-map map)
-            edge)))
+  (emacsos-assist-web-git--padded-action
+   "?" (or command #'emacsos-assist-web-git-status-details)))
 
 (defun emacsos-assist-web-git--status-action (label)
   "Return compact LABEL and a clickable explanation affordance."
@@ -919,8 +912,11 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                          ((and entry (not (plist-get entry :observer-end-checked))
                                (plist-get entry :verified-outcome))
                           "The exact terminal Run outcome was saved. Canonical reconciliation is pending; the old Git view remains noncurrent.")
-                         ((and entry (not (plist-get entry :observer-end-checked)))
+                         ((and entry (not (plist-get entry :observer-end-checked))
+                               (plist-get entry :reobserve-in-flight))
                           "The stream ended. An exact Run status check is pending; its outcome is not yet verified. The old Git view remains noncurrent.")
+                         ((and entry (not (plist-get entry :observer-end-checked)))
+                          "The exact Run status check did not complete. Refresh to retry; the old Git view remains noncurrent.")
                          (t "The stream ended but the exact Run was still active. The old Git view is noncurrent. Refresh to check this Run; this observer will not reattach automatically."))))))
                   ((emacsos-assist-web-git--run-gated-p)
                    "Thread access was confirmed, but the exact Run outcome is still unverified. Refresh the Assist thread to check that Run before opening Git. Existing views are noncurrent.")
@@ -1299,8 +1295,11 @@ The caller owns both the exact Run GET and subsequent canonical commit."
         ((and entry (not (plist-get entry :observer-end-checked))
               (plist-get entry :verified-outcome))
          "Run reconciling")
-        ((and entry (not (plist-get entry :observer-end-checked)))
+        ((and entry (not (plist-get entry :observer-end-checked))
+              (plist-get entry :reobserve-in-flight))
          "Run checking")
+        ((and entry (not (plist-get entry :observer-end-checked)))
+         "Run check failed; Refresh")
         (t "Run changed; Refresh"))))))
 
 (defun emacsos-assist-web-git--stopped-reobserve-owner-p (entry)
@@ -2111,21 +2110,29 @@ interpret repository-local code."
                  (unwind-protect
                      (let ((minibuffer-setup-hook
                             (cons (lambda ()
-                                    (setq chooser-buffer (current-buffer))
-                                    (setq-local
-                                     emacsos-assist-web-git--chooser-thread thread
-                                     emacsos-assist-web-git--chooser-generation
-                                     generation
-                                     emacsos-assist-web-git--chooser-exit exit
-                                     header-line-format
-                                     '(:eval (emacsos-assist-web-git--chooser-header)))
-                                    (local-set-key (kbd "C-c ?")
-                                                   #'emacsos-assist-web-git-chooser-details)
-                                    (local-set-key (kbd "C-c b")
-                                                   #'emacsos-assist-web-git-chooser-back)
-                                    (cl-pushnew chooser-buffer
-                                                (emacsos-assist-web-git-generation-views
-                                                 generation)))
+                                    ;; This hook is dynamically visible to a
+                                    ;; nested minibuffer.  Only the original
+                                    ;; chooser may own its pin and exit tag.
+                                    (unless chooser-buffer
+                                      (setq chooser-buffer (current-buffer))
+                                      (use-local-map
+                                       (copy-keymap
+                                        (or (current-local-map)
+                                            (make-sparse-keymap))))
+                                      (setq-local
+                                       emacsos-assist-web-git--chooser-thread thread
+                                       emacsos-assist-web-git--chooser-generation
+                                       generation
+                                       emacsos-assist-web-git--chooser-exit exit
+                                       header-line-format
+                                       '(:eval (emacsos-assist-web-git--chooser-header)))
+                                      (local-set-key (kbd "C-c ?")
+                                                     #'emacsos-assist-web-git-chooser-details)
+                                      (local-set-key (kbd "C-c b")
+                                                     #'emacsos-assist-web-git-chooser-back)
+                                      (cl-pushnew chooser-buffer
+                                                  (emacsos-assist-web-git-generation-views
+                                                   generation))))
                                   minibuffer-setup-hook)))
                        (condition-case nil
                            (read-file-name prompt default-directory nil t)
@@ -2135,14 +2142,14 @@ interpret repository-local code."
                                (emacsos-assist-web-git-generation-views generation))))))
            (cond
             ((eq (car exit) 'back)
-             (when (window-live-p window)
+             (when (emacsos-assist-web-git--intent-live-p intent)
                (set-window-parameter window 'assist-web-git-intent
                                      (1+ (plist-get intent :serial)))
                (emacsos-assist-web-git--clear-feedback window)
                (set-window-buffer window thread))
              (message "File selection cancelled; C-x C-f to retry"))
             ((eq (caar exit) 'details)
-             (when (window-live-p window)
+             (when (emacsos-assist-web-git--intent-live-p intent)
                (set-window-parameter window 'assist-web-git-intent
                                      (1+ (plist-get intent :serial)))
                (emacsos-assist-web-git--clear-feedback window)
@@ -2224,7 +2231,7 @@ interpret repository-local code."
      generation thread (current-buffer) nil)))
 
 (defun emacsos-assist-web-git--view-details-header ()
-  "Return live state and Back action for this fetched generation's Details."
+  "Return live pinned state or chooser snapshot, with a Back action."
   (let* ((generation emacsos-assist-web-git--details-generation)
          (thread emacsos-assist-web-git--details-thread)
          (snapshot emacsos-assist-web-git--details-chooser-snapshot)
@@ -2256,6 +2263,14 @@ otherwise the header follows THREAD's live state while the pinned view stays."
                        (and (buffer-live-p thread)
                             (with-current-buffer thread
                               emacsos-assist-web-git--metadata))))
+         (selected-fetched
+          (and (buffer-live-p thread) selected
+               (with-current-buffer thread
+                 (and emacsos-assist-web-git--current
+                      (emacsos-assist-web-git--same-identity
+                       selected
+                       (emacsos-assist-web-git-generation-metadata
+                        emacsos-assist-web-git--current))))))
          (view (generate-new-buffer " *Assist Web Git view details*")))
     (with-current-buffer view
       (insert (format "Fetched thread commit: %s\nFetched remote main base: %s\nFetched branch: %s\n"
@@ -2264,13 +2279,22 @@ otherwise the header follows THREAD's live state while the pinned view stays."
                           "unavailable")
                       (or (plist-get metadata :branch) "unavailable")))
       (when selected
-        (insert (format "\nSelected branch at opening: %s\nSelected expected commit at opening: %s\n"
+        (insert (format "\nSelected branch %s: %s\nSelected expected commit %s: %s\n"
+                        (if chooser-snapshot "at chooser exit" "when Details opened")
                         (or (plist-get selected :branch) "unavailable")
+                        (if chooser-snapshot "at chooser exit" "when Details opened")
                         (or (plist-get selected :expected) "unavailable")))
         (unless (emacsos-assist-web-git--same-identity metadata selected)
-          (insert "That selected commit is pending here; this view fetched the older commit above.\n")))
+          (insert (if selected-fetched
+                      "The newer selection has been fetched in another view; this pinned fetch is historical.\n"
+                    "The selection differs from this pinned fetch. Return to the thread for its live fetch state.\n"))))
       (when (not (equal (plist-get metadata :status) "ready"))
-        (insert "\nThis is a published committed revision, not proof of the server's current working HEAD. It may change after the active turn.\n"))
+        (insert "\nThis is a last-published committed revision, not proof of the server's current working HEAD.")
+        (when (member (plist-get metadata :status)
+                      '("queued" "initializing" "cloning" "starting_sandbox"
+                        "processing" "running" "pending" "transitioning"))
+          (insert " It may change after the active turn."))
+        (insert "\n"))
       (if chooser-snapshot
           (insert (format "\nChooser state at exit: %s (not live). File selection ended for Details. No file was selected; typed but unselected input was discarded. Back returns to the thread; C-x C-f starts a new chooser.\n"
                           (car chooser-snapshot)))

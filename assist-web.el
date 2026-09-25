@@ -1118,7 +1118,7 @@ does not downgrade a separate chat-accepted Git observation."
         token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
-      (error (setq token-error (error-message-string error))))
+      ((error quit) (setq token-error (error-message-string error))))
     (if token-error
         (progn
           (emacsos-assist-web--git-http-status
@@ -1237,11 +1237,13 @@ does not downgrade a separate chat-accepted Git observation."
 			       ;; Buffer hooks are optional presentation cleanup.  Even if
 			       ;; one signals, finish must fence a failed canonical read and
 			       ;; deliver its callback exactly once.
-			       (condition-case cleanup-error
-				   (kill-buffer (current-buffer))
-				 ((error quit)
-				  (setq value nil
-					problem (error-message-string cleanup-error))))
+		       (condition-case cleanup-error
+			   (kill-buffer (current-buffer))
+			 ((error quit)
+			  (setq value nil
+				problem (error-message-string cleanup-error))
+                          (emacsos-assist-web--kill-internal-response
+                           (current-buffer))))
 			       (finish value problem status
                                        (if (plist-get transport-status :error)
                                            'transport 'parse)
@@ -1269,15 +1271,8 @@ does not downgrade a separate chat-accepted Git observation."
                              ;; outcome.  A C-g there must still deliver the
                              ;; timeout to the exact Run owner once.
                              (let ((inhibit-quit t))
-                               (condition-case nil
-                                   (progn
-                                     (when (process-live-p process)
-                                       (set-process-filter process nil)
-                                       (set-process-sentinel process nil)
-                                       (delete-process process))
-                                     (when (buffer-live-p response)
-                                       (kill-buffer response)))
-                                 ((error quit) nil)))
+                               (emacsos-assist-web--close-internal-process process)
+                               (emacsos-assist-web--kill-internal-response response))
                              (finish nil "Assist Web request timed out"
                                      nil 'transport 'timeout)))))
 		  (when (process-live-p process)
@@ -1314,6 +1309,9 @@ does not downgrade a separate chat-accepted Git observation."
                             ;; failure has already downgraded Git freshness.
                             t)))))))
               ((error quit)
+               (let ((inhibit-quit t))
+                 (emacsos-assist-web--close-internal-process process)
+                 (emacsos-assist-web--kill-internal-response response))
                (finish nil (error-message-string error)))))))))))
 
 (defun emacsos-assist-web--display-status (status)
@@ -1361,8 +1359,34 @@ interruption and truncation leave a nonempty body intact."
   "Kill BUFFER after the current URL process filter has returned."
   (run-at-time 0 nil
                (lambda (candidate)
-                 (when (buffer-live-p candidate) (kill-buffer candidate)))
+                 (emacsos-assist-web--kill-internal-response candidate))
                buffer))
+
+(defun emacsos-assist-web--kill-internal-response (buffer)
+  "Close internal HTTP BUFFER even if one cleanup hook faults."
+  (when (buffer-live-p buffer)
+    (let ((inhibit-quit t))
+      (condition-case nil (kill-buffer buffer)
+        ((error quit) nil))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          ;; Only this internal response has already failed its ordinary
+          ;; cleanup.  Do not let a repeatedly signaling hook leak it.
+          (let ((kill-buffer-hook nil)
+                (kill-buffer-query-functions nil))
+            (condition-case nil (kill-buffer buffer)
+              ((error quit) nil))))))))
+
+(defun emacsos-assist-web--close-internal-process (process)
+  "Detach and close an exact owned HTTP PROCESS despite cleanup errors."
+  (when (condition-case nil (process-live-p process)
+          ((error quit) nil))
+    (condition-case nil (set-process-filter process nil)
+      ((error quit) nil))
+    (condition-case nil (set-process-sentinel process nil)
+      ((error quit) nil))
+    (condition-case nil (delete-process process)
+      ((error quit) nil))))
 
 (defun emacsos-assist-web--stream-cleanup (&optional keep-pending no-render)
   "Release this buffer's event stream.
