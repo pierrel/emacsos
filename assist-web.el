@@ -4492,8 +4492,9 @@ could release a pre-header SSE reservation later."
              (eq entry emacsos-assist-web--stream-entry)
              (eq (emacsos-assist-web--entry-state entry) 'observing))
     (let ((inhibit-quit t)
-          (kind (if (equal status
-                           "observation unavailable; operator repair required")
+          (kind (if (member status
+                            '("observation unavailable; operator repair required"
+                              "Assist observation was rejected"))
                     'operator-repair 'disconnect)))
       ;; Fence before any mutable end state, cleanup, or provisional render.
       (when (and emacsos-assist-web--thread-id (plist-get entry :run-id))
@@ -4510,6 +4511,7 @@ could release a pre-header SSE reservation later."
         (setf (plist-get entry :stream-process) nil
               (plist-get entry :stream-response) nil
               (plist-get entry :stream-header-timer) nil
+              (plist-get entry :stream-admitted) nil
               (plist-get entry :stream-raw-bytes) nil
               (plist-get entry :stream-undecided-suffix) nil
               (plist-get entry :state) 'accepted-unobserved
@@ -5277,7 +5279,7 @@ The start epoch proves freshness after any earlier definitive thread denial."
                              (emacsos-assist-web-git--stop-reobserve
                               current 'active-check t)
                              (emacsos-assist-web-git--confirm-active-run
-                              tid run-id run-auth-start current approval-stopped)
+                              tid run-id run-auth-start current)
                              (condition-case nil
                                  (emacsos-assist-web--start-observation current)
                                (error nil)

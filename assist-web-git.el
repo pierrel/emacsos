@@ -251,11 +251,19 @@ Its durable flag remains set during a later active Run/T/observer join."
     "Operator repair required before Refresh")
    ((emacsos-assist-web-git--approval-stopped-p)
     "Approval pending; approve first, then Refresh")
+   ((and (bound-and-true-p emacsos-assist-web--manual-recovery-required)
+         (bound-and-true-p emacsos-assist-web--manual-recovery-active)
+         (bound-and-true-p emacsos-assist-web--stream-entry))
+    (if (plist-get emacsos-assist-web--stream-entry :stream-admitted)
+        "Run active; observing; result will appear here"
+      "Run observer connecting; result will appear here"))
    ((bound-and-true-p emacsos-assist-web--manual-recovery-required)
     "Run recovery pending; Refresh")
    ((eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
         'active-check)
-    "Run status saved; canonical thread check pending")
+    (if (plist-get emacsos-assist-web-git--busy-check :t-accepted)
+        "Run observer connecting; result will appear here"
+      "Run status saved; canonical thread check pending"))
    ((eq (plist-get emacsos-assist-web-git--stopped-reobserve :kind)
         'terminal-verified)
     "Run outcome saved; canonical reconciliation pending")
@@ -994,7 +1002,7 @@ A definitive thread denial keeps its endpoint-specific reason instead."
                           "The exact Run status check did not complete. Refresh to retry; the old Git view remains noncurrent.")
                          (t "The stream ended but the exact Run was still active. The old Git view is noncurrent. Refresh to check this Run; this observer will not reattach automatically."))))))
                   ((emacsos-assist-web-git--run-gated-p)
-                   "Thread access was confirmed, but the exact Run outcome is still unverified. Refresh the Assist thread to check that Run before opening Git. Existing views are noncurrent.")
+                   "The exact Run and canonical thread state still need verification. Refresh the Assist thread to check that Run before opening Git. Existing views are noncurrent.")
                   (t "Git state needs a fresh canonical thread check. Refresh before opening another view.")))
          (view (generate-new-buffer " *Assist Web Git status*")))
     (with-current-buffer view
@@ -1532,11 +1540,11 @@ PRESERVE-GENERATION keeps the older stop floor during its exact recheck."
                (emacsos-assist-web-git--update-headers)))))))))
 
 (defun emacsos-assist-web-git--confirm-active-run
-    (tid run-id start-epoch &optional entry approval-resume)
+    (tid run-id start-epoch &optional entry)
   "After a durable active RUN-ID read, reconcile one nonready TID snapshot.
 ENTRY is a stopped queue owner, or nil for a legacy accepted receipt.
 A queue ENTRY requires admitted HTTP 200 SSE headers before opening Git.
-APPROVAL-RESUME also requires durable clearance of its approval stop."
+A durable approval stop is cleared only after the joined observer is saved."
   (when (or (emacsos-assist-web-git--run-record tid run-id)
             (and entry
                  (emacsos-assist-web-git--stopped-reobserve-owner-p entry)))
@@ -1547,7 +1555,7 @@ APPROVAL-RESUME also requires durable clearance of its approval stop."
                        :send-generation emacsos-assist-web--send-generation
                        :terminal-generation
                        emacsos-assist-web--legacy-terminal-generation
-                       :approval-resume approval-resume :t-accepted nil
+                       :t-accepted nil
                        :stage 'initial :post-barrier nil :candidate-key nil
                        :in-flight nil :serial 0)))
       (setq emacsos-assist-web-git--busy-check token)
@@ -1555,8 +1563,8 @@ APPROVAL-RESUME also requires durable clearance of its approval stop."
 
 (defun emacsos-assist-web-git--finish-active-join (entry)
   "Release ENTRY's active Run fence after canonical T acceptance.
-A stopped queue ENTRY also needs admitted SSE headers.  A stopped approval
-is durably cleared before its opening gate is removed."
+A stopped queue ENTRY also needs admitted SSE headers.  Its old stop reason
+is durably superseded before the opening gate is removed."
   (let ((token emacsos-assist-web-git--busy-check))
     (when (and token (eq entry (plist-get token :entry))
                (plist-get token :t-accepted)
@@ -1570,11 +1578,14 @@ is durably cleared before its opening gate is removed."
                            (or (plist-get entry :observer-end-generation) 0)))))
       (let ((inhibit-quit t))
         (let ((saved
-               (if (and entry (plist-get token :approval-resume))
+               (if (and entry
+                        (emacsos-assist-web-git--stopped-reobserve-owner-p
+                         entry))
                    (let ((old-kind (plist-get entry :observer-end-kind))
                          (old-generation
                           (plist-get entry :observer-end-generation))
-                         (old-checked (plist-get entry :observer-end-checked)))
+                         (old-checked (plist-get entry :observer-end-checked))
+                         (old-approval (plist-get entry :approval-stopped)))
                      ;; A crash ends this newly admitted observer.  Its old
                      ;; operator-repair/approval reason is no longer true,
                      ;; but its generation fence must survive the restart.
@@ -1587,7 +1598,7 @@ is durably cleared before its opening gate is removed."
                              (emacsos-assist-web--save-draft)
                            ((error quit) nil))
                          t
-                       (setf (plist-get entry :approval-stopped) t
+                       (setf (plist-get entry :approval-stopped) old-approval
                              (plist-get entry :observer-end-kind) old-kind
                              (plist-get entry :observer-end-generation)
                              old-generation
@@ -1608,7 +1619,7 @@ is durably cleared before its opening gate is removed."
             (setq emacsos-assist-web--reconcile-recovery-paused t)
             (condition-case nil
                 (emacsos-assist-web-git--invalidate
-                 "local approval recovery could not be saved; restart to recover")
+                 "local observer recovery could not be saved; restart to recover")
               ((error quit) nil)))))
       (condition-case nil (emacsos-assist-web-git--update-headers)
         ((error quit) nil)))))
