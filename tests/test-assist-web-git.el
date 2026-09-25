@@ -2253,10 +2253,10 @@
                                    (plist-get entry :stream-generation)
                                    (plist-get entry :epoch))))
                           ((symbol-function 'emacsos-assist-web--try-write-cache)
-                           (lambda (name value)
+                           (lambda (name value &optional encoded)
                              (if (string-prefix-p "threads/" name)
                                  t
-                               (funcall writer name value))))
+                               (funcall writer name value encoded))))
                           ((symbol-function 'emacsos-assist-web-git--canonical-accepted)
                            #'ignore)
                           ((symbol-function 'emacsos-assist-web--drain-events)
@@ -2362,9 +2362,9 @@
                        (lambda (_method _path _payload done &rest _)
                          (setq thread-check done)))
                       ((symbol-function 'emacsos-assist-web--try-write-cache)
-                       (lambda (name value)
+                       (lambda (name value &optional encoded)
                          (if (string-prefix-p "threads/" name)
-                             t (funcall writer name value))))
+                             t (funcall writer name value encoded))))
                       ((symbol-function 'emacsos-assist-web-git--canonical-accepted)
                        #'ignore)
                       ((symbol-function 'emacsos-assist-web--drain-events)
@@ -3028,10 +3028,11 @@
       (when (buffer-live-p peer) (kill-buffer peer)))))
 
 (defun test-assist-web-git--with-dead-stopped-owner
-    (callback &optional source-only keep-source two-runs)
+    (callback &optional source-only keep-source two-runs observing late-b failed-b)
   "Call CALLBACK with an empty same-T peer after its owner saves A.
 SOURCE-ONLY uses the pre-adoption draft; KEEP-SOURCE leaves its buffer live.
-TWO-RUNS also saves a later independent B receipt."
+TWO-RUNS also saves a later independent B receipt.  FAILED-B leaves a later
+unsaved B in the owner after its cache write fails."
   (let ((emacsos-assist-web-cache-directory
          (make-temp-file "assist-stop-claim-" t))
         (source (generate-new-buffer " *stop-claim-owner*"))
@@ -3050,7 +3051,9 @@ TWO-RUNS also saves a later independent B receipt."
                              (emacsos-assist-web--entry
                               "B" 'accepted-unobserved
                               "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))))
-              (setf (plist-get entry :run-id) "run-a"
+              (setf (plist-get entry :state)
+                    (if observing 'observing 'accepted-unobserved)
+                    (plist-get entry :run-id) "run-a"
                     (plist-get entry :requires-reobserve) t
                     (plist-get entry :observer-end-kind) 'disconnect
                     (plist-get entry :observer-end-generation) 1)
@@ -3064,11 +3067,30 @@ TWO-RUNS also saves a later independent B receipt."
               (emacsos-assist-web-git--stop-reobserve entry 'disconnect)
               (when next
                 (emacsos-assist-web-git--stop-reobserve next 'disconnect))
-              (should (emacsos-assist-web--save-draft))))
+              (should (emacsos-assist-web--save-draft))
+              (when late-b
+                (setq emacsos-assist-web--queue
+                      (append emacsos-assist-web--queue
+                              (list (emacsos-assist-web--entry
+                                     "B after A stop" 'queued
+                                     "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))))
+                (if failed-b
+                    (cl-letf (((symbol-function 'emacsos-assist-web--try-write-cache)
+                               (lambda (&rest _) nil)))
+                      (should-not (emacsos-assist-web--save-draft))
+                      (should-not
+                       (plist-get (emacsos-assist-web-git--shared-stop
+                                   "thread-1" "run-a") :draft-digest)))
+                  (should (emacsos-assist-web--save-draft))))))
           (with-current-buffer peer
             (emacsos-assist-web-mode)
             (setq-local emacsos-assist-web--thread-id "thread-1"))
-          (unless keep-source (kill-buffer source))
+          (unless keep-source
+            (if failed-b
+                (cl-letf (((symbol-function 'emacsos-assist-web--try-write-cache)
+                           (lambda (&rest _) nil)))
+                  (kill-buffer source))
+              (kill-buffer source)))
           (funcall callback peer key emacsos-assist-web-cache-directory))
       (when (buffer-live-p source) (kill-buffer source))
       (when (buffer-live-p peer) (kill-buffer peer))
@@ -3204,6 +3226,220 @@ TWO-RUNS also saves a later independent B receipt."
            (should-not emacsos-assist-web--queue)
            (should-not (emacsos-assist-web-git--shared-stop
                         "thread-1" "run-a"))))))))
+
+(ert-deftest test-assist-web-git-dead-owner-rejects-changed-full-draft ()
+  "A changed B body, order or editable tail cannot ride A's valid receipt."
+  (dolist (change '(body order tail checked))
+    (setq emacsos-assist-web-git--thread-safety (make-hash-table :test 'equal))
+    (test-assist-web-git--with-dead-stopped-owner
+     (lambda (peer _key _cache)
+       (with-current-buffer peer
+         (let* ((name "drafts/thread-1.json")
+                (draft (emacsos-assist-web--read-cache name))
+                requests)
+           (pcase change
+             ('body (setf (alist-get 'text (cadr (alist-get 'queue draft)))
+                          "forged B"))
+             ('order (setf (alist-get 'queue draft)
+                           (reverse (alist-get 'queue draft))))
+             ('tail (setf (alist-get 'text draft) "forged tail"))
+             ('checked (setf (alist-get 'observer_end_checked
+                                        (car (alist-get 'queue draft))) t)))
+           (should (emacsos-assist-web--try-write-cache name draft))
+           (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                      (lambda (&rest args) (push args requests))))
+             (call-interactively #'emacsos-assist-web-refresh-thread))
+           (should-not requests)
+           (should-not emacsos-assist-web--queue)
+           (should (eq (emacsos-assist-web-git--shared-recovery-state)
+                       'repair)))))
+     nil nil t)))
+
+(ert-deftest test-assist-web-git-dead-owner-imports-later-durable-b ()
+  "B added after A's stop is imported only after its owner saves full image."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (let (requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (method path _payload _callback &rest _)
+                      (push (cons method path) requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should (equal requests
+                        '(("GET" . "threads/thread-1/runs/run-a"))))
+         (should (= (length emacsos-assist-web--queue) 2))
+         (should (equal (plist-get (cadr emacsos-assist-web--queue) :text)
+                        "B after A stop")))))
+   nil nil nil nil t))
+
+(ert-deftest test-assist-web-git-dead-owner-failed-later-save-blocks-import ()
+  "An unsaved B makes the older A-only image unclaimable after owner death."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (let (requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (&rest args) (push args requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should-not requests)
+         (should-not emacsos-assist-web--queue)
+         (should (eq (emacsos-assist-web-git--shared-recovery-state)
+                     'repair)))))
+   nil nil nil nil t t))
+
+(ert-deftest test-assist-web-git-stop-image-digest-matches-durable-unicode-bytes ()
+  "The owner hashes precisely the JSON bytes a peer later reads."
+  (let* ((emacsos-assist-web-cache-directory
+          (make-temp-file "assist-stop-image-" t))
+         (name "drafts/thread-1.json")
+         (value '((text . "café ☃")))
+         (encoded (json-encode value)))
+    (unwind-protect
+        (progn
+          (should (emacsos-assist-web--try-write-cache name value encoded))
+          (should (equal (plist-get (emacsos-assist-web-git--read-stop-cache name)
+                                    :digest)
+                         (secure-hash 'sha256 encoded))))
+      (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-git-dead-owner-legacy-peer-is-not-empty ()
+  "A blank prompt with accepted legacy Rb cannot import stopped queue A."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (setq emacsos-assist-web--pending-accepted-p t
+             emacsos-assist-web--run-id "run-b"
+             emacsos-assist-web--pending-key
+             "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+             emacsos-assist-web--submitted-text "B")
+       (let (requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (&rest args) (push args requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should-not requests)
+         (should-not emacsos-assist-web--queue)
+         (should emacsos-assist-web--pending-accepted-p)
+         (should (equal emacsos-assist-web--run-id "run-b")))))))
+
+(ert-deftest test-assist-web-git-dead-owner-claims-normal-reopened-queue ()
+  "A peer already passively restored by normal open can claim exact A."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (emacsos-assist-web--restore-draft t)
+       (should (= (length emacsos-assist-web--queue) 1))
+       (let (requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (_method path _payload _callback &rest _)
+                      (push path requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should (equal requests '("threads/thread-1/runs/run-a"))))))))
+
+(ert-deftest test-assist-web-git-source-only-with-destination-tail-is-conflict ()
+  "A valid SOURCE receipt and nonempty DEST draft need conflict, not Repair."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (should (emacsos-assist-web--try-write-cache
+                "drafts/thread-1.json"
+                '((thread_id . "thread-1") (text . "destination tail")
+                  (queue . nil) (recovery_draft . nil)
+                  (collision . nil))))
+       (let (requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (&rest args) (push args requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should-not requests)
+         (should-not emacsos-assist-web--queue)
+         (should (eq (emacsos-assist-web-git--shared-recovery-state)
+                     'source-conflict))
+         (should (string-match-p "Draft conflict"
+                                 (substring-no-properties
+                                  (emacsos-assist-web-git--thread-header)))))))
+   t))
+
+(ert-deftest test-assist-web-git-dead-owner-stage-failure-leaves-peer-empty ()
+  "A staging exception never partially mutates the canonical peer."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (let ((original (symbol-function 'emacsos-assist-web--restore-draft))
+             requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--restore-draft)
+                    (lambda (&rest args)
+                      (apply original args)
+                      (error "injected staging failure")))
+                   ((symbol-function 'emacsos-assist-web--request)
+                    (lambda (&rest args) (push args requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should-not requests)
+         (should-not emacsos-assist-web--queue)
+         (should (string-empty-p (or (emacsos-assist-web--input) "")))
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (&rest args) (push args requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should (= (length requests) 1)))))))
+
+(ert-deftest test-assist-web-git-dead-owner-normalize-save-failure-no-get ()
+  "An observing receipt needs durable normalization before an exact Run GET."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (let ((original (symbol-function 'emacsos-assist-web--try-write-cache))
+             requests)
+         (cl-letf (((symbol-function 'emacsos-assist-web--try-write-cache)
+                    (lambda (name value &optional encoded)
+                      (if (equal name "drafts/thread-1.json") nil
+                        (funcall original name value encoded))))
+                   ((symbol-function 'emacsos-assist-web--request)
+                    (lambda (&rest args) (push args requests))))
+           (call-interactively #'emacsos-assist-web-refresh-thread))
+         (should-not requests)
+         (should-not emacsos-assist-web--queue)
+         (should (emacsos-assist-web-git--shared-stop "thread-1" "run-a")))))
+   nil nil nil t))
+
+(ert-deftest test-assist-web-git-dead-owner-a-retirement-allows-b-refresh ()
+  "After A's durable R2, B's saved receipt claims on a separate Refresh."
+  (test-assist-web-git--with-dead-stopped-owner
+   (lambda (peer _key _cache)
+     (with-current-buffer peer
+       (let (a-get b-get r2)
+         (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                    (lambda (_method path _payload callback &rest _)
+                      (cond ((string-match-p "/runs/run-a" path)
+                             (setq a-get callback))
+                            ((string-match-p "/runs/run-b" path)
+                             (setq b-get callback))
+                            (t (setq r2 callback)))))
+                   ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                   ((symbol-function 'emacsos-assist-web-git--begin) #'ignore))
+           (call-interactively #'emacsos-assist-web-refresh-thread)
+           (should a-get)
+           (should-not b-get)
+           (funcall a-get
+                    '((id . "run-a") (thread_id . "thread-1")
+                      (status . "success")) nil)
+           (should-not r2)
+           (should (emacsos-assist-web-git--shared-stop
+                    "thread-1" "run-b"))
+           (call-interactively #'emacsos-assist-web-refresh-thread)
+           (should b-get)
+           (should (eq (plist-get
+                        (emacsos-assist-web-git--shared-stop
+                         "thread-1" "run-b") :owner)
+                       peer))
+           (funcall b-get
+                    '((id . "run-b") (thread_id . "thread-1")
+                      (status . "success")) nil)
+           (should r2)
+           (funcall r2
+                    (test-assist-web-git--snapshot "ready" "topic/new") nil)
+           (should-not (emacsos-assist-web-git--shared-stop
+                        "thread-1" "run-a"))
+           (should-not (emacsos-assist-web-git--shared-stop
+                        "thread-1" "run-b"))))))
+   nil nil t))
 
 (ert-deftest test-assist-web-git-run-denial-fences-same-thread-destination ()
   "A source exact Run denial makes another live T buffer's Git noncurrent."
