@@ -154,6 +154,8 @@
                     (list :entry entry :t-accepted t))
         (should (equal (emacsos-assist-web-git--stopped-label)
                        "Run observer connecting"))
+        (should (string-match-p "Run observer connecting"
+                                (emacsos-assist-web-git--gate-reason)))
         (emacsos-assist-web-git-status-details)
         (should (string-match-p "canonical thread state was accepted"
                                 (buffer-string)))))))
@@ -429,7 +431,7 @@
       (emacsos-assist-web-git--canonical-authorized epoch)
       (should-not emacsos-assist-web-git--denied)
       (should (emacsos-assist-web-git--run-record "thread-1" "run-a"))
-      (should (string-match-p "Thread access was confirmed"
+      (should (string-match-p "exact Run and canonical thread state"
                               (let ((emacsos-assist-web-git--display-details-thread
                                      nil))
                                 (save-window-excursion
@@ -2137,7 +2139,7 @@
                         ((symbol-function 'emacsos-assist-web--drain-events)
                          #'ignore))
                 (emacsos-assist-web-git--confirm-active-run
-                 "thread-1" "run-a" 0 entry t)
+                 "thread-1" "run-a" 0 entry)
                 (funcall thread-check snapshot nil)
                 (should (emacsos-assist-web-git--run-gated-p))
                 (funcall (emacsos-assist-web--entry-event-filter
@@ -2146,7 +2148,12 @@
                 (ert-info ((format "HTTP case %S" case))
                   (should-not (plist-get entry :stream-admitted)))
                 (should (plist-get entry :approval-stopped))
-                (should (emacsos-assist-web-git--run-gated-p))))
+                (should (emacsos-assist-web-git--run-gated-p))
+                (when (equal (cadr case) "text/event-stream evil")
+                  (should (eq (plist-get entry :observer-end-kind)
+                              'operator-repair))
+                  (should (string-match-p "Operator repair"
+                                          (emacsos-assist-web-git--thread-header))))))
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p response) (kill-buffer response)))))))
 
@@ -2269,13 +2276,90 @@
                       (should-not (emacsos-assist-web-git--operator-repair-p))
                       (should (emacsos-assist-web-git--run-gated-p))
                       (should-not (plist-get (car emacsos-assist-web--queue)
-                                             :approval-stopped)))
+                                             :approval-stopped))
+                      (emacsos-assist-web-git-status-details)
+                      (should-not (string-match-p "Thread access was confirmed"
+                                                  (buffer-string)))
+                      (emacsos-assist-web-git-display-details-back))
                     (should-not emacsos-assist-web-git--current))))))
         (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response) (kill-buffer response))
         (when (buffer-live-p source) (kill-buffer source))
         (when (buffer-live-p reopened) (kill-buffer reopened))
         (delete-directory emacsos-assist-web-cache-directory t)))))
+
+(ert-deftest test-assist-web-git-repaired-503-reopens-as-disconnect-not-repair ()
+  "A newly admitted observer durably supersedes the old 503 stop reason."
+  (let ((emacsos-assist-web-cache-directory
+         (make-temp-file "assist-web-repaired-503-" t))
+        (source (generate-new-buffer " *repaired-503*"))
+        (reopened (generate-new-buffer " *reopened-503*"))
+        response process thread-check)
+    (unwind-protect
+        (with-current-buffer source
+          (emacsos-assist-web-mode)
+          (let* ((entry (emacsos-assist-web--entry
+                         "A" 'observing
+                         "emacsos-0123456789abcdef0123456789abcdef"))
+                 (snapshot (test-assist-web-git--snapshot
+                            "processing" "main" "topic/old"))
+                 (writer (symbol-function 'emacsos-assist-web--try-write-cache)))
+            (setq response (generate-new-buffer " *repaired-503-sse*"))
+            (setq process (make-pipe-process :name "repaired-503-sse"
+                                             :buffer response :noquery t))
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :observer-end-kind) 'operator-repair
+                  (plist-get entry :observer-end-generation) 0
+                  (plist-get entry :reobserve-generation) 0
+                  (plist-get entry :epoch) 1
+                  (plist-get entry :stream-generation) 1
+                  (plist-get entry :stream-process) process
+                  (plist-get entry :stream-response) response)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--queue-model-p t
+                        emacsos-assist-web--queue (list entry)
+                        emacsos-assist-web--stream-entry entry
+                        emacsos-assist-web-git--metadata
+                        (emacsos-assist-web-git--metadata-from-snapshot
+                         snapshot))
+            (emacsos-assist-web-git--stop-reobserve entry 'operator-repair)
+            (setf (plist-get entry :reobserve-generation) 1)
+            (emacsos-assist-web-git--stop-reobserve entry 'active-check t)
+            (with-current-buffer response
+              (setq-local url-http-response-status 200
+                          url-http-end-of-headers (copy-marker (point-min))
+                          url-http-content-type "text/event-stream"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload done &rest _)
+                         (setq thread-check done)))
+                      ((symbol-function 'emacsos-assist-web--try-write-cache)
+                       (lambda (name value)
+                         (if (string-prefix-p "threads/" name)
+                             t (funcall writer name value))))
+                      ((symbol-function 'emacsos-assist-web-git--canonical-accepted)
+                       #'ignore)
+                      ((symbol-function 'emacsos-assist-web--drain-events)
+                       #'ignore))
+              (emacsos-assist-web-git--confirm-active-run
+               "thread-1" "run-a" 0 entry)
+              (funcall thread-check snapshot nil)
+              (should (emacsos-assist-web-git--run-gated-p))
+              (funcall (emacsos-assist-web--entry-event-filter
+                        #'ignore source entry 1)
+                       process "")
+              (should-not emacsos-assist-web-git--stopped-reobserve)
+              (should (eq (plist-get entry :observer-end-kind) 'disconnect))
+              (with-current-buffer reopened
+                (emacsos-assist-web-mode)
+                (setq-local emacsos-assist-web--thread-id "thread-1")
+                (emacsos-assist-web--restore-draft)
+                (should-not (emacsos-assist-web-git--operator-repair-p))
+                (should (emacsos-assist-web-git--run-gated-p))))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p response) (kill-buffer response))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p reopened) (kill-buffer reopened))
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-git-approval-clearance-save-failure-keeps-gate ()
   "Even admitted SSE and accepted T cannot open Git if stop clearance fails."
@@ -2322,7 +2406,7 @@
                       ((symbol-function 'emacsos-assist-web--drain-events)
                        #'ignore))
               (emacsos-assist-web-git--confirm-active-run
-               "thread-1" "run-a" 0 entry t)
+               "thread-1" "run-a" 0 entry)
               (funcall thread-check snapshot nil)
               (funcall (emacsos-assist-web--entry-event-filter
                         #'ignore (current-buffer) entry 1)
