@@ -3,6 +3,15 @@
 (require 'ert)
 (require 'assist-web)
 
+(defun test-assist-web-git--isolated-thread-safety (run test &rest args)
+  "Give each independent ERT TEST its own process-wide Git safety ledger."
+  (let ((emacsos-assist-web-git--thread-safety
+         (make-hash-table :test 'equal)))
+    (apply run test args)))
+
+(advice-add 'ert-run-test :around
+            #'test-assist-web-git--isolated-thread-safety)
+
 (defconst test-assist-web-git--key "aaaaaaaaaaaaaaaaaaaa")
 (defconst test-assist-web-git--head
   "1111111111111111111111111111111111111111")
@@ -2982,6 +2991,36 @@
         (with-current-buffer source
           (remove-hook 'kill-buffer-hook abort-hook t))
         (kill-buffer source))
+      (when (buffer-live-p peer) (kill-buffer peer)))))
+
+(ert-deftest test-assist-web-git-later-kill-hook-peer-inherits-stop ()
+  "A peer created after the safety hook but before death still sees the stop."
+  (let ((source (generate-new-buffer " *stop-late-hook-owner*"))
+        peer
+        (generation (make-emacsos-assist-web-git-generation :state 'current)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-1")
+            (let ((entry (emacsos-assist-web--entry "A" 'observing "key-a")))
+              (setf (plist-get entry :run-id) "run-a")
+              (emacsos-assist-web-git--stop-reobserve entry 'disconnect))
+            (add-hook 'kill-buffer-hook
+                      (lambda ()
+                        (setq peer (generate-new-buffer " *stop-late-hook-peer*"))
+                        (with-current-buffer peer
+                          (emacsos-assist-web-mode)
+                          (setq-local emacsos-assist-web--thread-id "thread-1"
+                                      emacsos-assist-web-git--current generation)))
+                      t t))
+          (kill-buffer source)
+          (with-current-buffer peer
+            (should (emacsos-assist-web-git--run-gated-p))
+            (should (eq (emacsos-assist-web-git-generation-state generation)
+                        'cached))
+            (should (emacsos-assist-web-git--shared-stop "thread-1" "run-a"))))
+      (when (buffer-live-p source) (kill-buffer source))
       (when (buffer-live-p peer) (kill-buffer peer)))))
 
 (ert-deftest test-assist-web-git-run-denial-fences-same-thread-destination ()
