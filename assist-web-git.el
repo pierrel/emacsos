@@ -2693,8 +2693,15 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                   (emacsos-assist-web-git--open intent generation)
                 ((error quit)
                  (emacsos-assist-web-git--release-intents
-                  (list intent) (if (eq (car problem) 'quit) "view cancelled; Retry"
-                                  "Git view unavailable; Retry"))))))
+                  (list intent)
+                  (cond
+                   ((eq (car problem) 'quit) "view cancelled; Retry")
+                   ((and (eq (car problem) 'user-error)
+                         (member (cadr problem)
+                                 '("Git file already has an ordinary visit; close it before browsing here"
+                                   "Git buffer exceeds 1 MiB display limit")))
+                    (cadr problem))
+                   (t "Git view unavailable; Retry")))))))
           (emacsos-assist-web-git--run-next))))))
 
 (defun emacsos-assist-web-git--route-probe (intent metadata problem start-epoch)
