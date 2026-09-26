@@ -5,6 +5,13 @@
 (require 'cl-lib)
 (require 'json)
 
+;; -Q skips Alpine's site startup.  Expose only the distro Magit/dependency
+;; directories, without loading site startup, user init or package autoloads.
+(dolist (directory '("/usr/share/emacs/site-lisp"
+                     "/usr/share/emacs/site-lisp/compat"
+                     "/usr/share/emacs/site-lisp/magit"))
+  (add-to-list 'load-path directory))
+
 (setq inhibit-startup-screen t
       inhibit-startup-message t
       initial-scratch-message nil
