@@ -91,14 +91,61 @@
         (should (equal enqueued metadata))
         (should (= emacsos-assist-web-git--success-watermark 0))))))
 
+(ert-deftest test-assist-web-git-full-client-sse-stop-releases-obsolete-checkout ()
+  "A stopped Run during fetch or final GET cannot strand a read-only checkout."
+  (dolist (stop-phase '(helper final))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let* ((metadata (test-assist-web-git--metadata
+                        "processing" "topic/one" test-assist-web-git--head))
+             (root (emacsos-assist-web-git--checkout-path metadata))
+             (entry (emacsos-assist-web--entry "active turn" 'observing "key-a"))
+             (view (generate-new-buffer " *git-stop-edit-view*"))
+             helper-callback final-callback)
+        (unwind-protect
+            (progn
+              (setf (plist-get entry :run-id) "run-a")
+              (setq emacsos-assist-web-git--metadata metadata
+                    emacsos-assist-web--queue (list entry))
+              (with-current-buffer view
+                (setq buffer-file-name (concat root "/hello.txt")))
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (_request done) (setq helper-callback done) nil))
+                        ((symbol-function 'emacsos-assist-web-git--read-metadata)
+                         (lambda (_thread done) (setq final-callback done)))
+                        ((symbol-function 'emacsos-assist-web-git--reload-checkout-files) #'ignore)
+                        ((symbol-function 'emacsos-assist-web-git--cleanup)
+                         (lambda (_id _kind done) (funcall done t))))
+                (emacsos-assist-web-git--begin metadata nil)
+                (should (buffer-local-value 'buffer-read-only view))
+                (when (eq stop-phase 'final)
+                  (funcall helper-callback (test-assist-web-git--checkout-result metadata)))
+                (emacsos-assist-web-git--stop-reobserve entry 'disconnect)
+                (if (eq stop-phase 'helper)
+                    (funcall helper-callback (test-assist-web-git--checkout-result metadata))
+                  (funcall final-callback metadata nil)
+                  (funcall final-callback metadata nil))
+                (should-not emacsos-assist-web-git--request)
+                (should-not (gethash root emacsos-assist-web-git--checkout-operations))
+                (should-not (buffer-local-value 'buffer-read-only view))
+                (should (string-match-p "thread state changed"
+                                        emacsos-assist-web-git--unavailable))
+                (emacsos-assist-web-git--begin metadata nil)
+                (should emacsos-assist-web-git--request)
+                (emacsos-assist-web-git--cancel)))
+          (kill-buffer view))))))
+
 (ert-deftest test-assist-web-git-full-client-magit-drops-currentness-before-command ()
   "An ordinary Magit branch/index operation cannot retain a current claim."
   (with-temp-buffer
-    (let* ((root (directory-file-name default-directory))
-           (generation (make-emacsos-assist-web-git-generation :path root :state 'current)))
-      (setq emacsos-assist-web-git--current generation)
-      (emacsos-assist-web-git--manual-git-uncertain)
-      (should (eq (emacsos-assist-web-git-generation-state generation) 'cached)))))
+    (let ((root (directory-file-name default-directory)))
+      (dolist (default-directory (list (file-name-as-directory root)
+                                      (concat root "/nested/")))
+        (let ((generation (make-emacsos-assist-web-git-generation :path root :state 'current)))
+          (setq emacsos-assist-web-git--current generation)
+          (emacsos-assist-web-git--manual-git-uncertain)
+          (should (eq (emacsos-assist-web-git-generation-state generation) 'cached)))))))
 
 (ert-deftest test-assist-web-git-full-client-success-starts-final-turn-sync ()
   "Exact successful retirement requests direct Git sync, never an automatic push."
