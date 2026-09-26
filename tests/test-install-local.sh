@@ -14,11 +14,15 @@ make -C "$repo" install-local LOCAL_EMACSOS_DIR="$destination" \
 
 cmp "$repo/chat.el" "$destination/chat.el"
 cmp "$repo/assist-web.el" "$destination/assist-web.el"
+cmp "$repo/assist-web-git.el" "$destination/assist-web-git.el"
+cmp "$repo/assist-web-git-helper.py" "$destination/assist-web-git-helper.py"
 [ "$(stat -c '%a' "$destination/chat.el")" = 644 ]
 [ "$(stat -c '%a' "$destination/assist-web.el")" = 644 ]
+[ "$(stat -c '%a' "$destination/assist-web-git.el")" = 644 ]
+[ "$(stat -c '%a' "$destination/assist-web-git-helper.py")" = 755 ]
 [ "$(cat "$destination/sentinel")" = keep ]
 [ "$(find "$destination" -maxdepth 1 -type f -printf '%f\n' | sort | tr '\n' ' ')" = \
-  "assist-web.el chat.el sentinel " ]
+  "assist-web-git-helper.py assist-web-git.el assist-web.el chat.el sentinel " ]
 grep -Fq 'Credentials, certificates, and Emacs configuration were not changed.' \
   "$temporary/install.out"
 grep -Fq 'Set emacsos-assist-web-api-url to your HTTPS Assist phone API endpoint.' \
@@ -37,6 +41,8 @@ INSTALL_DESTINATION="$destination" HOME="$temporary/home" \
   "(progn
      (require 'assist-web)
      (let ((checks (list (featurep 'chat)
+                         (featurep 'assist-web-git)
+                         (commandp 'emacsos-assist-web-git-diff)
                          (featurep 'assist-web)
                          (commandp 'emacsos-assist-web-open-thread)
                          (with-temp-buffer
