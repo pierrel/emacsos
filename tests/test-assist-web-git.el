@@ -4597,6 +4597,38 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
               (kill-buffer view))))
       (delete-directory root t))))
 
+(ert-deftest test-assist-web-git-file-view-reuses-only-safe-bounded-visits ()
+  (let* ((root (make-temp-file "assist-git-reuse-" t))
+         (file (expand-file-name "work.txt" root))
+         (thread (current-buffer))
+         (generation (make-emacsos-assist-web-git-generation
+                      :path root :oid test-assist-web-git--head))
+         view)
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "disk content"))
+          (setq view (find-file-noselect file))
+          (with-current-buffer view (insert "unsaved edit"))
+          (should-error (emacsos-assist-web-git--literal-file-view
+                         file root thread generation) :type 'user-error)
+          (with-current-buffer view
+            (should (buffer-modified-p))
+            (should (string-match-p "unsaved edit" (buffer-string)))
+            (set-buffer-modified-p nil))
+          (kill-buffer view)
+          (setq view (emacsos-assist-web-git--literal-file-view
+                      file root thread generation))
+          (should (eq view (emacsos-assist-web-git--literal-file-view
+                           file root thread generation)))
+          (with-current-buffer view
+            (insert (make-string (1+ emacsos-assist-web-git--file-view-limit) ?x)))
+          (should-error (emacsos-assist-web-git--literal-file-view
+                         file root thread generation) :type 'user-error))
+      (when (buffer-live-p view)
+        (with-current-buffer view (set-buffer-modified-p nil))
+        (kill-buffer view))
+      (delete-directory root t))))
+
 (ert-deftest test-assist-web-git-file-read-is-bounded-after-size-precheck ()
   (let* ((root (make-temp-file "assist-git-read-bound-" t))
          (file (expand-file-name "growing.txt" root))

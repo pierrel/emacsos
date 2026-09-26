@@ -46,6 +46,8 @@
 (defvar-local emacsos-assist-web-git--metadata nil)
 (defvar-local emacsos-assist-web-git--current nil)
 (defvar-local emacsos-assist-web-git--previous nil)
+(defvar-local emacsos-assist-web-git--safe-file-view nil
+  "Non-nil when this file visit was initialized without repository-local code.")
 (defvar emacsos-assist-web-git--checkout-operations (make-hash-table :test 'equal)
   "In-app checkout advancement reservations, held until the helper finishes.")
 
@@ -2795,7 +2797,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
 (defun emacsos-assist-web-git--literal-file-view (file root thread generation)
   "Return a bounded editable visiting FILE from ROOT for THREAD and GENERATION.
 Read a bounded worktree path, not a verified committed blob.  Do not
-interpret repository-local code."
+interpret repository-local code.  Reject ordinary existing visits rather than
+discarding their edits or reusing their repository-local settings."
   (let ((resolved (file-truename file))
         (cursor (expand-file-name file))
         (base (expand-file-name root))
@@ -2822,6 +2825,12 @@ interpret repository-local code."
          (enable-local-eval nil)
          (enable-dir-local-variables nil)
          (existing (get-file-buffer file))
+         (_ (when existing
+              (with-current-buffer existing
+                (unless emacsos-assist-web-git--safe-file-view
+                  (user-error "Git file already has an ordinary visit; close it before browsing here"))
+                (when (> (buffer-size) emacsos-assist-web-git--file-view-limit)
+                  (user-error "Git buffer exceeds 1 MiB display limit")))))
          (view (or existing (generate-new-buffer (file-name-nondirectory file)))))
     (unless existing
       (condition-case problem
@@ -2833,6 +2842,7 @@ interpret repository-local code."
             (set-visited-file-name file t)
             (set-visited-file-modtime)
             (normal-mode t)
+            (setq-local emacsos-assist-web-git--safe-file-view t)
             (set-buffer-modified-p nil))
         ((error quit)
          (kill-buffer view)
