@@ -61,65 +61,20 @@ class GitHelperTest(unittest.TestCase):
                 "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ALLOW_PROTOCOL": "file",
                 "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 
-    def test_fetches_exact_two_refs_and_checks_out_thread(self):
-        with patch.object(helper, "configuration",
-                          return_value=({"b" * 20: str(self.bare),
-                                         "c" * 20: str(self.bare)},
-                                        self.root / "key", self.root / "hosts")), \
-             patch.object(helper, "git_environment",
-                          side_effect=self.isolated_env):
-            result = helper.refresh(self.request())
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["thread_oid"], self.thread_oid)
-        self.assertEqual(result["main_oid"], self.main_oid)
-        stage = self.cache / "staging" / ("a" * 32)
-        self.assertEqual(run("-C", str(stage), "branch", "--show-current"),
-                         "thread/one")
-        self.assertEqual((stage / "hello.txt").read_text(), "thread\n")
-        self.assertEqual(run("-C", str(stage), "rev-parse", "main"),
-                         self.main_oid)
-        self.assertEqual(run("-C", str(stage), "status", "--porcelain"), "")
-        self.assertEqual(self.cache.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(helper.cleanup({"cache_root": str(self.cache),
-                                         "kind": "staging",
-                                         "generation": "a" * 32}),
-                         {"ok": True})
-        self.assertFalse(stage.exists())
-
-    def test_invalid_or_missing_branch_leaves_no_staging(self):
-        with patch.object(helper, "configuration",
-                          return_value=({"b" * 20: str(self.bare)},
-                                        self.root / "key", self.root / "hosts")), \
-             patch.object(helper, "git_environment",
-                          side_effect=self.isolated_env):
-            for branch, generation in (
-                    ("main", "a" * 32),
-                    ("HEAD", "e" * 32),
-                    ("bad..ref", "c" * 32),
-                    ("thread/missing", "d" * 32)):
+    def test_invalid_or_missing_branch_never_installs_checkout(self):
+        for branch in ("main", "HEAD", "-option", "bad..ref", "thread/missing"):
+            with self.subTest(branch=branch):
                 with self.assertRaises(helper.Refusal):
-                    helper.refresh(self.request(branch, generation))
-                self.assertFalse((self.cache / "staging" / generation).exists())
-
-    def test_fetched_oid_must_equal_authenticated_expected_before_checkout(self):
-        request = self.request()
-        request["expected_oid"] = self.main_oid
-        with patch.object(helper, "configuration",
-                          return_value=({"b" * 20: str(self.bare)},
-                                        self.root / "key", self.root / "hosts")), \
-             patch.object(helper, "git_environment",
-                          side_effect=self.isolated_env):
-            with self.assertRaisesRegex(helper.Refusal, "remote update pending"):
-                helper.refresh(request)
-        self.assertFalse((self.cache / "staging" / ("a" * 32)).exists())
+                    self.sync(branch=branch)
+        self.assertFalse(any((self.cache / "checkouts").glob("*")))
 
     def test_private_map_refuses_duplicate_keys_and_credential_url(self):
         config = self.root / ".config" / "emacsos"
         config.mkdir(parents=True)
         key = "b" * 20
-        (config / "assist-git-read-key").write_text("read credential\n")
+        (config / "assist-git-key").write_text("Git credential\n")
         (config / "assist-git-known-hosts").write_text("host key\n")
-        for name in ("assist-git-read-key", "assist-git-known-hosts"):
+        for name in ("assist-git-key", "assist-git-known-hosts"):
             (config / name).chmod(0o600)
         mapping = config / "assist-git-remotes.json"
         mapping.write_text(json.dumps({key: "ssh://git@host.example/repo.git"}))
@@ -139,6 +94,117 @@ class GitHelperTest(unittest.TestCase):
             mapping.chmod(0o644)
             with self.assertRaises(helper.Refusal):
                 helper.configuration()
+
+    def sync(self, **changes):
+        request = {**self.request(), "thread_id": "thread-1", "allow_ff": True,
+                   **changes}
+        with patch.object(helper, "configuration",
+                          return_value=({"b" * 20: str(self.bare)},
+                                        self.root / "key", self.root / "hosts")), \
+             patch.object(helper, "git_environment", side_effect=self.isolated_env):
+            return helper.sync_checkout(request)
+
+    def publish_update(self, text="next committed turn\n"):
+        (self.repo / "hello.txt").write_text(text)
+        run("-C", str(self.repo), "add", "hello.txt")
+        run("-C", str(self.repo), "commit", "-qm", "next")
+        run("-C", str(self.repo), "push", "-q", "origin", "thread/one")
+        return run("-C", str(self.repo), "rev-parse", "HEAD")
+
+    def test_persistent_checkout_fast_forwards_without_reset_or_delete(self):
+        first = self.sync()
+        checkout = Path(first["checkout_path"])
+        self.assertEqual(run("-C", str(checkout), "branch", "--show-current"), "thread/one")
+        self.assertEqual(run("-C", str(checkout), "remote", "get-url", "origin"), str(self.bare))
+        self.assertEqual(run("-C", str(checkout), "rev-parse", "@{upstream}"), self.thread_oid)
+        next_oid = self.publish_update()
+        result = self.sync(expected_oid=next_oid)
+        self.assertEqual(result["checkout_path"], str(checkout))
+        self.assertEqual(result["local_oid"], next_oid)
+        self.assertEqual(result["thread_oid"], next_oid)
+        self.assertIsNone(result["pending"])
+
+    def test_busy_remote_advance_is_visible_without_expected_equality(self):
+        self.sync()
+        next_oid = self.publish_update()
+        result = self.sync(allow_ff=False)
+        self.assertEqual(result["thread_oid"], next_oid)
+        self.assertEqual(result["local_oid"], self.thread_oid)
+        self.assertFalse(result["expected_matches"])
+        self.assertTrue(result["pending"])
+
+    def test_local_staged_unstaged_untracked_edits_survive_refresh(self):
+        for kind in ("unstaged", "staged", "untracked"):
+            with self.subTest(kind=kind):
+                # Each case has a separate persistent checkout, same trusted remote.
+                result = self.sync(thread_id="thread-" + kind)
+                checkout = Path(result["checkout_path"])
+                target = checkout / ("local.txt" if kind == "untracked" else "hello.txt")
+                target.write_text("my edit\n")
+                if kind == "staged":
+                    run("-C", str(checkout), "add", "hello.txt")
+                updated = self.sync(thread_id="thread-" + kind)
+                self.assertTrue(updated["dirty"])
+                self.assertTrue(updated["pending"])
+                self.assertEqual(target.read_text(), "my edit\n")
+
+    def test_manual_commit_push_uses_ordinary_thread_upstream(self):
+        checkout = Path(self.sync()["checkout_path"])
+        run("-C", str(checkout), "config", "user.email", "sam@example.invalid")
+        run("-C", str(checkout), "config", "user.name", "Sam")
+        (checkout / "hello.txt").write_text("phone edit\n")
+        run("-C", str(checkout), "add", "hello.txt")
+        run("-C", str(checkout), "commit", "-qm", "phone")
+        run("-C", str(checkout), "push", "-q", "origin", "thread/one")
+        oid = run("-C", str(checkout), "rev-parse", "HEAD")
+        result = self.sync()
+        self.assertEqual(result["thread_oid"], oid)
+        self.assertEqual(result["local_oid"], oid)
+        self.assertFalse(result["expected_matches"])
+
+    def test_local_main_checkout_is_not_silently_repaired(self):
+        checkout = Path(self.sync()["checkout_path"])
+        run("-C", str(checkout), "switch", "-qc", "main", "origin/main")
+        result = self.sync()
+        self.assertEqual(result["actual_branch"], "main")
+        self.assertTrue(result["pending"])
+        self.assertEqual(run("-C", str(checkout), "branch", "--show-current"), "main")
+
+    def test_many_untracked_files_preserve_remote_view(self):
+        checkout = Path(self.sync()["checkout_path"])
+        for index in range(150):
+            (checkout / ("user-local-file-with-long-name-" + str(index))).write_text("edit")
+        result = self.sync()
+        self.assertTrue(result["dirty"])
+        self.assertEqual(result["thread_oid"], self.thread_oid)
+        self.assertEqual(len(list(checkout.glob("user-local-file-*"))), 150)
+
+    def test_clean_unpushed_commit_is_pending_not_remote_current(self):
+        checkout = Path(self.sync()["checkout_path"])
+        run("-C", str(checkout), "config", "user.email", "sam@example.invalid")
+        run("-C", str(checkout), "config", "user.name", "Sam")
+        (checkout / "hello.txt").write_text("unpushed phone commit\n")
+        run("-C", str(checkout), "add", "hello.txt")
+        run("-C", str(checkout), "commit", "-qm", "phone")
+        local_oid = run("-C", str(checkout), "rev-parse", "HEAD")
+        result = self.sync()
+        self.assertFalse(result["dirty"])
+        self.assertEqual(result["local_oid"], local_oid)
+        self.assertEqual(result["thread_oid"], self.thread_oid)
+        self.assertIn("local commits", result["pending"])
+
+    def test_repository_ident_expansion_is_disabled_before_checkout(self):
+        (self.repo / ".gitattributes").write_text("bomb.txt ident\n")
+        literal = "$Id$" * (256 * 1024)
+        (self.repo / "bomb.txt").write_text(literal)
+        run("-C", str(self.repo), "add", ".gitattributes", "bomb.txt")
+        run("-C", str(self.repo), "commit", "-qm", "ident expansion")
+        run("-C", str(self.repo), "push", "-q", "origin", "thread/one")
+        with patch.object(helper, "WORKTREE_LIMIT", 2 * 1024 * 1024):
+            checkout = Path(self.sync()["checkout_path"])
+            self.assertEqual((checkout / "bomb.txt").read_text(), literal)
+            run("-C", str(checkout), "checkout", "--", "bomb.txt")
+            self.assertEqual((checkout / "bomb.txt").read_text(), literal)
 
     def fake_git_tree(self):
         bin_dir = self.root / "bin"

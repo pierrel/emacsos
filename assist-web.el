@@ -179,6 +179,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--submitted-text nil)
 (defvar-local emacsos-assist-web--draft-id nil)
 (defvar-local emacsos-assist-web--draft-save-timer nil)
+(defvar-local emacsos-assist-web--last-draft-image nil
+  "Exact valid queue-save image, cleared before every later queue-save attempt.")
 (defvar-local emacsos-assist-web--refresh-generation 0)
 (defvar-local emacsos-assist-web--reconcile-generation nil
   "Shared refresh generation owned by an in-flight queue retirement GET.")
@@ -624,9 +626,10 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
 (defun emacsos-assist-web-git--metadata-from-snapshot (snapshot)
   "Select the authenticated committed ref from validated SNAPSHOT.
 
-Ready threads select their actual checkout; all other statuses select only the
-atomic last-published pair.  Git itself checks the selected ref format before
-the fetch begins."
+Ready threads select their actual checkout. Busy threads prefer the published
+branch, falling back only to an authenticated actual non-main branch. The
+published OID is provenance, not a ceiling on legitimate phone pushes. Git
+checks the selected ref format before the fetch begins."
   (let* ((thread (alist-get 'thread snapshot))
          (workspace (alist-get 'workspace thread))
          (tid (emacsos-assist-web--require-id (alist-get 'id thread)))
@@ -654,8 +657,8 @@ the fetch begins."
     (when (equal published-branch "HEAD")
       (error "Assist Web returned detached HEAD as a published Git ref"))
     (let* ((ready (equal status "ready"))
-           (branch (if ready actual-branch published-branch))
-           (expected (if ready head published-revision)))
+           (branch (if ready actual-branch (or published-branch actual-branch)))
+           (expected (if ready head (or published-revision head))))
       (when (and branch
                  (not (and (stringp branch)
                            (<= (string-bytes branch) 240)
@@ -2370,15 +2373,18 @@ of it, together with the oldest pagination cursor already reached."
         (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t))
         (emacsos-assist-web--write-prompt)
+        (let ((dormant (emacsos-assist-web-git--dormant-stop-p)))
         (if emacsos-assist-web--queue
             (progn
               (when draft (insert draft))
               (emacsos-assist-web--rerender-queue))
-          (if draft (insert draft) (emacsos-assist-web--restore-draft)))
+          (if draft (insert draft) (emacsos-assist-web--restore-draft dormant)))
         (emacsos-assist-web--restore-render-state render-state)
         (setq buffer-read-only nil)
         (set-buffer-modified-p nil)
-        (emacsos-assist-web--save-draft)))))
+        ;; A passive reopen cannot replace another dead owner's exact bytes.
+        ;; Explicit Refresh stages, durably normalizes and claims that receipt.
+        (unless dormant (emacsos-assist-web--save-draft)))))))
 
 (defun emacsos-assist-web--snapshot-cache-name (tid)
   "Return the bounded per-thread snapshot cache filename for TID."
@@ -3575,6 +3581,7 @@ VERIFIED-START-EPOCH fences later Run access denial."
      (open-object . emacsos-conversation--open-object)
      (catalog . emacsos-assist-web-refresh-threads)))
   (add-hook 'after-change-functions #'emacsos-assist-web--after-change nil t)
+  (add-hook 'before-change-functions #'emacsos-assist-web--protect-unclaimed-draft nil t)
   (add-hook 'post-command-hook #'emacsos-assist-web-git--sync-keys nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
@@ -3734,19 +3741,26 @@ consulted; selected-buffer state is never a fallback owner."
       (harness . ,(or emacsos-assist-web--draft-harness "deepagents")))))
 
 (defun emacsos-assist-web--save-draft ()
-  "Persist queue or legacy state before transport unless recovery is invalid.
+  "Persist queue or legacy state unless recovery is invalid or not yet owned.
 
 An invalid passive recovery retains its original cache unchanged until explicit
 repair; reload also preserves and re-enters that fail-closed state, including
 when the provisional buffer is killed.  A queue owner's stopped-Run image is
-published only after its exact draft bytes are durably saved."
-  (if emacsos-assist-web--passive-recovery-invalid-p
-      t
-    (if (emacsos-assist-web--legacy-compatibility-p)
+published only after its exact draft bytes are durably saved. A dormant stop's
+nonowner cannot rewrite that image through passive kill or idle saves."
+  (cond
+   ((and (emacsos-assist-web-git--dormant-stop-p)
+         (null (emacsos-assist-web-git--owned-stops)))
+    ;; Kill/idle-save are passive too: they cannot rewrite a dead owner's image.
+    nil)
+   (emacsos-assist-web--passive-recovery-invalid-p
+      t)
+   (t (if (emacsos-assist-web--legacy-compatibility-p)
         (emacsos-assist-web--legacy-save-draft)
     (if-let ((name (emacsos-assist-web--draft-cache-name)))
         (let ((stops (emacsos-assist-web-git--owned-stops))
               (inhibit-quit t))
+          (setq emacsos-assist-web--last-draft-image nil)
           ;; A failed later save must not let another view import the
           ;; previous image while this owner holds newer unsaved text.
           (dolist (stop stops)
@@ -3756,6 +3770,10 @@ published only after its exact draft bytes are durably saved."
                  (digest (secure-hash 'sha256 encoded)))
             (and (<= (string-bytes encoded) emacsos-assist-web-max-cache-bytes)
                  (when (emacsos-assist-web--try-write-cache name value encoded)
+                   (setq emacsos-assist-web--last-draft-image
+                         (list :name name :digest digest
+                               :queue-entries
+                               (copy-sequence emacsos-assist-web--queue)))
                    (dolist (stop stops)
                      (setf (plist-get stop :draft-name) name
                            (plist-get stop :draft-digest) digest
@@ -3766,7 +3784,13 @@ published only after its exact draft bytes are durably saved."
                                               emacsos-assist-web--queue)))
                        (setf (plist-get stop :ordinal) position)))
                    t))))
-      t))))
+      t)))))
+
+(defun emacsos-assist-web--protect-unclaimed-draft (&rest _)
+  "Require explicit ownership recovery before editing a dead owner's draft."
+  (when (and (emacsos-assist-web-git--dormant-stop-p)
+             (null (emacsos-assist-web-git--owned-stops)))
+    (user-error "Refresh to recover the saved Run before editing its draft")))
 
 (defun emacsos-assist-web--entry-set-assistant-status (entry status)
   "Replace ENTRY's provisional assistant body with fixed STATUS."
@@ -5750,6 +5774,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                (with-current-buffer destination
         (let* ((destination-thread-id emacsos-assist-web--thread-id)
                (destination-queue emacsos-assist-web--queue)
+               (destination-queue-model-p emacsos-assist-web--queue-model-p)
                (destination-input (emacsos-assist-web--input))
                (merged (emacsos-assist-web--adoption-merge source-queue destination-queue))
                (collision (> (length merged) 2))
@@ -5781,6 +5806,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
           ;; The latter would hide SOURCE's real queue while persisting its
           ;; durable retry after a failed destination write.
           (setq emacsos-assist-web--queue merged
+                emacsos-assist-web--queue-model-p t
                 emacsos-assist-web--collision-p collision
                 emacsos-assist-web--recovery-draft
                 (unless (string-empty-p (string-trim source-input)) source-input))
@@ -5788,6 +5814,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
               ;; The destination write is not durable.  Restore its live
               ;; state while the source cache remains its durable owner.
               (setq emacsos-assist-web--queue destination-queue
+                    emacsos-assist-web--queue-model-p destination-queue-model-p
                     emacsos-assist-web--collision-p destination-collision
                     emacsos-assist-web--recovery-draft destination-recovery-draft)
               (throw 'emacsos-assist-web--adoption-failed
@@ -5810,12 +5837,16 @@ ACCEPTED-RUN-ID is its already validated Run identity."
           ;; cache still survives a crash.  Retire that old source only now.
           (unless (emacsos-assist-web--delete-cache "drafts/new-thread.json")
             (setq emacsos-assist-web--queue destination-queue
+                  emacsos-assist-web--queue-model-p destination-queue-model-p
                   emacsos-assist-web--collision-p destination-collision
                   emacsos-assist-web--recovery-draft destination-recovery-draft)
             (throw 'emacsos-assist-web--adoption-failed
                     (if (emacsos-assist-web--save-draft)
                         "canonical adoption could not retire its source cache"
                       "canonical adoption has dual durable recovery records")))
+          ;; This is the commit point: DEST is durable and SOURCE is retired.
+          ;; Precommit saves and rollback must never retarget SOURCE's stops.
+          (emacsos-assist-web-git--adopt-stops source)
           ;; Source callbacks become inert only after the destination cache
           ;; holds the complete merge.  Do not close the destination observer:
           ;; it may already own C1, which is still authoritative for its stream.
@@ -6141,9 +6172,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                       emacsos-assist-web--queue-model-p t
                       emacsos-assist-web--collision-p collision
                       emacsos-assist-web--recovery-draft recovery-draft)
-                (when (stringp text) (insert text))
                 (dolist (entry emacsos-assist-web--queue)
                   (emacsos-assist-web--entry-render entry))
+                (when (stringp text) (emacsos-assist-web--replace-input text))
                 (emacsos-assist-web--render-recovery-draft-action)
                 (when (seq-some
                        (lambda (entry)
@@ -6154,7 +6185,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                 ;; A normalized transport state is recovery truth only after it reaches
                 ;; disk.  A failed write leaves this buffer visible but starts no retry,
                 ;; GET, or SSE that could outlive the old cached claim.
-                (when changed
+                (when (and changed (not passive-transport))
                   (unless (emacsos-assist-web--save-draft)
                     (setq changed 'persistence-failed)
                     (when emacsos-assist-web--manual-recovery-required
