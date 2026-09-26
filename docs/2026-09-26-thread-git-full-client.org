@@ -1,0 +1,74 @@
+#+title: Assist thread Git full client
+#+date: 2026-09-26
+
+* Contract
+
+Thread Git uses a persistent device checkout of the authenticated non-main
+thread branch. Content travels through Git directly, not the Assist Web API.
+The API supplies repository identity, branch and revision metadata only.
+
+=C-x C-f= in a canonical Assist thread selects a bounded local checkout file.
+=C-c d= opens a Magit committed diff against fetched remote/main. Normal Magit
+operations remain available for manual stage, commit and push. Nothing pushes
+automatically. Local edits, unsaved buffers and divergent commits are preserved;
+automatic advancement uses fast-forward only, without reset or autostash.
+An admitted automatic update temporarily protects visiting buffers through
+the final metadata check. Their prior edit permissions are then restored.
+Ordinary Magit commands conservatively clear the live Assist-current label;
+the pinned committed diff remains available and a new fetch verifies freshness.
+
+While a turn is busy, a fetched thread tip is remote-latest, not Assist-current,
+and may change after the turn finishes. A user push can legitimately be ahead
+of Assist's last published revision. Assist must incorporate that push before
+the next turn through its separately implemented fast-forward contract.
+
+* Private device configuration
+
+Provision these files in the UI user's =~/.config/emacsos/=, mode =0600=:
+
+- =assist-git-remotes.json=: JSON object mapping the authenticated repository
+  key to its explicitly approved credential-free =ssh://user@host/path.git= URL.
+- =assist-git-key=: dedicated device SSH private key, authorized for the intended
+  repository. This is a full Git credential; the feature never automatically
+  invokes receive-pack or pushes.
+- =assist-git-known-hosts=: independently verified pinned SSH host keys.
+
+The helper configures each new checkout's origin, upstream and SSH command so
+ordinary Git and Magit use the same dedicated key and host pin. Configuration
+is device-local and must never be committed. URLs are not inferred from an
+Assist host filesystem path or accepted from untrusted thread text.
+
+The managed checkout uses a local attributes override to retain literal blob
+bytes, disabling repository-driven filters, ident, encoding and line-ending
+conversion. This prevents checkout expansion from bypassing the stored-file
+size limit. Changing this local policy makes automatic updates unavailable
+until it is reconciled; the helper never overwrites an operator change.
+
+For a local bare repository, use direct SSH over the existing WireGuard link.
+Root provisions a repo-only forced command admitting upload-pack and
+receive-pack for that exact repository, with a whole-command time bound. Keep
+prior SSH login access intact. Disabling its dedicated key denies new sessions;
+an already admitted Git command may finish within that bound. Root reports
+drain until exit is verified. No hosted mirror or Assist-web proxy is needed.
+
+* Deployment verification
+
+Root must verify device Git and Magit availability, free disk space, UI-user
+credential ownership, host pin and direct remote access before deployment.
+Then verify file browsing, busy warning, a pinned branch diff, safe final-turn
+fast-forward, local-edit preservation and an explicitly invoked manual push.
+Phone tests require the accepted protected resource envelope. This document
+does not record a live provisioning or deployment.
+
+Fetches have deadlines and bounded diagnostic output plus a free-space
+preflight. Initial checkout is staged and atomically installed after size
+checks. A fetch can temporarily consume disk before its postfetch size check;
+the feature does not implement a filesystem quota. Existing editable checkouts
+are never deleted as cache generations.
+
+* Historical supersessions
+
+This replaces =2026-09-24-thread-git-mirror.org='s read-only file/Magit and
+immutable-generation contract with Pierre's full-client instruction. Its
+dated implementation and test report remains a point-in-time historical
+record, not evidence that this successor has been deployed.

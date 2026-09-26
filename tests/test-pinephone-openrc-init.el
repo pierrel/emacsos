@@ -6,6 +6,14 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(ert-deftest emacsos-openrc-distro-magit-paths-are-visible-under-q ()
+  (dolist (directory '("/usr/share/emacs/site-lisp"
+                       "/usr/share/emacs/site-lisp/compat"
+                       "/usr/share/emacs/site-lisp/magit"))
+    (should (member directory load-path)))
+  (should-not user-init-file)
+  (should-not (bound-and-true-p package--initialized)))
+
 (ert-deftest emacsos-openrc-lifecycle-actions-are-commands ()
   (dolist (command '(emacsos-firefox-start
                      emacsos-firefox-quit
