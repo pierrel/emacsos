@@ -1213,7 +1213,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
           (make-process
            :name "assist-thread-git" :buffer nil :noquery t
            :connection-type 'pipe
-           :command (list "setsid" "timeout" "--kill-after=2" "90"
+           :command (list "timeout" "--kill-after=2" "90"
                           "python3" emacsos-assist-web-git-helper)
            :filter (lambda (process chunk)
                      (if (> (+ (length output) (length chunk)) 4096)

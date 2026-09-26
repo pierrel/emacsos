@@ -3,6 +3,30 @@
 (require 'ert)
 (require 'assist-web)
 
+(ert-deftest test-assist-web-git-spawn-keeps-helper-attached-until-input-eof ()
+  "A real pipe helper must not finish before its request is delivered."
+  (let ((send (symbol-function 'process-send-string))
+        process results)
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (child input)
+                       ;; Yield before sending so a detached launcher can exit.
+                       (accept-process-output child 0.2)
+                       (funcall send child input))))
+            (setq process
+                  (emacsos-assist-web-git--spawn
+                   '((action . "probe"))
+                   (lambda (result) (push result results)))))
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (process-live-p process) (< (float-time) deadline))
+              (accept-process-output process 0.1)))
+          (should-not (process-live-p process))
+          (should (= (process-exit-status process) 0))
+          (should (equal results '((:ok nil :reason "helper action is invalid")))))
+      (when (and process (process-live-p process))
+        (emacsos-assist-web-git--terminate process)))))
+
 (defun test-assist-web-git--isolated-thread-safety (run test &rest args)
   "Give Assist Web ERT TESTs independent process-wide Git safety ledgers."
   (if (string-prefix-p "test-assist-web-" (symbol-name (ert-test-name test)))
