@@ -1,4 +1,4 @@
-;;; assist-web-git.el --- Committed Assist thread Git views -*- lexical-binding: t -*-
+;;; assist-web-git.el --- Editable thread checkouts and committed diffs -*- lexical-binding: t -*-
 ;;; Commentary:
 ;; This module maintains editable thread checkouts and captured fetch metadata.
 ;; File views read bounded local worktree paths, not verified committed blobs.
@@ -21,7 +21,7 @@
 (declare-function magit-section-toggle "magit-section")
 
 (defgroup emacsos-assist-web-git nil
-  "Committed Git views for canonical Assist Web threads."
+  "Editable checkouts and captured committed diffs for canonical Assist threads."
   :group 'emacsos-assist-web)
 
 (defcustom emacsos-assist-web-git-cache-directory
@@ -1277,7 +1277,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                    (emacsos-assist-web-git--cleanup-failed)))))))))))
 
 (defun emacsos-assist-web-git--cleanup-failed ()
-  "Release every Git action after an old staging directory cannot be cleaned."
+  "Release Git actions after a legacy cache cleanup action fails."
   (emacsos-assist-web-git--invalidate
    "mirror cleanup failed; restart Emacs before retry"))
 
@@ -2961,7 +2961,7 @@ interpret repository-local code."
                            (emacsos-assist-web-git-generation-oid generation)))))))
 
 (defun emacsos-assist-web-git--pin (view thread generation)
-  "Pin VIEW to GENERATION and THREAD until VIEW is closed."
+  "Associate VIEW with GENERATION and THREAD until closed or repinned after sync."
   (with-current-buffer view
     (setq-local emacsos-assist-web-git--view-thread thread
                 emacsos-assist-web-git--view-generation generation
