@@ -7166,6 +7166,29 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
       (emacsos-assist-web-git--clear-feedback (selected-window))
       (delete-directory cache t))))
 
+(ert-deftest test-assist-web-git-promotion-retains-only-fixed-file-refusals ()
+  (dolist (reason '("Git file already has an ordinary visit; close it before browsing here"
+                    "Git buffer exceeds 1 MiB display limit"
+                    "private repository detail"))
+    (with-temp-buffer
+      (let* ((metadata (test-assist-web-git--metadata
+                        "ready" "topic/one" test-assist-web-git--head))
+             (intent '(:action files))
+             (request (list :metadata metadata :intents (list intent)))
+             feedback)
+        (setq emacsos-assist-web-git--request request)
+        (cl-letf (((symbol-function 'emacsos-assist-web-git--intent-live-p)
+                   (lambda (_) t))
+                  ((symbol-function 'emacsos-assist-web-git--open)
+                   (lambda (&rest _) (user-error "%s" reason)))
+                  ((symbol-function 'emacsos-assist-web-git--release-intents)
+                   (lambda (_intents message &rest _) (setq feedback message))))
+          (emacsos-assist-web-git--promote
+           request (test-assist-web-git--checkout-result metadata)))
+        (should (equal feedback
+                       (if (equal reason "private repository detail")
+                           "Git view unavailable; Retry" reason)))))))
+
 (ert-deftest test-assist-web-git-final-read-keeps-checkout-reserved ()
   "Local writes stay barred through the final authenticated metadata read."
   (with-temp-buffer
