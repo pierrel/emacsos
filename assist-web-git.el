@@ -125,13 +125,14 @@
   (let ((directory default-directory))
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
-        (when (and emacsos-assist-web-git--current
-                   (equal (directory-file-name directory)
-                          (emacsos-assist-web-git-generation-path
-                           emacsos-assist-web-git--current)))
-          (setf (emacsos-assist-web-git-generation-state
-                 emacsos-assist-web-git--current) 'cached)
-          (emacsos-assist-web-git--update-headers))))))
+        (when-let ((root (and emacsos-assist-web-git--current
+                             (emacsos-assist-web-git-generation-path
+                              emacsos-assist-web-git--current))))
+          (when (or (equal (directory-file-name directory) root)
+                    (emacsos-assist-web-git--in-checkout-p directory root))
+            (setf (emacsos-assist-web-git-generation-state
+                   emacsos-assist-web-git--current) 'cached)
+            (emacsos-assist-web-git--update-headers)))))))
 
 (with-eval-after-load 'magit-process
   (add-hook 'magit-pre-call-git-hook #'emacsos-assist-web-git--checkout-write-guard)
@@ -2498,9 +2499,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                       (emacsos-assist-web-git--cleanup id "staging" #'ignore)
                     (with-current-buffer thread
                       (cond
-                       ((or (not (eq request emacsos-assist-web-git--request))
-                            (/= (plist-get request :epoch)
-                                emacsos-assist-web-git--epoch))
+                       ((not (eq request emacsos-assist-web-git--request))
+                        (emacsos-assist-web-git--release-checkout request)
                         (emacsos-assist-web-git--cleanup
                          id "staging"
                          (lambda (ok)
@@ -2511,6 +2511,10 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                                  (if ok
                                      (emacsos-assist-web-git--run-next)
                                    (emacsos-assist-web-git--cleanup-failed))))))))
+                       ((/= (plist-get request :epoch) emacsos-assist-web-git--epoch)
+                        (emacsos-assist-web-git--failed
+                         request "thread state changed during Git sync")
+                        (emacsos-assist-web-git--cleanup id "staging" #'ignore))
                        ((< (or (plist-get request :cause-at-start) 0)
                            emacsos-assist-web-git--success-watermark)
                         (emacsos-assist-web-git--finish-obsolete request))
@@ -2623,6 +2627,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                  (not (equal (emacsos-assist-web-git--request-key metadata)
                              (emacsos-assist-web-git--request-key
                               emacsos-assist-web-git--metadata))))
+             (emacsos-assist-web-git--failed
+              request "thread state changed during final Git verification")
              (emacsos-assist-web-git--cleanup
               (plist-get request :id) "staging" #'ignore))
             (t
