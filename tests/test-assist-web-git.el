@@ -256,6 +256,10 @@
                 (insert "ref: refs/heads/topic/one\n"))
               (emacsos-assist-web-git--command 'files)
               (should opened)
+              (should (string-match-p "cached" (emacsos-assist-web-git--thread-header)))
+              (should-not (string-match-p (regexp-opt '("may change" "unavailable"))
+                                          (emacsos-assist-web-git--view-state
+                                           emacsos-assist-web-git--current (current-buffer))))
               (with-temp-file (expand-file-name ".git/HEAD" root)
                 (insert "ref: refs/heads/main\n"))
               (should-error (emacsos-assist-web-git--command 'files) :type 'user-error))))
@@ -324,6 +328,68 @@
         (should (eq (and (plist-get entry :git-terminal-observed) t) admitted))
         (should-not (assq 'git_terminal_observed
                           (emacsos-assist-web--entry-cache-value entry)))))))
+
+(ert-deftest test-assist-web-git-terminal-first-sse-chunk-keeps-live-proof ()
+  "A validated terminal event in the first chunk is a live sync cause."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let* ((target (current-buffer))
+           (entry (emacsos-assist-web--entry "live" 'observing "key-live"))
+           (response (generate-new-buffer " *git-terminal-first-chunk*"))
+           (process (make-pipe-process :name "git-terminal-first-chunk"
+                                       :buffer response :noquery t)))
+      (unwind-protect
+          (progn
+            (setf (plist-get entry :run-id) "run-live"
+                  (plist-get entry :epoch) 1
+                  (plist-get entry :stream-process) process
+                  (plist-get entry :stream-response) response)
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web--stream-entry entry)
+            (with-current-buffer response
+              (insert "\nevent: terminal\ndata: {}\n\n")
+              (setq-local url-http-end-of-headers (copy-marker (point-min))
+                          url-http-response-status 200
+                          url-http-content-type "text/event-stream"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--stream-cleanup) #'ignore)
+                      ((symbol-function 'emacsos-assist-web--reobserve-entry) #'ignore)
+                      ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore)
+                      ((symbol-function 'emacsos-assist-web--sync-active-surface) #'ignore))
+              (funcall (emacsos-assist-web--entry-event-filter #'ignore target entry 1)
+                       process ""))
+            (should (plist-get entry :git-terminal-observed))
+            (should (eq (plist-get entry :state) 'terminal-unreconciled)))
+        (when (process-live-p process) (delete-process process))
+        (when (buffer-live-p response) (kill-buffer response))))))
+
+(ert-deftest test-assist-web-git-terminal-failure-requires-post-terminal-fetch ()
+  "An earlier same-key fetch cannot consume a later live terminal failure."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web--reconcile-generation 3)
+    (let* ((metadata (test-assist-web-git--metadata "error" "topic/one" test-assist-web-git--head))
+           (request (list :id "old" :metadata metadata :intents nil
+                          :cause-at-start 0 :terminal-at-start 0))
+           started)
+      (setq emacsos-assist-web-git--metadata metadata
+            emacsos-assist-web-git--request request)
+      (emacsos-assist-web-git--canonical-accepted
+       metadata nil (emacsos-assist-web-git--canonical-start
+                     t 3 '(("error-run" . "error")) '(("error-run" . "error"))))
+      (should (equal (car emacsos-assist-web-git--next) metadata))
+      (should (= emacsos-assist-web-git--success-watermark 0))
+      (should (= emacsos-assist-web-git--terminal-watermark 1))
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--cleanup)
+                 (lambda (_id _kind done) (funcall done t)))
+                ((symbol-function 'emacsos-assist-web-git--begin)
+                 (lambda (value _intents)
+                   (setq started value)
+                   (should (= emacsos-assist-web-git--terminal-watermark 1)))))
+        (emacsos-assist-web-git--finish-obsolete request))
+      (should (equal started metadata)))))
 
 (ert-deftest test-assist-web-git-local-branch-rechecked-after-file-selection ()
   "A manual branch change during the chooser cannot open main's files."
@@ -613,7 +679,7 @@
                      "Git state unavailable"))
       (should (equal (emacsos-assist-web-git--view-state
                       generation (current-buffer))
-                     "cached / local checkout; not synced for browsing; may change after this turn")))))
+                     "cached / local checkout; not synced for browsing")))))
 
 (ert-deftest test-assist-web-git-old-pinned-generation-stays-stale-during-run-check ()
   "A Run check cannot relabel an older pinned fetch as the selected cache."

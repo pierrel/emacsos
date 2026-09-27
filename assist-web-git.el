@@ -194,6 +194,9 @@ Modified buffers are never reverted. Repository local eval remains disabled."
 (defvar-local emacsos-assist-web-git--epoch 0)
 (defvar-local emacsos-assist-web-git--success-watermark 0
   "Count of exact successful Run IDs durably retired by queue-owned R2.")
+(defvar-local emacsos-assist-web-git--terminal-watermark 0
+  "Count of live terminal receipts admitted for background synchronization.
+Unlike the success watermark, terminal failures also advance this cause.")
 (defvar-local emacsos-assist-web-git--observed-terminal-run-id nil
   "Queue-free Run whose terminal event was received in this live buffer.")
 (defvar-local emacsos-assist-web-git--observation 0
@@ -972,7 +975,10 @@ A shared stop may outlive its original buffer pending exact durable recovery."
         "cached / thread branch changed")
        ((eq (emacsos-assist-web-git-generation-state generation) 'cached)
         (concat "cached / local checkout; not synced for browsing"
-                (unless (equal (plist-get emacsos-assist-web-git--metadata :status) "ready")
+                (unless (equal (plist-get
+                                (or emacsos-assist-web-git--metadata
+                                    (emacsos-assist-web-git-generation-metadata generation))
+                                :status) "ready")
                   "; may change after this turn")))
        ((and (eq (emacsos-assist-web-git-generation-state generation) 'current)
              (not (emacsos-assist-web-git--run-gated-p)))
@@ -1070,6 +1076,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 (defun emacsos-assist-web-git--thread-header ()
   "Return a compact, actionable mirror state for the thread header."
   (let* ((generation emacsos-assist-web-git--current)
+         (metadata (or emacsos-assist-web-git--metadata
+                       (and generation
+                            (emacsos-assist-web-git-generation-metadata generation))))
          (paused (bound-and-true-p emacsos-assist-web--reconcile-recovery-paused))
          (manual (bound-and-true-p emacsos-assist-web--manual-recovery-required))
          (display-failed (bound-and-true-p emacsos-assist-web--display-recovery))
@@ -1079,7 +1088,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                  (paused "recovery paused; restart")
                  (emacsos-assist-web-git--pending "pending; Retry")
                  ((not (emacsos-assist-web-git--usable
-                        emacsos-assist-web-git--metadata))
+                        metadata))
                   (or emacsos-assist-web-git--unavailable "unavailable"))
                  (emacsos-assist-web-git--request "fetching")
                  ((and emacsos-assist-web-git--unavailable
@@ -1088,7 +1097,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                   emacsos-assist-web-git--unavailable)
                  ((and generation
                        (not (emacsos-assist-web-git--same-identity
-                             emacsos-assist-web-git--metadata
+                             metadata
                              (emacsos-assist-web-git-generation-metadata
                               generation))))
                   "remote pending")
@@ -1444,6 +1453,11 @@ terminal failure without counting it as successful."
       (when emacsos-assist-web-git--current
         (setf (emacsos-assist-web-git-generation-state
                emacsos-assist-web-git--current) 'cached)))
+    (when observed-terminal
+      ;; Any work begun below must include this terminal cause, even when its
+      ;; exact outcome is a failure and earns no success-currentness credit.
+      (cl-incf emacsos-assist-web-git--terminal-watermark)
+      (setq emacsos-assist-web-git--observed-terminal-run-id nil))
     (emacsos-assist-web-git--note metadata)
     (when eligible
       (setq emacsos-assist-web-git--pending nil)
@@ -1458,7 +1472,6 @@ terminal failure without counting it as successful."
                (not emacsos-assist-web-git--r2-waiting)
                (not emacsos-assist-web-git--pending)
                (emacsos-assist-web-git--usable metadata))
-      (setq emacsos-assist-web-git--observed-terminal-run-id nil)
       (emacsos-assist-web-git--enqueue metadata nil t))))
 
 (defun emacsos-assist-web-git--r2-finished (owner committed)
@@ -2447,6 +2460,13 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
          (eql (window-parameter window 'assist-web-git-intent)
               (plist-get intent :serial)))))
 
+(defun emacsos-assist-web-git--request-obsolete-p (request)
+  "Return non-nil when REQUEST predates an admitted success or terminal cause."
+  (or (< (or (plist-get request :cause-at-start) 0)
+         emacsos-assist-web-git--success-watermark)
+      (< (or (plist-get request :terminal-at-start) 0)
+         emacsos-assist-web-git--terminal-watermark)))
+
 (defun emacsos-assist-web-git--enqueue (metadata intent &optional terminal)
   "Join or start one METADATA refresh, retaining optional UI INTENT."
   (let ((request emacsos-assist-web-git--request))
@@ -2464,8 +2484,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
            (equal (emacsos-assist-web-git--request-key
                    (plist-get request :metadata))
                   (emacsos-assist-web-git--request-key metadata)))
-      (if (< (or (plist-get request :cause-at-start) 0)
-             emacsos-assist-web-git--success-watermark)
+      (if (emacsos-assist-web-git--request-obsolete-p request)
           (progn
             (setq emacsos-assist-web-git--next
                   (list metadata
@@ -2496,6 +2515,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
          (request (list :id id :epoch epoch :metadata metadata
                         :intents intents :process nil
                         :cause-at-start emacsos-assist-web-git--success-watermark
+                        :terminal-at-start emacsos-assist-web-git--terminal-watermark
                         :final-attempts 0 :verified-epoch nil
                         :checkout (emacsos-assist-web-git--checkout-path metadata)))
          (root (plist-get request :checkout))
@@ -2550,8 +2570,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                         (emacsos-assist-web-git--failed
                          request "thread state changed during Git sync")
                         (emacsos-assist-web-git--cleanup id "staging" #'ignore))
-                       ((< (or (plist-get request :cause-at-start) 0)
-                           emacsos-assist-web-git--success-watermark)
+                       ((emacsos-assist-web-git--request-obsolete-p request)
                         (emacsos-assist-web-git--finish-obsolete request))
                        ((plist-get result :ok)
                         (emacsos-assist-web-git--final-check request result))
@@ -2580,8 +2599,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
   (when (eq request emacsos-assist-web-git--request)
     (setq emacsos-assist-web-git--request nil)
     (if (and emacsos-assist-web-git--next
-             (< (or (plist-get request :cause-at-start) 0)
-                emacsos-assist-web-git--success-watermark))
+             (emacsos-assist-web-git--request-obsolete-p request))
         (emacsos-assist-web-git--run-next)
       (setq emacsos-assist-web-git--unavailable reason)
       (when (and emacsos-assist-web-git--current
@@ -2615,8 +2633,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
              (emacsos-assist-web-git--release-checkout request)
              (emacsos-assist-web-git--cleanup
               (plist-get request :id) "staging" #'ignore))
-            ((< (or (plist-get request :cause-at-start) 0)
-                emacsos-assist-web-git--success-watermark)
+            ((emacsos-assist-web-git--request-obsolete-p request)
              (emacsos-assist-web-git--finish-obsolete request))
             ((/= start-epoch emacsos-assist-web-git--epoch)
              (if (< (plist-get request :final-attempts) 2)

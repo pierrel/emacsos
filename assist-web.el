@@ -4740,6 +4740,13 @@ this one transport.  No late callback can select a successor from globals."
                   (emacsos-assist-web--interrupt-entry-in-buffer
                    target entry epoch "Assist stream transport framing is too large"))
                  (t
+                  ;; A validated first chunk can itself contain the terminal
+                  ;; event. Record admission before dispatching those bytes;
+                  ;; parse failure still clears it through interruption.
+                  (when (and (emacsos-assist-web--entry-current-in-buffer-p
+                              target entry epoch)
+                             (eq process (plist-get entry :stream-process)))
+                    (setf (plist-get entry :stream-admitted) t))
                   (emacsos-assist-web--drain-events target epoch decoded-end entry)
                   (when (and (emacsos-assist-web--entry-current-in-buffer-p
                               target entry epoch)
