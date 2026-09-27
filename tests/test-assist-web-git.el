@@ -55,8 +55,8 @@
           :thread_oid tip :local_oid (or local tip)
           :main_oid test-assist-web-git--head :dirty nil :pending nil)))
 
-(ert-deftest test-assist-web-git-full-client-busy-command-is-not-run-gated ()
-  "A busy committed tip remains accessible through stopped/approval Run state."
+(ert-deftest test-assist-web-git-full-client-busy-explicit-refresh-is-not-run-gated ()
+  "An explicit refresh can still fetch a busy tip through stopped Run state."
   (save-window-excursion
     (with-temp-buffer
       (emacsos-assist-web-mode)
@@ -78,7 +78,7 @@
                      nil))
                   ((symbol-function 'emacsos-assist-web-git--open)
                    (lambda (_intent generation) (setq opened generation))))
-          (emacsos-assist-web-git-diff))
+          (emacsos-assist-web-git--refresh-command 'diff))
         (should (= (length requests) 1))
         (should (equal (alist-get 'action (car requests)) "sync"))
         (should (equal (emacsos-assist-web-git-generation-remote opened) remote))
@@ -175,7 +175,8 @@
   "Exact successful retirement requests direct Git sync, never an automatic push."
   (with-temp-buffer
     (emacsos-assist-web-mode)
-    (setq emacsos-assist-web--thread-id "thread-1")
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web-git--observed-terminal-run-id "run-success")
     (let ((metadata (emacsos-assist-web-git--metadata-from-snapshot
                      (test-assist-web-git--snapshot "ready" "topic/one")))
           request)
@@ -185,6 +186,265 @@
       (should (equal (alist-get 'action request) "sync"))
       (should (eq (alist-get 'allow_ff request) t))
       (should (= emacsos-assist-web-git--success-watermark 1)))))
+
+(ert-deftest test-assist-web-git-local-browse-never-fetches ()
+  "Busy, stale, offline, and Run-only failures retain immediate local browsing."
+  (dolist (status '("running" "ready" "error"))
+    (let ((cache (make-temp-file "git-local-browse-" t)))
+      (unwind-protect
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web-git-thread-mode t)
+            (let* ((emacsos-assist-web-git-cache-directory cache)
+                   (metadata (test-assist-web-git--metadata
+                              status "topic/one" test-assist-web-git--head))
+                   (root (emacsos-assist-web-git--checkout-path metadata))
+                   opened)
+              (make-directory (expand-file-name ".git" root) t)
+              (with-temp-file (expand-file-name ".git/HEAD" root)
+                (insert "ref: refs/heads/topic/one\n"))
+              (setq emacsos-assist-web-git--metadata metadata
+                    emacsos-assist-web-git--denied 'run
+                    emacsos-assist-web-git--unavailable "Git mirror operation failed")
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                         (lambda (&rest _) (ert-fail "browse must not GET")))
+                        ((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (&rest _) (ert-fail "browse must not fetch")))
+                        ((symbol-function 'emacsos-assist-web-git--open)
+                         (lambda (intent generation)
+                           (should (plist-get intent :local))
+                           (should (equal root (emacsos-assist-web-git-generation-path generation)))
+                           (should-not (emacsos-assist-web-git-generation-oid generation))
+                           (push (plist-get intent :action) opened))))
+                (emacsos-assist-web-git--command 'files)
+                ;; A newer server branch must not hide the known old local work.
+                (setq emacsos-assist-web-git--metadata
+                      (plist-put (copy-sequence metadata) :branch "topic/new"))
+                (emacsos-assist-web-git--command 'diff))
+              (should (equal opened '(diff files)))))
+        (delete-directory cache t)))))
+
+(ert-deftest test-assist-web-git-local-browse-cold-cache-and-no-checkout ()
+  "Validated cached snapshot is enough; absence does not initialize implicitly."
+  (let ((cache (make-temp-file "git-local-cold-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web-git-thread-mode t
+                emacsos-assist-web--snapshot
+                (test-assist-web-git--snapshot "ready" "topic/one"))
+          (let* ((emacsos-assist-web-git-cache-directory cache)
+                 (metadata (emacsos-assist-web-git--metadata-from-snapshot
+                            emacsos-assist-web--snapshot))
+                 (root (emacsos-assist-web-git--checkout-path metadata))
+                 opened)
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
+                       (lambda (&rest _) (ert-fail "cold browse must not GET")))
+                      ((symbol-function 'emacsos-assist-web-git--spawn)
+                       (lambda (&rest _) (ert-fail "cold browse must not fetch")))
+                      ((symbol-function 'emacsos-assist-web-git--open)
+                       (lambda (&rest _) (setq opened t))))
+              (should (string-match-p "initialize"
+                                      (cadr (should-error
+                                             (emacsos-assist-web-git--command 'files)
+                                             :type 'user-error))))
+              (should-not opened)
+              (make-directory (expand-file-name ".git" root) t)
+              (with-temp-file (expand-file-name ".git/HEAD" root)
+                (insert "ref: refs/heads/topic/one\n"))
+              (emacsos-assist-web-git--command 'files)
+              (should opened)
+              (with-temp-file (expand-file-name ".git/HEAD" root)
+                (insert "ref: refs/heads/main\n"))
+              (should-error (emacsos-assist-web-git--command 'files) :type 'user-error))))
+      (delete-directory cache t))))
+
+(ert-deftest test-assist-web-git-local-browse-retains-known-denial-after-close ()
+  "Closing the denied view cannot reopen cached access without reauthorization."
+  (let ((source (generate-new-buffer " *git-denied-source*")))
+    (with-current-buffer source
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (emacsos-assist-web-git--canonical-denied 403))
+    (kill-buffer source)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web-git-thread-mode t)
+      (should-error (emacsos-assist-web-git--command 'files) :type 'user-error)
+      (emacsos-assist-web-git--canonical-authorized emacsos-assist-web-git--auth-epoch)
+      (should-not (emacsos-assist-web-git--gate-reason t)))))
+
+(ert-deftest test-assist-web-git-background-requires-live-terminal-proof ()
+  "Historical success cannot fetch; an observed terminal error may safely fetch."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (let ((metadata (test-assist-web-git--metadata
+                     "error" "topic/one" test-assist-web-git--head))
+          request)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                 (lambda (value _callback) (setq request value) nil)))
+        (emacsos-assist-web-git--canonical-accepted metadata "restored-success" nil)
+        (should-not request)
+        (setq emacsos-assist-web--reconcile-generation 3)
+        (let ((token (emacsos-assist-web-git--canonical-start
+                      t 3 '(("error-run" . "error")))))
+          (emacsos-assist-web-git--canonical-accepted metadata nil token)
+          (should-not request))
+        (let ((token (emacsos-assist-web-git--canonical-start
+                      t 3 '(("error-run" . "error")) '(("error-run" . "error")))))
+          (emacsos-assist-web-git--canonical-accepted metadata nil token)
+          (should (equal (alist-get 'action request) "sync")))))))
+
+(ert-deftest test-assist-web-git-observed-terminal-proof-is-live-and-not-persisted ()
+  "Only an admitted live SSE ending can mark the nonportable terminal receipt."
+  (dolist (admitted '(nil t))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (let ((entry (emacsos-assist-web--entry "live" 'observing "key-live")))
+        (setf (plist-get entry :run-id) "run-live"
+              (plist-get entry :stream-admitted) admitted)
+        (setq emacsos-assist-web--thread-id "thread-1"
+              emacsos-assist-web--queue (list entry)
+              emacsos-assist-web--stream-entry entry)
+        (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                  ((symbol-function 'emacsos-assist-web--stream-cleanup) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--reobserve-entry) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--sync-active-surface) #'ignore))
+          (emacsos-assist-web--stream-finish (current-buffer)))
+        (should (eq (and (plist-get entry :git-terminal-observed) t) admitted))
+        (should-not (assq 'git_terminal_observed
+                          (emacsos-assist-web--entry-cache-value entry)))))))
+
+(ert-deftest test-assist-web-git-local-branch-rechecked-after-file-selection ()
+  "A manual branch change during the chooser cannot open main's files."
+  (let ((cache (make-temp-file "git-local-branch-" t)))
+    (unwind-protect
+        (save-window-excursion
+         (with-temp-buffer
+          (switch-to-buffer (current-buffer))
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web-git-thread-mode t
+                emacsos-assist-web-git--metadata
+                (test-assist-web-git--metadata "ready" "topic/one" test-assist-web-git--head))
+          (let* ((emacsos-assist-web-git-cache-directory cache)
+                 (root (emacsos-assist-web-git--checkout-path emacsos-assist-web-git--metadata))
+                 (head (expand-file-name ".git/HEAD" root)))
+            (make-directory (file-name-directory head) t)
+            (with-temp-file head (insert "ref: refs/heads/topic/one\n"))
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _)
+                         (with-temp-file head (insert "ref: refs/heads/main\n"))
+                         (expand-file-name "hello.txt" root)))
+                      ((symbol-function 'emacsos-assist-web-git--literal-file-view)
+                       (lambda (&rest _) (ert-fail "main must not be opened")))
+                      ((symbol-function 'emacsos-assist-web-git--read-metadata)
+                       (lambda (&rest _) (ert-fail "browse must not GET")))
+                      ((symbol-function 'emacsos-assist-web-git--spawn)
+                       (lambda (&rest _) (ert-fail "browse must not fetch"))))
+              (should-error (emacsos-assist-web-git--command 'files) :type 'user-error)))))
+      (delete-directory cache t))))
+
+(ert-deftest test-assist-web-git-legacy-error-observation-syncs-without-success-credit ()
+  "A live compatibility terminal error can sync without making success currentness."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web-git--observed-terminal-run-id "run-error")
+    (let ((metadata (test-assist-web-git--metadata
+                     "error" "topic/one" test-assist-web-git--head))
+          request)
+      (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                 (lambda (value _callback) (setq request value) nil)))
+        (emacsos-assist-web-git--canonical-accepted metadata nil nil "run-error"))
+      (should (equal (alist-get 'action request) "sync"))
+      (should (= emacsos-assist-web-git--success-watermark 0))
+      (should-not emacsos-assist-web-git--observed-terminal-run-id))))
+
+(ert-deftest test-assist-web-git-local-magit-reads-during-background-reservation ()
+  "The fixed cached diff is readable while ordinary later Git writes stay fenced."
+  (save-window-excursion
+    (let ((cache (make-temp-file "git-local-magit-" t))
+          (view (generate-new-buffer " *git-local-diff*"))
+          (original-require (symbol-function 'require)))
+      (unwind-protect
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (switch-to-buffer (current-buffer))
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web-git-thread-mode t)
+            (let* ((emacsos-assist-web-git-cache-directory cache)
+                   (metadata (test-assist-web-git--metadata
+                              "running" "topic/one" test-assist-web-git--head))
+                   (root (emacsos-assist-web-git--checkout-path metadata))
+                   (magit-pre-call-git-hook '(emacsos-assist-web-git--checkout-write-guard))
+                   opened)
+              (make-directory (expand-file-name ".git" root) t)
+              (with-temp-file (expand-file-name ".git/HEAD" root)
+                (insert "ref: refs/heads/topic/one\n"))
+              (setq emacsos-assist-web-git--metadata metadata)
+              (puthash root (list :checkout root) emacsos-assist-web-git--checkout-operations)
+              (cl-letf (((symbol-function 'require)
+                         (lambda (feature &rest args)
+                           (if (eq feature 'magit) t
+                             (apply original-require feature args))))
+                        ((symbol-function 'magit-diff-range)
+                         (lambda (range)
+                           (should (equal range "refs/remotes/origin/main...HEAD"))
+                           (run-hooks 'magit-pre-call-git-hook)
+                           (setq opened t)
+                           (set-window-buffer (selected-window) view)))
+                        ((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (&rest _) (ert-fail "diff must not fetch"))))
+                (emacsos-assist-web-git--command 'diff))
+              (should opened)
+              (should (memq #'emacsos-assist-web-git--checkout-write-guard magit-pre-call-git-hook))
+              (let ((default-directory (file-name-as-directory root)))
+                (should-error (run-hooks 'magit-pre-call-git-hook) :type 'user-error))))
+        (kill-buffer view)
+        (delete-directory cache t)))))
+
+(ert-deftest test-assist-web-git-local-file-opens-during-background-reservation ()
+  "Opening local files is available while edit protection preserves the checkout."
+  (save-window-excursion
+    (let ((cache (make-temp-file "git-local-file-" t)) view)
+      (unwind-protect
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (switch-to-buffer (current-buffer))
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web-git-thread-mode t
+                  emacsos-assist-web-git--denied 'run)
+            (let* ((emacsos-assist-web-git-cache-directory cache)
+                   (metadata (test-assist-web-git--metadata
+                              "error" "topic/one" test-assist-web-git--head))
+                   (root (emacsos-assist-web-git--checkout-path metadata))
+                   (file (expand-file-name "work.txt" root))
+                   (request (list :checkout root)))
+              (make-directory (expand-file-name ".git" root) t)
+              (with-temp-file (expand-file-name ".git/HEAD" root)
+                (insert "ref: refs/heads/topic/one\n"))
+              (with-temp-file file (insert "preserved content"))
+              (setq emacsos-assist-web-git--metadata metadata)
+              (puthash root request emacsos-assist-web-git--checkout-operations)
+              (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) file))
+                        ((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (&rest _) (ert-fail "file browsing must not fetch"))))
+                (emacsos-assist-web-git--command 'files))
+              (setq view (get-file-buffer file))
+              (should view)
+              (with-current-buffer view
+                (should (equal (buffer-string) "preserved content"))
+                (should buffer-read-only))
+              (emacsos-assist-web-git--release-checkout request)
+              (with-current-buffer view (should-not buffer-read-only))))
+        (when (buffer-live-p view) (kill-buffer view))
+        (delete-directory cache t)))))
 
 (ert-deftest test-assist-web-git-full-client-cold-ready-is-not-assist-current ()
   "A clean matching clone without a durably observed success is only remote latest."
@@ -347,7 +607,8 @@
       (should (equal emacsos-assist-web-git--unavailable
                      "Git state unavailable"))
       (should (equal (emacsos-assist-web-git--view-state
-                      generation (current-buffer)) "cached / thread branch changed")))))
+                      generation (current-buffer))
+                     "cached / local checkout; not synced for browsing; may change after this turn")))))
 
 (ert-deftest test-assist-web-git-old-pinned-generation-stays-stale-during-run-check ()
   "A Run check cannot relabel an older pinned fetch as the selected cache."
@@ -808,7 +1069,7 @@
             (should (eq emacsos-assist-web--manual-recovery-required manual))
             (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
                        (lambda (&rest _) (setq command-read t))))
-              (emacsos-assist-web-git--command 'files))
+              (emacsos-assist-web-git--refresh-command 'files))
             (should command-read))
             (set-window-parameter window 'assist-web-git-intent
                                   original-intent)))))))
@@ -2067,7 +2328,7 @@
                  (if (= status 404) "Thread unavailable" "Reauthorize")
                  (substring-no-properties
                   (emacsos-assist-web-git--thread-header))))
-        (should-error (emacsos-assist-web-git--command 'files)
+        (should-error (emacsos-assist-web-git--refresh-command 'files)
                       :type 'user-error)
         (save-window-excursion
           (emacsos-assist-web-git-status-details)
@@ -3904,7 +4165,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
             (should (eq emacsos-assist-web-git--denied t))
             (should (eq (emacsos-assist-web-git-generation-state
                          emacsos-assist-web-git--current) 'cached))
-            (should-error (emacsos-assist-web-git--command 'files)
+            (should-error (emacsos-assist-web-git--refresh-command 'files)
                           :type 'user-error))
           (with-current-buffer source
             (emacsos-assist-web-git--canonical-authorized
@@ -4320,7 +4581,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
               (emacsos-assist-web-git--sync-keys)
               (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
                          (lambda (_thread done) (setq callback done))))
-                (emacsos-assist-web-git--command 'files)
+                (emacsos-assist-web-git--refresh-command 'files)
                 (should (= (length emacsos-assist-web-git--active-probes) 1))
                 (emacsos-assist-web--manual-recovery-activate)
                 (should-not emacsos-assist-web-git--active-probes)
@@ -4706,7 +4967,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                   emacsos-assist-web-git--current generation)
       (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
                  (lambda (_thread callback) (funcall callback nil "offline"))))
-        (emacsos-assist-web-git--command 'files))
+        (emacsos-assist-web-git--refresh-command 'files))
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'current))
       (should (string-match-p " current" (emacsos-assist-web-git--thread-header)))
@@ -4719,13 +4980,13 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
       (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
                  (lambda (_thread callback)
                    (funcall callback nil '(git . "bad Git fields")))))
-        (emacsos-assist-web-git--command 'files))
+        (emacsos-assist-web-git--refresh-command 'files))
       (should (eq emacsos-assist-web-git--metadata metadata))
       (should-not emacsos-assist-web-git--unavailable)
       (cl-letf (((symbol-function 'emacsos-assist-web-git--read-metadata)
                  (lambda (_thread callback)
                    (funcall callback nil '(canonical . "bad thread status")))))
-        (emacsos-assist-web-git--command 'files))
+        (emacsos-assist-web-git--refresh-command 'files))
       (should (eq emacsos-assist-web-git--metadata metadata))
       (should (eq (emacsos-assist-web-git-generation-state generation)
                   'current)))))
@@ -5008,7 +5269,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                                    url-http-end-of-headers (copy-marker (point-min)))
                        (funcall callback nil))
                      response))))
-        (emacsos-assist-web-git--command 'files))
+        (emacsos-assist-web-git--refresh-command 'files))
       (should-not emacsos-assist-web-git--metadata)
       (should emacsos-assist-web-git--denied)
       (should (= emacsos-assist-web-git--auth-epoch 1))
@@ -5945,7 +6206,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                                         '(:error (tls "bad certificate")))))
                            response)))
                 (with-selected-window second
-                  (emacsos-assist-web-git--command 'files))
+                  (emacsos-assist-web-git--refresh-command 'files))
                 (when (eq failure 'timeout) (funcall timer)))
               (with-current-buffer thread
                 (should (equal (plist-get emacsos-assist-web-git--metadata
@@ -6096,12 +6357,12 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                  (lambda (_thread done) (setq callback done)))
                 ((symbol-function 'emacsos-assist-web-git--enqueue)
                  (lambda (&rest _) (setq enqueued t))))
-        (emacsos-assist-web-git--command 'files)
+        (emacsos-assist-web-git--refresh-command 'files)
         (emacsos-assist-web-git--note new)
         (funcall callback old nil)
         (should (equal emacsos-assist-web-git--metadata new))
         (should-not enqueued)
-        (emacsos-assist-web-git--command 'files)
+        (emacsos-assist-web-git--refresh-command 'files)
         (emacsos-assist-web-git--invalidate "invalid Git workspace metadata")
         (funcall callback old nil)
         (should-not emacsos-assist-web-git--metadata)
@@ -6124,7 +6385,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                         ((symbol-function 'emacsos-assist-web-git--enqueue)
                          (lambda (metadata intent)
                            (setq enqueued (list metadata intent)))))
-                (emacsos-assist-web-git--command 'files)
+                (emacsos-assist-web-git--refresh-command 'files)
                 (should (= (window-parameter window 'assist-web-git-intent)
                            1))
                 (emacsos-assist-web-git--note
@@ -6167,8 +6428,8 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                 ((symbol-function 'emacsos-assist-web-git--enqueue)
                  (lambda (metadata intent)
                    (setq enqueued (list metadata intent)))))
-        (emacsos-assist-web-git--command 'files)
-        (emacsos-assist-web-git--command 'diff)
+        (emacsos-assist-web-git--refresh-command 'files)
+        (emacsos-assist-web-git--refresh-command 'diff)
         (let ((newer (car callbacks))
               (older (cadr callbacks)))
           (funcall older old nil)
@@ -6299,7 +6560,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                  request (list :thread_oid test-assist-web-git--head)))
               (with-selected-window second
                 (with-current-buffer thread
-                  (emacsos-assist-web-git--command 'diff)))
+                  (emacsos-assist-web-git--refresh-command 'diff)))
               (funcall final-callback middle nil)
               (with-current-buffer thread
                 (should-not emacsos-assist-web-git--pending)
@@ -6387,7 +6648,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                   "fixture" 'reconciling "exact-key"))
           callbacks fetched rendered)
       (setf (plist-get entry :run-id) "run-1"
-            (plist-get entry :verified-outcome) "success")
+            (plist-get entry :verified-outcome) "success"
+            (plist-get entry :git-terminal-observed) t
+            (plist-get entry :observer-end-kind) 'terminal-sse)
       (setq-local emacsos-assist-web--thread-id "thread-1"
                   emacsos-assist-web--queue (list entry))
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
@@ -6429,7 +6692,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                         "ready" "topic/new"))
              callbacks saved fetched)
         (setf (plist-get entry :run-id) "run-1"
-              (plist-get entry :verified-outcome) "success")
+              (plist-get entry :verified-outcome) "success"
+              (plist-get entry :git-terminal-observed) t
+              (plist-get entry :observer-end-kind) 'terminal-sse)
         (unwind-protect
             (progn
               (set-window-buffer window thread)
@@ -6612,6 +6877,8 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
           (fetched 0))
       (setf (plist-get success :run-id) "run-s"
             (plist-get success :verified-outcome) "success"
+            (plist-get success :git-terminal-observed) t
+            (plist-get success :observer-end-kind) 'terminal-sse
             (plist-get failure :run-id) "run-f"
             (plist-get failure :verified-outcome) "error")
       (setq-local emacsos-assist-web--thread-id "thread-1"
@@ -6655,7 +6922,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
             (set-window-parameter first 'assist-web-git-intent 1)
             (set-window-parameter second 'assist-web-git-intent 1)
             (setf (plist-get entry :run-id) "run-s"
-                  (plist-get entry :verified-outcome) "success")
+                  (plist-get entry :verified-outcome) "success"
+                  (plist-get entry :git-terminal-observed) t
+                  (plist-get entry :observer-end-kind) 'terminal-sse)
             (with-current-buffer thread
               (emacsos-assist-web-mode)
               (setq-local emacsos-assist-web--thread-id "thread-1"
@@ -6974,7 +7243,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                  (test-assist-web-git--snapshot "ready" "topic/new") nil)
         (should-not emacsos-assist-web--queue)
         (should-not emacsos-assist-web--manual-recovery-required)
-        (should fetched)))))
+        ;; A historical receipt recovered by manual chat Refresh is not a
+        ;; connected terminal event and must not start background Git work.
+        (should-not fetched)))))
 
 (ert-deftest test-assist-web-git-stale-r2-cannot-restore-reclaimed-owner ()
   (with-temp-buffer
@@ -7121,7 +7392,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                 ((symbol-function 'emacsos-assist-web--render)
                  (lambda (value &rest _) (setq rendered value))))
         (emacsos-assist-web--legacy-refresh-thread (current-buffer))
-        (emacsos-assist-web-git--command 'files)
+        (emacsos-assist-web-git--refresh-command 'files)
         (funcall refresh-callback snapshot nil)
         (should (equal (plist-get emacsos-assist-web-git--metadata :branch)
                        "topic/old"))

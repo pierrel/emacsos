@@ -674,18 +674,22 @@ checks the selected ref format before the fetch begins."
             :head head))))
 
 (defun emacsos-assist-web-git--note-snapshot
-    (snapshot &optional legacy-success-run-id auth-start-epoch reconcile-token)
+    (snapshot &optional legacy-success-run-id auth-start-epoch reconcile-token legacy-terminal-run-id)
   "Update optional Git state from validated SNAPSHOT without rejecting chat.
 LEGACY-SUCCESS-RUN-ID is an exact successful Run retired by the legacy path.
 AUTH-START-EPOCH permits only a post-denial accepted canonical GET to clear
 the Git denial latch.  RECONCILE-TOKEN identifies an eligible committed
-post-conflict canonical read."
+post-conflict canonical read. LEGACY-TERMINAL-RUN-ID identifies a durably
+retired compatibility Run, including a terminal failure."
   (condition-case nil
       (let ((metadata (emacsos-assist-web-git--metadata-from-snapshot snapshot)))
         (emacsos-assist-web-git--canonical-authorized auth-start-epoch)
         (unless emacsos-assist-web-git--denied
-          (emacsos-assist-web-git--canonical-accepted
-           metadata legacy-success-run-id reconcile-token)
+          (if legacy-terminal-run-id
+              (emacsos-assist-web-git--canonical-accepted
+               metadata legacy-success-run-id reconcile-token legacy-terminal-run-id)
+            (emacsos-assist-web-git--canonical-accepted
+             metadata legacy-success-run-id reconcile-token))
           (when (equal (plist-get metadata :actual-branch) "HEAD")
             (setq emacsos-assist-web-git--unavailable
                   "detached HEAD; Git unavailable")
@@ -1468,6 +1472,9 @@ terminal event."
     (with-current-buffer buffer
       (let ((completed-run-id
              (unless run-still-active emacsos-assist-web--run-id)))
+        (when (and completed-run-id
+                   (process-live-p emacsos-assist-web--stream-process))
+          (setq emacsos-assist-web-git--observed-terminal-run-id completed-run-id))
         ;; A terminal SSE is not the answer.  Keep the marker-scoped text raw
         ;; until the canonical snapshot has replaced this provisional region.
         (emacsos-assist-web--stream-cleanup t t)
@@ -1484,6 +1491,7 @@ terminal event."
   "Keep BUFFER's exact pending submission and visibly mark STATUS unverified."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
+      (setq emacsos-assist-web-git--observed-terminal-run-id nil)
       (emacsos-assist-web--stream-cleanup t)
       (when (and (markerp emacsos-assist-web--assistant-start)
                  (markerp emacsos-assist-web--assistant-end))
@@ -3050,7 +3058,7 @@ VERIFIED-START-EPOCH fences later Run access denial."
                                  (emacsos-assist-web--git-note-safely
                                   value (and (equal verified-outcome "success")
                                              completed-run-id)
-                                  git-auth-start-epoch git-reconcile-token))
+                                  git-auth-start-epoch git-reconcile-token completed-run-id))
                                (when (and cached (not retiring))
                                  (emacsos-assist-web--git-note-safely
                                   value nil git-auth-start-epoch
@@ -3632,6 +3640,7 @@ callbacks even after reconciliation leaves the resident list empty."
         :stream-generation 0 :stream-admitted nil :handshake-token nil
         :reobserve-generation 0 :reobserve-in-flight nil
         :observer-end-kind nil :observer-end-generation nil
+        :git-terminal-observed nil
         :observer-end-checked nil :approval-stopped nil
         :reconcile-owner nil
         :cancellation-generation 0
@@ -4507,6 +4516,7 @@ could release a pre-header SSE reservation later."
           (setf (plist-get entry :handshake-token) token
                 (plist-get entry :state) 'observing
                 (plist-get entry :stream-admitted) nil
+                (plist-get entry :git-terminal-observed) nil
                 (plist-get entry :epoch) (1+ (plist-get entry :epoch)))
           (setq emacsos-assist-web--stream-entry entry)
           (if (condition-case nil (emacsos-assist-web--save-draft)
@@ -4560,6 +4570,7 @@ could release a pre-header SSE reservation later."
               (plist-get entry :stream-response) nil
               (plist-get entry :stream-header-timer) nil
               (plist-get entry :stream-admitted) nil
+              (plist-get entry :git-terminal-observed) nil
               (plist-get entry :stream-raw-bytes) nil
               (plist-get entry :stream-undecided-suffix) nil
               (plist-get entry :state) 'accepted-unobserved
@@ -4863,7 +4874,7 @@ VERIFIED-START-EPOCH from an exact Run GET."
               (emacsos-assist-web--legacy-stream-finish
                buffer run-still-active verified-outcome
                verified-start-epoch))
-          (let (complete)
+          (let ((admitted (plist-get entry :stream-admitted)) complete)
             (let ((inhibit-quit t))
               ;; The exact owner is fenced before end-state mutations.  The
               ;; unwind path closes the slot and pauses if save or cleanup
@@ -4875,6 +4886,10 @@ VERIFIED-START-EPOCH from an exact Run GET."
                       (emacsos-assist-web-git--stop-reobserve
                        entry 'terminal-sse))
                     (unless run-still-active
+                      ;; Capture admission before fencing tears down transport.
+                      ;; This receipt is deliberately not serialized to disk.
+                      (setf (plist-get entry :git-terminal-observed)
+                            (and admitted t))
                       (setf (plist-get entry :state) 'terminal-unreconciled
                             (plist-get entry :verified-outcome) nil
                             (plist-get entry :observer-end-kind) 'terminal-sse
@@ -5004,6 +5019,7 @@ Every restored Run needs a new exact status read before another retirement."
       (setf (plist-get entry :state) 'terminal-unreconciled
             (plist-get entry :requires-reobserve) t
             (plist-get entry :verified-outcome) nil
+            (plist-get entry :git-terminal-observed) nil
             (plist-get entry :reconcile-owner) nil)
       (emacsos-assist-web--entry-status entry reason))
     (when restored
@@ -5094,7 +5110,15 @@ restoration pauses this buffer until restart."
              (mapcar (lambda (entry)
                        (cons (plist-get entry :run-id)
                              (plist-get entry :verified-outcome)))
-                     entries)))
+                     entries)
+             (mapcar (lambda (entry)
+                       (cons (plist-get entry :run-id)
+                             (plist-get entry :verified-outcome)))
+                     (seq-filter
+                      (lambda (entry)
+                        (and (plist-get entry :git-terminal-observed)
+                             (eq (plist-get entry :observer-end-kind) 'terminal-sse)))
+                      entries))))
            (keys (mapcar (lambda (entry) (plist-get entry :key)) entries))
            committed)
       (setq emacsos-assist-web--reconcile-generation generation)

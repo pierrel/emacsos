@@ -18,6 +18,8 @@
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-section-forward "magit-section")
 (declare-function magit-section-backward "magit-section")
+(defvar magit-pre-call-git-hook nil)
+(defvar magit-pre-start-git-hook nil)
 (declare-function magit-section-toggle "magit-section")
 
 (defgroup emacsos-assist-web-git nil
@@ -192,6 +194,8 @@ Modified buffers are never reverted. Repository local eval remains disabled."
 (defvar-local emacsos-assist-web-git--epoch 0)
 (defvar-local emacsos-assist-web-git--success-watermark 0
   "Count of exact successful Run IDs durably retired by queue-owned R2.")
+(defvar-local emacsos-assist-web-git--observed-terminal-run-id nil
+  "Queue-free Run whose terminal event was received in this live buffer.")
 (defvar-local emacsos-assist-web-git--observation 0
   "Serial of the newest diagnostic Git metadata probe.")
 (defvar-local emacsos-assist-web-git--deferred-probes nil)
@@ -256,7 +260,8 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
 (defun emacsos-assist-web-git--thread-safety-record (tid &optional create)
   "Return TID's live shared safety record, creating it when CREATE is non-nil.
 Scan live same-thread peers before pruning a dead owner: a later kill hook
-may open one after the owner's own hook ran but before the kill completed."
+may open one after the owner's own hook ran but before the kill completed.
+An observed thread denial survives closing every view until reauthorization."
   (when tid
     (let ((record (gethash tid emacsos-assist-web-git--thread-safety)))
       (when record
@@ -268,7 +273,7 @@ may open one after the owner's own hook ran but before the kill completed."
                              'emacsos-assist-web--thread-id buffer) tid))
             (emacsos-assist-web-git--thread-safety-enroll
              record tid buffer)))
-        (unless (plist-get record :buffers)
+        (unless (or (plist-get record :buffers) (plist-get record :denial))
           (remhash tid emacsos-assist-web-git--thread-safety)
           (setq record nil)))
       (when (and create (not record))
@@ -898,7 +903,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 (defun emacsos-assist-web-git--gate-reason (&optional remote-view)
   "Return the strongest current refusal for a fresh Git action, or nil."
   (if remote-view
-      (when (eq emacsos-assist-web-git--denied t)
+      (when (or (eq emacsos-assist-web-git--denied t)
+                (plist-get (emacsos-assist-web-git--thread-safety-record
+                            emacsos-assist-web--thread-id) :denial))
         "Thread access unavailable; reopen and Retry")
   (cond
    ((bound-and-true-p emacsos-assist-web--reconcile-recovery-paused)
@@ -956,10 +963,15 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                   "; may change after this turn")))
        ((not (eq generation emacsos-assist-web-git--current))
         "cached / pinned earlier fetch")
-       ((not (equal (plist-get emacsos-assist-web-git--metadata :branch)
+       ((and emacsos-assist-web-git--metadata
+             (not (equal (plist-get emacsos-assist-web-git--metadata :branch)
                     (plist-get (emacsos-assist-web-git-generation-metadata generation)
-                               :branch)))
+                               :branch))))
         "cached / thread branch changed")
+       ((eq (emacsos-assist-web-git-generation-state generation) 'cached)
+        (concat "cached / local checkout; not synced for browsing"
+                (unless (equal (plist-get emacsos-assist-web-git--metadata :status) "ready")
+                  "; may change after this turn")))
        ((and (eq (emacsos-assist-web-git-generation-state generation) 'current)
              (not (emacsos-assist-web-git--run-gated-p)))
         "current / Assist current")
@@ -1354,9 +1366,11 @@ A shared stop may outlive its original buffer pending exact durable recovery."
     (nreverse result)))
 
 (defun emacsos-assist-web-git--canonical-start
-    (&optional durable queue-owner outcomes)
+    (&optional durable queue-owner outcomes observed-outcomes)
   "Claim a canonical GET, optionally owned by QUEUE-OWNER and OUTCOMES.
-OUTCOMES are exact authenticated Run ID/status pairs verified before R2."
+OUTCOMES are exact authenticated Run ID/status pairs verified before R2.
+OBSERVED-OUTCOMES select terminal events received by this live buffer, not
+restored receipts; only those events can start an automatic Git sync."
   (let ((pending-token
          (when (and emacsos-assist-web-git--pending
                     (or (not (plist-get emacsos-assist-web-git--pending
@@ -1368,7 +1382,8 @@ OUTCOMES are exact authenticated Run ID/status pairs verified before R2."
              token))))
     (if queue-owner
         (list :queue-owner queue-owner :epoch emacsos-assist-web-git--epoch
-              :pending pending-token :outcomes outcomes)
+              :pending pending-token :outcomes outcomes
+              :observed-outcomes observed-outcomes)
       pending-token)))
 
 (defun emacsos-assist-web-git--canonical-failed (token &optional reason)
@@ -1389,10 +1404,11 @@ REASON is the visible retry or restart explanation."
       (emacsos-assist-web-git--update-headers)))))
 
 (defun emacsos-assist-web-git--canonical-accepted
-    (metadata legacy-success-run-id token)
+    (metadata legacy-success-run-id token &optional legacy-terminal-run-id)
   "Apply chat-accepted METADATA, resolving an eligible TOKEN after commit.
 LEGACY-SUCCESS-RUN-ID is an exact successful Run durably retired by the
-queue-free compatibility path."
+queue-free compatibility path. LEGACY-TERMINAL-RUN-ID also admits an observed
+terminal failure without counting it as successful."
   (let* ((queue-owner (plist-get token :queue-owner))
          (pending-token (if queue-owner (plist-get token :pending) token))
          (queue-eligible
@@ -1408,6 +1424,11 @@ queue-free compatibility path."
                          (seq-filter (lambda (cause)
                                        (equal (cdr cause) "success"))
                                      (plist-get token :outcomes)))))))
+         (observed-terminal
+          (or (and (or legacy-terminal-run-id legacy-success-run-id)
+                   (equal (or legacy-terminal-run-id legacy-success-run-id)
+                          emacsos-assist-web-git--observed-terminal-run-id))
+              (and queue-eligible (plist-get token :observed-outcomes))))
          (pending emacsos-assist-web-git--pending)
          (eligible (and pending pending-token
                         (eq pending-token (plist-get pending :request))
@@ -1431,11 +1452,12 @@ queue-free compatibility path."
             (emacsos-assist-web-git--enqueue metadata nil))
         (emacsos-assist-web-git--release-intents
          intents "no published thread branch; Retry")))
-    (when (and success-ids
+    (when (and observed-terminal
                (not emacsos-assist-web-git--r2-waiting)
                (not emacsos-assist-web-git--pending)
                (emacsos-assist-web-git--usable metadata))
-      (emacsos-assist-web-git--enqueue metadata nil))))
+      (setq emacsos-assist-web-git--observed-terminal-run-id nil)
+      (emacsos-assist-web-git--enqueue metadata nil t))))
 
 (defun emacsos-assist-web-git--r2-finished (owner committed)
   "Complete OWNER's later diagnostic intents after its R2 COMMITTED or failed."
@@ -1763,6 +1785,9 @@ A definitive thread denial keeps its endpoint-specific reason instead."
     ;; The safety latch reaches every same-T buffer before any release,
     ;; cancellation, header, or echo-area operation can signal.
     (let ((inhibit-quit t))
+      (when tid
+        (let ((record (emacsos-assist-web-git--thread-safety-record tid t)))
+          (setf (plist-get record :denial) status)))
       (emacsos-assist-web-git--canonical-denied-local status)
       (setq targets (list source))
       (dolist (buffer (buffer-list))
@@ -1971,14 +1996,20 @@ Only a resident queue entry or accepted legacy receipt may claim the gate."
 (defun emacsos-assist-web-git--canonical-authorized (start-epoch)
   "Clear thread denial after validated canonical GET begun at START-EPOCH.
 An auth-only GET leaves exact Run outcome uncertain."
-  (when (and emacsos-assist-web-git--denied
+  (when (and (or emacsos-assist-web-git--denied
+                 (plist-get (emacsos-assist-web-git--thread-safety-record
+                             emacsos-assist-web--thread-id) :denial))
              (eql start-epoch emacsos-assist-web-git--auth-epoch))
-    (let ((thread-denial (eq emacsos-assist-web-git--denied t))
+    (let ((thread-denial (or (eq emacsos-assist-web-git--denied t)
+                            (plist-get (emacsos-assist-web-git--thread-safety-record
+                                        emacsos-assist-web--thread-id) :denial)))
           (tid emacsos-assist-web--thread-id))
     (setq emacsos-assist-web-git--denied nil
           emacsos-assist-web-git--thread-denial-status nil
           emacsos-assist-web-git--run-recheck-needed nil)
     (when thread-denial
+      (when-let ((record (emacsos-assist-web-git--thread-safety-record tid)))
+        (setf (plist-get record :denial) nil))
       (dolist (buffer (buffer-list))
         (unless (eq buffer (current-buffer))
           (with-current-buffer buffer
@@ -2414,7 +2445,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
          (eql (window-parameter window 'assist-web-git-intent)
               (plist-get intent :serial)))))
 
-(defun emacsos-assist-web-git--enqueue (metadata intent)
+(defun emacsos-assist-web-git--enqueue (metadata intent &optional terminal)
   "Join or start one METADATA refresh, retaining optional UI INTENT."
   (let ((request emacsos-assist-web-git--request))
     (cond
@@ -2452,7 +2483,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
       (setq emacsos-assist-web-git--next
             (list metadata (and intent (list intent))))
       (emacsos-assist-web-git--cancel))
-     ((or intent (> emacsos-assist-web-git--success-watermark 0))
+     ((or intent terminal (> emacsos-assist-web-git--success-watermark 0))
       (emacsos-assist-web-git--begin metadata (and intent (list intent)))))))
 
 (defun emacsos-assist-web-git--begin (metadata intents)
@@ -2758,7 +2789,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
          (and problem (nth 2 record))
          (if problem (nth 3 record) start-epoch)))))))
 
-(defun emacsos-assist-web-git--command (action)
+(defun emacsos-assist-web-git--refresh-command (action)
   "Probe metadata, then perform ACTION in its originating thread window."
   (unless (and emacsos-assist-web-git-thread-mode
                emacsos-assist-web--thread-id)
@@ -2786,13 +2817,67 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
            (emacsos-assist-web-git--probe-complete
             observation intent metadata problem start-epoch)))))))
 
+(defun emacsos-assist-web-git--check-local-branch (root metadata)
+  "Require ROOT's bounded regular HEAD to name METADATA's thread branch.
+This only reads local metadata; it does not invoke Git or synchronize files."
+  (let ((head (and root (expand-file-name ".git/HEAD" root))))
+    (unless (and root (file-directory-p root) (not (file-symlink-p root))
+                 (file-directory-p (expand-file-name ".git" root))
+                 (not (file-symlink-p (expand-file-name ".git" root)))
+                 (file-regular-p head) (not (file-symlink-p head))
+                 (<= (file-attribute-size (file-attributes head)) 512))
+      (user-error "No local thread checkout; use Git Refresh to initialize"))
+    (unless (with-temp-buffer
+              (insert-file-contents-literally head nil 0 512)
+              (equal (string-trim (buffer-string))
+                     (concat "ref: refs/heads/" (plist-get metadata :branch))))
+      (user-error "Local checkout is not on its thread branch; inspect Magit"))))
+
+(defun emacsos-assist-web-git--command (action)
+  "Browse local files/Magit without fetching; only explicit Refresh may sync."
+  (if (eq action 'refresh)
+      (emacsos-assist-web-git--refresh-command action)
+    (unless (and emacsos-assist-web-git-thread-mode emacsos-assist-web--thread-id)
+      (user-error "Git views require a canonical Assist thread"))
+    (when-let ((reason (emacsos-assist-web-git--gate-reason t)))
+      (user-error "%s" reason))
+    (let* ((prior emacsos-assist-web-git--current)
+           (metadata (or (and prior
+                              (or (null emacsos-assist-web-git--metadata)
+                                  (equal (plist-get emacsos-assist-web-git--metadata :repo-key)
+                                         (plist-get (emacsos-assist-web-git-generation-metadata prior) :repo-key)))
+                              (emacsos-assist-web-git-generation-metadata prior))
+                         emacsos-assist-web-git--metadata
+                         (and emacsos-assist-web--snapshot
+                              (emacsos-assist-web-git--metadata-from-snapshot
+                               emacsos-assist-web--snapshot))))
+           (root (and (emacsos-assist-web-git--usable metadata)
+                      (equal emacsos-assist-web--thread-id (plist-get metadata :tid))
+                      (or (null emacsos-assist-web-git--metadata)
+                          (equal (plist-get metadata :repo-key)
+                                 (plist-get emacsos-assist-web-git--metadata :repo-key)))
+                      (emacsos-assist-web-git--checkout-path metadata))))
+      (emacsos-assist-web-git--check-local-branch root metadata)
+      (let* ((window (selected-window))
+             (serial (1+ (or (window-parameter window 'assist-web-git-intent) 0)))
+             (generation (make-emacsos-assist-web-git-generation
+                          :path root :metadata metadata :state 'cached
+                          :auth-epoch emacsos-assist-web-git--auth-epoch))
+             (intent (list :action action :buffer (current-buffer) :window window
+                           :serial serial :local t)))
+        (setq emacsos-assist-web-git--previous prior
+              emacsos-assist-web-git--current generation)
+        (set-window-parameter window 'assist-web-git-intent serial)
+        (emacsos-assist-web-git--clear-feedback window)
+        (emacsos-assist-web-git--open intent generation)))))
+
 (defun emacsos-assist-web-git-find-file ()
-  "Browse bounded worktree files from this thread's fetched Git mirror."
+  "Browse the existing editable thread checkout immediately, without syncing."
   (interactive)
   (emacsos-assist-web-git--command 'files))
 
 (defun emacsos-assist-web-git-diff ()
-  "Open ordinary Magit with a pinned committed diff against fetched remote main."
+  "Open ordinary Magit on local HEAD against cached remote main, without syncing."
   (interactive)
   (emacsos-assist-web-git--command 'diff))
 
@@ -2942,16 +3027,31 @@ discarding their edits or reusing their repository-local settings."
             ((not choice)
              (signal 'quit nil))
             ((emacsos-assist-web-git--intent-live-p intent)
-             (when (gethash root emacsos-assist-web-git--checkout-operations)
+             (when (and (not (plist-get intent :local))
+                        (gethash root emacsos-assist-web-git--checkout-operations))
                (user-error "Thread Git is updating; retry file selection"))
              (unless (with-current-buffer thread
-                       (and (not emacsos-assist-web-git--denied)
+                       (and (not (eq emacsos-assist-web-git--denied t))
                             (= auth-epoch emacsos-assist-web-git--auth-epoch)
+                            (or (not (plist-get intent :local))
+                                (and (equal emacsos-assist-web--thread-id
+                                            (plist-get (emacsos-assist-web-git-generation-metadata generation) :tid))
+                                     (or (null emacsos-assist-web-git--metadata)
+                                         (equal (plist-get emacsos-assist-web-git--metadata :repo-key)
+                                                (plist-get (emacsos-assist-web-git-generation-metadata generation) :repo-key)))))
                             (equal root (emacsos-assist-web-git--checkout-path
-                                         emacsos-assist-web-git--metadata))))
+                                         (if (plist-get intent :local)
+                                             (emacsos-assist-web-git-generation-metadata generation)
+                                           emacsos-assist-web-git--metadata)))))
                (user-error "Thread Git repository changed; Retry"))
+             (when (plist-get intent :local)
+               (emacsos-assist-web-git--check-local-branch
+                root (emacsos-assist-web-git-generation-metadata generation)))
              (let ((view (emacsos-assist-web-git--literal-file-view
                           choice root thread generation)))
+               (when-let ((request (gethash root emacsos-assist-web-git--checkout-operations)))
+                 (with-current-buffer view
+                   (emacsos-assist-web-git--protect-checkout-buffer request)))
                (condition-case error
                    (set-window-buffer window view)
                  (error
@@ -2961,12 +3061,27 @@ discarding their edits or reusing their repository-local settings."
          (if (not (require 'magit nil t))
              (message "Magit is not installed on this phone")
            (with-selected-window window
-             (let ((default-directory (file-name-as-directory root)))
+             (let ((default-directory (file-name-as-directory root))
+                   ;; Opening this fixed read-only diff is allowed during a
+                   ;; background update. Ordinary later Magit writes retain
+                   ;; their normal checkout reservation guard.
+                   (magit-pre-call-git-hook
+                    (if (plist-get intent :local)
+                        (remq #'emacsos-assist-web-git--checkout-write-guard
+                              magit-pre-call-git-hook)
+                      magit-pre-call-git-hook))
+                   (magit-pre-start-git-hook
+                    (if (plist-get intent :local)
+                        (remq #'emacsos-assist-web-git--checkout-write-guard
+                              magit-pre-start-git-hook)
+                      magit-pre-start-git-hook)))
                (magit-diff-range
-                (concat (emacsos-assist-web-git-generation-main generation)
+                (if (plist-get intent :local)
+                    "refs/remotes/origin/main...HEAD"
+                  (concat (emacsos-assist-web-git-generation-main generation)
                         "..."
                         (or (emacsos-assist-web-git-generation-remote generation)
-                            (emacsos-assist-web-git-generation-oid generation))))
+                            (emacsos-assist-web-git-generation-oid generation)))))
                (delete-other-windows window)
                (let ((view (window-buffer window)))
                  (with-current-buffer view
@@ -2974,12 +3089,14 @@ discarding their edits or reusing their repository-local settings."
                                (or (emacsos-assist-web-git-generation-remote generation)
                                    (emacsos-assist-web-git-generation-oid generation)))
                    (emacsos-assist-web-git--pin view thread generation))
-                 (message "Diff: fetched remote main %s...thread %s"
+                 (if (plist-get intent :local)
+                     (message "Diff: cached remote/main...local thread HEAD; no sync")
+                   (message "Diff: fetched remote main %s...thread %s"
                           (emacsos-assist-web-git--short
                            (emacsos-assist-web-git-generation-main generation))
                           (emacsos-assist-web-git--short
                            (or (emacsos-assist-web-git-generation-remote generation)
-                               (emacsos-assist-web-git-generation-oid generation)))))))))
+                               (emacsos-assist-web-git-generation-oid generation))))))))))
         ('refresh (message "Thread Git refreshed at %s"
                            (emacsos-assist-web-git-generation-oid generation)))))))
 
@@ -3055,19 +3172,26 @@ otherwise the header follows THREAD's live state while the pinned view stays."
           (and (buffer-live-p thread) selected
                (with-current-buffer thread
                  (and emacsos-assist-web-git--current
+                      (or (emacsos-assist-web-git-generation-remote
+                           emacsos-assist-web-git--current)
+                          (emacsos-assist-web-git-generation-oid
+                           emacsos-assist-web-git--current))
                       (emacsos-assist-web-git--same-identity
                        selected
                        (emacsos-assist-web-git-generation-metadata
                         emacsos-assist-web-git--current))))))
          (view (generate-new-buffer " *Assist Web Git view details*")))
     (with-current-buffer view
-      (insert (format "Local checkout HEAD: %s\nFetched remote thread tip: %s\nFetched remote main base: %s\nFetched branch: %s\n"
-                      (emacsos-assist-web-git-generation-oid generation)
+      (insert (format "Local checkout HEAD: %s\nFetched remote thread tip: %s\nFetched remote main base: %s\nCheckout selection branch: %s\n"
+                      (or (emacsos-assist-web-git-generation-oid generation)
+                          "not read for local browsing")
                       (or (emacsos-assist-web-git-generation-remote generation)
                           "unavailable")
                       (or (emacsos-assist-web-git-generation-main generation)
                           "unavailable")
                       (or (plist-get metadata :branch) "unavailable")))
+      (when (eq (emacsos-assist-web-git-generation-state generation) 'cached)
+        (insert "\nLocal cached checkout; browsing performed no fetch. Magit compares cached remote/main against local HEAD.\n"))
       (when selected
         (insert (format "\nSelected branch %s: %s\nSelected expected commit %s: %s\n"
                         (if chooser-snapshot "at chooser exit" "when Details opened")
