@@ -269,11 +269,16 @@
       (setq emacsos-assist-web--thread-id "thread-1")
       (emacsos-assist-web-git--canonical-denied 403))
     (kill-buffer source)
+    (should (eql (plist-get (gethash "thread-1" emacsos-assist-web-git--thread-safety)
+                           :denial) 403))
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1"
             emacsos-assist-web-git-thread-mode t)
-      (should-error (emacsos-assist-web-git--command 'files) :type 'user-error)
+      (should (string-match-p "Thread access unavailable"
+                              (cadr (should-error
+                                     (emacsos-assist-web-git--command 'files)
+                                     :type 'user-error))))
       (emacsos-assist-web-git--canonical-authorized emacsos-assist-web-git--auth-epoch)
       (should-not (emacsos-assist-web-git--gate-reason t)))))
 
@@ -618,7 +623,7 @@
            (new (test-assist-web-git--metadata
                  "ready" "topic/new" test-assist-web-git--head))
            (old-generation (make-emacsos-assist-web-git-generation
-                            :metadata old :state 'cached))
+                            :metadata old :oid test-assist-web-git--head :state 'cached))
            (new-generation (make-emacsos-assist-web-git-generation
                             :metadata new :state 'current)))
       (setq-local emacsos-assist-web--thread-id "thread-1"
@@ -5129,6 +5134,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
                       test-assist-web-git--head))
            (generation (make-emacsos-assist-web-git-generation
                         :metadata metadata :oid test-assist-web-git--head
+                        :remote test-assist-web-git--head
                         :state 'busy))
            details)
       (unwind-protect

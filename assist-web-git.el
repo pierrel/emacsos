@@ -277,7 +277,7 @@ An observed thread denial survives closing every view until reauthorization."
           (remhash tid emacsos-assist-web-git--thread-safety)
           (setq record nil)))
       (when (and create (not record))
-        (setq record (list :buffers nil :stops nil))
+        (setq record (list :buffers nil :stops nil :denial nil))
         (puthash tid record emacsos-assist-web-git--thread-safety)
         (dolist (buffer (buffer-list))
           (when (and (buffer-live-p buffer)
@@ -962,7 +962,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                           (emacsos-assist-web-git--run-gated-p))
                   "; may change after this turn")))
        ((not (eq generation emacsos-assist-web-git--current))
-        "cached / pinned earlier fetch")
+        (if (emacsos-assist-web-git-generation-oid generation)
+            "cached / pinned earlier fetch"
+          "cached / earlier local view"))
        ((and emacsos-assist-web-git--metadata
              (not (equal (plist-get emacsos-assist-web-git--metadata :branch)
                     (plist-get (emacsos-assist-web-git-generation-metadata generation)
@@ -1052,7 +1054,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
   (abort-recursive-edit))
 
 (defun emacsos-assist-web-git-chooser-details ()
-  "Leave this chooser for immutable commit Details without selecting a file."
+  "Leave this chooser for captured checkout Details without selecting a file."
   (interactive)
   (when emacsos-assist-web-git--chooser-exit
     (setcar emacsos-assist-web-git--chooser-exit
@@ -2834,7 +2836,7 @@ This only reads local metadata; it does not invoke Git or synchronize files."
       (user-error "Local checkout is not on its thread branch; inspect Magit"))))
 
 (defun emacsos-assist-web-git--command (action)
-  "Browse local files/Magit without fetching; only explicit Refresh may sync."
+  "Browse local files/Magit without fetching; Refresh explicitly requests sync."
   (if (eq action 'refresh)
       (emacsos-assist-web-git--refresh-command action)
     (unless (and emacsos-assist-web-git-thread-mode emacsos-assist-web--thread-id)
@@ -3200,10 +3202,12 @@ otherwise the header follows THREAD's live state while the pinned view stays."
                         (or (plist-get selected :expected) "unavailable")))
         (unless (emacsos-assist-web-git--same-identity metadata selected)
           (insert (if selected-fetched
-                      "The newer selection has already been fetched; this pinned fetch is historical.\n"
-                    "The selection differs from this pinned fetch. Return to the thread for its live fetch state.\n"))))
+                      "The newer selection has already been fetched; this pinned view is historical.\n"
+                    "The selection differs from this pinned view. Return to the thread for its live state.\n"))))
       (when (not (equal (plist-get metadata :status) "ready"))
-        (insert "\nThis is the fetched remote tip; Assist currentness is unverified.")
+        (insert (if (emacsos-assist-web-git-generation-remote generation)
+                    "\nThis is the fetched remote tip; Assist currentness is unverified."
+                  "\nThis is a cached local checkout; its remote tip and Assist currentness are unverified."))
         (when (member (plist-get metadata :status)
                       '("queued" "initializing" "cloning" "starting_sandbox"
                         "processing" "running" "pending" "transitioning"))
@@ -3212,7 +3216,7 @@ otherwise the header follows THREAD's live state while the pinned view stays."
       (if chooser-snapshot
           (insert (format "\nChooser state at exit: %s (not live). File selection ended for Details. No file was selected; typed but unselected input was discarded. Back returns to the thread; C-x C-f starts a new chooser.\n"
                           (car chooser-snapshot)))
-        (insert "\nThe header shows live freshness; this text records fetch-time provenance. Back returns to the pinned file or diff.\n"))
+        (insert "\nThe header shows live freshness; this text records captured checkout provenance. Back returns to the pinned file or diff.\n"))
       (special-mode)
       (visual-line-mode 1)
       (setq-local emacsos-assist-web-git--details-generation generation
