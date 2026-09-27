@@ -193,10 +193,10 @@ Modified buffers are never reverted. Repository local eval remains disabled."
 (defvar-local emacsos-assist-web-git--canceling nil)
 (defvar-local emacsos-assist-web-git--epoch 0)
 (defvar-local emacsos-assist-web-git--success-watermark 0
-  "Count of exact successful Run IDs durably retired by queue-owned R2.")
+  "Count of successful Run IDs durably retired by R2 or legacy compatibility.")
 (defvar-local emacsos-assist-web-git--terminal-watermark 0
-  "Count of live terminal receipts admitted for background synchronization.
-Unlike the success watermark, terminal failures also advance this cause.")
+  "Serial of committed batches containing a live terminal sync cause.
+Unlike the success watermark, batches with terminal failures also advance it.")
 (defvar-local emacsos-assist-web-git--observed-terminal-run-id nil
   "Queue-free Run whose terminal event was received in this live buffer.")
 (defvar-local emacsos-assist-web-git--observation 0
@@ -1446,8 +1446,9 @@ terminal failure without counting it as successful."
                         (= (car pending-token) emacsos-assist-web-git--epoch)))
          (intents (and eligible (plist-get pending :intents))))
     (when success-ids
-      ;; The owner/generation gate admits each R2 once.  Every exact Run ID
-      ;; advances the cause watermark; one post-batch fetch can satisfy all.
+      ;; Committed R2 and compatibility retirements admit exact successes.
+      ;; Each successful Run ID advances the success watermark; one post-batch
+      ;; fetch can satisfy all.
       (cl-incf emacsos-assist-web-git--success-watermark
                 (length success-ids))
       (when emacsos-assist-web-git--current
