@@ -24,6 +24,39 @@ def run(*args: str) -> str:
                                    stderr=subprocess.DEVNULL).strip()
 
 
+class HelperInputBoundaryTest(unittest.TestCase):
+    """Malformed stdin requests return fixed JSON before any filesystem/Git work."""
+
+    def assert_refusal(self, action, root, *, missing=False):
+        request = {"action": action, "repo_key": "b" * 20,
+                   "branch": "thread/one", "thread_id": "thread-1",
+                   "generation": "a" * 32, "kind": "staging",
+                   "expected_oid": "1" * 40}
+        if not missing:
+            request["cache_root"] = root
+        result = subprocess.run([sys.executable, "-B", str(MODULE)],
+                                input=json.dumps(request), text=True,
+                                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout), {
+            "ok": False, "reason": "cleanup request is invalid" if action == "cleanup"
+            else "checkout request metadata is invalid"})
+
+    def test_non_string_cache_roots_return_json(self):
+        for action in ("sync", "cleanup"):
+            for root in (None, [], {}, 7, True, False):
+                with self.subTest(action=action, root=root):
+                    self.assert_refusal(action, root)
+
+    def test_missing_and_relative_cache_roots_keep_fixed_refusal(self):
+        for action in ("sync", "cleanup"):
+            self.assert_refusal(action, None, missing=True)
+            for root in ("", "relative-cache", "../cache"):
+                with self.subTest(action=action, root=root):
+                    self.assert_refusal(action, root)
+
+
 class GitHelperTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

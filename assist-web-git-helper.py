@@ -241,7 +241,10 @@ def tree_size(root: Path, *, omit_git: bool = False) -> tuple[int, int]:
 def cleanup(request: dict) -> dict:
     generation = request.get("generation")
     kind = request.get("kind")
-    root = Path(request.get("cache_root", ""))
+    raw_root = request.get("cache_root", "")
+    if not isinstance(raw_root, str):
+        raise Refusal("cleanup request is invalid")
+    root = Path(raw_root)
     if (not isinstance(generation, str) or not ID_RE.fullmatch(generation)
             or kind not in ("staging", "generations") or not root.is_absolute()):
         raise Refusal("cleanup request is invalid")
@@ -264,7 +267,10 @@ def sync_checkout(request: dict) -> dict:
     repo_key = request.get("repo_key")
     branch = request.get("branch")
     tid = request.get("thread_id")
-    root = Path(request.get("cache_root", ""))
+    raw_root = request.get("cache_root", "")
+    if not isinstance(raw_root, str):
+        raise Refusal("checkout request metadata is invalid")
+    root = Path(raw_root)
     expected = request.get("expected_oid")
     if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
             or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)
