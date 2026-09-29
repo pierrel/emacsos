@@ -27,16 +27,48 @@ def run(*args: str) -> str:
 class HelperInputBoundaryTest(unittest.TestCase):
     """Helper input and local failures return fixed JSON categories."""
 
-    def test_missing_private_git_configuration_has_safe_category(self):
+    def test_missing_private_git_configuration_names_only_fixed_file(self):
+        files = {
+            "assist-git-remotes.json": ("{}", "Git repository map unavailable"),
+            "assist-git-key": ("test key\n", "Git key unavailable"),
+            "assist-git-known-hosts": ("test host\n", "Git host pin unavailable"),
+        }
         with tempfile.TemporaryDirectory() as home:
-            result = subprocess.run(
-                [sys.executable, "-B", str(MODULE), "--check-config"],
-                env={**os.environ, "HOME": home}, text=True,
-                capture_output=True, timeout=5)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stderr, "")
-        self.assertEqual(json.loads(result.stdout),
-                         {"ok": False, "reason": "Git configuration unavailable"})
+            config = Path(home) / ".config" / "emacsos"
+            config.mkdir(parents=True)
+            for name, (content, _) in files.items():
+                target = config / name
+                target.write_text(content)
+                target.chmod(0o600)
+            for name, (_, reason) in files.items():
+                with self.subTest(file=name):
+                    target = config / name
+                    target.rename(config / (name + ".held"))
+                    result = subprocess.run(
+                        [sys.executable, "-B", str(MODULE), "--check-config"],
+                        env={**os.environ, "HOME": home}, text=True,
+                        capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, "")
+                    self.assertEqual(json.loads(result.stdout),
+                                     {"ok": False, "reason": reason})
+                    (config / (name + ".held")).rename(target)
+
+            request = {"action": "sync", "repo_key": "b" * 20,
+                       "branch": "thread/one", "thread_id": "thread-1",
+                       "cache_root": str(Path(home) / "cache"),
+                       "expected_oid": "1" * 40}
+            mapping = config / "assist-git-remotes.json"
+            mapping.rename(config / "assist-git-remotes.json.held")
+            result = subprocess.run([sys.executable, "-B", str(MODULE)],
+                                    input=json.dumps(request),
+                                    env={**os.environ, "HOME": home}, text=True,
+                                    capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(json.loads(result.stdout),
+                             {"ok": False, "reason": "Git repository map unavailable"})
+            self.assertFalse((Path(home) / "cache").exists())
 
     def test_other_local_io_and_invalid_json_have_safe_categories(self):
         with tempfile.TemporaryDirectory() as directory:

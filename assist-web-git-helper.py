@@ -99,10 +99,16 @@ def configuration(config: Path | None = None) -> tuple[dict[str, str], Path, Pat
     hosts = config / "assist-git-known-hosts"
     try:
         raw = private_file(mapping, nonempty=True)
+    except OSError as exc:
+        raise Refusal("Git repository map unavailable") from exc
+    try:
         private_file(key, nonempty=True)
+    except OSError as exc:
+        raise Refusal("Git key unavailable") from exc
+    try:
         private_file(hosts, nonempty=True)
     except OSError as exc:
-        raise Refusal("Git configuration unavailable") from exc
+        raise Refusal("Git host pin unavailable") from exc
     try:
         remotes = json.loads(raw, object_pairs_hook=unique_object)
     except (UnicodeError, ValueError) as exc:
