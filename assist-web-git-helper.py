@@ -97,9 +97,12 @@ def configuration(config: Path | None = None) -> tuple[dict[str, str], Path, Pat
     mapping = config / "assist-git-remotes.json"
     key = config / "assist-git-key"
     hosts = config / "assist-git-known-hosts"
-    raw = private_file(mapping, nonempty=True)
-    private_file(key, nonempty=True)
-    private_file(hosts, nonempty=True)
+    try:
+        raw = private_file(mapping, nonempty=True)
+        private_file(key, nonempty=True)
+        private_file(hosts, nonempty=True)
+    except OSError as exc:
+        raise Refusal("Git configuration unavailable") from exc
     try:
         remotes = json.loads(raw, object_pairs_hook=unique_object)
     except (UnicodeError, ValueError) as exc:
@@ -427,8 +430,13 @@ def main() -> None:
         else:
             raise Refusal("helper invocation is invalid")
     except (Refusal, OSError, UnicodeError, ValueError) as exc:
-        result = {"ok": False, "reason": str(exc) if isinstance(exc, Refusal)
-                  else "Git mirror operation failed"}
+        if isinstance(exc, Refusal):
+            reason = str(exc)
+        elif isinstance(exc, OSError):
+            reason = "Git mirror local I/O unavailable"
+        else:
+            reason = "Git mirror local data invalid"
+        result = {"ok": False, "reason": reason}
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
 
 

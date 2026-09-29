@@ -25,7 +25,39 @@ def run(*args: str) -> str:
 
 
 class HelperInputBoundaryTest(unittest.TestCase):
-    """Malformed stdin requests return fixed JSON before any filesystem/Git work."""
+    """Helper input and local failures return fixed JSON categories."""
+
+    def test_missing_private_git_configuration_has_safe_category(self):
+        with tempfile.TemporaryDirectory() as home:
+            result = subprocess.run(
+                [sys.executable, "-B", str(MODULE), "--check-config"],
+                env={**os.environ, "HOME": home}, text=True,
+                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout),
+                         {"ok": False, "reason": "Git configuration unavailable"})
+
+    def test_other_local_io_and_invalid_json_have_safe_categories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            regular = Path(directory) / "regular"
+            regular.write_text("not a directory")
+            request = {"action": "cleanup", "cache_root": str(regular / "cache"),
+                       "generation": "a" * 32, "kind": "staging"}
+            result = subprocess.run([sys.executable, "-B", str(MODULE)],
+                                    input=json.dumps(request), text=True,
+                                    capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout),
+                         {"ok": False, "reason": "Git mirror local I/O unavailable"})
+        malformed = subprocess.run([sys.executable, "-B", str(MODULE)],
+                                   input="{", text=True,
+                                   capture_output=True, timeout=5)
+        self.assertEqual(malformed.returncode, 0)
+        self.assertEqual(malformed.stderr, "")
+        self.assertEqual(json.loads(malformed.stdout),
+                         {"ok": False, "reason": "Git mirror local data invalid"})
 
     def assert_refusal(self, action, root, *, missing=False):
         request = {"action": action, "repo_key": "b" * 20,

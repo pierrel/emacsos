@@ -27,6 +27,30 @@
       (when (and process (process-live-p process))
         (emacsos-assist-web-git--terminate process)))))
 
+(ert-deftest test-assist-web-git-helper-exit-and-invalid-result-are-categorized ()
+  "Report only bounded helper failure categories, not child output or paths."
+  (let ((script (make-temp-file "git-helper-exit-" nil ".py"))
+        process results)
+    (unwind-protect
+        (progn
+          (with-temp-file script
+            (insert "import sys\nsys.stdin.read()\nraise SystemExit(7)\n"))
+          (let ((emacsos-assist-web-git-helper script))
+            (setq process
+                  (emacsos-assist-web-git--spawn
+                   '((action . "probe"))
+                   (lambda (result) (push result results)))))
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (process-live-p process) (< (float-time) deadline))
+              (accept-process-output process 0.1)))
+          (should-not (process-live-p process))
+          (should (equal results '((:ok nil :reason "Git helper exited (7)"))))
+          (should (equal (emacsos-assist-web-git--parse-helper-result "not-json")
+                         '(:ok nil :reason "Git helper response invalid"))))
+      (when (and process (process-live-p process))
+        (emacsos-assist-web-git--terminate process))
+      (delete-file script))))
+
 (defun test-assist-web-git--isolated-thread-safety (run test &rest args)
   "Give Assist Web ERT TESTs independent process-wide Git safety ledgers."
   (if (string-prefix-p "test-assist-web-" (symbol-name (ert-test-name test)))

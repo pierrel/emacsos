@@ -1227,8 +1227,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
     (if (eq (plist-get result :ok) t)
         result
       (list :ok nil :reason
-            (or (plist-get result :reason)
-                "Git mirror operation failed")))))
+            (if (stringp (plist-get result :reason))
+                (plist-get result :reason)
+              "Git helper response invalid")))))
 
 (defun emacsos-assist-web-git--spawn (request callback)
   "Run helper REQUEST asynchronously and call CALLBACK with its bounded result."
@@ -1256,7 +1257,15 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                                  (<= (length output) 4096))
                             (emacsos-assist-web-git--parse-helper-result output)
                           (list :ok nil :reason
-                                "Git mirror operation failed"))))))))
+                                (cond
+                                 ((process-get process :oversize)
+                                  "Git helper output too large")
+                                 ((eq (process-status process) 'signal)
+                                  "Git helper terminated")
+                                 ((/= (process-exit-status process) 0)
+                                  (format "Git helper exited (%d)"
+                                          (process-exit-status process)))
+                                 (t "Git helper response invalid"))))))))))
     (process-send-string process (json-encode request))
     (process-send-eof process)
     process))
