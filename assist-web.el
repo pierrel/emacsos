@@ -1472,9 +1472,6 @@ terminal event."
     (with-current-buffer buffer
       (let ((completed-run-id
              (unless run-still-active emacsos-assist-web--run-id)))
-        (when (and completed-run-id
-                   (process-live-p emacsos-assist-web--stream-process))
-          (setq emacsos-assist-web-git--observed-terminal-run-id completed-run-id))
         ;; A terminal SSE is not the answer.  Keep the marker-scoped text raw
         ;; until the canonical snapshot has replaced this provisional region.
         (emacsos-assist-web--stream-cleanup t t)
@@ -1491,7 +1488,6 @@ terminal event."
   "Keep BUFFER's exact pending submission and visibly mark STATUS unverified."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setq emacsos-assist-web-git--observed-terminal-run-id nil)
       (emacsos-assist-web--stream-cleanup t)
       (when (and (markerp emacsos-assist-web--assistant-start)
                  (markerp emacsos-assist-web--assistant-end))
@@ -2822,6 +2818,18 @@ suppressing a genuine repeated submission."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
+    ;; Opening a thread can fetch its branch while cached files remain usable.
+    ;; A later canonical snapshot may select a newer branch and queue a successor.
+    (with-current-buffer buffer
+      (when (and emacsos-assist-web--snapshot
+                 (not (emacsos-assist-web-git--gate-reason t)))
+        (condition-case nil
+            (let ((metadata
+                   (emacsos-assist-web-git--metadata-from-snapshot
+                    emacsos-assist-web--snapshot)))
+              (emacsos-assist-web-git--note metadata)
+              (emacsos-assist-web-git--enqueue metadata nil))
+          (error nil))))
     (unless (with-current-buffer buffer emacsos-assist-web--in-flight)
       (emacsos-assist-web-refresh-thread buffer)))))
 
@@ -3640,7 +3648,6 @@ callbacks even after reconciliation leaves the resident list empty."
         :stream-generation 0 :stream-admitted nil :handshake-token nil
         :reobserve-generation 0 :reobserve-in-flight nil
         :observer-end-kind nil :observer-end-generation nil
-        :git-terminal-observed nil
         :observer-end-checked nil :approval-stopped nil
         :reconcile-owner nil
         :cancellation-generation 0
@@ -4516,7 +4523,6 @@ could release a pre-header SSE reservation later."
           (setf (plist-get entry :handshake-token) token
                 (plist-get entry :state) 'observing
                 (plist-get entry :stream-admitted) nil
-                (plist-get entry :git-terminal-observed) nil
                 (plist-get entry :epoch) (1+ (plist-get entry :epoch)))
           (setq emacsos-assist-web--stream-entry entry)
           (if (condition-case nil (emacsos-assist-web--save-draft)
@@ -4570,7 +4576,6 @@ could release a pre-header SSE reservation later."
               (plist-get entry :stream-response) nil
               (plist-get entry :stream-header-timer) nil
               (plist-get entry :stream-admitted) nil
-              (plist-get entry :git-terminal-observed) nil
               (plist-get entry :stream-raw-bytes) nil
               (plist-get entry :stream-undecided-suffix) nil
               (plist-get entry :state) 'accepted-unobserved
@@ -4881,7 +4886,7 @@ VERIFIED-START-EPOCH from an exact Run GET."
               (emacsos-assist-web--legacy-stream-finish
                buffer run-still-active verified-outcome
                verified-start-epoch))
-          (let ((admitted (plist-get entry :stream-admitted)) complete)
+          (let (complete)
             (let ((inhibit-quit t))
               ;; The exact owner is fenced before end-state mutations.  The
               ;; unwind path closes the slot and pauses if save or cleanup
@@ -4893,10 +4898,6 @@ VERIFIED-START-EPOCH from an exact Run GET."
                       (emacsos-assist-web-git--stop-reobserve
                        entry 'terminal-sse))
                     (unless run-still-active
-                      ;; Capture admission before fencing tears down transport.
-                      ;; This receipt is deliberately not serialized to disk.
-                      (setf (plist-get entry :git-terminal-observed)
-                            (and admitted t))
                       (setf (plist-get entry :state) 'terminal-unreconciled
                             (plist-get entry :verified-outcome) nil
                             (plist-get entry :observer-end-kind) 'terminal-sse
@@ -5026,7 +5027,6 @@ Every restored Run needs a new exact status read before another retirement."
       (setf (plist-get entry :state) 'terminal-unreconciled
             (plist-get entry :requires-reobserve) t
             (plist-get entry :verified-outcome) nil
-            (plist-get entry :git-terminal-observed) nil
             (plist-get entry :reconcile-owner) nil)
       (emacsos-assist-web--entry-status entry reason))
     (when restored
@@ -5112,20 +5112,7 @@ restoration pauses this buffer until restart."
                                       'reconciling))
                                 emacsos-assist-web--queue))
            (git-reconcile-token
-            (emacsos-assist-web-git--canonical-start
-             t owner
-             (mapcar (lambda (entry)
-                       (cons (plist-get entry :run-id)
-                             (plist-get entry :verified-outcome)))
-                     entries)
-             (mapcar (lambda (entry)
-                       (cons (plist-get entry :run-id)
-                             (plist-get entry :verified-outcome)))
-                     (seq-filter
-                      (lambda (entry)
-                        (and (plist-get entry :git-terminal-observed)
-                             (eq (plist-get entry :observer-end-kind) 'terminal-sse)))
-                      entries))))
+            (emacsos-assist-web-git--canonical-start t owner))
            (keys (mapcar (lambda (entry) (plist-get entry :key)) entries))
            committed)
       (setq emacsos-assist-web--reconcile-generation generation)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, noninteractive Git work for the Assist thread mirror.
 
-The Emacs client supplies a repository key, thread ID, branch, expected OID,
+The Emacs client supplies a repository key, thread ID, branch, optional expected OID,
 private cache root and fast-forward admission flag.  This process validates
 the request, resolves the remote from private device configuration, and never
 emits the URL, SSH diagnostics, or credential material.
@@ -270,7 +270,7 @@ def sync_checkout(request: dict) -> dict:
     """Fetch the selected thread ref and safely FF its persistent local checkout.
 
     No operation resets, stashes, pushes or deletes an existing checkout.
-    Expected OIDs describe Assist freshness, not permission to see remote tips.
+    An optional expected OID describes Assist provenance, not permission to fetch.
     """
     global OPERATION_LOCK
     repo_key = request.get("repo_key")
@@ -285,7 +285,8 @@ def sync_checkout(request: dict) -> dict:
             or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)
             or not isinstance(branch, str) or not 1 <= len(branch.encode()) <= 240
             or branch in ("main", "HEAD") or branch.startswith("-") or not root.is_absolute()
-            or not isinstance(expected, str) or not OID_RE.fullmatch(expected)):
+            or (expected is not None
+                and (not isinstance(expected, str) or not OID_RE.fullmatch(expected)))):
         raise Refusal("checkout request metadata is invalid")
     remotes, key, hosts = configuration()
     url = remotes.get(repo_key)
@@ -402,7 +403,7 @@ def sync_checkout(request: dict) -> dict:
             return {"ok": True, "checkout_path": str(checkout),
                     "thread_oid": remote_oid, "local_oid": local_oid, "main_oid": main_oid,
                     "dirty": dirty, "pending": pending, "actual_branch": actual,
-                    "expected_matches": remote_oid == expected}
+                    "expected_matches": expected is not None and remote_oid == expected}
         except BaseException:
             if new and stage.exists():
                 shutil.rmtree(stage)

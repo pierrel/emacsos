@@ -221,6 +221,12 @@ class GitHelperTest(unittest.TestCase):
         self.assertEqual(result["thread_oid"], next_oid)
         self.assertIsNone(result["pending"])
 
+    def test_selected_remote_branch_needs_no_assist_oid(self):
+        result = self.sync(expected_oid=None)
+        self.assertEqual(result["local_oid"], self.thread_oid)
+        self.assertEqual(result["thread_oid"], self.thread_oid)
+        self.assertFalse(result["expected_matches"])
+
     def test_busy_remote_advance_is_visible_without_expected_equality(self):
         self.sync()
         next_oid = self.publish_update()
