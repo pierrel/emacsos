@@ -92,7 +92,7 @@
          (emacsos-assist-web-git-cache-directory cache)
          (emacsos-assist-web-git-workspace-directory (expand-file-name "workspaces" cache))
          (metadata (test-assist-web-git--metadata "ready" "topic/old" test-assist-web-git--head))
-         (relative "repo/thread-0123456789ab"))
+         (relative (concat "repo/thread-" (substring (emacsos-assist-web-git--workspace-identity metadata) 0 12))))
     (unwind-protect
         (let ((file (test-assist-web-git--write-route metadata nil relative)))
           (dolist (state '(nil 0 1 "yes" [] missing))
@@ -111,6 +111,19 @@
                                     (initialized . ,(if (eq state :json-false) json-false state))))))
             (should (equal (emacsos-assist-web-git--route-path metadata)
                            (expand-file-name relative emacsos-assist-web-git-workspace-directory)))))
+      (delete-directory cache t))))
+
+(ert-deftest test-assist-web-git-route-cannot-alias-another-thread ()
+  "A valid private file cannot assign another thread's physical user workspace."
+  (let* ((cache (make-temp-file "git-route-alias-" t))
+         (emacsos-assist-web-git-cache-directory cache)
+         (metadata (test-assist-web-git--metadata "ready" "topic/one" test-assist-web-git--head))
+         (other (plist-put (copy-sequence metadata) :tid "other-thread"))
+         (relative (concat "repo/thread-" (substring (emacsos-assist-web-git--workspace-identity other) 0 12))))
+    (unwind-protect
+        (progn
+          (test-assist-web-git--write-route metadata nil relative)
+          (should-error (emacsos-assist-web-git--route-path metadata) :type 'user-error))
       (delete-directory cache t))))
 
 (ert-deftest test-assist-web-git-frozen-user-route-survives-title-ref-change ()
@@ -240,7 +253,8 @@
         (with-temp-buffer
           (emacsos-assist-web-mode)
           (setq emacsos-assist-web--thread-id "thread-1" emacsos-assist-web-git--metadata metadata)
-          (test-assist-web-git--write-route metadata nil "repo/thread-123456789abc")
+          (test-assist-web-git--write-route
+           metadata nil (concat "repo/thread-" (substring (emacsos-assist-web-git--workspace-identity metadata) 0 12)))
           (let* ((root (emacsos-assist-web-git--checkout-path metadata))
                  (result (test-assist-web-git--checkout-result metadata))
                  (route (expand-file-name (concat "routes/" (emacsos-assist-web-git--workspace-identity metadata) ".json") cache)))
@@ -324,6 +338,28 @@
           (should (button-get button 'follow-link))
           (should (eq (button-get button 'action) #'emacsos-assist-web-git--bind-workspace-choice)))
         (kill-buffer view)))))
+
+(ert-deftest test-assist-web-git-helper-choice-survives-safe-failure-parser ()
+  "The real helper failure shape reaches the pending local workspace chooser."
+  (let* ((identity (make-string 64 ?a))
+         (result (emacsos-assist-web-git--parse-helper-result
+                  (json-encode `((ok . ,json-false) (reason . "existing workspace needs local choice")
+                                 (workspace_choices . [((identity . ,identity) (branch . "topic/old"))]))))))
+    (should-not (plist-get result :ok))
+    (should (equal (plist-get result :workspace_choices)
+                   (list (list :identity identity :branch "topic/old"))))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (emacsos-assist-web-git--failed nil (plist-get result :reason) result)
+      (should (equal emacsos-assist-web-git--workspace-choices
+                     (plist-get result :workspace_choices))))
+    (dolist (bad `(["bad"] [((identity . ,identity) (branch . "unsafe\nlabel"))]
+                  [((identity . "bad") (branch . "topic"))]
+                  ,(vconcat (make-list 17 `((identity . ,identity) (branch . "topic"))))))
+      (should-not
+       (plist-get (emacsos-assist-web-git--parse-helper-result
+                   (json-encode `((ok . ,json-false) (reason . "pending") (workspace_choices . ,bad))))
+                  :workspace_choices)))))
 
 (defun test-assist-web-git--checkout-result (metadata &optional remote local)
   "Make the persistent helper result for exact METADATA without filesystem work."

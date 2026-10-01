@@ -119,7 +119,8 @@ Existing checkouts stay here in place; new user workspaces use
                (string-match-p "\\`[0-9a-f]\\{64\\}\\'" legacy))
           (expand-file-name (concat "checkouts/" legacy) emacsos-assist-web-git-cache-directory))
          ((and (null legacy) (stringp relative)
-               (string-match-p "\\`[a-z0-9][a-z0-9-]\\{0,47\\}/[a-z0-9][a-z0-9-]\\{0,47\\}-[0-9a-f]\\{12\\}\\'" relative))
+               (string-match-p "\\`[a-z0-9][a-z0-9-]\\{0,47\\}/[a-z0-9][a-z0-9-]\\{0,47\\}-[0-9a-f]\\{12\\}\\'" relative)
+               (string-suffix-p (concat "-" (substring (emacsos-assist-web-git--workspace-identity metadata) 0 12)) relative))
           (expand-file-name relative emacsos-assist-web-git-workspace-directory))
          (t (user-error "Workspace binding path is invalid")))))))
 
@@ -585,14 +586,26 @@ Modified buffers are never reverted. Repository local eval remains disabled."
   "Return a safe result from bounded helper OUTPUT."
   (let ((result (condition-case nil
                     (json-parse-string output :object-type 'plist
+                                       :array-type 'list
                                        :false-object nil :null-object nil)
                   (error nil))))
     (if (eq (plist-get result :ok) t)
         result
-      (list :ok nil :reason
-            (if (stringp (plist-get result :reason))
-                (plist-get result :reason)
-              "Git helper response invalid")))))
+      (let ((safe (list :ok nil :reason
+                        (if (stringp (plist-get result :reason))
+                            (plist-get result :reason)
+                          "Git helper response invalid")))
+            (choices (plist-get result :workspace_choices)))
+        (when (and (listp choices) choices (<= (length choices) 16)
+                   (cl-every (lambda (choice)
+                               (and (listp choice) (stringp (plist-get choice :identity))
+                                    (string-match-p "\\`[0-9a-f]\\{64\\}\\'" (plist-get choice :identity))
+                                    (stringp (plist-get choice :branch))
+                                    (<= (length (plist-get choice :branch)) 48)
+                                    (string-match-p "\\`[A-Za-z0-9._/?-]*\\'" (plist-get choice :branch))))
+                             choices))
+          (setq safe (plist-put safe :workspace_choices choices)))
+        safe))))
 
 (defun emacsos-assist-web-git--spawn (request callback)
   "Run helper REQUEST asynchronously and call CALLBACK with its bounded result."

@@ -90,7 +90,8 @@ def route_path(record: dict, root: Path, workspaces: Path,
     if isinstance(legacy, str) and re.fullmatch(r"[0-9a-f]{64}", legacy) and relative is None:
         return root / "checkouts" / legacy
     if (legacy is None and isinstance(relative, str)
-            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)):
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)
+            and relative.endswith("-" + stable_identity(repo_key, tid)[:12])):
         return workspaces / relative
     raise Refusal("workspace binding is invalid")
 
@@ -115,7 +116,35 @@ def write_route(path: Path, record: dict) -> None:
             os.unlink(temporary)
 
 
-def legacy_choices(root: Path, url: str, env: dict) -> list[dict]:
+def workspace_bindings(root: Path, workspaces: Path) -> dict[Path, str]:
+    """Read bounded valid bindings, refusing duplicate physical ownership."""
+    bindings = {}
+    for index, route in enumerate((root / "routes").glob("*.json")):
+        if index >= FILE_LIMIT:
+            raise Refusal("workspace binding inventory exceeds its limit")
+        record = read_route(route)
+        if not isinstance(record, dict):
+            raise Refusal("workspace binding is invalid")
+        repo_key, tid = record.get("repo_key"), record.get("thread_id")
+        if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
+                or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)):
+            raise Refusal("workspace binding is invalid")
+        identity = stable_identity(repo_key, tid)
+        if route.name != identity + ".json":
+            raise Refusal("workspace binding is invalid")
+        checkout = route_path(record, root, workspaces, repo_key, tid)
+        if checkout in bindings:
+            raise Refusal("workspace is already bound to another thread")
+        bindings[checkout] = identity
+    return bindings
+
+
+def physical_lock(checkout: Path, legacy: str | None) -> str:
+    """Keep old physical locks; new locks depend on the path, not the thread."""
+    return legacy or "path-" + hashlib.sha256(os.fsencode(checkout)).hexdigest()
+
+
+def legacy_choices(root: Path, url: str, env: dict, bindings: dict[Path, str]) -> list[dict]:
     """Inspect only bounded old managed paths, disclosing no configured URL."""
     choices = []
     for index, entry in enumerate((root / "checkouts").iterdir()):
@@ -123,15 +152,19 @@ def legacy_choices(root: Path, url: str, env: dict) -> list[dict]:
             raise Refusal("legacy workspace inventory exceeds its limit")
         if not re.fullmatch(r"[0-9a-f]{64}", entry.name):
             continue
+        if entry in bindings:
+            continue
         private_directory(entry)
         if not (entry / ".git").is_dir() or (entry / ".git").is_symlink():
             raise Refusal("legacy workspace source is unavailable")
         if git(["-C", str(entry), "remote", "get-url", "origin"], env, seconds=2) == url:
-            branch = git(["-C", str(entry), "symbolic-ref", "--short", "HEAD"], env, seconds=2)
+            branch = git(["-C", str(entry), "rev-parse", "--abbrev-ref", "HEAD"], env, seconds=2)
+            if branch == "HEAD":
+                branch = "detached"
             choices.append({"identity": entry.name,
                             "branch": re.sub(r"[^A-Za-z0-9._/-]", "?", branch)[:48]})
-            if len(choices) == 16:
-                break
+            if len(choices) > 16:
+                raise Refusal("legacy workspace inventory exceeds its limit")
     return choices
 
 
@@ -141,6 +174,7 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
     identity = stable_identity(repo_key, tid)
     routes = root / "routes"
     private_directory(routes)
+    bindings = workspace_bindings(root, workspaces)
     route = routes / (identity + ".json")
     if route.exists() or route.is_symlink():
         record = read_route(route)
@@ -151,7 +185,7 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
             raise Refusal("workspace destination already exists; local work preserved")
         if record.get("initialized") is not False and not checkout.exists():
             raise Refusal("bound workspace missing; restore its existing path")
-        return checkout, record.get("legacy") or identity
+        return checkout, physical_lock(checkout, record.get("legacy"))
     legacy = hashlib.sha256((repo_key + "\n" + tid + "\n" + branch).encode()).hexdigest()
     choice = request.get("workspace_choice")
     if choice is not None and (not isinstance(choice, str)
@@ -160,7 +194,7 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
     if (root / "checkouts" / legacy).exists():
         choice = None  # An exact known existing workspace is never replaced.
     if choice is None and not (root / "checkouts" / legacy).exists():
-        choices = legacy_choices(root, url, env)
+        choices = legacy_choices(root, url, env, bindings)
         if choices:
             raise WorkspaceChoice(choices)
     elif choice != "new":
@@ -185,14 +219,11 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
             raise Refusal("legacy workspace Git directory is invalid")
         if git(["-C", str(checkout), "remote", "get-url", "origin"], env, seconds=2) != url:
             raise Refusal("legacy workspace remote differs from configured repository")
-        for index, existing in enumerate(routes.glob("*.json")):
-            if index >= FILE_LIMIT:
-                raise Refusal("workspace binding inventory exceeds its limit")
-            if read_route(existing).get("legacy") == legacy:
-                raise Refusal("legacy workspace is already bound to another thread")
+    if checkout in bindings:
+        raise Refusal("workspace is already bound to another thread")
     # Atomic publication freezes allocation even if the following fetch fails.
     write_route(route, record)
-    return checkout, record.get("legacy") or identity
+    return checkout, physical_lock(checkout, record.get("legacy"))
 
 
 def private_file(path: Path, *, nonempty: bool = False) -> bytes:
@@ -483,8 +514,16 @@ def sync_checkout(request: dict) -> dict:
         except BlockingIOError as exc:
             raise Refusal("another Git operation is still using this checkout") from exc
         OPERATION_LOCK = allocation
-        checkout, physical = allocate_workspace(request, root, workspaces,
-                                                repo_key, tid, branch, url, env)
+        # Allocation across identities is one short critical section; otherwise
+        # two threads could both bind the same unclaimed legacy workspace.
+        with os.fdopen(os.open(root / "locks" / "workspace-bindings",
+                               os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "rb") as bindings:
+            try:
+                fcntl.flock(bindings.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise Refusal("another Git operation is allocating a workspace") from exc
+            checkout, physical = allocate_workspace(request, root, workspaces,
+                                                    repo_key, tid, branch, url, env)
         if str(checkout) != admitted_path:
             raise Refusal("workspace binding changed; Refresh to retry")
         descriptor = os.open(root / "locks" / physical,

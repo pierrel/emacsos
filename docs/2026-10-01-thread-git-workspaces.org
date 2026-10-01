@@ -16,6 +16,10 @@ the existing metadata root records either that legacy location or a new relative
 An exact known legacy checkout is registered in place. If older same-source
 workspaces cannot be attributed to this thread, Choose workspace offers a
 bounded local list: bind an existing workspace or explicitly create New.
+Already bound workspaces are not offered to another thread. Detached unbound
+workspaces remain visible as choices; an oversized inventory refuses visibly
+instead of showing a truncated list. Bindings validate the identity suffix
+and cannot assign one physical workspace to two threads.
 Nothing automatically moves, copies, deletes or replaces an existing workspace.
 An already initialized workspace missing from its bound path is not recreated.
 Initial promotion is atomic and no-clobber, including an empty user directory.
@@ -37,7 +41,8 @@ request or =expected_matches= result remains. Only a clean matching local
 branch with no unsaved edits or in-app Git mutation can advance fast-forward.
 Dirty, staged, untracked, unsaved, divergent and local-ahead work is preserved
 with a pending label. No automatic reset, stash, rebase, branch switch or push.
-Allocation is serialized by stable identity and workspace; the helper refuses
+Binding publication is serialized across thread identities. Allocation and
+fetch hold stable-identity and physical-path locks; the helper refuses
 if its resolved workspace differs from the path admitted by Emacs.
 
 * Responsibility and verification

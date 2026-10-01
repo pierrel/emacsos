@@ -307,6 +307,55 @@ class GitHelperTest(unittest.TestCase):
         run("-C", str(checkout), "remote", "set-url", "origin", str(self.root / "another.git"))
         self.assertTrue(Path(self.sync()["checkout_path"]).is_relative_to(self.root / "workspaces"))
 
+    def test_bound_legacy_is_not_an_ambiguous_candidate_for_a_new_thread(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        result = self.sync(thread_id="thread-2")
+        self.assertNotEqual(result["checkout_path"], str(checkout))
+        self.assertTrue(Path(result["checkout_path"]).is_relative_to(self.root / "workspaces"))
+
+    def test_detached_unbound_legacy_still_offers_explicit_new_choice(self):
+        checkout = self.legacy_checkout()
+        run("-C", str(checkout), "checkout", "--detach", "-q")
+        before = checkout.stat().st_ino, (checkout / ".git" / "HEAD").read_bytes()
+        with self.assertRaises(helper.WorkspaceChoice) as refused:
+            self.sync()
+        self.assertEqual(refused.exception.choices, [{"identity": checkout.name, "branch": "detached"}])
+        self.sync(workspace_choice="new")
+        self.assertEqual((checkout.stat().st_ino, (checkout / ".git" / "HEAD").read_bytes()), before)
+
+    def test_legacy_choice_inventory_never_silently_truncates(self):
+        for index in range(17):
+            self.legacy_checkout("old-" + str(index))
+        with self.assertRaisesRegex(helper.Refusal, "inventory exceeds"):
+            self.sync()
+
+    def test_route_cannot_alias_another_threads_workspace(self):
+        checkout = Path(self.sync()["checkout_path"])
+        identity = helper.stable_identity("b" * 20, "thread-2")
+        route = self.cache / "routes" / (identity + ".json")
+        helper.write_route(route, {"repo_key": "b" * 20, "thread_id": "thread-2",
+                                   "legacy": None, "relative": str(checkout.relative_to(self.root / "workspaces")),
+                                   "initialized": True})
+        before = checkout.stat().st_ino, (checkout / ".git" / "index").read_bytes()
+        with patch.object(helper, "git", wraps=helper.git) as invoked:
+            with self.assertRaisesRegex(helper.Refusal, "binding is invalid"):
+                self.sync(thread_id="thread-2", checkout_path=str(checkout))
+        self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+        self.assertEqual((checkout.stat().st_ino, (checkout / ".git" / "index").read_bytes()), before)
+
+    def test_duplicate_legacy_bindings_refuse_before_fetch(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        identity = helper.stable_identity("b" * 20, "thread-2")
+        helper.write_route(self.cache / "routes" / (identity + ".json"),
+                           {"repo_key": "b" * 20, "thread_id": "thread-2", "legacy": checkout.name,
+                            "relative": None, "initialized": True})
+        with patch.object(helper, "git", wraps=helper.git) as invoked:
+            with self.assertRaisesRegex(helper.Refusal, "already bound"):
+                self.sync(thread_id="thread-2")
+        self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+
     def test_explicit_new_choice_leaves_unattributed_legacy_in_place(self):
         checkout = self.legacy_checkout()
         before = checkout.stat().st_ino
@@ -446,6 +495,35 @@ class GitHelperTest(unittest.TestCase):
         locks = self.cache / "locks"
         locks.mkdir(mode=0o700)
         descriptor = os.open(locks / checkout.name, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(helper, "git", wraps=helper.git) as invoked:
+                with self.assertRaisesRegex(helper.Refusal, "another Git operation"):
+                    self.sync()
+            self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+        finally:
+            os.close(descriptor)
+
+    def test_binding_publication_serializes_different_thread_identities(self):
+        checkout = self.legacy_checkout()
+        locks = self.cache / "locks"
+        locks.mkdir(mode=0o700)
+        descriptor = os.open(locks / "workspace-bindings", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(helper, "git", wraps=helper.git) as invoked:
+                with self.assertRaisesRegex(helper.Refusal, "allocating a workspace"):
+                    self.sync(thread_id="another-thread", workspace_choice=checkout.name)
+            self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+            self.assertFalse((self.cache / "routes").exists())
+        finally:
+            os.close(descriptor)
+
+    def test_new_workspace_fetch_uses_its_physical_path_lock(self):
+        checkout = Path(self.sync()["checkout_path"])
+        physical = helper.physical_lock(checkout, None)
+        self.assertEqual(physical, "path-" + __import__("hashlib").sha256(os.fsencode(checkout)).hexdigest())
+        descriptor = os.open(self.cache / "locks" / physical, os.O_RDWR)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with patch.object(helper, "git", wraps=helper.git) as invoked:
