@@ -146,6 +146,15 @@ class HelperInputBoundaryTest(unittest.TestCase):
                                              "kind": "staging"}), {"ok": True})
             self.assertFalse((root / "staging").exists())
 
+    def test_cleanup_missing_root_still_creates_private_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "cache"
+            self.assertEqual(helper.cleanup({"cache_root": str(root),
+                                             "generation": "a" * 32,
+                                             "kind": "staging"}), {"ok": True})
+            self.assertTrue(root.is_dir())
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+
     def test_cleanup_pins_kind_during_removal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "cache"
@@ -174,6 +183,45 @@ class HelperInputBoundaryTest(unittest.TestCase):
                                                  "kind": "staging"}), {"ok": True})
             self.assertEqual(sentinel.read_text(), "keep\n")
             self.assertFalse((held / target.name).exists())
+
+    def test_cleanup_refuses_ancestor_swap_before_root_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            ancestor = base / "ancestor"
+            root = ancestor / "cache"
+            root_kind = root / "staging"
+            root_kind.mkdir(parents=True, mode=0o700)
+            ancestor.chmod(0o700)
+            root.chmod(0o700)
+            root_kind.chmod(0o700)
+            outside = base / "outside"
+            outside_kind = outside / "cache" / "staging"
+            outside_target = outside_kind / ("a" * 32)
+            outside_target.mkdir(parents=True, mode=0o700)
+            outside_kind.parent.chmod(0o700)
+            outside_kind.chmod(0o700)
+            sentinel = outside_target / "keep.txt"
+            sentinel.write_text("keep\n")
+            original_open = helper.os.open
+            swapped = False
+
+            def swap_before_open(path, flags, *args, **kwargs):
+                nonlocal swapped
+                if not swapped:
+                    swapped = True
+                    ancestor.rename(base / "held-ancestor")
+                    ancestor.symlink_to(outside, target_is_directory=True)
+                return original_open(path, flags, *args, **kwargs)
+
+            with patch.object(helper.os, "open", side_effect=swap_before_open):
+                try:
+                    helper.cleanup({"cache_root": str(root), "generation": "a" * 32,
+                                    "kind": "staging"})
+                    refused = False
+                except (helper.Refusal, OSError):
+                    refused = True
+            self.assertEqual(sentinel.read_text(), "keep\n")
+            self.assertTrue(refused)
 
 
 class GitHelperTest(unittest.TestCase):

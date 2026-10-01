@@ -470,10 +470,22 @@ def cleanup(request: dict) -> dict:
     if (not isinstance(generation, str) or not ID_RE.fullmatch(generation)
             or kind not in ("staging", "generations") or not root.is_absolute()):
         raise Refusal("cleanup request is invalid")
-    private_directory(root)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    root_fd = os.open(root, flags)
+    if ".." in root.parts:
+        raise Refusal("Git metadata directory is invalid")
+    root_fd = os.open("/", flags)
     try:
+        for component in root.parts[1:]:
+            try:
+                next_fd = os.open(component, flags, dir_fd=root_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=root_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(component, flags, dir_fd=root_fd)
+            os.close(root_fd)
+            root_fd = next_fd
         info = os.fstat(root_fd)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise Refusal("Git cache directory must be private mode 0700")
