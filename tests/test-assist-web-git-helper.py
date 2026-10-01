@@ -121,6 +121,60 @@ class HelperInputBoundaryTest(unittest.TestCase):
                 with self.subTest(action=action, root=root):
                     self.assert_refusal(action, root)
 
+    def test_cleanup_refuses_symlinked_kind_without_deleting_outside(self):
+        for kind in ("staging", "generations"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "cache"
+                root.mkdir(mode=0o700)
+                outside = Path(directory) / "outside"
+                target = outside / ("a" * 32)
+                target.mkdir(parents=True)
+                sentinel = target / "keep.txt"
+                sentinel.write_text("keep\n")
+                (root / kind).symlink_to(outside, target_is_directory=True)
+                with self.assertRaises(helper.Refusal):
+                    helper.cleanup({"cache_root": str(root), "generation": "a" * 32,
+                                    "kind": kind})
+                self.assertEqual(sentinel.read_text(), "keep\n")
+
+    def test_cleanup_missing_kind_remains_noop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "cache"
+            root.mkdir(mode=0o700)
+            self.assertEqual(helper.cleanup({"cache_root": str(root),
+                                             "generation": "a" * 32,
+                                             "kind": "staging"}), {"ok": True})
+            self.assertFalse((root / "staging").exists())
+
+    def test_cleanup_pins_kind_during_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "cache"
+            kind = root / "staging"
+            target = kind / ("a" * 32)
+            target.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            kind.chmod(0o700)
+            (target / "old.txt").write_text("remove\n")
+            outside = Path(directory) / "outside"
+            other = outside / target.name
+            other.mkdir(parents=True)
+            sentinel = other / "keep.txt"
+            sentinel.write_text("keep\n")
+            held = root / "held-staging"
+            original = helper.shutil.rmtree
+
+            def swap_parent(path, *args, **kwargs):
+                kind.rename(held)
+                kind.symlink_to(outside, target_is_directory=True)
+                return original(path, *args, **kwargs)
+
+            with patch.object(helper.shutil, "rmtree", side_effect=swap_parent):
+                self.assertEqual(helper.cleanup({"cache_root": str(root),
+                                                 "generation": target.name,
+                                                 "kind": "staging"}), {"ok": True})
+            self.assertEqual(sentinel.read_text(), "keep\n")
+            self.assertFalse((held / target.name).exists())
+
 
 class GitHelperTest(unittest.TestCase):
     def setUp(self):
@@ -165,6 +219,29 @@ class GitHelperTest(unittest.TestCase):
                 with self.assertRaises(helper.Refusal):
                     self.sync(branch=branch)
         self.assertFalse(any((self.cache / "checkouts").glob("*")))
+
+    def test_valid_utf8_thread_branch_initializes(self):
+        branch = "topic/caf\u00e9"
+        run("-C", str(self.repo), "branch", branch)
+        run("-C", str(self.repo), "push", "-q", "origin", branch)
+        result = self.sync(branch=branch)
+        self.assertEqual(result["actual_branch"], branch)
+
+    def test_valid_utf8_space_suffix_branch_preserved(self):
+        branch = "topic/caf\u00e9\u00a0"
+        run("-C", str(self.repo), "branch", branch)
+        run("-C", str(self.repo), "push", "-q", "origin", branch)
+        result = self.sync(branch=branch)
+        self.assertEqual(result["actual_branch"], branch)
+
+    def test_thread_named_thread_initializes(self):
+        run("-C", str(self.repo), "switch", "-q", "main")
+        run("-C", str(self.repo), "branch", "-D", "thread/one")
+        run("-C", str(self.repo), "push", "-q", "origin", "--delete", "thread/one")
+        run("-C", str(self.repo), "switch", "-qc", "thread")
+        run("-C", str(self.repo), "push", "-q", "origin", "thread")
+        result = self.sync(branch="thread")
+        self.assertEqual(result["actual_branch"], "thread")
 
     def test_private_map_refuses_duplicate_keys_and_credential_url(self):
         config = self.root / ".config" / "emacsos"

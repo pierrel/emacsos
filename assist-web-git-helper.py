@@ -434,7 +434,7 @@ def git(args: list[str], env: dict[str, str], *, seconds: int = 20,
         ACTIVE_GIT = None
     if process.returncode:
         raise Refusal("Git command failed")
-    return output.decode("ascii", errors="strict").strip()
+    return output.decode("utf-8", errors="strict").removesuffix("\n")
 
 
 def tree_size(root: Path, *, omit_git: bool = False) -> tuple[int, int]:
@@ -471,11 +471,33 @@ def cleanup(request: dict) -> dict:
             or kind not in ("staging", "generations") or not root.is_absolute()):
         raise Refusal("cleanup request is invalid")
     private_directory(root)
-    target = root / kind / generation
-    if target.is_symlink():
-        raise Refusal("cleanup target is a symlink")
-    if target.exists():
-        shutil.rmtree(target)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root_fd = os.open(root, flags)
+    try:
+        info = os.fstat(root_fd)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise Refusal("Git cache directory must be private mode 0700")
+        try:
+            kind_fd = os.open(kind, flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return {"ok": True}
+        except OSError as exc:
+            raise Refusal("cleanup parent is invalid") from exc
+        try:
+            info = os.fstat(kind_fd)
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise Refusal("cleanup parent is invalid")
+            try:
+                target = os.stat(generation, dir_fd=kind_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return {"ok": True}
+            if not stat.S_ISDIR(target.st_mode):
+                raise Refusal("cleanup target is invalid")
+            shutil.rmtree(generation, dir_fd=kind_fd)
+        finally:
+            os.close(kind_fd)
+    finally:
+        os.close(root_fd)
     return {"ok": True}
 
 
