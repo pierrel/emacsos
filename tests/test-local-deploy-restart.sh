@@ -32,7 +32,8 @@ cat >"$fake_bin/openrc-update" <<'EOF'
 #!/bin/sh
 set -eu
 
-for source in os.el chat.el assist-web.el emacsos-assist.el network.el \
+for source in os.el chat.el assist-web.el assist-web-git.el \
+    assist-web-git-helper.py emacsos-assist.el network.el \
     phone-call.el phone-sms.el phone-sms-chat.el; do
     cp -- "$EMACSOS_TEST_REPO_DIR/$source" "$EMACSOS_TEST_DEPLOY_DIR/"
 done
@@ -56,8 +57,10 @@ new_pid=$(emacsclient -s "$daemon_name" --eval '(emacs-pid)' | tr -d '"')
 current_state='(list (intern-soft "emacos-command-map")
                      (intern-soft "emacos--chat-show-top-buffer")
                      (boundp (quote emacsos-command-map))
-                     (fboundp (quote emacsos-command-mode)))'
-[ "$(emacsclient -s "$daemon_name" --eval "$current_state")" = '(nil nil t t)' ]
+                     (fboundp (quote emacsos-command-mode))
+                     (featurep (quote assist-web-git)))'
+[ "$(emacsclient -s "$daemon_name" --eval "$current_state")" = '(nil nil t t t)' ]
+[ -f "$deployed/assist-web-git-helper.py" ]
 grep -F 'atomic OpenRC update and restart' "$log" >/dev/null
 
 printf '%s\n' 'local deploy restart tests passed'

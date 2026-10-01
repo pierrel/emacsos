@@ -534,6 +534,9 @@ def sync_checkout(request: dict) -> dict:
         except BlockingIOError as exc:
             raise Refusal("another Git operation is still using this checkout") from exc
         OPERATION_LOCK = descriptor
+        # A route freezes identity and installation state, not the safety of
+        # workspace parents that may have changed since allocation.
+        workspace_directory(checkout.parent)
         if shutil.disk_usage(checkout.parent).free < FREE_MARGIN:
             raise Refusal("insufficient free space for Git fetch")
         new = not checkout.exists()

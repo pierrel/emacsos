@@ -395,6 +395,22 @@ class GitHelperTest(unittest.TestCase):
             self.sync()
         self.assertEqual((destination / "user.txt").read_text(), "keep")
 
+    def test_bound_uninitialized_workspace_refuses_replaced_parent(self):
+        with self.assertRaises(helper.Refusal):
+            self.sync(branch="thread/missing", repo_label="Notes")
+        route = self.cache / "routes" / (
+            helper.stable_identity("b" * 20, "thread-1") + ".json")
+        checkout = self.root / "workspaces" / helper.read_route(route)["relative"]
+        original_parent = checkout.parent
+        outside = self.root / "outside"
+        outside.mkdir()
+        original_parent.rmdir()
+        original_parent.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(helper.Refusal, "workspace directory is invalid"):
+            self.sync()
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(checkout.exists())
+
     def test_binding_path_mismatch_refuses_before_fetch(self):
         with patch.object(helper, "git", wraps=helper.git) as invoked:
             with self.assertRaisesRegex(helper.Refusal, "binding changed"):
