@@ -20,6 +20,9 @@ Already bound workspaces are not offered to another thread. Detached unbound
 workspaces remain visible as choices; an oversized inventory refuses visibly
 instead of showing a truncated list. Bindings validate the identity suffix
 and cannot assign one physical workspace to two threads.
+Legacy local browsing performs only a bounded private binding check and refuses
+duplicate ownership before opening editable files. No Git probe holds the short
+metadata publication lock or blocks another already-bound workspace's fetch.
 Nothing automatically moves, copies, deletes or replaces an existing workspace.
 An already initialized workspace missing from its bound path is not recreated.
 Initial promotion is atomic and no-clobber, including an empty user directory.

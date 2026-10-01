@@ -219,10 +219,19 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
             raise Refusal("legacy workspace Git directory is invalid")
         if git(["-C", str(checkout), "remote", "get-url", "origin"], env, seconds=2) != url:
             raise Refusal("legacy workspace remote differs from configured repository")
-    if checkout in bindings:
-        raise Refusal("workspace is already bound to another thread")
-    # Atomic publication freezes allocation even if the following fetch fails.
-    write_route(route, record)
+    # Serialize only metadata publication, never the legacy Git inventory.
+    with os.fdopen(os.open(root / "locks" / "workspace-bindings",
+                           os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "rb") as publication:
+        try:
+            fcntl.flock(publication.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refusal("another Git operation is allocating a workspace") from exc
+        if checkout in workspace_bindings(root, workspaces):
+            raise Refusal("workspace is already bound to another thread")
+        if route.exists() or route.is_symlink():
+            raise Refusal("workspace binding changed; Refresh to retry")
+        # Atomic publication freezes allocation even if the following fetch fails.
+        write_route(route, record)
     return checkout, physical_lock(checkout, record.get("legacy"))
 
 
@@ -514,16 +523,8 @@ def sync_checkout(request: dict) -> dict:
         except BlockingIOError as exc:
             raise Refusal("another Git operation is still using this checkout") from exc
         OPERATION_LOCK = allocation
-        # Allocation across identities is one short critical section; otherwise
-        # two threads could both bind the same unclaimed legacy workspace.
-        with os.fdopen(os.open(root / "locks" / "workspace-bindings",
-                               os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "rb") as bindings:
-            try:
-                fcntl.flock(bindings.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise Refusal("another Git operation is allocating a workspace") from exc
-            checkout, physical = allocate_workspace(request, root, workspaces,
-                                                    repo_key, tid, branch, url, env)
+        checkout, physical = allocate_workspace(request, root, workspaces,
+                                                repo_key, tid, branch, url, env)
         if str(checkout) != admitted_path:
             raise Refusal("workspace binding changed; Refresh to retry")
         descriptor = os.open(root / "locks" / physical,

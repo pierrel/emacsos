@@ -89,23 +89,37 @@ Existing checkouts stay here in place; new user workspaces use
            "-" (substring (emacsos-assist-web-git--workspace-identity metadata) 0 12))
    emacsos-assist-web-git-workspace-directory))
 
+(defun emacsos-assist-web-git--read-route (route)
+  "Read one private bounded ROUTE without invoking Git or reading credentials."
+  (let ((attributes (file-attributes route)))
+    (unless (and (file-regular-p route) (not (file-symlink-p route))
+                 (equal (expand-file-name route) (file-truename route))
+                 (eql (file-attribute-user-id attributes) (user-uid))
+                 (= (nth 1 attributes) 1) (= (file-modes route) #o600)
+                 (<= (file-attribute-size attributes) 2048))
+      (user-error "Workspace binding unavailable; local files preserved")))
+  (with-temp-buffer
+    (insert-file-contents route nil 0 2048)
+    (json-parse-buffer :object-type 'plist :array-type 'list
+                       :null-object nil :false-object :json-false)))
+
+(defun emacsos-assist-web-git--unique-legacy-binding (route legacy)
+  "Refuse another bounded private route claiming this LEGACY workspace."
+  (let ((routes (directory-files (file-name-directory route) t "\\.json\\'" t 10001)))
+    (when (> (length routes) 10000)
+      (user-error "Workspace binding inventory exceeds its limit"))
+    (dolist (other routes)
+      (unless (equal other route)
+        (when (equal (plist-get (emacsos-assist-web-git--read-route other) :legacy) legacy)
+          (user-error "Workspace has ambiguous thread ownership; local files preserved"))))))
+
 (defun emacsos-assist-web-git--route-path (metadata)
   "Return METADATA's bounded private frozen binding, without starting a process."
   (let ((route (expand-file-name
                 (concat "routes/" (emacsos-assist-web-git--workspace-identity metadata) ".json")
                 emacsos-assist-web-git-cache-directory)))
     (when (or (file-exists-p route) (file-symlink-p route))
-      (let ((attributes (file-attributes route)))
-        (unless (and (file-regular-p route) (not (file-symlink-p route))
-                     (equal (expand-file-name route) (file-truename route))
-                     (eql (file-attribute-user-id attributes) (user-uid))
-                     (= (nth 1 attributes) 1) (= (file-modes route) #o600)
-                     (<= (file-attribute-size attributes) 2048))
-          (user-error "Workspace binding unavailable; local files preserved")))
-      (let* ((record (with-temp-buffer
-                       (insert-file-contents route nil 0 2048)
-                       (json-parse-buffer :object-type 'plist :array-type 'list
-                                          :null-object nil :false-object :json-false)))
+      (let* ((record (emacsos-assist-web-git--read-route route))
              (legacy (plist-get record :legacy))
              (relative (plist-get record :relative)))
         (unless (and (equal (plist-get record :repo_key) (plist-get metadata :repo-key))
@@ -117,6 +131,7 @@ Existing checkouts stay here in place; new user workspaces use
         (cond
          ((and (null relative) (stringp legacy)
                (string-match-p "\\`[0-9a-f]\\{64\\}\\'" legacy))
+          (emacsos-assist-web-git--unique-legacy-binding route legacy)
           (expand-file-name (concat "checkouts/" legacy) emacsos-assist-web-git-cache-directory))
          ((and (null legacy) (stringp relative)
                (string-match-p "\\`[a-z0-9][a-z0-9-]\\{0,47\\}/[a-z0-9][a-z0-9-]\\{0,47\\}-[0-9a-f]\\{12\\}\\'" relative)

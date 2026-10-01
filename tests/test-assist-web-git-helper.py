@@ -515,7 +515,7 @@ class GitHelperTest(unittest.TestCase):
                 with self.assertRaisesRegex(helper.Refusal, "allocating a workspace"):
                     self.sync(thread_id="another-thread", workspace_choice=checkout.name)
             self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
-            self.assertFalse((self.cache / "routes").exists())
+            self.assertFalse(list((self.cache / "routes").iterdir()))
         finally:
             os.close(descriptor)
 
@@ -532,6 +532,27 @@ class GitHelperTest(unittest.TestCase):
             self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
         finally:
             os.close(descriptor)
+
+    def test_legacy_git_scan_does_not_hold_the_binding_publication_lock(self):
+        checkout = self.legacy_checkout()
+        original = helper.git
+        probed = []
+
+        def inspected(args, env, **options):
+            if str(checkout) in args and "get-url" in args:
+                descriptor = os.open(self.cache / "locks" / "workspace-bindings",
+                                     os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    probed.append(True)
+                finally:
+                    os.close(descriptor)
+            return original(args, env, **options)
+
+        with patch.object(helper, "git", side_effect=inspected):
+            with self.assertRaises(helper.WorkspaceChoice):
+                self.sync()
+        self.assertEqual(probed, [True])
 
     def test_persistent_checkout_fast_forwards_without_reset_or_delete(self):
         first = self.sync()
