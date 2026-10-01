@@ -81,9 +81,37 @@
     (with-temp-file file
       (insert (json-encode `((repo_key . ,(plist-get metadata :repo-key))
                             (thread_id . ,(plist-get metadata :tid))
-                            (legacy . ,legacy) (relative . ,relative)))))
+                            (legacy . ,legacy) (relative . ,relative)
+                            (initialized . t)))))
     (set-file-modes file #o600)
     file))
+
+(ert-deftest test-assist-web-git-route-rejects-malformed-initialization ()
+  "Only the three recorded installation states may resolve a frozen workspace."
+  (let* ((cache (make-temp-file "git-route-state-" t))
+         (emacsos-assist-web-git-cache-directory cache)
+         (emacsos-assist-web-git-workspace-directory (expand-file-name "workspaces" cache))
+         (metadata (test-assist-web-git--metadata "ready" "topic/old" test-assist-web-git--head))
+         (relative "repo/thread-0123456789ab"))
+    (unwind-protect
+        (let ((file (test-assist-web-git--write-route metadata nil relative)))
+          (dolist (state '(nil 0 1 "yes" [] missing))
+            (with-temp-file file
+              (insert (json-encode
+                       (append `((repo_key . ,(plist-get metadata :repo-key))
+                                 (thread_id . ,(plist-get metadata :tid))
+                                 (legacy . nil) (relative . ,relative))
+                               (unless (eq state 'missing) `((initialized . ,state)))))))
+            (should-error (emacsos-assist-web-git--route-path metadata) :type 'user-error))
+          (dolist (state '(t :json-false "installing"))
+            (with-temp-file file
+              (insert (json-encode `((repo_key . ,(plist-get metadata :repo-key))
+                                    (thread_id . ,(plist-get metadata :tid))
+                                    (legacy . nil) (relative . ,relative)
+                                    (initialized . ,(if (eq state :json-false) json-false state))))))
+            (should (equal (emacsos-assist-web-git--route-path metadata)
+                           (expand-file-name relative emacsos-assist-web-git-workspace-directory)))))
+      (delete-directory cache t))))
 
 (ert-deftest test-assist-web-git-frozen-user-route-survives-title-ref-change ()
   "A cold local-first browse uses the same workspace and actual old local branch."
@@ -1009,7 +1037,7 @@
         (set-window-parameter window 'assist-web-git-intent nil)
         (kill-buffer thread)))))
 
-(ert-deftest test-assist-web-git-run-404-fences-current-until-thread-get ()
+(ert-deftest test-assist-web-git-run-404-preserves-git-while-run-recovery-checks ()
   "A missing exact Run fences Run recovery, not independently fetched Git."
   (with-temp-buffer
     (emacsos-assist-web-mode)
@@ -1407,8 +1435,7 @@
         (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
         (emacsos-assist-web--confirm-active-run "thread-1" "run-a" emacsos-assist-web--auth-epoch entry)
         (funcall (car requests) snapshot nil)
-        ;; The existing changed-repository barrier admits one stable repeat.
-        (when (> (length requests) 1) (funcall (car requests) snapshot nil))
+        (should (= (length requests) 1))
         (should (eq emacsos-assist-web--snapshot snapshot))
         (should-not emacsos-assist-web--run-outcome-uncertain)
         (should (equal emacsos-assist-web-git--unavailable "Git state unavailable"))))))
@@ -3147,7 +3174,7 @@
         (when (process-live-p process) (delete-process process))
         (when (buffer-live-p response) (kill-buffer response))))))
 
-(ert-deftest test-assist-web-git-restored-approval-receipt-gates-git ()
+(ert-deftest test-assist-web-git-restored-approval-receipt-gates-run-recovery ()
   "A saved accepted approval still fences Run recovery after its volatile stop dies."
   (let ((emacsos-assist-web-cache-directory
          (make-temp-file "assist-web-approval-gate-" t))
@@ -5536,7 +5563,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
     (funcall filter nil "")
     (should (= attempts 2))))
 
-(ert-deftest test-assist-web-git-raw-nondenial-still-downgrades-on-parse-error ()
+(ert-deftest test-assist-web-git-raw-nondenial-parse-error-preserves-git ()
   "Raw 200 or 503 does not pre-acknowledge later canonical failure."
   (dolist (trial '((200 . 1) (503 . 1) (200 . 2) (503 . 2)
                    (200 . deferred) (503 . deferred)))

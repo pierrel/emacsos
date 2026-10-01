@@ -82,6 +82,9 @@ def route_path(record: dict, root: Path, workspaces: Path,
     if (not isinstance(record, dict) or record.get("repo_key") != repo_key
             or record.get("thread_id") != tid):
         raise Refusal("workspace binding is invalid")
+    initialized = record.get("initialized")
+    if initialized is not False and initialized is not True and initialized != "installing":
+        raise Refusal("workspace binding is invalid")
     legacy = record.get("legacy")
     relative = record.get("relative")
     if isinstance(legacy, str) and re.fullmatch(r"[0-9a-f]{64}", legacy) and relative is None:

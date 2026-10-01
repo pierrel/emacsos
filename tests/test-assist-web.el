@@ -2293,7 +2293,7 @@
       (should-not emacsos-assist-web--pending-key))))
 
 (ert-deftest test-assist-web-legacy-exact-terminal-commits-once ()
-  "Only an exact successful legacy Run adds Git freshness after durable retirement."
+  "An exact terminal legacy Run triggers Git fetch only after durable retirement."
   (dolist (outcome '("success" "error"))
     (let ((emacsos-assist-web-cache-directory
            (make-temp-file "assist-legacy-terminal-" t))

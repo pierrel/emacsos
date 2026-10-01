@@ -408,6 +408,25 @@ class GitHelperTest(unittest.TestCase):
             self.sync()
         self.assertFalse(any(path.is_dir() for path in (self.root / "workspaces" / "repo").iterdir()))
 
+    def test_corrupt_route_state_cannot_admit_an_existing_workspace(self):
+        checkout = Path(self.sync()["checkout_path"])
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        original = helper.read_route(route)
+        inode, index = checkout.stat().st_ino, (checkout / ".git" / "index").read_bytes()
+        head = run("-C", str(checkout), "rev-parse", "HEAD")
+        for value in (None, 0, 1, "yes", [], {}, "missing"):
+            with self.subTest(state=value):
+                corrupt = {**original, "initialized": value}
+                if value == "missing":
+                    corrupt.pop("initialized")
+                helper.write_route(route, corrupt)
+                with patch.object(helper, "git", wraps=helper.git) as invoked:
+                    with self.assertRaisesRegex(helper.Refusal, "binding is invalid"):
+                        self.sync()
+                self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+                self.assertEqual((checkout.stat().st_ino, (checkout / ".git" / "index").read_bytes(),
+                                  run("-C", str(checkout), "rev-parse", "HEAD")), (inode, index, head))
+
     def test_stable_allocation_lock_covers_a_changed_branch(self):
         locks = self.cache / "locks"
         locks.mkdir(mode=0o700, parents=True)

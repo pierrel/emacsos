@@ -105,12 +105,15 @@ Existing checkouts stay here in place; new user workspaces use
       (let* ((record (with-temp-buffer
                        (insert-file-contents route nil 0 2048)
                        (json-parse-buffer :object-type 'plist :array-type 'list
-                                          :null-object nil :false-object nil)))
+                                          :null-object nil :false-object :json-false)))
              (legacy (plist-get record :legacy))
              (relative (plist-get record :relative)))
         (unless (and (equal (plist-get record :repo_key) (plist-get metadata :repo-key))
                      (equal (plist-get record :thread_id) (plist-get metadata :tid)))
           (user-error "Workspace binding identity is invalid"))
+        (unless (or (memq (plist-get record :initialized) '(t :json-false))
+                    (equal (plist-get record :initialized) "installing"))
+          (user-error "Workspace binding initialization is invalid"))
         (cond
          ((and (null relative) (stringp legacy)
                (string-match-p "\\`[0-9a-f]\\{64\\}\\'" legacy))
