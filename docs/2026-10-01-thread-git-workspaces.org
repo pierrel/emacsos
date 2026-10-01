@@ -44,8 +44,8 @@ request or =expected_matches= result remains. Only a clean matching local
 branch with no unsaved edits or in-app Git mutation can advance fast-forward.
 Dirty, staged, untracked, unsaved, divergent and local-ahead work is preserved
 with a pending label. No automatic reset, stash, rebase, branch switch or push.
-Binding publication is serialized across thread identities. Allocation and
-fetch hold stable-identity and physical-path locks; the helper refuses
+Binding publication is serialized across thread identities. Allocation holds
+the stable-identity lock; fetch then also holds the physical-path lock. The helper refuses
 if its resolved workspace differs from the path admitted by Emacs.
 
 * Responsibility and verification

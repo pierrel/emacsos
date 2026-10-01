@@ -267,6 +267,22 @@ class GitHelperTest(unittest.TestCase):
         self.sync()
         self.assertEqual(root.stat().st_mode & 0o777, 0o755)
 
+    def test_concurrent_creation_of_shared_repo_directory_preserves_peer_inode(self):
+        target = self.root / "workspaces" / "repo"
+        original = Path.mkdir
+        peer = []
+
+        def concurrent(path, *args, **options):
+            if path == target and not path.exists():
+                original(path, mode=0o755)
+                peer.append(path.stat().st_ino)
+            return original(path, *args, **options)
+
+        with patch.object(Path, "mkdir", new=concurrent):
+            self.sync()
+        self.assertEqual([target.stat().st_ino], peer)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+
     def test_exact_legacy_checkout_registers_in_place_preserving_user_state(self):
         for kind in ("unstaged", "staged", "untracked", "local-commit"):
             with self.subTest(kind=kind):

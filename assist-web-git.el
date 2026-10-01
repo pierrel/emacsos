@@ -105,13 +105,14 @@ Existing checkouts stay here in place; new user workspaces use
 
 (defun emacsos-assist-web-git--unique-legacy-binding (route legacy)
   "Refuse another bounded private route claiming this LEGACY workspace."
-  (let ((routes (directory-files (file-name-directory route) t "\\.json\\'" t 10001)))
-    (when (> (length routes) 10000)
-      (user-error "Workspace binding inventory exceeds its limit"))
-    (dolist (other routes)
-      (unless (equal other route)
-        (when (equal (plist-get (emacsos-assist-web-git--read-route other) :legacy) legacy)
-          (user-error "Workspace has ambiguous thread ownership; local files preserved"))))))
+  (when (file-directory-p (file-name-directory route))
+    (let ((routes (directory-files (file-name-directory route) t "\\.json\\'" t 10001)))
+      (when (> (length routes) 10000)
+        (user-error "Workspace binding inventory exceeds its limit"))
+      (dolist (other routes)
+        (unless (equal other route)
+          (when (equal (plist-get (emacsos-assist-web-git--read-route other) :legacy) legacy)
+            (user-error "Workspace has ambiguous thread ownership; local files preserved")))))))
 
 (defun emacsos-assist-web-git--route-path (metadata)
   "Return METADATA's bounded private frozen binding, without starting a process."
@@ -160,12 +161,19 @@ Existing checkouts stay here in place; new user workspaces use
   "Resolve the existing frozen/legacy workspace, or propose a genuinely new path."
   (or (emacsos-assist-web-git--route-path metadata)
       (let* ((legacy (emacsos-assist-web-git--legacy-checkout-path metadata))
-             (choice (emacsos-assist-web-git--selected-workspace-choice metadata)))
-        (cond
-         ((file-exists-p legacy) legacy)
-         ((and choice (not (equal choice "new")))
-          (expand-file-name (concat "checkouts/" choice) emacsos-assist-web-git-cache-directory))
-         (t (emacsos-assist-web-git--new-checkout-path metadata))))))
+             (choice (emacsos-assist-web-git--selected-workspace-choice metadata))
+             (existing (cond
+                        ((file-exists-p legacy) legacy)
+                        ((and choice (not (equal choice "new")))
+                         (expand-file-name (concat "checkouts/" choice) emacsos-assist-web-git-cache-directory)))))
+        (if existing
+            (progn
+              (emacsos-assist-web-git--unique-legacy-binding
+               (expand-file-name (concat "routes/" (emacsos-assist-web-git--workspace-identity metadata) ".json")
+                                 emacsos-assist-web-git-cache-directory)
+               (file-name-nondirectory existing))
+              existing)
+          (emacsos-assist-web-git--new-checkout-path metadata)))))
 
 (defun emacsos-assist-web-git--in-checkout-p (file root)
   "Whether local FILE belongs under the managed ROOT without filesystem I/O."

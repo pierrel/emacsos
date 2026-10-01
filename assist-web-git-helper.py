@@ -58,7 +58,7 @@ def workspace_directory(path: Path) -> None:
         raise Refusal("workspace directory is invalid")
     if not path.exists():
         workspace_directory(path.parent)
-        path.mkdir(mode=0o700)
+        path.mkdir(mode=0o700, exist_ok=True)
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o022):

@@ -150,6 +150,33 @@
               (should-error (emacsos-assist-web-git--command 'files) :type 'user-error))))
       (delete-directory cache t))))
 
+(ert-deftest test-assist-web-git-unrouted-legacy-fallback-cannot-browse-bound-work ()
+  "Both exact old paths and explicit choice paths honor existing thread ownership."
+  (let* ((cache (make-temp-file "git-legacy-fallback-" t))
+         (emacsos-assist-web-git-cache-directory cache)
+         (metadata (test-assist-web-git--metadata "ready" "topic/one" test-assist-web-git--head))
+         (other (plist-put (copy-sequence metadata) :tid "other-thread"))
+         (root (emacsos-assist-web-git--legacy-checkout-path metadata))
+         (legacy (file-name-nondirectory root)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" root) t)
+          (with-temp-file (expand-file-name ".git/HEAD" root) (insert "ref: refs/heads/topic/one\n"))
+          (test-assist-web-git--write-route other legacy)
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1" emacsos-assist-web-git--metadata metadata
+                  emacsos-assist-web-git-thread-mode t)
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn) (lambda (&rest _) (ert-fail "browse must not sync")))
+                      ((symbol-function 'emacsos-assist-web-git--read-metadata) (lambda (&rest _) (ert-fail "browse must not GET")))
+                      ((symbol-function 'emacsos-assist-web-git--open) (lambda (&rest _) (ert-fail "another thread workspace must not open"))))
+              (should-error (emacsos-assist-web-git--command 'files) :type 'user-error)
+              (setq emacsos-assist-web-git--metadata (plist-put (copy-sequence metadata) :branch "topic/new")
+                    emacsos-assist-web-git--workspace-choice
+                    (cons (emacsos-assist-web-git--workspace-identity metadata) legacy))
+              (should-error (emacsos-assist-web-git--command 'files) :type 'user-error))))
+      (delete-directory cache t))))
+
 (ert-deftest test-assist-web-git-frozen-user-route-survives-title-ref-change ()
   "A cold local-first browse uses the same workspace and actual old local branch."
   (let* ((cache (make-temp-file "git-frozen-route-" t))
