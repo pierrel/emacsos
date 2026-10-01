@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bounded, noninteractive Git work for the Assist thread mirror.
 
-The Emacs client supplies a repository key, thread ID, branch, optional expected OID,
-private cache root and fast-forward admission flag.  This process validates
+The Emacs client supplies a repository key, thread ID, branch, admitted workspace,
+private metadata root and fast-forward admission flag.  This process validates
 the request, resolves the remote from private device configuration, and never
 emits the URL, SSH diagnostics, or credential material.
 """
@@ -20,6 +20,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import urlsplit
 
@@ -43,6 +44,154 @@ class Refusal(Exception):
     """A safe, bounded reason to decline a mirror refresh."""
 
 
+class WorkspaceChoice(Refusal):
+    """A bounded local choice, not authority to replace an existing workspace."""
+
+    def __init__(self, choices: list[dict]):
+        super().__init__("existing workspace needs local choice")
+        self.choices = choices
+
+
+def workspace_directory(path: Path) -> None:
+    """Create an owned directory, never follow symlinks or chmod existing work."""
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise Refusal("workspace directory is invalid")
+    if not path.exists():
+        workspace_directory(path.parent)
+        path.mkdir(mode=0o700)
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022):
+        raise Refusal("workspace directory is invalid")
+
+
+def workspace_slug(value: object, fallback: str) -> str:
+    """Return one bounded filename component; labels are never source authority."""
+    if not isinstance(value, str) or len(value.encode()) > 4096:
+        return fallback
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:48].rstrip("-") or fallback
+
+
+def stable_identity(repo_key: str, tid: str) -> str:
+    return hashlib.sha256((repo_key + "\n" + tid).encode()).hexdigest()
+
+
+def route_path(record: dict, root: Path, workspaces: Path,
+               repo_key: str, tid: str) -> Path:
+    """Resolve an exact identity's private route under one of two fixed anchors."""
+    if (not isinstance(record, dict) or record.get("repo_key") != repo_key
+            or record.get("thread_id") != tid):
+        raise Refusal("workspace binding is invalid")
+    legacy = record.get("legacy")
+    relative = record.get("relative")
+    if isinstance(legacy, str) and re.fullmatch(r"[0-9a-f]{64}", legacy) and relative is None:
+        return root / "checkouts" / legacy
+    if (legacy is None and isinstance(relative, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)):
+        return workspaces / relative
+    raise Refusal("workspace binding is invalid")
+
+
+def read_route(path: Path) -> dict:
+    if path.lstat().st_size > 2048:
+        raise Refusal("workspace binding is invalid")
+    return json.loads(private_file(path), object_pairs_hook=unique_object)
+
+
+def write_route(path: Path, record: dict) -> None:
+    """Atomically publish only private binding metadata, never workspace bytes."""
+    descriptor, temporary = tempfile.mkstemp(prefix=".route-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(record, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def legacy_choices(root: Path, url: str, env: dict) -> list[dict]:
+    """Inspect only bounded old managed paths, disclosing no configured URL."""
+    choices = []
+    for index, entry in enumerate((root / "checkouts").iterdir()):
+        if index >= FILE_LIMIT:
+            raise Refusal("legacy workspace inventory exceeds its limit")
+        if not re.fullmatch(r"[0-9a-f]{64}", entry.name):
+            continue
+        private_directory(entry)
+        if not (entry / ".git").is_dir() or (entry / ".git").is_symlink():
+            raise Refusal("legacy workspace source is unavailable")
+        if git(["-C", str(entry), "remote", "get-url", "origin"], env, seconds=2) == url:
+            branch = git(["-C", str(entry), "symbolic-ref", "--short", "HEAD"], env, seconds=2)
+            choices.append({"identity": entry.name,
+                            "branch": re.sub(r"[^A-Za-z0-9._/-]", "?", branch)[:48]})
+            if len(choices) == 16:
+                break
+    return choices
+
+
+def allocate_workspace(request: dict, root: Path, workspaces: Path,
+                       repo_key: str, tid: str, branch: str, url: str, env: dict) -> tuple[Path, str]:
+    """Freeze one path, registering legacy work in place without changing Git bytes."""
+    identity = stable_identity(repo_key, tid)
+    routes = root / "routes"
+    private_directory(routes)
+    route = routes / (identity + ".json")
+    if route.exists() or route.is_symlink():
+        record = read_route(route)
+        checkout = route_path(record, root, workspaces, repo_key, tid)
+        if record.get("initialized") == "installing":
+            raise Refusal("workspace initialization interrupted; local files preserved")
+        if record.get("initialized") is False and (checkout.exists() or checkout.is_symlink()):
+            raise Refusal("workspace destination already exists; local work preserved")
+        if record.get("initialized") is not False and not checkout.exists():
+            raise Refusal("bound workspace missing; restore its existing path")
+        return checkout, record.get("legacy") or identity
+    legacy = hashlib.sha256((repo_key + "\n" + tid + "\n" + branch).encode()).hexdigest()
+    choice = request.get("workspace_choice")
+    if choice is not None and (not isinstance(choice, str)
+                               or (choice != "new" and not re.fullmatch(r"[0-9a-f]{64}", choice))):
+        raise Refusal("workspace choice is invalid")
+    if (root / "checkouts" / legacy).exists():
+        choice = None  # An exact known existing workspace is never replaced.
+    if choice is None and not (root / "checkouts" / legacy).exists():
+        choices = legacy_choices(root, url, env)
+        if choices:
+            raise WorkspaceChoice(choices)
+    elif choice != "new":
+        legacy = choice or legacy
+        if choice is not None and not (root / "checkouts" / legacy).exists():
+            raise Refusal("chosen legacy workspace is unavailable")
+    if choice == "new" or not (root / "checkouts" / legacy).exists():
+        relative = (workspace_slug(request.get("repo_label"), "repo") + "/"
+                    + workspace_slug(request.get("thread_label"), "thread") + "-" + identity[:12])
+        record = {"repo_key": repo_key, "thread_id": tid, "legacy": None,
+                  "relative": relative, "initialized": False}
+        checkout = route_path(record, root, workspaces, repo_key, tid)
+        workspace_directory(checkout.parent)
+        if checkout.exists() or checkout.is_symlink():
+            raise Refusal("workspace destination already exists; local work preserved")
+    else:
+        record = {"repo_key": repo_key, "thread_id": tid, "legacy": legacy,
+                  "relative": None, "initialized": True}
+        checkout = route_path(record, root, workspaces, repo_key, tid)
+        private_directory(checkout)
+        if not (checkout / ".git").is_dir() or (checkout / ".git").is_symlink():
+            raise Refusal("legacy workspace Git directory is invalid")
+        if git(["-C", str(checkout), "remote", "get-url", "origin"], env, seconds=2) != url:
+            raise Refusal("legacy workspace remote differs from configured repository")
+        for index, existing in enumerate(routes.glob("*.json")):
+            if index >= FILE_LIMIT:
+                raise Refusal("workspace binding inventory exceeds its limit")
+            if read_route(existing).get("legacy") == legacy:
+                raise Refusal("legacy workspace is already bound to another thread")
+    # Atomic publication freezes allocation even if the following fetch fails.
+    write_route(route, record)
+    return checkout, record.get("legacy") or identity
+
+
 def private_file(path: Path, *, nonempty: bool = False) -> bytes:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
@@ -55,11 +204,32 @@ def private_file(path: Path, *, nonempty: bool = False) -> bytes:
 
 
 def private_directory(path: Path) -> None:
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise Refusal("Git metadata directory is invalid")
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
             or stat.S_IMODE(info.st_mode) != 0o700):
         raise Refusal("Git cache directory must be private mode 0700")
+
+
+def promote_workspace(stage: Path, checkout: Path) -> None:
+    """Atomically install our staged directory without replacing any user path."""
+    try:
+        import ctypes
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+    except (ImportError, AttributeError) as exc:
+        raise Refusal("atomic workspace promotion unavailable") from exc
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
+    if rename(-100, os.fsencode(stage), -100, os.fsencode(checkout), 1):
+        import errno
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise Refusal("workspace destination already exists; local work preserved")
+        raise OSError(error, "workspace promotion failed")
 
 
 def remote_url(value: str) -> str:
@@ -270,7 +440,7 @@ def sync_checkout(request: dict) -> dict:
     """Fetch the selected thread ref and safely FF its persistent local checkout.
 
     No operation resets, stashes, pushes or deletes an existing checkout.
-    An optional expected OID describes Assist provenance, not permission to fetch.
+    The locked path must equal the client path admitted for buffer protection.
     """
     global OPERATION_LOCK
     repo_key = request.get("repo_key")
@@ -280,13 +450,16 @@ def sync_checkout(request: dict) -> dict:
     if not isinstance(raw_root, str):
         raise Refusal("checkout request metadata is invalid")
     root = Path(raw_root)
-    expected = request.get("expected_oid")
+    raw_workspaces = request.get("workspace_root")
+    admitted_path = request.get("checkout_path")
+    if not isinstance(raw_workspaces, str) or not isinstance(admitted_path, str):
+        raise Refusal("checkout request metadata is invalid")
+    workspaces = Path(raw_workspaces)
     if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
             or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)
             or not isinstance(branch, str) or not 1 <= len(branch.encode()) <= 240
             or branch in ("main", "HEAD") or branch.startswith("-") or not root.is_absolute()
-            or (expected is not None
-                and (not isinstance(expected, str) or not OID_RE.fullmatch(expected)))):
+            or not workspaces.is_absolute() or not Path(admitted_path).is_absolute()):
         raise Refusal("checkout request metadata is invalid")
     remotes, key, hosts = configuration()
     url = remotes.get(repo_key)
@@ -296,30 +469,41 @@ def sync_checkout(request: dict) -> dict:
     git(["check-ref-format", "refs/heads/" + branch], env)
     private_directory(root)
     private_directory(root / "checkouts")
-    identity = hashlib.sha256((repo_key + "\n" + tid + "\n" + branch).encode()).hexdigest()
-    checkout = root / "checkouts" / identity
+    identity = stable_identity(repo_key, tid)
     private_directory(root / "locks")
-    descriptor = os.open(root / "locks" / identity,
+    allocation = os.open(root / "locks" / ("workspace-" + identity),
                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    descriptor = allocation
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refusal("another Git operation is still using this checkout") from exc
+        OPERATION_LOCK = allocation
+        checkout, physical = allocate_workspace(request, root, workspaces,
+                                                repo_key, tid, branch, url, env)
+        if str(checkout) != admitted_path:
+            raise Refusal("workspace binding changed; Refresh to retry")
+        descriptor = os.open(root / "locks" / physical,
+                             os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refusal("another Git operation is still using this checkout") from exc
         OPERATION_LOCK = descriptor
-        if shutil.disk_usage(root).free < FREE_MARGIN:
+        if shutil.disk_usage(checkout.parent).free < FREE_MARGIN:
             raise Refusal("insufficient free space for Git fetch")
         new = not checkout.exists()
         if checkout.is_symlink():
             raise Refusal("checkout path is a symlink")
-        stage = root / "checkouts" / (identity + ".initial")
+        stage = checkout.with_name("." + checkout.name + ".initial")
         working = stage if new else checkout
         if new:
             if stage.exists() or stage.is_symlink():
                 raise Refusal("initial checkout interrupted; inspect staging before Retry")
             stage.mkdir(mode=0o700)
         else:
-            private_directory(checkout)
+            workspace_directory(checkout)
             if (not (checkout / ".git").is_dir() or (checkout / ".git").is_symlink()):
                 raise Refusal("checkout Git directory is invalid")
         try:
@@ -399,18 +583,27 @@ def sync_checkout(request: dict) -> dict:
                     raise Refusal("initial Git checkout exceeds its cache limit")
             actual = git(["-C", str(working), "symbolic-ref", "--short", "HEAD"], env)
             if new:
-                working.rename(checkout)
+                route = root / "routes" / (identity + ".json")
+                record = read_route(route)
+                record["initialized"] = "installing"
+                # An interrupted promotion refuses retry, whether the path is
+                # missing or occupied. It must not adopt somebody else's work.
+                write_route(route, record)
+                promote_workspace(working, checkout)
+                record["initialized"] = True
+                write_route(route, record)
             return {"ok": True, "checkout_path": str(checkout),
                     "thread_oid": remote_oid, "local_oid": local_oid, "main_oid": main_oid,
-                    "dirty": dirty, "pending": pending, "actual_branch": actual,
-                    "expected_matches": expected is not None and remote_oid == expected}
+                    "dirty": dirty, "pending": pending, "actual_branch": actual}
         except BaseException:
             if new and stage.exists():
                 shutil.rmtree(stage)
             raise
     finally:
         OPERATION_LOCK = None
-        os.close(descriptor)
+        if descriptor != allocation:
+            os.close(descriptor)
+        os.close(allocation)
 
 
 def main() -> None:
@@ -444,6 +637,8 @@ def main() -> None:
         else:
             reason = "Git mirror local data invalid"
         result = {"ok": False, "reason": reason}
+        if isinstance(exc, WorkspaceChoice):
+            result["workspace_choices"] = exc.choices
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
 
 

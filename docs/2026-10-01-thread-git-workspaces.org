@@ -1,0 +1,68 @@
+#+title: Thread Git user workspaces and ownership
+#+date: 2026-10-01
+
+* Current contract
+
+New checkouts live under =~/assist/<repo>/<thread-slug>-<shortid>=.
+Names use bounded ASCII slugs. The suffix derives from repository/thread
+identity, not a branch or title. Once allocated, the name is frozen across
+title changes, branch changes and failed first fetches. Missing display
+labels use =repo= and =thread=; labels never select a remote or authorize Git.
+
+Binding an existing checkout preserves its original path, files, index,
+commits and branch. A later admitted safe fast-forward may advance a clean
+matching branch; it never discards local work. A private identity binding in
+the existing metadata root records either that legacy location or a new relative path.
+An exact known legacy checkout is registered in place. If older same-source
+workspaces cannot be attributed to this thread, Choose workspace offers a
+bounded local list: bind an existing workspace or explicitly create New.
+Nothing automatically moves, copies, deletes or replaces an existing workspace.
+An already initialized workspace missing from its bound path is not recreated.
+Initial promotion is atomic and no-clobber, including an empty user directory.
+An interrupted promotion reports pending instead of guessing whether it owns
+an existing directory. Cached files remain browsable; initialization repair is
+a deliberate local action, not automatic file replacement.
+
+=C-x C-f= reads the existing workspace immediately without an HTTP request or
+Git process. =C-c d= uses ordinary Magit against cached remote/main and local
+HEAD. A preserved old non-main branch stays browsable and is labeled pending
+when it differs from the selected thread branch. Main or detached HEAD cannot
+be presented as a thread checkout. Without local files, browsing explains
+initialization rather than pretending a workspace exists.
+
+Thread open, terminal update and explicit Git Refresh use the same serialized
+background fetch and safe-fast-forward operation. The fetched thread ref is
+the source of truth, not a server revision observation. No =expected_oid=
+request or =expected_matches= result remains. Only a clean matching local
+branch with no unsaved edits or in-app Git mutation can advance fast-forward.
+Dirty, staged, untracked, unsaved, divergent and local-ahead work is preserved
+with a pending label. No automatic reset, stash, rebase, branch switch or push.
+Allocation is serialized by stable identity and workspace; the helper refuses
+if its resolved workspace differs from the path admitted by Emacs.
+
+* Responsibility and verification
+
+=assist-web.el= owns general Run, queue, recovery and thread-access state.
+=assist-web-git.el= owns workspace selection, fetches and Git freshness.
+Run warnings do not downgrade a fetched Git view or cancel its fetch. A
+definitive authenticated thread denial still fences Git until reauthorization.
+Optional Git metadata cannot block a saved Run's canonical acceptance. A newer
+Git selection supersedes only the old optional Git projection, not Run recovery.
+The phone header composes independently derived Run and Git actions; Details
+keeps the full explanation available when compact text is clipped.
+Git Details is a separate tappable action and works before first initialization.
+
+Direct Git credentials, pinned host keys, source binding, fetch bounds and
+root-owned protected installation are unchanged. Installation hashes and UI
+startup do not prove UID104 Git access or a user Git/Magit end-to-end flow.
+Those live checks remain root-owned and unverified by this source record.
+
+* Historical supersessions
+
+This replaces the selected-branch browsing restriction in the Contract
+section of =docs/2026-09-27-thread-git-local-browsing.org=: an existing owned
+non-main local branch remains browsable while a branch update is pending.
+It also replaces that section's live-Run-receipt prerequisite for automatic
+Git work with the already delivered remote-ref-driven open/terminal/Refresh
+operation. The dated document is not rewritten. Its local-first browsing,
+editable-work preservation and configuration-provenance rules still apply.

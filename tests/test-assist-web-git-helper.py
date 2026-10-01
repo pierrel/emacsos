@@ -1,6 +1,7 @@
 """Real local Git coverage for the off-loop Assist mirror helper."""
 
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -57,7 +58,8 @@ class HelperInputBoundaryTest(unittest.TestCase):
             request = {"action": "sync", "repo_key": "b" * 20,
                        "branch": "thread/one", "thread_id": "thread-1",
                        "cache_root": str(Path(home) / "cache"),
-                       "expected_oid": "1" * 40}
+                       "workspace_root": str(Path(home) / "workspaces"),
+                       "checkout_path": str(Path(home) / "workspaces" / "thread")}
             mapping = config / "assist-git-remotes.json"
             mapping.rename(config / "assist-git-remotes.json.held")
             result = subprocess.run([sys.executable, "-B", str(MODULE)],
@@ -94,8 +96,7 @@ class HelperInputBoundaryTest(unittest.TestCase):
     def assert_refusal(self, action, root, *, missing=False):
         request = {"action": action, "repo_key": "b" * 20,
                    "branch": "thread/one", "thread_id": "thread-1",
-                   "generation": "a" * 32, "kind": "staging",
-                   "expected_oid": "1" * 40}
+                   "generation": "a" * 32, "kind": "staging"}
         if not missing:
             request["cache_root"] = root
         result = subprocess.run([sys.executable, "-B", str(MODULE)],
@@ -150,7 +151,7 @@ class GitHelperTest(unittest.TestCase):
     def request(self, branch="thread/one", generation="a" * 32):
         return {"repo_key": "b" * 20, "branch": branch,
                 "generation": generation, "cache_root": str(self.cache),
-                "expected_oid": self.thread_oid}
+                "workspace_root": str(self.root / "workspaces")}
 
     def isolated_env(self, _key, _hosts):
         return {"PATH": "/usr/bin:/bin", "HOME": str(self.root),
@@ -195,6 +196,23 @@ class GitHelperTest(unittest.TestCase):
     def sync(self, **changes):
         request = {**self.request(), "thread_id": "thread-1", "allow_ff": True,
                    **changes}
+        identity = helper.stable_identity(request["repo_key"], request["thread_id"])
+        route = self.cache / "routes" / (identity + ".json")
+        if route.exists():
+            checkout = helper.route_path(helper.read_route(route), self.cache,
+                                         self.root / "workspaces", request["repo_key"], request["thread_id"])
+        else:
+            legacy = self.cache / "checkouts" / __import__("hashlib").sha256(
+                (request["repo_key"] + "\n" + request["thread_id"] + "\n" + request["branch"]).encode()).hexdigest()
+            choice = request.get("workspace_choice")
+            if legacy.exists():
+                checkout = legacy
+            elif choice and choice != "new":
+                checkout = self.cache / "checkouts" / choice
+            else:
+                checkout = (self.root / "workspaces" / helper.workspace_slug(request.get("repo_label"), "repo")
+                            / (helper.workspace_slug(request.get("thread_label"), "thread") + "-" + identity[:12]))
+        request.setdefault("checkout_path", str(checkout))
         with patch.object(helper, "configuration",
                           return_value=({"b" * 20: str(self.bare)},
                                         self.root / "key", self.root / "hosts")), \
@@ -208,6 +226,216 @@ class GitHelperTest(unittest.TestCase):
         run("-C", str(self.repo), "push", "-q", "origin", "thread/one")
         return run("-C", str(self.repo), "rev-parse", "HEAD")
 
+    def legacy_checkout(self, tid="old-thread", branch="thread/one", remote=None):
+        """Make an old managed checkout, not a newly allocated workspace route."""
+        identity = __import__("hashlib").sha256(("b" * 20 + "\n" + tid + "\n" + branch).encode()).hexdigest()
+        checkout = self.cache / "checkouts" / identity
+        checkout.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.cache.chmod(0o700)
+        run("clone", "-q", "--branch", branch, str(remote or self.bare), str(checkout))
+        checkout.chmod(0o700)
+        (checkout / ".git" / "info" / "attributes").write_text(
+            "* -filter -ident -working-tree-encoding -text -eol\n")
+        return checkout
+
+    def test_readable_workspace_name_is_frozen_across_names_and_branches(self):
+        first = self.sync(repo_label="Project Notes", thread_label="Plan the week")
+        checkout = Path(first["checkout_path"])
+        self.assertEqual(checkout.parent.name, "project-notes")
+        self.assertEqual(checkout.name, "plan-the-week-" + helper.stable_identity("b" * 20, "thread-1")[:12])
+        renamed = self.sync(repo_label="Renamed", thread_label="New title")
+        self.assertEqual(renamed["checkout_path"], str(checkout))
+        run("-C", str(self.repo), "branch", "thread/two")
+        run("-C", str(self.repo), "push", "-q", "origin", "thread/two")
+        old_head = run("-C", str(checkout), "rev-parse", "HEAD")
+        result = self.sync(branch="thread/two")
+        self.assertEqual(result["checkout_path"], str(checkout))
+        self.assertEqual(result["actual_branch"], "thread/one")
+        self.assertTrue(result["pending"])
+        self.assertEqual(run("-C", str(checkout), "rev-parse", "HEAD"), old_head)
+
+    def test_same_labels_different_threads_and_malicious_labels_are_separate(self):
+        first = Path(self.sync(repo_label="../../Project", thread_label="--../..Plan") ["checkout_path"])
+        second = Path(self.sync(thread_id="thread-2", repo_label="Project", thread_label="Plan")["checkout_path"])
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent, second.parent)
+        self.assertTrue(first.is_relative_to(self.root / "workspaces"))
+
+    def test_existing_user_root_is_not_chmodded(self):
+        root = self.root / "workspaces"
+        root.mkdir(mode=0o755)
+        self.sync()
+        self.assertEqual(root.stat().st_mode & 0o777, 0o755)
+
+    def test_exact_legacy_checkout_registers_in_place_preserving_user_state(self):
+        for kind in ("unstaged", "staged", "untracked", "local-commit"):
+            with self.subTest(kind=kind):
+                tid = "legacy-" + kind
+                checkout = self.legacy_checkout(tid)
+                target = checkout / ("local.txt" if kind == "untracked" else "hello.txt")
+                target.write_text("user work\n")
+                if kind in ("staged", "local-commit"):
+                    run("-C", str(checkout), "add", "hello.txt")
+                if kind == "local-commit":
+                    run("-C", str(checkout), "-c", "user.name=Sam", "-c", "user.email=sam@example.invalid",
+                        "commit", "-qm", "local")
+                inode, index = checkout.stat().st_ino, (checkout / ".git" / "index").read_bytes()
+                head = run("-C", str(checkout), "rev-parse", "HEAD")
+                result = self.sync(thread_id=tid)
+                self.assertEqual(result["checkout_path"], str(checkout))
+                self.assertEqual(checkout.stat().st_ino, inode)
+                self.assertEqual(target.read_text(), "user work\n")
+                self.assertEqual(run("-C", str(checkout), "rev-parse", "HEAD"), head)
+                self.assertEqual((checkout / ".git" / "index").read_bytes(), index)
+                self.assertTrue(result["pending"])
+
+    def test_ambiguous_legacy_requires_choice_and_never_replaces_user_files(self):
+        checkout = self.legacy_checkout()
+        (checkout / "personal.txt").write_text("keep\n")
+        with self.assertRaises(helper.WorkspaceChoice) as refused:
+            self.sync()
+        self.assertEqual(refused.exception.choices[0]["identity"], checkout.name)
+        self.assertFalse((self.root / "workspaces").exists())
+        result = self.sync(workspace_choice=checkout.name)
+        self.assertEqual(result["checkout_path"], str(checkout))
+        self.assertEqual((checkout / "personal.txt").read_text(), "keep\n")
+        with self.assertRaisesRegex(helper.Refusal, "already bound"):
+            self.sync(thread_id="other-thread", workspace_choice=checkout.name)
+
+    def test_unrelated_repository_legacy_does_not_block_new_workspace(self):
+        checkout = self.legacy_checkout()
+        run("-C", str(checkout), "remote", "set-url", "origin", str(self.root / "another.git"))
+        self.assertTrue(Path(self.sync()["checkout_path"]).is_relative_to(self.root / "workspaces"))
+
+    def test_explicit_new_choice_leaves_unattributed_legacy_in_place(self):
+        checkout = self.legacy_checkout()
+        before = checkout.stat().st_ino
+        result = self.sync(workspace_choice="new")
+        self.assertNotEqual(result["checkout_path"], str(checkout))
+        self.assertEqual(checkout.stat().st_ino, before)
+
+    def test_symlink_root_and_occupied_destination_are_never_overwritten(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (self.root / "workspaces").symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaises(helper.Refusal):
+            self.sync()
+        self.assertFalse(list(elsewhere.iterdir()))
+        (self.root / "workspaces").unlink()
+        identity = helper.stable_identity("b" * 20, "thread-1")
+        destination = self.root / "workspaces" / "repo" / ("thread-" + identity[:12])
+        destination.mkdir(parents=True)
+        (destination / "user.txt").write_text("keep")
+        with self.assertRaisesRegex(helper.Refusal, "already exists"):
+            self.sync()
+        self.assertEqual((destination / "user.txt").read_text(), "keep")
+
+    def test_binding_path_mismatch_refuses_before_fetch(self):
+        with patch.object(helper, "git", wraps=helper.git) as invoked:
+            with self.assertRaisesRegex(helper.Refusal, "binding changed"):
+                self.sync(checkout_path=str(self.root / "wrong"))
+        self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+        self.assertFalse((self.root / "workspaces" / "repo" / "wrong").exists())
+
+    def test_free_space_preflight_uses_workspace_not_metadata_filesystem(self):
+        empty = shutil.disk_usage(self.root)._replace(free=0)
+        with patch.object(helper.shutil, "disk_usage", return_value=empty) as checked, \
+             patch.object(helper, "git", wraps=helper.git) as invoked:
+            with self.assertRaisesRegex(helper.Refusal, "insufficient free space"):
+                self.sync(repo_label="Life", thread_label="Nutrition")
+        self.assertEqual(checked.call_args.args[0], self.root / "workspaces" / "life")
+        self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+
+    def test_missing_initialized_workspace_is_not_recreated(self):
+        checkout = Path(self.sync()["checkout_path"])
+        held = checkout.with_name("user-moved-workspace")
+        checkout.rename(held)
+        with self.assertRaisesRegex(helper.Refusal, "bound workspace missing"):
+            self.sync()
+        self.assertFalse(checkout.exists())
+        self.assertEqual((held / "hello.txt").read_text(), "thread\n")
+
+    def test_initial_fetch_failure_keeps_frozen_allocation(self):
+        with self.assertRaises(helper.Refusal):
+            self.sync(branch="thread/missing", repo_label="First", thread_label="First title")
+        result = self.sync(repo_label="Changed", thread_label="Changed title")
+        self.assertEqual(Path(result["checkout_path"]).parent.name, "first")
+        self.assertTrue(Path(result["checkout_path"]).name.startswith("first-title-"))
+
+    def test_failed_allocation_does_not_adopt_a_later_user_checkout(self):
+        with self.assertRaises(helper.Refusal):
+            self.sync(branch="thread/missing")
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        checkout = self.root / "workspaces" / helper.read_route(route)["relative"]
+        run("clone", "-q", "-b", "thread/one", str(self.bare), str(checkout))
+        inode = checkout.stat().st_ino
+        index = (checkout / ".git" / "index").read_bytes()
+        head = run("-C", str(checkout), "rev-parse", "HEAD")
+        (checkout / "personal.txt").write_text("keep\n")
+        with patch.object(helper, "git", wraps=helper.git) as invoked:
+            with self.assertRaisesRegex(helper.Refusal, "destination already exists"):
+                self.sync()
+        self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+        self.assertEqual((checkout.stat().st_ino, (checkout / ".git" / "index").read_bytes(),
+                          run("-C", str(checkout), "rev-parse", "HEAD")), (inode, index, head))
+        self.assertEqual((checkout / "personal.txt").read_text(), "keep\n")
+
+    def test_atomic_promotion_never_replaces_a_new_empty_user_directory(self):
+        promote = helper.promote_workspace
+        state = {}
+
+        def occupied(stage, checkout):
+            checkout.mkdir(mode=0o755)
+            state.update(path=checkout, inode=checkout.stat().st_ino)
+            promote(stage, checkout)
+
+        with patch.object(helper, "promote_workspace", side_effect=occupied):
+            with self.assertRaisesRegex(helper.Refusal, "destination already exists"):
+                self.sync()
+        checkout = state["path"]
+        self.assertEqual(checkout.stat().st_ino, state["inode"])
+        self.assertEqual(checkout.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(list(checkout.iterdir()), [])
+        with self.assertRaisesRegex(helper.Refusal, "initialization interrupted"):
+            self.sync()
+        self.assertEqual(checkout.stat().st_ino, state["inode"])
+
+    def test_interrupted_promotion_does_not_recreate_a_missing_workspace(self):
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        with self.assertRaisesRegex(helper.Refusal, "initialization interrupted"):
+            self.sync()
+        self.assertFalse(any(path.is_dir() for path in (self.root / "workspaces" / "repo").iterdir()))
+
+    def test_stable_allocation_lock_covers_a_changed_branch(self):
+        locks = self.cache / "locks"
+        locks.mkdir(mode=0o700, parents=True)
+        self.cache.chmod(0o700)
+        lock = locks / ("workspace-" + helper.stable_identity("b" * 20, "thread-1"))
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(helper.Refusal, "another Git operation"):
+                self.sync(branch="thread/two")
+            self.assertFalse((self.root / "workspaces").exists())
+        finally:
+            os.close(descriptor)
+
+    def test_legacy_physical_lock_is_not_bypassed_by_new_binding(self):
+        checkout = self.legacy_checkout("thread-1")
+        locks = self.cache / "locks"
+        locks.mkdir(mode=0o700)
+        descriptor = os.open(locks / checkout.name, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(helper, "git", wraps=helper.git) as invoked:
+                with self.assertRaisesRegex(helper.Refusal, "another Git operation"):
+                    self.sync()
+            self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+        finally:
+            os.close(descriptor)
+
     def test_persistent_checkout_fast_forwards_without_reset_or_delete(self):
         first = self.sync()
         checkout = Path(first["checkout_path"])
@@ -215,17 +443,17 @@ class GitHelperTest(unittest.TestCase):
         self.assertEqual(run("-C", str(checkout), "remote", "get-url", "origin"), str(self.bare))
         self.assertEqual(run("-C", str(checkout), "rev-parse", "@{upstream}"), self.thread_oid)
         next_oid = self.publish_update()
-        result = self.sync(expected_oid=next_oid)
+        result = self.sync()
         self.assertEqual(result["checkout_path"], str(checkout))
         self.assertEqual(result["local_oid"], next_oid)
         self.assertEqual(result["thread_oid"], next_oid)
         self.assertIsNone(result["pending"])
 
     def test_selected_remote_branch_needs_no_assist_oid(self):
-        result = self.sync(expected_oid=None)
+        result = self.sync()
         self.assertEqual(result["local_oid"], self.thread_oid)
         self.assertEqual(result["thread_oid"], self.thread_oid)
-        self.assertFalse(result["expected_matches"])
+        self.assertNotIn("expected_matches", result)
 
     def test_busy_remote_advance_is_visible_without_expected_equality(self):
         self.sync()
@@ -233,7 +461,7 @@ class GitHelperTest(unittest.TestCase):
         result = self.sync(allow_ff=False)
         self.assertEqual(result["thread_oid"], next_oid)
         self.assertEqual(result["local_oid"], self.thread_oid)
-        self.assertFalse(result["expected_matches"])
+        self.assertNotIn("expected_matches", result)
         self.assertTrue(result["pending"])
 
     def test_local_staged_unstaged_untracked_edits_survive_refresh(self):
@@ -263,7 +491,7 @@ class GitHelperTest(unittest.TestCase):
         result = self.sync()
         self.assertEqual(result["thread_oid"], oid)
         self.assertEqual(result["local_oid"], oid)
-        self.assertFalse(result["expected_matches"])
+        self.assertNotIn("expected_matches", result)
 
     def test_local_main_checkout_is_not_silently_repaired(self):
         checkout = Path(self.sync()["checkout_path"])
