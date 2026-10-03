@@ -1,0 +1,196 @@
+[
+  {
+    "file": "PhoneType02-Regular.ttf",
+    "family": "Phone Type 02",
+    "weight": 400,
+    "parent": "assets/ibmplexsans/IBMPlexSans[wdth,wght].ttf",
+    "axes": {
+      "wght": 400,
+      "wdth": 100.0
+    },
+    "sha256": "33886ad7cf50c34f70a5116fc5bccbbaf817c64aa019909a2038787ec84f305c"
+  },
+  {
+    "file": "PhoneType02-SemiBold.ttf",
+    "family": "Phone Type 02",
+    "weight": 600,
+    "parent": "assets/ibmplexsans/IBMPlexSans[wdth,wght].ttf",
+    "axes": {
+      "wght": 600,
+      "wdth": 100.0
+    },
+    "sha256": "83054b08125b5a80dd88a637cf687fd28fca919305ecd5ca13c79e74d8341af5"
+  },
+  {
+    "file": "PhoneType03-Regular.ttf",
+    "family": "Phone Type 03",
+    "weight": 400,
+    "parent": "assets/inter/Inter[opsz,wght].ttf",
+    "axes": {
+      "opsz": 14.0,
+      "wght": 400
+    },
+    "sha256": "13c7d54f143229a20d5a144909603770d8ad403b1fd7e16606a9cbaa7dad2699"
+  },
+  {
+    "file": "PhoneType03-SemiBold.ttf",
+    "family": "Phone Type 03",
+    "weight": 600,
+    "parent": "assets/inter/Inter[opsz,wght].ttf",
+    "axes": {
+      "opsz": 14.0,
+      "wght": 600
+    },
+    "sha256": "36f7f72bc2754b36567fbbb3d7ac42774bd35ea500867eb81307f49116630876"
+  },
+  {
+    "file": "PhoneType04-Regular.ttf",
+    "family": "Phone Type 04",
+    "weight": 400,
+    "parent": "assets/sourcesans3/SourceSans3[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "8a902264d1a37c64dd07510e9af958d861b1f8d75c014a7f8c42acfc335276ee"
+  },
+  {
+    "file": "PhoneType04-SemiBold.ttf",
+    "family": "Phone Type 04",
+    "weight": 600,
+    "parent": "assets/sourcesans3/SourceSans3[wght].ttf",
+    "axes": {
+      "wght": 600
+    },
+    "sha256": "ef9152c6393c2298728ef11f41aa28f24d0427030efea3260f9c19af1300c5ea"
+  },
+  {
+    "file": "PhoneType05-Regular.ttf",
+    "family": "Phone Type 05",
+    "weight": 400,
+    "parent": "assets/atkinsonhyperlegiblenext/AtkinsonHyperlegibleNext[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "6b35d707ba37d9e8e4ae8aae0f342b8b6c1e7f5cb41c423d786e1e1bd15486b8"
+  },
+  {
+    "file": "PhoneType05-SemiBold.ttf",
+    "family": "Phone Type 05",
+    "weight": 600,
+    "parent": "assets/atkinsonhyperlegiblenext/AtkinsonHyperlegibleNext[wght].ttf",
+    "axes": {
+      "wght": 600
+    },
+    "sha256": "8b35054e3c7973d2b388479cfd4df9073a054f0546aee9a2163c155b3501808a"
+  },
+  {
+    "file": "PhoneType06-Regular.ttf",
+    "family": "Phone Type 06",
+    "weight": 400,
+    "parent": "assets/geist/Geist[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "bf034198340d5122617d860fef0d66b94d5f1f8204e9ad5b6774a9bef60fef13"
+  },
+  {
+    "file": "PhoneType06-SemiBold.ttf",
+    "family": "Phone Type 06",
+    "weight": 600,
+    "parent": "assets/geist/Geist[wght].ttf",
+    "axes": {
+      "wght": 600
+    },
+    "sha256": "823c21951e984af07514924fab092816d8f30b453ff20c01941e299a2c9488e9"
+  },
+  {
+    "file": "PhoneType07-Regular.ttf",
+    "family": "Phone Type 07",
+    "weight": 400,
+    "parent": "assets/manrope/Manrope[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "0be981866fa91c80b9a70a6fccff05856253ebe549b5f4c62183d8a9822516f6"
+  },
+  {
+    "file": "PhoneType07-SemiBold.ttf",
+    "family": "Phone Type 07",
+    "weight": 600,
+    "parent": "assets/manrope/Manrope[wght].ttf",
+    "axes": {
+      "wght": 600
+    },
+    "sha256": "771a425a433af1a09432017c91f19de7574b644981efacd36485ecd5d71a6c73"
+  },
+  {
+    "file": "PhoneType08-Regular.ttf",
+    "family": "Phone Type 08",
+    "weight": 400,
+    "parent": "assets/sourceserif4/SourceSerif4[opsz,wght].ttf",
+    "axes": {
+      "wght": 400,
+      "opsz": 14
+    },
+    "sha256": "c556c9d05f7d2579229399140e86708c4736085fe50c429a7c558f8033669571"
+  },
+  {
+    "file": "PhoneType08-SemiBold.ttf",
+    "family": "Phone Type 08",
+    "weight": 600,
+    "parent": "assets/sourceserif4/SourceSerif4[opsz,wght].ttf",
+    "axes": {
+      "wght": 600,
+      "opsz": 14
+    },
+    "sha256": "ae0238df3a8eaff39d56a3ba864edb48007e1a6913d95b3040ac90d78b648a88"
+  },
+  {
+    "file": "PhoneCode02-Regular.ttf",
+    "family": "Phone Code 02",
+    "weight": 400,
+    "parent": "assets/ibmplexmono/IBMPlexMono-Regular.ttf",
+    "axes": {},
+    "sha256": "d878d22f92b26be8eca1f3f6f83225b8c83af67a9d23586f9dce334c2a7605b2"
+  },
+  {
+    "file": "PhoneCode03-Regular.ttf",
+    "family": "Phone Code 03",
+    "weight": 400,
+    "parent": "assets/jetbrainsmono/JetBrainsMono[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "45f3197d611e1dfedff8a51c9781210b149c949cba59f217706cddc090055652"
+  },
+  {
+    "file": "PhoneCode04-Regular.ttf",
+    "family": "Phone Code 04",
+    "weight": 400,
+    "parent": "assets/sourcecodepro/SourceCodePro[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "59fbf60dfe59ca83f4f27b454f3003d22f8172a4df53810f5674b9a770c0101e"
+  },
+  {
+    "file": "PhoneCode05-Regular.ttf",
+    "family": "Phone Code 05",
+    "weight": 400,
+    "parent": "assets/atkinsonhyperlegiblemono/AtkinsonHyperlegibleMono[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "0805d9f45ef77e3218043092aa0ece2cd4571b67fa61337abb442fcc4729fb44"
+  },
+  {
+    "file": "PhoneCode06-Regular.ttf",
+    "family": "Phone Code 06",
+    "weight": 400,
+    "parent": "assets/geistmono/GeistMono[wght].ttf",
+    "axes": {
+      "wght": 400
+    },
+    "sha256": "2d6a63a8b5c9568e20cddc874647dcb288e3cebcb442a3a1c82dfd878de8d2dc"
+  }
+]

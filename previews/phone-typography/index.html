@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EmacsOS · type studies</title>
+<link rel="stylesheet" href="specimen.css">
+</head>
+<body>
+<header class="intro"><p class="eyebrow">EMACSOS / PHONE TYPE STUDIES / 01</p><h1>A quieter phone.<br>A sharper voice.</h1><p class="dek">Eight directions. The same words, the same screen. Find the type you want to live with.</p><p class="honesty">Browser approximation, not a phone screenshot. PinePhone: 720 × 1440 physical, 360 × 720 logical at 2×. Synthetic text only. Local bundled fonts.</p></header>
+<form id="controls" class="controls" onsubmit="return false">
+<label>View<select id="view"><option value="chat">Assist conversation</option><option value="sms">SMS conversation</option><option value="network">Network chooser</option><option value="code">Code & terminal</option><option value="reading">Long-form reading</option><option value="glyphs">Letters & numbers</option></select></label>
+<label>Prose size <output id="size-value"></output><input id="size" type="range" min="15" max="24" step=".5" value="18"></label>
+<label>Weight<select id="weight"><option value="400">Regular · 400</option><option value="450">Book · 450</option><option value="500">Medium · 500</option><option value="600">Semibold · 600</option></select></label>
+<label>Line height <output id="leading-value"></output><input id="leading" type="range" min="1.15" max="1.65" step=".05" value="1.35"></label>
+<label>Tracking <output id="tracking-value"></output><input id="tracking" type="range" min="-.3" max=".5" step=".1" value="0"></label>
+<label>Surface<select id="theme"><option value="dark">Ink · dark</option><option value="light">Paper · light</option></select></label>
+<label>Keyboard<select id="keyboard"><option value="visible">Visible · 300 logical px</option><option value="hidden">Hidden · full reading space</option></select></label>
+<label>Compare<select id="focus"><option value="all">All eight directions</option></select></label>
+<button type="button" id="reset">Reset study</button>
+</form>
+<div class="study-head"><p id="study-summary"></p><span id="font-status" role="status">Loading fonts…</span></div>
+<main id="gallery" class="gallery"></main>
+<section class="notes"><h2>Start with Plex. Keep Inter close.</h2><p><strong>IBM Plex Sans + Mono</strong> is my first direction: spare, distinct, and at home in an Emacs phone. <strong>Inter + JetBrains Mono</strong> is the quieter alternative. <strong>Source Sans 3 + Source Code Pro</strong> is the reading-first choice. Compare at 18–20 logical pixels, regular prose, semibold headings, and 1.35–1.45 line height. This recommendation is a visual judgment; physical-screen rendering still needs a phone trial.</p><p>Chat preserves the current <code>you&gt;</code>/<code>bot&gt;</code> structure, editable <code>&gt;</code> prompt, +15% Markdown headings, and fixed-pitch code. SMS uses the same role prefixes and status suffixes. Networks follows the seven-line chooser. The bottom mode line and external keyboard stay in place. Preview margins, palette, line spacing, and proportional non-chat UI are proposed styling, not a claim about the current theme.</p><p>The Droid card uses the same comparison sizes and spacing as the alternatives, so it isolates family choice. Current-phone face sizes and rendering are documented in <a href="README.md">the evidence notes</a>. Code and terminals stay monospace. Ordinary UI can be proportional, but the existing character-cell button layout needs separate consideration before changing its font. The keyboard font stays Droid in these studies, to isolate Emacs typography.</p><div class="downloads"><a href="screenshots/chat-dark.png" download>Chat contact sheet ↓</a><a href="screenshots/chat-light.png" download>Light contact sheet ↓</a><a href="screenshots/reading.png" download>Reading ↓</a><a href="screenshots/sms.png" download>SMS ↓</a><a href="screenshots/network.png" download>Networks ↓</a><a href="screenshots/code.png" download>Code ↓</a><a href="font-manifest.json">Font provenance & checksums</a></div><p class="source-links">Primary sources: <a href="https://rsms.me/inter/">Inter</a> · <a href="https://github.com/IBM/plex">IBM Plex</a> · <a href="https://github.com/adobe-fonts/source-sans">Source Sans</a> · <a href="https://github.com/adobe-fonts/source-code-pro">Source Code Pro</a> · <a href="https://www.brailleinstitute.org/freefont/">Atkinson</a> · <a href="https://vercel.com/font">Geist</a> · <a href="https://github.com/sharanda/manrope">Manrope v4</a> · <a href="https://github.com/adobe-fonts/source-serif">Source Serif</a> · <a href="https://www.jetbrains.com/lp/mono/">JetBrains Mono</a>. Licenses accompany every family under <code>assets/</code>.</p></section>
+<script src="specimen.js"></script>
+</body></html>
