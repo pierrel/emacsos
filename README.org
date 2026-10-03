@@ -232,9 +232,9 @@ Run receipt or saved draft. After a decision, the same logical Run handle follow
 the approval resume and reconciles its completed canonical snapshot.
 Tap =Review= in a stopped Run header or =Review pending action= in its snapshot to fetch a complete scrollable preview. Outbound email
 shows From, To, fixed Cc, subject and body; =Edit email= changes To, subject and body
-and returns to review before sending. Gmail archive and Trash proposals show the
-exact affected messages, their bodies and =Open in Gmail= links. An unavailable
-complete Gmail preview offers rejection only. Approve/send and reject use two taps;
+and returns to review before sending. Email archive and Trash proposals show the
+exact affected messages, their bodies and =Open email= links. An unavailable
+complete email preview offers rejection only. Approve/send and reject use two taps;
 another action or window disarms confirmation. Tokens bind decisions to the displayed proposal.
 An in-flight decision blocks another submission across preview refreshes and recreated
 views until its acknowledgment settles. The editor uses the same canonical body text

@@ -7822,7 +7822,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
            (args (alist-get 'args action))
            (messages (alist-get 'messages proposal)))
       (unless (and (emacsos-assist-web--object-p proposal)
-                   (member kind '("send_email" "gmail_archive" "gmail_delete"))
+                   (member kind '("send_email" "email_archive" "email_delete"))
                    (emacsos-assist-web--object-p action)
                    (equal kind (alist-get 'name action))
                    (emacsos-assist-web--object-p args)
@@ -7989,7 +7989,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
           (insert-text-button "Edit email" 'follow-link t
                               'action (lambda (_) (emacsos-assist-web--edit-approval)))
           (insert "\n\n"))
-      (insert (if (equal (alist-get 'kind proposal) "gmail_delete")
+      (insert (if (equal (alist-get 'kind proposal) "email_delete")
                   "Move these messages to Trash\n\n"
                 "Archive these messages\n\n"))
       (when-let ((error (alist-get 'error proposal)))
@@ -8002,7 +8002,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                 "\n\n")
         (let ((url (concat "https://mail.google.com/mail/u/0/#all/"
                            (url-hexify-string (alist-get 'id mail)))))
-          (insert-text-button "Open in Gmail" 'follow-link t
+          (insert-text-button "Open email" 'follow-link t
                               'action (lambda (_) (browse-url url))))
         (insert "\n\n"))
       (when (and (alist-get 'messages proposal)

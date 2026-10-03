@@ -7979,12 +7979,12 @@
       (should (equal (alist-get 'token emacsos-assist-web--approval)
                      (alist-get 'token test-assist-web--email-approval))))))
 
-(ert-deftest test-assist-web-approval-gmail-bodies-links-and-unavailable-preview ()
+(ert-deftest test-assist-web-approval-email-bodies-links-and-unavailable-preview ()
   (with-temp-buffer
     (emacsos-assist-web-approval-mode)
     (setq emacsos-assist-web--approval
-          '((kind . "gmail_delete") (token . "01234567890123456789012345678901")
-            (action . ((name . "gmail_delete") (args . ((message_ids . ("abc123"))))))
+          '((kind . "email_delete") (token . "01234567890123456789012345678901")
+            (action . ((name . "email_delete") (args . ((message_ids . ("abc123"))))))
             (messages . (((id . "abc123") (from . "sender@example.test")
                           (to . "reader@example.test") (date . "Yesterday")
                           (subject . "Subject") (body . "Complete mail body"))))))
@@ -7992,9 +7992,10 @@
      `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
     (emacsos-assist-web--render-approval)
     (should (string-match-p "Complete mail body" (buffer-string)))
+    (should-not (string-match-p "Gmail" (buffer-string)))
     (let (opened)
       (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
-        (button-activate (test-assist-web--approval-button "Open in Gmail")))
+        (button-activate (test-assist-web--approval-button "Open email")))
       (should (equal opened "https://mail.google.com/mail/u/0/#all/abc123")))
     (setf (alist-get 'error emacsos-assist-web--approval) "Complete body unavailable"
           (alist-get 'messages emacsos-assist-web--approval) nil)
@@ -8005,12 +8006,12 @@
     (should-not (string-match-p "Approve" (buffer-string)))
     (should (test-assist-web--approval-button "Reject"))))
 
-(ert-deftest test-assist-web-approval-gmail-opaque-id-and-encoded-link ()
+(ert-deftest test-assist-web-approval-email-opaque-id-and-encoded-link ()
   (with-temp-buffer
     (emacsos-assist-web-approval-mode)
     (setq emacsos-assist-web--approval
-          '((kind . "gmail_archive") (token . "01234567890123456789012345678901")
-            (action . ((name . "gmail_archive")
+          '((kind . "email_archive") (token . "01234567890123456789012345678901")
+            (action . ((name . "email_archive")
                        (args . ((message_ids . ("opaque id?#é"))))))
             (messages . (((id . "opaque id?#é") (from . "sender@example.test")
                           (to . "reader@example.test") (date . "Yesterday")
@@ -8024,7 +8025,7 @@
     (should (test-assist-web--approval-button "Approve"))
     (let (opened)
       (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
-        (button-activate (test-assist-web--approval-button "Open in Gmail")))
+        (button-activate (test-assist-web--approval-button "Open email")))
       (should (equal opened "https://mail.google.com/mail/u/0/#all/opaque%20id%3F%23%C3%A9")))))
 
 (ert-deftest test-assist-web-approval-failure-requires-fresh-preview ()
@@ -8056,8 +8057,8 @@
   (should-error
    (emacsos-assist-web--require-approval
     '((thread_id . "thread-1")
-      (proposal . ((kind . "gmail_archive") (token . "01234567890123456789012345678901")
-                   (action . ((name . "gmail_archive") (args . ((message_ids . ("abc"))))))
+      (proposal . ((kind . "email_archive") (token . "01234567890123456789012345678901")
+                   (action . ((name . "email_archive") (args . ((message_ids . ("abc"))))))
                    (messages . (((id . "def") (from . "") (to . "")
                                  (date . "") (subject . "") (body . "")))))))
     "thread-1")))
@@ -8175,14 +8176,14 @@
 
 
 (ert-deftest test-assist-web-approval-rejects-multiline-mailbox-headers ()
-  "Exact Gmail previews admit multiline bodies but reject injected header rows."
+  "Exact email previews admit multiline bodies but reject injected header rows."
   (dolist (field '(from to date subject))
     (let* ((message '((id . "abc123") (from . "sender@example.test")
                       (to . "reader@example.test") (date . "Yesterday")
                       (subject . "Subject") (body . "Full\nbody")))
            (mail (copy-tree message))
-           (proposal `((kind . "gmail_delete") (token . "01234567890123456789012345678901")
-                       (action . ((name . "gmail_delete") (args . ((message_ids . ("abc123"))))))
+           (proposal `((kind . "email_delete") (token . "01234567890123456789012345678901")
+                       (action . ((name . "email_delete") (args . ((message_ids . ("abc123"))))))
                        (messages . (,mail)))))
       (setf (alist-get field mail) "Spoof\nFrom: someone@example.test")
       (should-error (emacsos-assist-web--require-approval
