@@ -8,8 +8,9 @@ fi
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 install -d -- "$LOCAL_EMACSOS_DIR"
-install -m 0644 -- "$repo/chat.el" "$repo/assist-web.el" \
+install -m 0644 -- "$repo/chat.el" "$repo/assist-web.el" "$repo/assist-web-git.el" \
   "$LOCAL_EMACSOS_DIR/"
+install -m 0755 -- "$repo/assist-web-git-helper.py" "$LOCAL_EMACSOS_DIR/"
 
 printf 'Installed the Assist thread client in %s.\n' "$LOCAL_EMACSOS_DIR"
 echo 'Credentials, certificates, and Emacs configuration were not changed.'

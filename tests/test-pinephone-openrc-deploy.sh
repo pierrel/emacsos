@@ -59,7 +59,7 @@ for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el chat.el assist-web.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for name in os.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
@@ -89,7 +89,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 40 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 42 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -120,7 +120,7 @@ grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
 simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
-install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus >/dev/null' \
+install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus emacs-magit git openssh-client-default >/dev/null' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus'" \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
@@ -144,6 +144,8 @@ mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1
 [ "$helper_backup_line" -lt "$bootstrap_line" ]
 grep -F 'bootstrap_helper_replaced=1' "$deploy_dir/openrc-update-root" >/dev/null
 expected='EMACSOS-COMMANDS.org
+assist-web-git-helper.py
+assist-web-git.el
 assist-web.el
 chat.el
 dtach-shell-init.el
@@ -331,7 +333,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 40 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 42 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null

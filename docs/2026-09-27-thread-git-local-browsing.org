@@ -1,0 +1,49 @@
+#+title: Thread Git local browsing
+#+date: 2026-09-27
+
+* Contract
+
+=C-x C-f= browses the existing editable thread checkout immediately.
+=C-c d= opens ordinary Magit's committed diff of cached remote/main against
+local thread HEAD. Neither browsing command requests thread metadata or
+fetches Git. Busy, stale, offline and failed-refresh states keep existing
+files available, labeled cached and not verified Assist-current.
+
+A cold reopen uses the validated cached thread snapshot to locate an existing
+private checkout. Unknown local commit IDs stay unknown. The checkout must
+still be on its selected non-main thread branch. An observed thread access
+denial remains fenced across closing and reopening views until a validated
+canonical GET reauthorizes it.
+
+With no local checkout, the command explains that explicit Git Refresh is
+needed for first initialization. It does not pretend files exist or fetch
+because the user tried to browse. Explicit Refresh remains available for
+initialization or manual synchronization.
+
+A connected thread's admitted terminal event can start safe background sync
+after its exact Run outcome and canonical snapshot are committed. This live
+receipt is not persisted: reopened historical receipts or disconnected
+observations cannot start automatic Git work. Success and terminal failure
+can both refresh the committed branch; neither invents uncommitted content.
+Local edits, unsaved buffers, staged files and divergent commits remain
+preserved. Updates remain fast-forward only, with no reset, stash, main
+checkout or automatic push. During an admitted update, file reads and the
+fixed local diff remain available; edits/saves and manual Git mutations stay
+guarded until the update releases its reservation.
+
+* Configuration provenance
+
+Direct Git configuration belongs to the account running the phone UI, not
+necessarily the SSH login account. A successful login-account Git probe is
+not proof that the UI account can read its key, remote map or pinned host
+file. Provisioning and live account-specific verification are root-owned;
+the client does not infer credentials or proxy Git through Assist Web.
+
+* Historical supersessions
+
+This supersedes only the browsing/freshness behavior in the Contract section
+of =docs/2026-09-26-thread-git-full-client.org=: browsing no longer fetches a
+remote tip or uses a fetched pinned diff; it opens existing local work and
+compares cached remote/main to local HEAD. The earlier document remains an
+unchanged historical record. Its editable-work preservation, direct Git,
+private configuration and bounded transport contracts still apply.

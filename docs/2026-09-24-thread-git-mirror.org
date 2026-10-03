@@ -1,0 +1,70 @@
+#+TITLE: Assist thread Git mirror: provisional implementation checkpoint
+#+DATE: 2026-09-24
+
+* Status
+
+This is a historical, non-deployed checkpoint of the EmacsOS implementation at
+commit =9745aa0c978a06b742df6eb1b667163f896af9db= (tree
+=2b74b133590679ff54d792ac5ac0c3f8fcf0cd32=). It is not a review-converged
+candidate. The companion Assist publication/schema change is a separate effort.
+The accepted design is =/tmp/emacsos-thread-git-sync-design-v7.md=, SHA256
+=e3c0c4eba14cfe6a062d927bc8c6cf9fde2660b46e710db2b00c45d8b30bc4ce=.
+
+* Implemented at this checkpoint
+
+Canonical Assist Web thread buffers install thread-local =C-x C-f= and =C-c d=.
+Drafts and other buffers preserve normal file opening and the global dtach
+=C-c d=. The phone selects a committed branch from authenticated metadata:
+=ready= uses the actual checked-out non-=main= branch and HEAD OID; other
+statuses use only the atomic last-published branch/OID pair. A missing or
+half-null pair is unavailable. A transient busy checkout of =main= never
+substitutes for its separately authenticated published pair.
+
+The helper resolves the 20-hex repository key through a private, device-local
+allowlist, then fetches only remote =main= and the selected thread branch with
+an explicit read key and pinned SSH host trust. It checks the exact fetched
+OID against the authenticated expected OID before checkout, checks the result
+for cleanliness and size, and keeps Git/SSH off Emacs's input loop. The Emacs
+client rereads canonical metadata before promotion and retains at most one
+current and one pinned prior generation. A timed-out fetch may open an exact
+same-identity cached file view; an OID mismatch never promotes or opens one.
+Ordinary files open in literal, non-visiting read-only buffers so repository
+file-local and directory-local code cannot execute.
+
+The public OpenRC payload includes the Lisp module and helper. Fresh install
+names =git=, =emacs-magit= and SSH; updater installs them before stopping the UI.
+No read key, repository map or known-hosts file is in the tracked payload.
+
+* Open decisions and nonconformance
+
+- The current =C-c d= path calls native =magit-diff-range= synchronously. Magit
+  refreshes its buffer using local Git on Emacs's input loop and inherits the
+  ambient Git environment. This does not meet the accepted design's off-loop,
+  isolated-environment rule. The user has not yet chosen between a bounded
+  native-Magit exception and a larger isolated adapter. Do not deploy or call
+  this feature ready before that decision and an implementation review.
+- Private read credential/map/host-trust delivery and validation before UI
+  activation were not implemented. A proposed installer transfer was denied
+  by auto-review pending explicit user authorization; no workaround was used.
+  Existing private files are parsed by the helper only when a request runs.
+- The standalone =make phone-install= path copies public code but does not yet
+  provision/check Magit, Git, SSH or the private configuration. It cannot be
+  treated as a supported install path for this checkpoint.
+- Standard Git fetch has no hard incoming-byte ceiling. The configured remote
+  is an operator trust input; post-fetch object/cache checks and a preflight
+  free-space margin bound retained state, not transient transfer size.
+
+* Verification at this checkpoint
+
+- =make test-assist-web-git=: six real bare-Git/process tests and twelve ERT
+  selection, race, keybinding and malicious-local-code tests passed.
+- Existing Assist Web plus Git ERT with an isolated temporary Assist cache:
+  282/282 passed. Two reconciliation fixtures that deliberately bypass snapshot
+  validation also bypass the new metadata parser.
+- =tests/test-pinephone-openrc-deploy.sh=: payload and installer static checks
+  passed. =tests/test-pinephone-openrc-installer.sh=: network-disabled Docker
+  fresh-install, update, package-before-UI-stop, and rollback transaction
+  passed against the exact commit above.
+- =git diff --check= and =checkdoc-file assist-web-git.el= were clean.
+
+No phone deployment, merge, push, or submodule re-pin occurred.
