@@ -237,6 +237,10 @@ exact affected messages, their bodies and =Open in Gmail= links. An unavailable
 complete Gmail preview offers rejection only. Approve/send and reject use two taps;
 another action disarms confirmation. Tokens bind decisions to the displayed proposal.
 After an unconfirmed decision, refresh to inspect server state before acting again.
+Oversized edits stay in the editor: To allows 320 characters, subject 998 UTF-8
+bytes and body 65536 UTF-8 bytes; the encoded request is capped at 512 KiB.
+An accepted decision rechecks its stopped Run owners even if another view
+refreshed the preview while the decision was in flight.
 Approval previews are fetched afresh and are not stored in the local snapshot cache.
 Headers remain single-line; bodies wrap and scroll. An empty fresh preview closes
 the old approval buffer and removes its decision controls.

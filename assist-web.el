@@ -8020,16 +8020,31 @@ ACCEPTED-RUN-ID is its already validated Run identity."
          (with-current-buffer buffer
            (let ((edited `((to . ,(widget-value to)) (subject . ,(widget-value subject))
                            (body . ,(widget-value body)))))
-             (if (seq-every-p (lambda (field)
+             (cond
+              ((not (seq-every-p (lambda (field)
                                (if (eq (car field) 'body)
                                    (emacsos-assist-web--valid-message-text-p (cdr field))
-                                 (emacsos-conversation-valid-text-p (cdr field)))) edited)
-                 (progn
+                                 (emacsos-conversation-valid-text-p (cdr field)))) edited))
+               (message "Email contains unsupported display controls"))
+              ((or (> (length (alist-get 'to edited)) 320)
+                   (> (length (alist-get 'subject edited)) 998)
+                   (> (length (alist-get 'body edited)) (* 64 1024))
+                   (> (string-bytes (encode-coding-string (alist-get 'subject edited) 'utf-8)) 998)
+                   (> (string-bytes (encode-coding-string (alist-get 'body edited) 'utf-8)) (* 64 1024))
+                   (> (string-bytes
+                       (encode-coding-string
+                        (json-encode
+                         (append `((kind . "send_email") (decision . "edit")
+                                   (token . ,(alist-get 'token emacsos-assist-web--approval)))
+                                 edited)) 'utf-8))
+                      (* 512 1024)))
+               (message (concat "Email exceeds approval limits: To 320 characters, "
+                                "subject 998/body 65536 UTF-8 bytes; request 512 KiB")))
+              (t
                    (setq emacsos-assist-web--approval-edited edited)
                    (remove-overlays)
                    (setq buffer-read-only t)
-                   (emacsos-assist-web--render-approval))
-               (message "Email contains unsupported display controls")))))
+                   (emacsos-assist-web--render-approval))))))
        "Review edited email")
       (insert "\n\n")
       (widget-create 'push-button :notify
@@ -8044,9 +8059,11 @@ ACCEPTED-RUN-ID is its already validated Run identity."
       (goto-char (widget-field-start to)))))
 
 (defun emacsos-assist-web--submit-approval (decision)
-  "Submit DECISION for this exact preview, never automatically retrying a mutation."
+  "Submit DECISION and reconcile accepted work after any preview refresh."
   (let* ((buffer (current-buffer))
          (tid emacsos-assist-web--thread-id)
+         (source emacsos-assist-web--approval-source)
+         (record (emacsos-assist-web--thread-safety-record tid t))
          (proposal emacsos-assist-web--approval)
          (payload `((kind . ,(alist-get 'kind proposal))
                     (token . ,(alist-get 'token proposal)) (decision . ,decision))))
@@ -8057,11 +8074,39 @@ ACCEPTED-RUN-ID is its already validated Run identity."
     (emacsos-assist-web--request
      "POST" (format "threads/%s/approval" tid) payload
      (lambda (value error)
-       (when (buffer-live-p buffer)
+       (cond
+        ((and (not error) (equal (alist-get 'thread_id value) tid)
+              (emacsos-assist-web--valid-id-p (alist-get 'run_id value))
+              (eq record (emacsos-assist-web--thread-safety-record tid))
+              (not (plist-get record :denial)))
+         (let ((owners (delete-dups
+                        (mapcar (lambda (stop) (plist-get stop :owner))
+                                (seq-filter (lambda (stop) (eq (plist-get stop :kind) 'approval))
+                                            (plist-get record :stops))))))
+           (when record (cl-incf (plist-get record :approval-generation)))
+           (dolist (owner owners)
+             (when (buffer-live-p owner)
+               (emacsos-assist-web-refresh-thread owner)))
+           (when (buffer-live-p source)
+             (switch-to-buffer source)
+             (unless (memq source owners)
+               (emacsos-assist-web-refresh-thread source)))
+           (let ((preview (or (get-buffer (format "*assist Approval %s*" tid)) buffer)))
+             (when (and (buffer-live-p preview)
+                      (equal (alist-get 'kind proposal)
+                             (alist-get 'kind (buffer-local-value
+                                              'emacsos-assist-web--approval preview)))
+                      (equal (alist-get 'token proposal)
+                             (alist-get 'token (buffer-local-value
+                                               'emacsos-assist-web--approval preview))))
+               (kill-buffer preview)))
+           (message "Approval decision accepted")))
+        ((buffer-live-p buffer)
          (with-current-buffer buffer
-           (when (eq proposal emacsos-assist-web--approval)
+           (when (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
+                      (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval)))
              (if error
-		 (progn
+                 (progn
                    ;; The request may have been accepted. A fresh server preview
                    ;; is required before exposing any decision buttons again.
                    (let ((inhibit-read-only t))
@@ -8073,27 +8118,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
 				(emacsos-assist-web-review-approval
 				 emacsos-assist-web--approval-source))))
                    (message "Approval decision not confirmed: %s" error))
-               (if (and (equal (alist-get 'thread_id value) tid)
-			(emacsos-assist-web--valid-id-p (alist-get 'run_id value)))
-                   (let* ((source emacsos-assist-web--approval-source)
-                          (owners (delete-dups
-                                   (mapcar (lambda (stop) (plist-get stop :owner))
-                                           (seq-filter
-                                            (lambda (stop) (eq (plist-get stop :kind) 'approval))
-                                            (plist-get (emacsos-assist-web--thread-safety-record tid)
-                                                       :stops))))))
-                     (when-let ((record (emacsos-assist-web--thread-safety-record tid)))
-                       (cl-incf (plist-get record :approval-generation)))
-                     (dolist (owner owners)
-                       (when (buffer-live-p owner)
-                         (emacsos-assist-web-refresh-thread owner)))
-                     (when (buffer-live-p source)
-                       (switch-to-buffer source)
-                       (unless (memq source owners)
-                         (emacsos-assist-web-refresh-thread source)))
-                     (kill-buffer buffer)
-                     (message "Approval decision accepted"))
-		 (message "Invalid approval acknowledgment; refresh the thread"))))))))))
+               (message "Invalid approval acknowledgment; refresh the thread"))))))))))
 
 (define-derived-mode emacsos-assist-web-approval-mode special-mode "Assist Approval"
   "Review a complete pending Assist action using explicit two-tap decisions."
