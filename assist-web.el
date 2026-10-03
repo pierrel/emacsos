@@ -118,7 +118,7 @@ An observed thread denial survives closing every view until reauthorization."
           (remhash tid emacsos-assist-web--thread-safety)
           (setq record nil)))
       (when (and create (not record))
-        (setq record (list :buffers nil :stops nil :denial nil))
+        (setq record (list :buffers nil :stops nil :denial nil :approval-generation 0))
         (puthash tid record emacsos-assist-web--thread-safety)
         (dolist (buffer (buffer-list))
           (when (and (buffer-live-p buffer)
@@ -1654,7 +1654,6 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--approval-edited nil)
 (defvar-local emacsos-assist-web--approval-armed nil)
 (defvar-local emacsos-assist-web--approval-sending nil)
-(defvar-local emacsos-assist-web--approval-generation 0)
 (defvar-local emacsos-assist-web--stream-process nil)
 (defvar-local emacsos-assist-web--stream-response nil)
 (defvar-local emacsos-assist-web--stream-body-marker nil)
@@ -2543,8 +2542,8 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
   "Classify ORIGIN's thread, approval or Run GET access failure.
 METHOD and PATH identify the exact endpoint.  STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
-EARLY-FAILURE belongs only to a chat-owned canonical request; a Git probe's
-nondiagnostic failure must not invalidate another window's accepted state.
+EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
+classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
 REQUEST-TID is the trusted origin thread captured before an async T GET; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
@@ -2554,7 +2553,10 @@ status is safely ignored as stale; nil permits a bounded later retry."
              (or (memq status '(401 403 404)) early-failure)
              (stringp path))
     (condition-case nil
-        (let ((thread-get (string-match "\\`threads/\\([^/]+\\)\\(?:/approval\\)?\\'" path))
+        (let ((thread-get (string-match
+                           (if (memq status '(401 403 404))
+                               "\\`threads/\\([^/]+\\)\\(?:/approval\\)?\\'"
+                             "\\`threads/\\([^/]+\\)\\'") path))
               (tid nil)
               (run-id nil))
           (if thread-get
@@ -7855,7 +7857,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
   (alist-get 'proposal value))
 
 (defun emacsos-assist-web-review-approval (&optional source)
-  "Fetch a fresh complete proposal for SOURCE's canonical thread."
+  "Fetch a complete proposal, ordered across SOURCE's same-thread peers."
   (interactive)
   (setq source (or source (current-buffer)))
   (when (buffer-live-p source)
@@ -7864,8 +7866,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
            (old-proposal (and (buffer-live-p old-preview)
                               (buffer-local-value 'emacsos-assist-web--approval old-preview)))
            (auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
-           (generation (with-current-buffer source
-                         (cl-incf emacsos-assist-web--approval-generation))))
+           (record (emacsos-assist-web--thread-safety-record tid t))
+           (generation (cl-incf (plist-get record :approval-generation))))
       (emacsos-assist-web--require-id tid)
       (emacsos-assist-web--request
        "GET" (format "threads/%s/approval" tid) nil
@@ -7873,7 +7875,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
          (when (and (buffer-live-p source)
                     (eql auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
                     (not (buffer-local-value 'emacsos-assist-web--denied source))
-                    (= generation (buffer-local-value 'emacsos-assist-web--approval-generation source))
+                    (eq record (emacsos-assist-web--thread-safety-record tid))
+                    (= generation (plist-get record :approval-generation))
                     (equal tid (buffer-local-value 'emacsos-assist-web--thread-id source)))
            (if error
                (message "Approval unavailable: %s" error)
@@ -8072,10 +8075,22 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                    (message "Approval decision not confirmed: %s" error))
                (if (and (equal (alist-get 'thread_id value) tid)
 			(emacsos-assist-web--valid-id-p (alist-get 'run_id value)))
-                   (let ((source emacsos-assist-web--approval-source))
+                   (let* ((source emacsos-assist-web--approval-source)
+                          (owners (delete-dups
+                                   (mapcar (lambda (stop) (plist-get stop :owner))
+                                           (seq-filter
+                                            (lambda (stop) (eq (plist-get stop :kind) 'approval))
+                                            (plist-get (emacsos-assist-web--thread-safety-record tid)
+                                                       :stops))))))
+                     (when-let ((record (emacsos-assist-web--thread-safety-record tid)))
+                       (cl-incf (plist-get record :approval-generation)))
+                     (dolist (owner owners)
+                       (when (buffer-live-p owner)
+                         (emacsos-assist-web-refresh-thread owner)))
                      (when (buffer-live-p source)
                        (switch-to-buffer source)
-                       (emacsos-assist-web-refresh-thread source))
+                       (unless (memq source owners)
+                         (emacsos-assist-web-refresh-thread source)))
                      (kill-buffer buffer)
                      (message "Approval decision accepted"))
 		 (message "Invalid approval acknowledgment; refresh the thread"))))))))))
