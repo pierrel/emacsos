@@ -7849,11 +7849,12 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                 (mapcar (lambda (message) (alist-get 'id message)) messages))))
           (error "Invalid Assist mailbox preview"))
         (dolist (message messages)
-          (unless (and (emacsos-assist-web--object-p message)
-                       (stringp (alist-get 'id message))
-                       (string-match-p "\\`[0-9a-fA-F]\\{1,64\\}\\'"
-                                       (alist-get 'id message)))
-            (error "Invalid Assist mailbox message identity"))
+          (let ((id (alist-get 'id message)))
+            (unless (and (emacsos-assist-web--object-p message)
+                         (stringp id) (<= 1 (length id) 512)
+                         (not (member id '("." "..")))
+                         (not (string-match-p "[\0-\37\177/\\\\\uD800-\uDFFF]" id)))
+              (error "Invalid Assist mailbox message identity")))
           (dolist (field '(from to date subject))
             (unless (emacsos-conversation-valid-text-p (alist-get field message))
               (error "Invalid Assist mailbox header")))
@@ -7999,7 +8000,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
           (insert (capitalize (symbol-name field)) ": " (alist-get field mail) "\n"))
         (insert "\n" (emacsos-assist-web--canonical-message-text (alist-get 'body mail))
                 "\n\n")
-        (let ((url (concat "https://mail.google.com/mail/u/0/#all/" (alist-get 'id mail))))
+        (let ((url (concat "https://mail.google.com/mail/u/0/#all/"
+                           (url-hexify-string (alist-get 'id mail)))))
           (insert-text-button "Open in Gmail" 'follow-link t
                               'action (lambda (_) (browse-url url))))
         (insert "\n\n"))

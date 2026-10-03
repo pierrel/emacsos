@@ -8005,6 +8005,28 @@
     (should-not (string-match-p "Approve" (buffer-string)))
     (should (test-assist-web--approval-button "Reject"))))
 
+(ert-deftest test-assist-web-approval-gmail-opaque-id-and-encoded-link ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval
+          '((kind . "gmail_archive") (token . "01234567890123456789012345678901")
+            (action . ((name . "gmail_archive")
+                       (args . ((message_ids . ("opaque id?#é"))))))
+            (messages . (((id . "opaque id?#é") (from . "sender@example.test")
+                          (to . "reader@example.test") (date . "Yesterday")
+                          (subject . "Subject") (body . "Complete mail body"))))))
+    (should (eq emacsos-assist-web--approval
+                (emacsos-assist-web--require-approval
+                 `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval))
+                 "thread-1")))
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p (regexp-quote "Id: opaque id?#é") (buffer-string)))
+    (should (test-assist-web--approval-button "Approve"))
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (button-activate (test-assist-web--approval-button "Open in Gmail")))
+      (should (equal opened "https://mail.google.com/mail/u/0/#all/opaque%20id%3F%23%C3%A9")))))
+
 (ert-deftest test-assist-web-approval-failure-requires-fresh-preview ()
   (with-temp-buffer
     (emacsos-assist-web-approval-mode)
