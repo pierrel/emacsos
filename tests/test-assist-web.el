@@ -8159,5 +8159,59 @@
       (when (buffer-live-p preview) (kill-buffer preview))
       (kill-buffer source))))
 
+(ert-deftest test-assist-web-approval-http-denial-fences-preview-and-old-callback ()
+  "Malformed approval denials latch every peer before an old callback can return."
+  (dolist (status '(401 403 404))
+    (let ((source (generate-new-buffer " *approval denial source*"))
+          (peer (generate-new-buffer " *approval denial peer*"))
+          (preview (get-buffer-create "*assist Approval thread-1*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          (emacsos-assist-web--requests nil)
+          old-callback)
+      (unwind-protect
+          (progn
+            (dolist (buffer (list source peer))
+              (with-current-buffer buffer
+                (emacsos-assist-web-mode)
+                (setq emacsos-assist-web--thread-id "thread-1")))
+            (with-current-buffer preview
+              (emacsos-assist-web-approval-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--approval-source source
+                    emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+              (emacsos-assist-web--render-approval))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _)
+                         (setq old-callback callback))))
+              (emacsos-assist-web-review-approval source))
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (_url callback &rest _)
+                         (let ((response (generate-new-buffer " *approval denial response*")))
+                           (with-current-buffer response
+                             (setq-local url-http-response-status status
+                                         url-http-content-type "text/plain"
+                                         url-http-end-of-headers (copy-marker (point-min)))
+                             (insert "malformed denial")
+                             (funcall callback nil))
+                           response))))
+              (with-current-buffer source
+                (emacsos-assist-web--request
+                 "GET" "threads/thread-1/approval" nil (lambda (&rest _) nil))))
+            (dolist (buffer (list source peer))
+              (with-current-buffer buffer
+                (should emacsos-assist-web--denied)
+                (should (= emacsos-assist-web--thread-denial-status status))
+                (should (> emacsos-assist-web--auth-epoch 0))))
+            (should-not (buffer-live-p preview))
+            (funcall old-callback
+                     `((thread_id . "thread-1")
+                       (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (should-not (get-buffer "*assist Approval thread-1*")))
+        (dolist (buffer (list preview peer source))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

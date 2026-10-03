@@ -946,7 +946,8 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 
 
 (defun emacsos-assist-web--canonical-denied (status)
-  "Fence every live buffer for this thread after definitive HTTP STATUS."
+  "Fence every live buffer for this thread after definitive HTTP STATUS.
+Close approval previews after latching denial on every peer."
   (let* ((tid emacsos-assist-web--thread-id)
          (source (current-buffer))
          targets)
@@ -973,7 +974,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
             (condition-case nil
                 (emacsos-assist-web-git--invalidate
                  emacsos-assist-web--lifecycle-notice)
-              ((error quit) nil))))))
+              ((error quit) nil))
+            (when (derived-mode-p 'emacsos-assist-web-approval-mode)
+              (kill-buffer buffer))))))
     (when (buffer-live-p source)
       (with-current-buffer source
         (condition-case nil
@@ -2537,7 +2540,7 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
 
 (defun emacsos-assist-web--http-access-status
     (origin method path status &optional early-failure run-owner request-tid)
-  "Classify ORIGIN's thread or Run GET failure at the exact access boundary.
+  "Classify ORIGIN's thread, approval or Run GET access failure.
 METHOD and PATH identify the exact endpoint.  STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE belongs only to a chat-owned canonical request; a Git probe's
@@ -2551,7 +2554,7 @@ status is safely ignored as stale; nil permits a bounded later retry."
              (or (memq status '(401 403 404)) early-failure)
              (stringp path))
     (condition-case nil
-        (let ((thread-get (string-match "\\`threads/\\([^/]+\\)\\'" path))
+        (let ((thread-get (string-match "\\`threads/\\([^/]+\\)\\(?:/approval\\)?\\'" path))
               (tid nil)
               (run-id nil))
           (if thread-get
