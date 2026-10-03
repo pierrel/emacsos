@@ -1839,12 +1839,12 @@
             (should (equal (substring-no-properties
                             (emacsos-assist-web--lifecycle-header))
                            (if (equal status "awaiting_approval")
-                               "Approval needed [?] "
+                               " [Review]  [?] "
                              "Run changed; Refresh [?] ")))
             (emacsos-assist-web-details)
             (should (string-match-p
                      (if (equal status "awaiting_approval")
-                         "Approve this Run" "will not reattach")
+                         "Tap Review" "will not reattach")
                      (buffer-string)))
             (emacsos-assist-web-display-details-back)
             (when (equal status "awaiting_approval")
@@ -1897,7 +1897,7 @@
                        emacsos-assist-web-git--current) 'current))
           (should (string-match-p
                    (if (equal status "awaiting_approval")
-                       "Approval needed" "Run changed; Refresh")
+                       "Review" "Run changed; Refresh")
                    (substring-no-properties
                     (emacsos-assist-web--thread-header)))))))))
 
@@ -2386,7 +2386,7 @@
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (dolist (case '((disconnect "Observation unavailable; Refresh" "outcome was known")
-                      (approval "Approval needed" "Approve this Run")
+                      (approval "Review" "Tap Review")
                       (terminal-sse "Run changed; Refresh" "stream ended")))
         (setq-local emacsos-assist-web--stopped-reobserve
                     (list :kind (car case)))
@@ -2684,7 +2684,7 @@
           (should-not (emacsos-assist-web--operator-repair-p))
           (should (string-match-p
                    (if (equal status "awaiting_approval")
-                       "Approval needed" "Run reconciling")
+                       "Review" "Run reconciling")
                    (substring-no-properties
                     (emacsos-assist-web--thread-header)))))))))
 
@@ -3295,7 +3295,7 @@
               (should-not emacsos-assist-web--stopped-reobserve)
               (should (emacsos-assist-web--run-gated-p))
               (should (string-match-p
-                       "Approval needed"
+                       "Review"
                        (substring-no-properties
                         (emacsos-assist-web--thread-header))))
               (emacsos-assist-web-git-thread-mode 1)

@@ -8005,5 +8005,64 @@
                                  (date . "") (subject . "") (body . "")))))))
     "thread-1")))
 
+
+(ert-deftest test-assist-web-stopped-approval-opens-review-with-original-receipt ()
+  "Exact stopped approval exposes review even with the previous ready snapshot."
+  (let ((emacsos--assist-active-surface nil)
+        (source (generate-new-buffer " *approval source*")) callback paths)
+    (unwind-protect
+        (with-current-buffer source
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--snapshot (copy-tree test-assist-web--snapshot))
+          (emacsos-assist-web--write-prompt)
+          (let ((entry (emacsos-assist-web--entry "Email this person" 'accepted-unobserved "key-a")))
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :requires-reobserve) t)
+            (setq emacsos-assist-web--queue (list entry))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method path _payload cb &rest _)
+                         (push path paths) (setq callback cb)))
+                      ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+              (emacsos-assist-web--reobserve-entry entry)
+              (funcall callback '((id . "run-a") (thread_id . "thread-1")
+                                  (status . "awaiting_approval")) nil)
+              (should (plist-get entry :approval-stopped))
+              (let* ((header (emacsos-assist-web--thread-header))
+                     (position (string-match "Review" header))
+                     (map (get-text-property position 'local-map header)))
+                (should position)
+                (should (eq (lookup-key map [header-line mouse-1])
+                            'emacsos-assist-web-review-approval)))
+              (emacsos-assist-web-review-approval source)
+              (funcall callback `((thread_id . "thread-1")
+                                  (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "reject"))
+              (funcall callback '((thread_id . "thread-1") (run_id . "resume-a")) nil)
+              (should (equal (car paths) "threads/thread-1/runs/run-a"))
+              (should (eq (car emacsos-assist-web--queue) entry))
+              (should (equal (plist-get entry :text) "Email this person"))
+              (should (equal (plist-get entry :run-id) "run-a")))))
+      (when (get-buffer "*assist Approval thread-1*")
+        (kill-buffer "*assist Approval thread-1*"))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-old-approval-get-cannot-clear-new-denial ()
+  "An older preview response cannot reopen a proposal after canonical denial."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (let (callback)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb))))
+        (emacsos-assist-web-review-approval (current-buffer)))
+      (cl-incf emacsos-assist-web--auth-epoch)
+      (setq emacsos-assist-web--denied t)
+      (funcall callback `((thread_id . "thread-1")
+                          (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+      (should emacsos-assist-web--denied)
+      (should-not (get-buffer "*assist Approval thread-1*")))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

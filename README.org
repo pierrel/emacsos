@@ -226,9 +226,11 @@ acceptance-unknown committed turn; Send reuses its exact idempotency key to
 re-observe it.  Afterwards, only HTTP 200 =cancelled= confirms cancellation;
 structured HTTP 409 =running= or =transitioning= truthfully detaches, and other
 terminal outcomes reconcile the canonical snapshot.  =awaiting_approval= is a
-nonterminal Run state, but it ends this finite live-text observation and also
-reconciles the canonical snapshot so the approval state becomes visible.
-Tap =Review pending action= to fetch a complete scrollable preview. Outbound email
+nonterminal Run state, but it ends this finite live-text observation. Its exact
+status check exposes the compact =Review= header action without discarding the accepted
+Run receipt or saved draft. After a decision, the same logical Run handle follows
+the approval resume and reconciles its completed canonical snapshot.
+Tap =Review= in a stopped Run header or =Review pending action= in its snapshot to fetch a complete scrollable preview. Outbound email
 shows From, To, fixed Cc, subject and body; =Edit email= changes To, subject and body
 and returns to review before sending. Gmail archive and Trash proposals show the
 exact affected messages, their bodies and =Open in Gmail= links. An unavailable

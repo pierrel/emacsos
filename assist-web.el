@@ -703,7 +703,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
      ((emacsos-assist-web--operator-repair-p)
       (emacsos-assist-web--status-action "Operator repair"))
      ((emacsos-assist-web--approval-stopped-p)
-      (emacsos-assist-web--status-action "Approval needed"))
+      (concat (emacsos-assist-web--padded-action
+               "Review" #'emacsos-assist-web-review-approval)
+              (emacsos-assist-web--details-link)))
      ((and manual
            (bound-and-true-p emacsos-assist-web--manual-recovery-active)
            (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -861,7 +863,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                   ((emacsos-assist-web--operator-repair-p)
                    "The exact Run observer reported a server-side failure. Ask the operator to repair Assist first. Then Refresh to check this Run.")
                   ((emacsos-assist-web--approval-stopped-p)
-                   "Approve this Run in Assist first, then Refresh to recheck. Refresh before approval cannot resume observation; no observer reattaches automatically.")
+                   "Tap Review to inspect and decide the proposal. An accepted decision rechecks this exact Run; Refresh before approval cannot resume observation.")
                   ((and (bound-and-true-p
                          emacsos-assist-web--manual-recovery-active)
                         (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -871,7 +873,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                      "The recovered Run observer is connecting. Its headers have not been admitted yet. Extra Refresh taps start no request; the result will appear here."))
                   ((eq (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
                        'approval)
-                   "The exact Run is awaiting approval after its stream ended. Approve it first, then Refresh to check the exact Run again. This pass stopped; it will not reattach automatically. Press q to return.")
+                   "The exact Run is awaiting approval after its stream ended. Return to the thread and tap Review. An accepted decision rechecks the exact Run. Press q to return.")
                   ((eq (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
                        'changed)
                    "The Run was still active after its stream ended. The observation may have changed. Refresh to make one new exact Run check; this pass will not reattach automatically. Press q to return.")
@@ -885,7 +887,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                       (if (plist-get emacsos-assist-web--busy-check :t-accepted)
                           "The exact Run is active and its canonical thread state was accepted. Its observer is connecting."
                         "The exact Run is active and its status was saved. Its canonical thread check is still pending; Refresh joins or retries that check."))
-                     ('approval "The exact Run is awaiting approval. Approve it first, then Refresh to check its status; this observer will not reattach automatically.")
+                     ('approval "The exact Run is awaiting approval. Tap Review in the thread; an accepted decision rechecks its status.")
                      (_ (cond
                          ((and entry (not (plist-get entry :observer-end-checked))
                                (plist-get entry :verified-outcome))
@@ -7852,6 +7854,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
   (setq source (or source (current-buffer)))
   (when (buffer-live-p source)
     (let ((tid (buffer-local-value 'emacsos-assist-web--thread-id source))
+          (auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
           (generation (with-current-buffer source
                         (cl-incf emacsos-assist-web--approval-generation))))
       (emacsos-assist-web--require-id tid)
@@ -7859,6 +7862,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
        "GET" (format "threads/%s/approval" tid) nil
        (lambda (value error)
          (when (and (buffer-live-p source)
+                    (eql auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+                    (not (buffer-local-value 'emacsos-assist-web--denied source))
                     (= generation (buffer-local-value 'emacsos-assist-web--approval-generation source))
                     (equal tid (buffer-local-value 'emacsos-assist-web--thread-id source)))
            (if error
