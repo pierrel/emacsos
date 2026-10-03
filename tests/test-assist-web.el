@@ -8519,5 +8519,65 @@
       (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
       (kill-buffer source))))
 
+
+
+(ert-deftest test-assist-web-approval-reuses-preapproval-safety-record ()
+  "An open thread's pre-approval record remains usable after code upgrade."
+  (let ((source (generate-new-buffer " *old safety approval source*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        get)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"))
+          (let ((old (list :buffers (list source) :stops nil :denial nil)))
+            (puthash "thread-1" old emacsos-assist-web--thread-safety)
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _) (setq get callback))))
+              (emacsos-assist-web-review-approval source)
+              (should (eq old (gethash "thread-1" emacsos-assist-web--thread-safety)))
+              (should (= (plist-get old :approval-generation) 1))
+              (funcall get `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (should (test-assist-web--approval-button "Approve and send"))
+                (emacsos-assist-web--submit-approval "approve")
+                (should (plist-get old :approval-pending))
+                (should-error (emacsos-assist-web--submit-approval "reject") :type 'user-error)))))
+      (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-approval-scalar-ack-requires-fresh-preview ()
+  "Every non-object JSON acknowledgment removes unconfirmed decision controls."
+  (dolist (ack '("accepted" 1 t :false [] nil))
+    (let ((source (generate-new-buffer " *scalar ack source*"))
+          (preview (get-buffer-create "*assist Approval thread-1*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          post)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"))
+            (with-current-buffer preview
+              (emacsos-assist-web-approval-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--approval-source source
+                    emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+              (emacsos-assist-web--render-approval)
+              (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                         (lambda (_method _path _payload callback &rest _) (setq post callback))))
+                (emacsos-assist-web--submit-approval "approve")))
+            (funcall post ack nil)
+            (should-not (plist-get (emacsos-assist-web--thread-safety-record "thread-1") :approval-pending))
+            (with-current-buffer preview
+              (should (string-prefix-p "Decision not confirmed" (buffer-string)))
+              (should-not (test-assist-web--approval-button "Approve and send"))
+              (should-not (test-assist-web--approval-button "Reject"))
+              (should (test-assist-web--approval-button "Refresh proposal"))))
+        (when (buffer-live-p preview) (kill-buffer preview))
+        (kill-buffer source)))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

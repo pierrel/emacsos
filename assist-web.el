@@ -107,6 +107,10 @@ An observed thread denial survives closing every view until reauthorization."
   (when tid
     (let ((record (gethash tid emacsos-assist-web--thread-safety)))
       (when record
+        (unless (plist-member record :approval-generation)
+          (nconc record (list :approval-generation 0)))
+        (unless (plist-member record :approval-pending)
+          (nconc record (list :approval-pending nil)))
         (setf (plist-get record :buffers)
               (seq-filter #'buffer-live-p (plist-get record :buffers)))
         (dolist (buffer (buffer-list))
@@ -8097,7 +8101,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
        (when (eq attempt (plist-get record :approval-pending))
          (setf (plist-get record :approval-pending) nil))
        (cond
-        ((and (not error) (equal (alist-get 'thread_id value) tid)
+        ((and (not error) (emacsos-assist-web--object-p value)
+              (equal (alist-get 'thread_id value) tid)
               (emacsos-assist-web--valid-id-p (alist-get 'run_id value))
               (eq record (emacsos-assist-web--thread-safety-record tid))
               (not (plist-get record :denial)))
