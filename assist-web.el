@@ -7899,7 +7899,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                (error (message "%s" (error-message-string problem)))))))))))
 
 (defun emacsos-assist-web--approval-disarm ()
-  "Cancel the armed decision unless this command activates that same button."
+  "Cancel the armed decision unless this command continues its confirming tap."
   (when emacsos-assist-web--approval-armed
     (let* ((inhibit-read-only t)
            (button (car emacsos-assist-web--approval-armed))
@@ -7908,7 +7908,10 @@ ACCEPTED-RUN-ID is its already validated Run identity."
            (position (if mouse-event
                          (posn-point (event-end last-input-event))
                        (point))))
-      (unless (and (eq this-command 'push-button) (integerp position)
+      (unless (and (or (eq this-command 'push-button)
+                       (and (eq this-command 'mouse-drag-region)
+                            (eq (car-safe last-input-event) 'down-mouse-1)))
+                   (integerp position)
                    (or (not mouse-event)
                        (and (windowp event-window)
                             (eq (window-buffer event-window) (current-buffer))))

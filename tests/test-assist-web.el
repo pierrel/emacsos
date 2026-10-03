@@ -7884,6 +7884,39 @@
         (button-activate button)
         (should-not sent)))))
 
+(ert-deftest test-assist-web-approval-native-mouse-taps-confirm-and-disarm ()
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((approve (test-assist-web--approval-button "Approve and send"))
+            (reject (test-assist-web--approval-button "Reject")) sent)
+        (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                   (lambda (decision) (push decision sent))))
+          (cl-labels ((tap (button)
+                        (let ((position (list (selected-window) (button-start button)
+                                              '(10 . 10) 0)))
+                          (execute-kbd-macro
+                           (vector (list 'down-mouse-1 position)
+                                   (list 'mouse-1 position))))))
+            (tap approve)
+            (should-not sent)
+            (should emacsos-assist-web--approval-armed)
+            (tap approve)
+            (should (equal sent '("approve")))
+            (tap approve)
+            (tap reject)
+            (should (equal sent '("approve")))
+            (should (equal (cdr emacsos-assist-web--approval-armed) "reject"))
+            (execute-kbd-macro (kbd "C-f"))
+            (should-not emacsos-assist-web--approval-armed)
+            (tap reject)
+            (should (equal sent '("approve")))
+            (tap reject)
+            (should (equal sent '("reject" "approve")))))))))
+
 (ert-deftest test-assist-web-approval-tap-in-other-window-disarms ()
   (save-window-excursion
     (with-temp-buffer
