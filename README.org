@@ -228,6 +228,14 @@ structured HTTP 409 =running= or =transitioning= truthfully detaches, and other
 terminal outcomes reconcile the canonical snapshot.  =awaiting_approval= is a
 nonterminal Run state, but it ends this finite live-text observation and also
 reconciles the canonical snapshot so the approval state becomes visible.
+Tap =Review pending action= to fetch a complete scrollable preview. Outbound email
+shows From, To, fixed Cc, subject and body; =Edit email= changes To, subject and body
+and returns to review before sending. Gmail archive and Trash proposals show the
+exact affected messages, their bodies and =Open in Gmail= links. An unavailable
+complete Gmail preview offers rejection only. Approve/send and reject use two taps;
+another action disarms confirmation. Tokens bind decisions to the displayed proposal.
+After an unconfirmed decision, refresh to inspect server state before acting again.
+Approval previews are fetched afresh and are not stored in the local snapshot cache.
 If Assist confirms that the thread was deleted while an observer is open, the
 client retains visible partial text and the next draft, clears the accepted
 retry identity, and starts the next submission as a new thread.  If the durable

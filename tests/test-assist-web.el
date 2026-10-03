@@ -7835,5 +7835,175 @@
       (should (equal emacsos-assist-web--stream-status
                      "observation unavailable; operator repair required")))))
 
+(defconst test-assist-web--email-approval
+  '((kind . "send_email") (token . "01234567890123456789012345678901")
+    (from . "Assistant <assistant@example.test>") (cc . "oversight@example.test")
+    (action . ((name . "send_email") (args . ((to . "recipient@example.test")
+                                              (subject . "Subject")
+                                              (body . "First line\nLast body line")))))))
+
+(defun test-assist-web--approval-button (label)
+  "Find the actionable approval button with LABEL in this buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (search-forward label nil t))
+        (setq found (button-at (1- (point)))))
+      found)))
+
+(ert-deftest test-assist-web-approval-complete-preview-and-two-tap-send ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (dolist (field '("Assistant <assistant@example.test>" "oversight@example.test"
+                     "recipient@example.test" "Subject" "First line\nLast body line"))
+      (should (string-match-p (regexp-quote field) (buffer-string))))
+    (let ((button (test-assist-web--approval-button "Approve and send")) sent)
+      (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                 (lambda (decision) (setq sent decision))))
+        (button-activate button)
+        (should-not sent)
+        (should (equal (button-get button 'display) "Confirm Approve and send?"))
+        (button-activate button)
+        (should (equal sent "approve"))))))
+
+(ert-deftest test-assist-web-approval-other-action-disarms-confirmation ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (let ((button (test-assist-web--approval-button "Approve and send")) sent)
+      (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                 (lambda (decision) (setq sent decision))))
+        (button-activate button)
+        (let ((this-command 'forward-char) (last-input-event ?f))
+          (emacsos-assist-web--approval-disarm))
+        (should-not emacsos-assist-web--approval-armed)
+        (should-not (button-get button 'display))
+        (button-activate button)
+        (should-not sent)))))
+
+(ert-deftest test-assist-web-approval-tap-in-other-window-disarms ()
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let* ((button (test-assist-web--approval-button "Approve and send"))
+             (other (split-window-right))
+             (this-command 'push-button)
+             (last-input-event (list 'mouse-2 (list other (button-start button) '(0 . 0) 0))))
+        (set-window-buffer other (get-buffer-create " *approval keyboard test*"))
+        (unwind-protect
+            (progn
+              (button-activate button)
+              (should emacsos-assist-web--approval-armed)
+              (emacsos-assist-web--approval-disarm)
+              (should-not emacsos-assist-web--approval-armed))
+          (kill-buffer " *approval keyboard test*"))))))
+
+(ert-deftest test-assist-web-approval-old-post-callback-preserves-new-preview ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (let (callback)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _data fn &rest _) (setq callback fn))))
+        (emacsos-assist-web--submit-approval "approve"))
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (funcall callback nil "old request failed")
+      (should (string-match-p "Email awaiting approval" (buffer-string)))
+      (should-not (string-match-p "Decision not confirmed" (buffer-string))))))
+
+(ert-deftest test-assist-web-approval-editor-returns-to-full-review ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (emacsos-assist-web--edit-approval)
+    (should (eq (current-local-map) widget-keymap))
+    (should-not buffer-read-only)
+    (let* ((fields (sort (copy-sequence widget-field-list)
+                        (lambda (a b) (< (widget-field-start a) (widget-field-start b)))))
+           (to (nth 0 fields)) (subject (nth 1 fields)) (body (nth 2 fields)))
+      (widget-value-set to "edited@example.test")
+      (widget-value-set subject "Edited subject")
+      (widget-value-set body "New body\nFinal edited line")
+      (goto-char (point-min))
+      (search-forward "Review edited email")
+      (widget-apply (widget-at (1- (point))) :notify nil)
+      (should buffer-read-only)
+      (should (equal emacsos-assist-web--approval-edited
+                     '((to . "edited@example.test") (subject . "Edited subject")
+                       (body . "New body\nFinal edited line"))))
+      (should (string-match-p "Final edited line" (buffer-string)))
+      (should (test-assist-web--approval-button "Send edited email"))
+      (should (equal (alist-get 'token emacsos-assist-web--approval)
+                     (alist-get 'token test-assist-web--email-approval))))))
+
+(ert-deftest test-assist-web-approval-gmail-bodies-links-and-unavailable-preview ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval
+          '((kind . "gmail_delete") (token . "01234567890123456789012345678901")
+            (action . ((name . "gmail_delete") (args . ((message_ids . ("abc123"))))))
+            (messages . (((id . "abc123") (from . "sender@example.test")
+                          (to . "reader@example.test") (date . "Yesterday")
+                          (subject . "Subject") (body . "Complete mail body"))))))
+    (emacsos-assist-web--require-approval
+     `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "Complete mail body" (buffer-string)))
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (button-activate (test-assist-web--approval-button "Open in Gmail")))
+      (should (equal opened "https://mail.google.com/mail/u/0/#all/abc123")))
+    (setf (alist-get 'error emacsos-assist-web--approval) "Complete body unavailable"
+          (alist-get 'messages emacsos-assist-web--approval) nil)
+    (emacsos-assist-web--require-approval
+     `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "Complete body unavailable" (buffer-string)))
+    (should-not (string-match-p "Approve" (buffer-string)))
+    (should (test-assist-web--approval-button "Reject"))))
+
+(ert-deftest test-assist-web-approval-failure-requires-fresh-preview ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (let (payload)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path data callback &rest _)
+                   (setq payload data)
+                   (funcall callback nil "request timed out"))))
+        (emacsos-assist-web--submit-approval "approve"))
+      (should (equal (alist-get 'token payload)
+                     (alist-get 'token test-assist-web--email-approval)))
+      (should emacsos-assist-web--approval-sending)
+      (should (string-match-p "Decision not confirmed" (buffer-string)))
+      (should-not (string-match-p "Approve" (buffer-string)))
+      (should (test-assist-web--approval-button "Refresh proposal")))))
+
+(ert-deftest test-assist-web-approval-rejects-spoofing-and-mismatched-message-ids ()
+  (let ((proposal (copy-tree test-assist-web--email-approval)))
+    (setf (alist-get 'body (alist-get 'args (alist-get 'action proposal)))
+          (concat "Hidden" (string #x202e) "text"))
+    (should-error (emacsos-assist-web--require-approval
+                   `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1")))
+  (should-error
+   (emacsos-assist-web--require-approval
+    '((thread_id . "thread-1")
+      (proposal . ((kind . "gmail_archive") (token . "01234567890123456789012345678901")
+                   (action . ((name . "gmail_archive") (args . ((message_ids . ("abc"))))))
+                   (messages . (((id . "def") (from . "") (to . "")
+                                 (date . "") (subject . "") (body . "")))))))
+    "thread-1")))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here
