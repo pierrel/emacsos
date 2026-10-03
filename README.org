@@ -235,7 +235,10 @@ shows From, To, fixed Cc, subject and body; =Edit email= changes To, subject and
 and returns to review before sending. Gmail archive and Trash proposals show the
 exact affected messages, their bodies and =Open in Gmail= links. An unavailable
 complete Gmail preview offers rejection only. Approve/send and reject use two taps;
-another action disarms confirmation. Tokens bind decisions to the displayed proposal.
+another action or window disarms confirmation. Tokens bind decisions to the displayed proposal.
+An in-flight decision blocks another submission across preview refreshes and recreated
+views until its acknowledgment settles. The editor uses the same canonical body text
+as the preview, including CRLF line endings.
 After an unconfirmed decision, refresh to inspect server state before acting again.
 Oversized edits stay in the editor: To allows 320 characters, subject 998 UTF-8
 bytes and body 65536 UTF-8 bytes; the encoded request is capped at 512 KiB.

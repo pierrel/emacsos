@@ -103,6 +103,7 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
 Scan live same-thread peers before pruning a dead owner: a later kill hook
 may open one after the owner's own hook ran but before the kill completed.
 An observed thread denial survives closing every view until reauthorization."
+  ;; Keep an in-flight approval attempt even when its preview is recreated.
   (when tid
     (let ((record (gethash tid emacsos-assist-web--thread-safety)))
       (when record
@@ -114,11 +115,13 @@ An observed thread denial survives closing every view until reauthorization."
                              'emacsos-assist-web--thread-id buffer) tid))
             (emacsos-assist-web--thread-safety-enroll
              record tid buffer)))
-        (unless (or (plist-get record :buffers) (plist-get record :denial))
+        (unless (or (plist-get record :buffers) (plist-get record :denial)
+                    (plist-get record :approval-pending))
           (remhash tid emacsos-assist-web--thread-safety)
           (setq record nil)))
       (when (and create (not record))
-        (setq record (list :buffers nil :stops nil :denial nil :approval-generation 0))
+        (setq record (list :buffers nil :stops nil :denial nil :approval-generation 0
+                           :approval-pending nil))
         (puthash tid record emacsos-assist-web--thread-safety)
         (dolist (buffer (buffer-list))
           (when (and (buffer-live-p buffer)
@@ -1653,7 +1656,7 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--approval nil)
 (defvar-local emacsos-assist-web--approval-edited nil)
 (defvar-local emacsos-assist-web--approval-armed nil)
-(defvar-local emacsos-assist-web--approval-sending nil)
+(defvar-local emacsos-assist-web--approval-armed-window nil)
 (defvar-local emacsos-assist-web--stream-process nil)
 (defvar-local emacsos-assist-web--stream-response nil)
 (defvar-local emacsos-assist-web--stream-body-marker nil)
@@ -7908,7 +7911,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
            (position (if mouse-event
                          (posn-point (event-end last-input-event))
                        (point))))
-      (unless (and (or (eq this-command 'push-button)
+      (unless (and (eq (if mouse-event event-window (selected-window))
+                       emacsos-assist-web--approval-armed-window)
+                   (or (eq this-command 'push-button)
                        (and (eq this-command 'mouse-drag-region)
                             (eq (car-safe last-input-event) 'down-mouse-1)))
                    (integerp position)
@@ -7918,7 +7923,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                    (<= (button-start button) position)
                    (< position (button-end button)))
         (button-put button 'display nil)
-        (setq emacsos-assist-web--approval-armed nil)))))
+        (setq emacsos-assist-web--approval-armed nil
+              emacsos-assist-web--approval-armed-window nil)))))
 
 (defun emacsos-assist-web--approval-button (label decision)
   "Insert a two-tap LABEL button for DECISION on the exact displayed proposal."
@@ -7930,14 +7936,17 @@ ACCEPTED-RUN-ID is its already validated Run identity."
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
            (let ((inhibit-read-only t))
-             (unless emacsos-assist-web--approval-sending
-               (if (equal (cdr emacsos-assist-web--approval-armed) decision)
+             (unless (plist-get (emacsos-assist-web--thread-safety-record
+                                 emacsos-assist-web--thread-id) :approval-pending)
+               (if (and (equal (cdr emacsos-assist-web--approval-armed) decision)
+                        (eq (selected-window) emacsos-assist-web--approval-armed-window))
                    (progn
                      (setq emacsos-assist-web--approval-armed nil)
                      (emacsos-assist-web--submit-approval decision))
 		 (when emacsos-assist-web--approval-armed
                    (button-put (car emacsos-assist-web--approval-armed) 'display nil))
-		 (setq emacsos-assist-web--approval-armed (cons button decision))
+		 (setq emacsos-assist-web--approval-armed (cons button decision)
+                       emacsos-assist-web--approval-armed-window (selected-window))
 		 (button-put button 'display (concat "Confirm " label "?")))))))))
     (insert "\n\n")))
 
@@ -8005,6 +8014,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
 
 (defun emacsos-assist-web--edit-approval ()
   "Edit recipient, subject and body, then return to review before sending."
+  (when (plist-get (emacsos-assist-web--thread-safety-record
+                   emacsos-assist-web--thread-id) :approval-pending)
+    (user-error "A decision is awaiting confirmation"))
   (let* ((inhibit-read-only t)
          (buffer (current-buffer))
          (args (or emacsos-assist-web--approval-edited
@@ -8016,7 +8028,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
     (let ((to (widget-create 'editable-field :format "To: %v\n" :value (alist-get 'to args)))
           (subject (widget-create 'editable-field :format "Subject: %v\n"
                                   :value (alist-get 'subject args)))
-          (body (widget-create 'text :format "Body:\n%v\n" :value (alist-get 'body args))))
+          (body (widget-create 'text :format "Body:\n%v\n"
+                               :value (emacsos-assist-web--canonical-message-text
+                                       (alist-get 'body args)))))
       (widget-create
        'push-button :notify
        (lambda (&rest _)
@@ -8068,15 +8082,20 @@ ACCEPTED-RUN-ID is its already validated Run identity."
          (source emacsos-assist-web--approval-source)
          (record (emacsos-assist-web--thread-safety-record tid t))
          (proposal emacsos-assist-web--approval)
+         (attempt (list (alist-get 'kind proposal) (alist-get 'token proposal) decision))
          (payload `((kind . ,(alist-get 'kind proposal))
                     (token . ,(alist-get 'token proposal)) (decision . ,decision))))
     (when (equal decision "edit")
       (setq payload (append payload emacsos-assist-web--approval-edited)))
-    (setq emacsos-assist-web--approval-sending t)
+    (when (plist-get record :approval-pending)
+      (user-error "A decision is awaiting confirmation"))
+    (setf (plist-get record :approval-pending) attempt)
     (message "Submitting approval decision…")
     (emacsos-assist-web--request
      "POST" (format "threads/%s/approval" tid) payload
      (lambda (value error)
+       (when (eq attempt (plist-get record :approval-pending))
+         (setf (plist-get record :approval-pending) nil))
        (cond
         ((and (not error) (equal (alist-get 'thread_id value) tid)
               (emacsos-assist-web--valid-id-p (alist-get 'run_id value))
@@ -8104,12 +8123,12 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                                'emacsos-assist-web--approval preview))))
                (kill-buffer preview)))
            (message "Approval decision accepted")))
-        ((buffer-live-p buffer)
-         (with-current-buffer buffer
-           (when (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
-                      (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval)))
-             (if error
-                 (progn
+        (t
+         (let ((preview (or (get-buffer (format "*assist Approval %s*" tid)) buffer)))
+           (when (buffer-live-p preview)
+            (with-current-buffer preview
+             (when (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
+                        (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval)))
                    ;; The request may have been accepted. A fresh server preview
                    ;; is required before exposing any decision buttons again.
                    (let ((inhibit-read-only t))
@@ -8120,8 +8139,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                       'action (lambda (_)
 				(emacsos-assist-web-review-approval
 				 emacsos-assist-web--approval-source))))
-                   (message "Approval decision not confirmed: %s" error))
-               (message "Invalid approval acknowledgment; refresh the thread"))))))))))
+                   (message "Approval decision not confirmed: %s"
+                            (or error "invalid acknowledgment"))))))))))))
 
 (define-derived-mode emacsos-assist-web-approval-mode special-mode "Assist Approval"
   "Review a complete pending Assist action using explicit two-tap decisions."
