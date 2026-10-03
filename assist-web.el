@@ -7819,13 +7819,15 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                    (alist-get 'token proposal)))
         (error "Invalid Assist approval proposal"))
       (if (equal kind "send_email")
-          (dolist (text (list (alist-get 'from proposal) (alist-get 'cc proposal)
-                              (alist-get 'to args) (alist-get 'subject args)
-                              (alist-get 'body args)))
+          (progn
+            (dolist (text (list (alist-get 'from proposal) (alist-get 'cc proposal)
+                                (alist-get 'to args) (alist-get 'subject args)))
+              (unless (emacsos-conversation-valid-text-p text)
+                (error "Invalid Assist email header")))
             (unless (emacsos-assist-web--valid-message-text-p
-                     (and (stringp text)
-                          (emacsos-assist-web--canonical-message-text text)))
-              (error "Invalid Assist email preview")))
+                     (and (stringp (alist-get 'body args))
+                          (emacsos-assist-web--canonical-message-text (alist-get 'body args))))
+              (error "Invalid Assist email body")))
         (unless (or (and (stringp (alist-get 'error proposal))
                          (not (string-empty-p (alist-get 'error proposal)))
                          (emacsos-assist-web--valid-message-text-p (alist-get 'error proposal))
@@ -7840,12 +7842,13 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                        (string-match-p "\\`[0-9a-fA-F]\\{1,64\\}\\'"
                                        (alist-get 'id message)))
             (error "Invalid Assist mailbox message identity"))
-          (dolist (field '(from to date subject body))
-            (unless (emacsos-assist-web--valid-message-text-p
-                     (and (stringp (alist-get field message))
-                          (emacsos-assist-web--canonical-message-text
-                           (alist-get field message))))
-              (error "Invalid Assist mailbox message preview")))))))
+          (dolist (field '(from to date subject))
+            (unless (emacsos-conversation-valid-text-p (alist-get field message))
+              (error "Invalid Assist mailbox header")))
+          (unless (emacsos-assist-web--valid-message-text-p
+                   (and (stringp (alist-get 'body message))
+                        (emacsos-assist-web--canonical-message-text (alist-get 'body message))))
+            (error "Invalid Assist mailbox body"))))))
   (alist-get 'proposal value))
 
 (defun emacsos-assist-web-review-approval (&optional source)
@@ -7853,10 +7856,13 @@ ACCEPTED-RUN-ID is its already validated Run identity."
   (interactive)
   (setq source (or source (current-buffer)))
   (when (buffer-live-p source)
-    (let ((tid (buffer-local-value 'emacsos-assist-web--thread-id source))
-          (auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
-          (generation (with-current-buffer source
-                        (cl-incf emacsos-assist-web--approval-generation))))
+    (let* ((tid (buffer-local-value 'emacsos-assist-web--thread-id source))
+           (old-preview (get-buffer (format "*assist Approval %s*" tid)))
+           (old-proposal (and (buffer-live-p old-preview)
+                              (buffer-local-value 'emacsos-assist-web--approval old-preview)))
+           (auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+           (generation (with-current-buffer source
+                         (cl-incf emacsos-assist-web--approval-generation))))
       (emacsos-assist-web--require-id tid)
       (emacsos-assist-web--request
        "GET" (format "threads/%s/approval" tid) nil
@@ -7878,6 +7884,10 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                emacsos-assist-web--approval proposal)
                          (emacsos-assist-web--render-approval))
                        (switch-to-buffer buffer))
+                   (when (and (buffer-live-p old-preview)
+                              (eq old-proposal (buffer-local-value
+                                                'emacsos-assist-web--approval old-preview)))
+                     (kill-buffer old-preview))
                    (emacsos-assist-web-refresh-thread source)
                    (message "This thread has no supported pending approval"))
                (error (message "%s" (error-message-string problem)))))))))))
@@ -7967,8 +7977,6 @@ ACCEPTED-RUN-ID is its already validated Run identity."
           (insert (capitalize (symbol-name field)) ": " (alist-get field mail) "\n"))
         (insert "\n" (emacsos-assist-web--canonical-message-text (alist-get 'body mail))
                 "\n\n")
-        (when (eq (alist-get 'body_truncated mail) t)
-          (insert "Body is truncated. Open Gmail to read the complete message.\n\n"))
         (let ((url (concat "https://mail.google.com/mail/u/0/#all/" (alist-get 'id mail))))
           (insert-text-button "Open in Gmail" 'follow-link t
                               'action (lambda (_) (browse-url url))))
@@ -8007,7 +8015,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
            (let ((edited `((to . ,(widget-value to)) (subject . ,(widget-value subject))
                            (body . ,(widget-value body)))))
              (if (seq-every-p (lambda (field)
-				(emacsos-assist-web--valid-message-text-p (cdr field))) edited)
+                               (if (eq (car field) 'body)
+                                   (emacsos-assist-web--valid-message-text-p (cdr field))
+                                 (emacsos-conversation-valid-text-p (cdr field)))) edited)
                  (progn
                    (setq emacsos-assist-web--approval-edited edited)
                    (remove-overlays)

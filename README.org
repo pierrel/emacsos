@@ -238,6 +238,8 @@ complete Gmail preview offers rejection only. Approve/send and reject use two ta
 another action disarms confirmation. Tokens bind decisions to the displayed proposal.
 After an unconfirmed decision, refresh to inspect server state before acting again.
 Approval previews are fetched afresh and are not stored in the local snapshot cache.
+Headers remain single-line; bodies wrap and scroll. An empty fresh preview closes
+the old approval buffer and removes its decision controls.
 If Assist confirms that the thread was deleted while an observer is open, the
 client retains visible partial text and the next draft, clears the accepted
 retry identity, and starts the next submission as a new thread.  If the durable
