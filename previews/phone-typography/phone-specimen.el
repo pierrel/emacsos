@@ -21,12 +21,11 @@ The Phone Type/Code families are fixed-axis derivatives, renamed for OFL complia
   "Return FAMILY at WEIGHT, refusing a silent substitute."
   (let* ((font (find-font (font-spec :family family :weight weight)))
          (actual (and font (font-get font :family))))
-    (unless (and actual (string-equal (downcase actual) (downcase family)))
+    (unless (and actual (string-equal (downcase (symbol-name actual)) (downcase family)))
       (error "Specimen font missing: %s %s (resolved %s)" family weight actual))
-    (when (memq weight '(semi-bold bold))
-      (let ((regular (find-font (font-spec :family family :weight 'normal))))
-        (unless (> (font-get font :weight) (font-get regular :weight))
-          (error "Specimen weight missing: %s %s" family weight))))
+    (unless (eq (font-get font :weight) weight)
+      (error "Specimen weight missing: %s %s (resolved %s)"
+             family weight (font-get font :weight)))
     font))
 
 (defun emacsos-type-study--insert (text family height &optional weight)
