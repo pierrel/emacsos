@@ -17,6 +17,7 @@
 (require 'url)
 (require 'url-http)
 (require 'url-util)
+(require 'wid-edit)
 
 (declare-function emacsos--render-page "os")
 (defvar url-http-content-type)
@@ -25,6 +26,7 @@
 (defvar url-http-response-status)
 (defvar url-http-attempt-keepalives)
 (defvar gnutls-trustfiles)
+(defvar emacsos-assist-web-approval-mode-map)
 
 (defvar-local emacsos-assist-web--lifecycle-notice nil
   "General Run/recovery warning, independent of fetched Git state.")
@@ -101,9 +103,14 @@ It also fences an exact active Run's T check and terminal Run's R2 commit.")
 Scan live same-thread peers before pruning a dead owner: a later kill hook
 may open one after the owner's own hook ran but before the kill completed.
 An observed thread denial survives closing every view until reauthorization."
+  ;; Keep an in-flight approval attempt even when its preview is recreated.
   (when tid
     (let ((record (gethash tid emacsos-assist-web--thread-safety)))
       (when record
+        (unless (plist-member record :approval-generation)
+          (nconc record (list :approval-generation 0)))
+        (unless (plist-member record :approval-pending)
+          (nconc record (list :approval-pending nil)))
         (setf (plist-get record :buffers)
               (seq-filter #'buffer-live-p (plist-get record :buffers)))
         (dolist (buffer (buffer-list))
@@ -112,11 +119,13 @@ An observed thread denial survives closing every view until reauthorization."
                              'emacsos-assist-web--thread-id buffer) tid))
             (emacsos-assist-web--thread-safety-enroll
              record tid buffer)))
-        (unless (or (plist-get record :buffers) (plist-get record :denial))
+        (unless (or (plist-get record :buffers) (plist-get record :denial)
+                    (plist-get record :approval-pending))
           (remhash tid emacsos-assist-web--thread-safety)
           (setq record nil)))
       (when (and create (not record))
-        (setq record (list :buffers nil :stops nil :denial nil))
+        (setq record (list :buffers nil :stops nil :denial nil :approval-generation 0
+                           :approval-pending nil))
         (puthash tid record emacsos-assist-web--thread-safety)
         (dolist (buffer (buffer-list))
           (when (and (buffer-live-p buffer)
@@ -701,7 +710,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
      ((emacsos-assist-web--operator-repair-p)
       (emacsos-assist-web--status-action "Operator repair"))
      ((emacsos-assist-web--approval-stopped-p)
-      (emacsos-assist-web--status-action "Approval needed"))
+      (concat (emacsos-assist-web--padded-action
+               "Review" #'emacsos-assist-web-review-approval)
+              (emacsos-assist-web--details-link)))
      ((and manual
            (bound-and-true-p emacsos-assist-web--manual-recovery-active)
            (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -859,7 +870,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                   ((emacsos-assist-web--operator-repair-p)
                    "The exact Run observer reported a server-side failure. Ask the operator to repair Assist first. Then Refresh to check this Run.")
                   ((emacsos-assist-web--approval-stopped-p)
-                   "Approve this Run in Assist first, then Refresh to recheck. Refresh before approval cannot resume observation; no observer reattaches automatically.")
+                   "Tap Review to inspect and decide the proposal. An accepted decision rechecks this exact Run; Refresh before approval cannot resume observation.")
                   ((and (bound-and-true-p
                          emacsos-assist-web--manual-recovery-active)
                         (bound-and-true-p emacsos-assist-web--stream-entry))
@@ -869,7 +880,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                      "The recovered Run observer is connecting. Its headers have not been admitted yet. Extra Refresh taps start no request; the result will appear here."))
                   ((eq (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
                        'approval)
-                   "The exact Run is awaiting approval after its stream ended. Approve it first, then Refresh to check the exact Run again. This pass stopped; it will not reattach automatically. Press q to return.")
+                   "The exact Run is awaiting approval after its stream ended. Return to the thread and tap Review. An accepted decision rechecks the exact Run. Press q to return.")
                   ((eq (bound-and-true-p emacsos-assist-web--manual-recovery-reason)
                        'changed)
                    "The Run was still active after its stream ended. The observation may have changed. Refresh to make one new exact Run check; this pass will not reattach automatically. Press q to return.")
@@ -883,7 +894,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                       (if (plist-get emacsos-assist-web--busy-check :t-accepted)
                           "The exact Run is active and its canonical thread state was accepted. Its observer is connecting."
                         "The exact Run is active and its status was saved. Its canonical thread check is still pending; Refresh joins or retries that check."))
-                     ('approval "The exact Run is awaiting approval. Approve it first, then Refresh to check its status; this observer will not reattach automatically.")
+                     ('approval "The exact Run is awaiting approval. Tap Review in the thread; an accepted decision rechecks its status.")
                      (_ (cond
                          ((and entry (not (plist-get entry :observer-end-checked))
                                (plist-get entry :verified-outcome))
@@ -942,7 +953,8 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 
 
 (defun emacsos-assist-web--canonical-denied (status)
-  "Fence every live buffer for this thread after definitive HTTP STATUS."
+  "Fence every live buffer for this thread after definitive HTTP STATUS.
+Close approval previews after latching denial on every peer."
   (let* ((tid emacsos-assist-web--thread-id)
          (source (current-buffer))
          targets)
@@ -969,7 +981,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
             (condition-case nil
                 (emacsos-assist-web-git--invalidate
                  emacsos-assist-web--lifecycle-notice)
-              ((error quit) nil))))))
+              ((error quit) nil))
+            (when (derived-mode-p 'emacsos-assist-web-approval-mode)
+              (kill-buffer buffer))))))
     (when (buffer-live-p source)
       (with-current-buffer source
         (condition-case nil
@@ -1642,6 +1656,11 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--follow-ups nil
   "Ordered, locally durable follow-ups behind this buffer's active request.")
 (defvar-local emacsos-assist-web--snapshot nil)
+(defvar-local emacsos-assist-web--approval-source nil)
+(defvar-local emacsos-assist-web--approval nil)
+(defvar-local emacsos-assist-web--approval-edited nil)
+(defvar-local emacsos-assist-web--approval-armed nil)
+(defvar-local emacsos-assist-web--approval-armed-window nil)
 (defvar-local emacsos-assist-web--stream-process nil)
 (defvar-local emacsos-assist-web--stream-response nil)
 (defvar-local emacsos-assist-web--stream-body-marker nil)
@@ -2527,11 +2546,11 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
 
 (defun emacsos-assist-web--http-access-status
     (origin method path status &optional early-failure run-owner request-tid)
-  "Classify ORIGIN's thread or Run GET failure at the exact access boundary.
+  "Classify ORIGIN's thread, approval or Run GET access failure.
 METHOD and PATH identify the exact endpoint.  STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
-EARLY-FAILURE belongs only to a chat-owned canonical request; a Git probe's
-nondiagnostic failure must not invalidate another window's accepted state.
+EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
+classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
 REQUEST-TID is the trusted origin thread captured before an async T GET; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
@@ -2541,7 +2560,10 @@ status is safely ignored as stale; nil permits a bounded later retry."
              (or (memq status '(401 403 404)) early-failure)
              (stringp path))
     (condition-case nil
-        (let ((thread-get (string-match "\\`threads/\\([^/]+\\)\\'" path))
+        (let ((thread-get (string-match
+                           (if (memq status '(401 403 404))
+                               "\\`threads/\\([^/]+\\)\\(?:/approval\\)?\\'"
+                             "\\`threads/\\([^/]+\\)\\'") path))
               (tid nil)
               (run-id nil))
           (if thread-get
@@ -3812,6 +3834,12 @@ of it, together with the oldest pagination cursor already reached."
                             (concat ": " error) "")))
         (setq emacsos-assist-web--status-end (copy-marker (point) nil))
         (insert "\n\n")
+        (when (equal (alist-get 'status thread) "awaiting_approval")
+          (let ((source (current-buffer)))
+            (insert-text-button
+             "Review pending action" 'follow-link t
+             'action (lambda (_) (emacsos-assist-web-review-approval source)))
+            (insert "\n\n")))
         (let ((emacsos--chat-presentation-max-bytes
                (if (<= presentation-bytes emacsos--chat-presentation-max-bytes)
                    emacsos--chat-presentation-max-bytes
@@ -7781,6 +7809,351 @@ ACCEPTED-RUN-ID is its already validated Run identity."
 (cl-incf emacsos-assist-web--catalog-generation)
 (emacsos-assist-web--cancel-pending-new-thread)
 (emacsos-assist-web--load-catalog)
+
+(defun emacsos-assist-web--require-approval (value tid)
+  "Validate the complete bounded approval response VALUE for TID."
+  (unless (and (emacsos-assist-web--object-p value)
+               (equal (alist-get 'thread_id value) tid)
+               (<= (string-bytes (json-encode value)) (* 512 1024)))
+    (error "Invalid Assist approval response"))
+  (when-let ((proposal (alist-get 'proposal value)))
+    (let* ((kind (alist-get 'kind proposal))
+           (action (alist-get 'action proposal))
+           (args (alist-get 'args action))
+           (messages (alist-get 'messages proposal)))
+      (unless (and (emacsos-assist-web--object-p proposal)
+                   (member kind '("send_email" "gmail_archive" "gmail_delete"))
+                   (emacsos-assist-web--object-p action)
+                   (equal kind (alist-get 'name action))
+                   (emacsos-assist-web--object-p args)
+                   (stringp (alist-get 'token proposal))
+                   (string-match-p "\\`[A-Za-z0-9_-]\\{16,128\\}\\'"
+                                   (alist-get 'token proposal)))
+        (error "Invalid Assist approval proposal"))
+      (if (equal kind "send_email")
+          (progn
+            (dolist (text (list (alist-get 'from proposal) (alist-get 'cc proposal)
+                                (alist-get 'to args) (alist-get 'subject args)))
+              (unless (emacsos-conversation-valid-text-p text)
+                (error "Invalid Assist email header")))
+            (unless (emacsos-assist-web--valid-message-text-p
+                     (and (stringp (alist-get 'body args))
+                          (emacsos-assist-web--canonical-message-text (alist-get 'body args))))
+              (error "Invalid Assist email body")))
+        (unless (or (and (stringp (alist-get 'error proposal))
+                         (not (string-empty-p (alist-get 'error proposal)))
+                         (emacsos-assist-web--valid-message-text-p (alist-get 'error proposal))
+                         (null messages))
+                    (and (listp messages) messages (<= (length messages) 100)
+                         (equal (alist-get 'message_ids args)
+                                (mapcar (lambda (message) (alist-get 'id message)) messages))))
+          (error "Invalid Assist mailbox preview"))
+        (dolist (message messages)
+          (let ((id (alist-get 'id message)))
+            (unless (and (emacsos-assist-web--object-p message)
+                         (stringp id) (<= 1 (length id) 512)
+                         (not (member id '("." "..")))
+                         (not (string-match-p "[\0-\37\177/\\\\\uD800-\uDFFF]" id)))
+              (error "Invalid Assist mailbox message identity")))
+          (dolist (field '(from to date subject))
+            (unless (emacsos-conversation-valid-text-p (alist-get field message))
+              (error "Invalid Assist mailbox header")))
+          (unless (emacsos-assist-web--valid-message-text-p
+                   (and (stringp (alist-get 'body message))
+                        (emacsos-assist-web--canonical-message-text (alist-get 'body message))))
+            (error "Invalid Assist mailbox body"))))))
+  (alist-get 'proposal value))
+
+(defun emacsos-assist-web-review-approval (&optional source)
+  "Fetch a complete proposal, ordered across SOURCE's same-thread peers."
+  (interactive)
+  (setq source (or source (current-buffer)))
+  (when (buffer-live-p source)
+    (let* ((tid (buffer-local-value 'emacsos-assist-web--thread-id source))
+           (old-preview (get-buffer (format "*assist Approval %s*" tid)))
+           (old-proposal (and (buffer-live-p old-preview)
+                              (buffer-local-value 'emacsos-assist-web--approval old-preview)))
+           (auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+           (record (emacsos-assist-web--thread-safety-record tid t))
+           (generation (cl-incf (plist-get record :approval-generation))))
+      (emacsos-assist-web--require-id tid)
+      (emacsos-assist-web--request
+       "GET" (format "threads/%s/approval" tid) nil
+       (lambda (value error)
+         (when (and (buffer-live-p source)
+                    (eql auth-start (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+                    (not (buffer-local-value 'emacsos-assist-web--denied source))
+                    (eq record (emacsos-assist-web--thread-safety-record tid))
+                    (= generation (plist-get record :approval-generation))
+                    (equal tid (buffer-local-value 'emacsos-assist-web--thread-id source)))
+           (if error
+               (message "Approval unavailable: %s" error)
+             (condition-case problem
+                 (if-let ((proposal (emacsos-assist-web--require-approval value tid)))
+                     (let ((buffer (get-buffer-create (format "*assist Approval %s*" tid))))
+                       (with-current-buffer buffer
+                         (emacsos-assist-web-approval-mode)
+                         (setq emacsos-assist-web--thread-id tid
+                               emacsos-assist-web--approval-source source
+                               emacsos-assist-web--approval proposal)
+                         (emacsos-assist-web--render-approval))
+                       (switch-to-buffer buffer))
+                   (when (and (buffer-live-p old-preview)
+                              (eq old-proposal (buffer-local-value
+                                                'emacsos-assist-web--approval old-preview)))
+                     (kill-buffer old-preview))
+                   (emacsos-assist-web-refresh-thread source)
+                   (message "This thread has no supported pending approval"))
+               (error (message "%s" (error-message-string problem)))))))))))
+
+(defun emacsos-assist-web--approval-disarm ()
+  "Cancel the armed decision unless this command continues its confirming tap."
+  (when emacsos-assist-web--approval-armed
+    (let* ((inhibit-read-only t)
+           (button (car emacsos-assist-web--approval-armed))
+           (mouse-event (mouse-event-p last-input-event))
+           (event-window (and mouse-event (posn-window (event-end last-input-event))))
+           (position (if mouse-event
+                         (posn-point (event-end last-input-event))
+                       (point))))
+      (unless (and (eq (if mouse-event event-window (selected-window))
+                       emacsos-assist-web--approval-armed-window)
+                   (or (eq this-command 'push-button)
+                       (and (eq this-command 'mouse-drag-region)
+                            (eq (car-safe last-input-event) 'down-mouse-1)))
+                   (integerp position)
+                   (or (not mouse-event)
+                       (and (windowp event-window)
+                            (eq (window-buffer event-window) (current-buffer))))
+                   (<= (button-start button) position)
+                   (< position (button-end button)))
+        (button-put button 'display nil)
+        (setq emacsos-assist-web--approval-armed nil
+              emacsos-assist-web--approval-armed-window nil)))))
+
+(defun emacsos-assist-web--approval-button (label decision)
+  "Insert a two-tap LABEL button for DECISION on the exact displayed proposal."
+  (let ((buffer (current-buffer)))
+    (insert-text-button
+     label 'follow-link t
+     'action
+     (lambda (button)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (let ((inhibit-read-only t))
+             (unless (plist-get (emacsos-assist-web--thread-safety-record
+                                 emacsos-assist-web--thread-id) :approval-pending)
+               (if (and (equal (cdr emacsos-assist-web--approval-armed) decision)
+                        (eq (selected-window) emacsos-assist-web--approval-armed-window))
+                   (progn
+                     (setq emacsos-assist-web--approval-armed nil)
+                     (emacsos-assist-web--submit-approval decision))
+		 (when emacsos-assist-web--approval-armed
+                   (button-put (car emacsos-assist-web--approval-armed) 'display nil))
+		 (setq emacsos-assist-web--approval-armed (cons button decision)
+                       emacsos-assist-web--approval-armed-window (selected-window))
+		 (button-put button 'display (concat "Confirm " label "?")))))))))
+    (insert "\n\n")))
+
+(defun emacsos-assist-web--render-approval ()
+  "Show every field and body before offering an exact proposal decision."
+  (let ((inhibit-read-only t)
+        (inhibit-modification-hooks t)
+        (proposal emacsos-assist-web--approval)
+        (buffer (current-buffer)))
+    (remove-hook 'before-change-functions #'widget-before-change t)
+    (remove-hook 'after-change-functions #'widget-after-change t)
+    (remove-overlays)
+    (use-local-map emacsos-assist-web-approval-mode-map)
+    (erase-buffer)
+    (setq emacsos-assist-web--approval-armed nil)
+    (insert-text-button
+     "Back to thread" 'follow-link t
+     'action (lambda (_)
+               (when (buffer-live-p emacsos-assist-web--approval-source)
+                 (switch-to-buffer emacsos-assist-web--approval-source))))
+    (insert "\n\n")
+    (if (equal (alist-get 'kind proposal) "send_email")
+        (let ((args (or emacsos-assist-web--approval-edited
+                        (alist-get 'args (alist-get 'action proposal)))))
+          (insert "Email awaiting approval\n\n"
+                  "From: " (alist-get 'from proposal) "\n"
+                  "To: " (alist-get 'to args) "\n"
+                  "Cc: " (alist-get 'cc proposal) "\n"
+                  "Subject: " (alist-get 'subject args) "\n\n"
+                  (emacsos-assist-web--canonical-message-text (alist-get 'body args))
+                  "\n\n")
+          (emacsos-assist-web--approval-button
+           (if emacsos-assist-web--approval-edited "Send edited email" "Approve and send")
+           (if emacsos-assist-web--approval-edited "edit" "approve"))
+          (insert-text-button "Edit email" 'follow-link t
+                              'action (lambda (_) (emacsos-assist-web--edit-approval)))
+          (insert "\n\n"))
+      (insert (if (equal (alist-get 'kind proposal) "gmail_delete")
+                  "Move these messages to Trash\n\n"
+                "Archive these messages\n\n"))
+      (when-let ((error (alist-get 'error proposal)))
+        (unless (string-empty-p error)
+          (insert "Complete preview unavailable: " error "\nReject this proposal and try again.\n\n")))
+      (dolist (mail (alist-get 'messages proposal))
+        (dolist (field '(id from to date subject))
+          (insert (capitalize (symbol-name field)) ": " (alist-get field mail) "\n"))
+        (insert "\n" (emacsos-assist-web--canonical-message-text (alist-get 'body mail))
+                "\n\n")
+        (let ((url (concat "https://mail.google.com/mail/u/0/#all/"
+                           (url-hexify-string (alist-get 'id mail)))))
+          (insert-text-button "Open in Gmail" 'follow-link t
+                              'action (lambda (_) (browse-url url))))
+        (insert "\n\n"))
+      (when (and (alist-get 'messages proposal)
+                 (or (null (alist-get 'error proposal))
+                     (string-empty-p (alist-get 'error proposal))))
+        (emacsos-assist-web--approval-button "Approve" "approve")))
+    (emacsos-assist-web--approval-button "Reject" "reject")
+    (insert-text-button
+     "Refresh proposal" 'follow-link t
+     'action (lambda (_)
+               (with-current-buffer buffer
+                 (emacsos-assist-web-review-approval emacsos-assist-web--approval-source))))
+    (insert "\n")
+    (goto-char (point-min))))
+
+(defun emacsos-assist-web--edit-approval ()
+  "Edit recipient, subject and body, then return to review before sending."
+  (when (plist-get (emacsos-assist-web--thread-safety-record
+                   emacsos-assist-web--thread-id) :approval-pending)
+    (user-error "A decision is awaiting confirmation"))
+  (let* ((inhibit-read-only t)
+         (buffer (current-buffer))
+         (args (or emacsos-assist-web--approval-edited
+                   (alist-get 'args (alist-get 'action emacsos-assist-web--approval)))))
+    (erase-buffer)
+    (remove-overlays)
+    (setq emacsos-assist-web--approval-armed nil)
+    (insert "Edit email\n\n")
+    (let ((to (widget-create 'editable-field :format "To: %v\n" :value (alist-get 'to args)))
+          (subject (widget-create 'editable-field :format "Subject: %v\n"
+                                  :value (alist-get 'subject args)))
+          (body (widget-create 'text :format "Body:\n%v\n"
+                               :value (emacsos-assist-web--canonical-message-text
+                                       (alist-get 'body args)))))
+      (widget-create
+       'push-button :notify
+       (lambda (&rest _)
+         (with-current-buffer buffer
+           (let ((edited `((to . ,(widget-value to)) (subject . ,(widget-value subject))
+                           (body . ,(widget-value body)))))
+             (cond
+              ((not (seq-every-p (lambda (field)
+                               (if (eq (car field) 'body)
+                                   (emacsos-assist-web--valid-message-text-p (cdr field))
+                                 (emacsos-conversation-valid-text-p (cdr field)))) edited))
+               (message "Email contains unsupported display controls"))
+              ((or (> (length (alist-get 'to edited)) 320)
+                   (> (length (alist-get 'subject edited)) 998)
+                   (> (length (alist-get 'body edited)) (* 64 1024))
+                   (> (string-bytes (encode-coding-string (alist-get 'subject edited) 'utf-8)) 998)
+                   (> (string-bytes (encode-coding-string (alist-get 'body edited) 'utf-8)) (* 64 1024))
+                   (> (string-bytes
+                       (encode-coding-string
+                        (json-encode
+                         (append `((kind . "send_email") (decision . "edit")
+                                   (token . ,(alist-get 'token emacsos-assist-web--approval)))
+                                 edited)) 'utf-8))
+                      (* 512 1024)))
+               (message (concat "Email exceeds approval limits: To 320 characters, "
+                                "subject 998/body 65536 UTF-8 bytes; request 512 KiB")))
+              (t
+                   (setq emacsos-assist-web--approval-edited edited)
+                   (remove-overlays)
+                   (setq buffer-read-only t)
+                   (emacsos-assist-web--render-approval))))))
+       "Review edited email")
+      (insert "\n\n")
+      (widget-create 'push-button :notify
+                     (lambda (&rest _)
+                       (with-current-buffer buffer
+                         (remove-overlays)
+                         (setq buffer-read-only t)
+                         (emacsos-assist-web--render-approval))) "Cancel edit")
+      (widget-setup)
+      (use-local-map widget-keymap)
+      (setq buffer-read-only nil)
+      (goto-char (widget-field-start to)))))
+
+(defun emacsos-assist-web--submit-approval (decision)
+  "Submit DECISION and reconcile accepted work after any preview refresh."
+  (let* ((buffer (current-buffer))
+         (tid emacsos-assist-web--thread-id)
+         (source emacsos-assist-web--approval-source)
+         (record (emacsos-assist-web--thread-safety-record tid t))
+         (proposal emacsos-assist-web--approval)
+         (attempt (list (alist-get 'kind proposal) (alist-get 'token proposal) decision))
+         (payload `((kind . ,(alist-get 'kind proposal))
+                    (token . ,(alist-get 'token proposal)) (decision . ,decision))))
+    (when (equal decision "edit")
+      (setq payload (append payload emacsos-assist-web--approval-edited)))
+    (when (plist-get record :approval-pending)
+      (user-error "A decision is awaiting confirmation"))
+    (setf (plist-get record :approval-pending) attempt)
+    (message "Submitting approval decision…")
+    (emacsos-assist-web--request
+     "POST" (format "threads/%s/approval" tid) payload
+     (lambda (value error)
+       (when (eq attempt (plist-get record :approval-pending))
+         (setf (plist-get record :approval-pending) nil))
+       (cond
+        ((and (not error) (emacsos-assist-web--object-p value)
+              (equal (alist-get 'thread_id value) tid)
+              (emacsos-assist-web--valid-id-p (alist-get 'run_id value))
+              (eq record (emacsos-assist-web--thread-safety-record tid))
+              (not (plist-get record :denial)))
+         (let ((owners (delete-dups
+                        (mapcar (lambda (stop) (plist-get stop :owner))
+                                (seq-filter (lambda (stop) (eq (plist-get stop :kind) 'approval))
+                                            (plist-get record :stops))))))
+           (when record (cl-incf (plist-get record :approval-generation)))
+           (dolist (owner owners)
+             (when (buffer-live-p owner)
+               (emacsos-assist-web-refresh-thread owner)))
+           (when (buffer-live-p source)
+             (switch-to-buffer source)
+             (unless (memq source owners)
+               (emacsos-assist-web-refresh-thread source)))
+           (let ((preview (or (get-buffer (format "*assist Approval %s*" tid)) buffer)))
+             (when (and (buffer-live-p preview)
+                      (equal (alist-get 'kind proposal)
+                             (alist-get 'kind (buffer-local-value
+                                              'emacsos-assist-web--approval preview)))
+                      (equal (alist-get 'token proposal)
+                             (alist-get 'token (buffer-local-value
+                                               'emacsos-assist-web--approval preview))))
+               (kill-buffer preview)))
+           (message "Approval decision accepted")))
+        (t
+         (let ((preview (or (get-buffer (format "*assist Approval %s*" tid)) buffer)))
+           (when (buffer-live-p preview)
+            (with-current-buffer preview
+             (when (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
+                        (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval)))
+                   ;; The request may have been accepted. A fresh server preview
+                   ;; is required before exposing any decision buttons again.
+                   (let ((inhibit-read-only t))
+                     (erase-buffer)
+                     (insert "Decision not confirmed. Refresh to inspect current state.\n\n")
+                     (insert-text-button
+                      "Refresh proposal" 'follow-link t
+                      'action (lambda (_)
+				(emacsos-assist-web-review-approval
+				 emacsos-assist-web--approval-source))))
+                   (message "Approval decision not confirmed: %s"
+                            (or error "invalid acknowledgment"))))))))))))
+
+(define-derived-mode emacsos-assist-web-approval-mode special-mode "Assist Approval"
+  "Review a complete pending Assist action using explicit two-tap decisions."
+  (visual-line-mode 1)
+  (setq-local truncate-lines nil word-wrap t)
+  (add-hook 'pre-command-hook #'emacsos-assist-web--approval-disarm nil t))
 
 (provide 'assist-web)
 ;;; assist-web.el ends here

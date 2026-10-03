@@ -7835,5 +7835,771 @@
       (should (equal emacsos-assist-web--stream-status
                      "observation unavailable; operator repair required")))))
 
+(defconst test-assist-web--email-approval
+  '((kind . "send_email") (token . "01234567890123456789012345678901")
+    (from . "Assistant <assistant@example.test>") (cc . "oversight@example.test")
+    (action . ((name . "send_email") (args . ((to . "recipient@example.test")
+                                              (subject . "Subject")
+                                              (body . "First line\nLast body line")))))))
+
+(defun test-assist-web--approval-button (label)
+  "Find the actionable approval button with LABEL in this buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (search-forward label nil t))
+        (setq found (button-at (1- (point)))))
+      found)))
+
+(ert-deftest test-assist-web-approval-complete-preview-and-two-tap-send ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (dolist (field '("Assistant <assistant@example.test>" "oversight@example.test"
+                     "recipient@example.test" "Subject" "First line\nLast body line"))
+      (should (string-match-p (regexp-quote field) (buffer-string))))
+    (let ((button (test-assist-web--approval-button "Approve and send")) sent)
+      (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                 (lambda (decision) (setq sent decision))))
+        (button-activate button)
+        (should-not sent)
+        (should (equal (button-get button 'display) "Confirm Approve and send?"))
+        (button-activate button)
+        (should (equal sent "approve"))))))
+
+(ert-deftest test-assist-web-approval-other-action-disarms-confirmation ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (let ((button (test-assist-web--approval-button "Approve and send")) sent)
+      (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                 (lambda (decision) (setq sent decision))))
+        (button-activate button)
+        (let ((this-command 'forward-char) (last-input-event ?f))
+          (emacsos-assist-web--approval-disarm))
+        (should-not emacsos-assist-web--approval-armed)
+        (should-not (button-get button 'display))
+        (button-activate button)
+        (should-not sent)))))
+
+(ert-deftest test-assist-web-approval-native-mouse-taps-confirm-and-disarm ()
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((approve (test-assist-web--approval-button "Approve and send"))
+            (reject (test-assist-web--approval-button "Reject")) sent)
+        (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                   (lambda (decision) (push decision sent))))
+          (cl-labels ((tap (button)
+                        (let ((position (list (selected-window) (button-start button)
+                                              '(10 . 10) 0)))
+                          (execute-kbd-macro
+                           (vector (list 'down-mouse-1 position)
+                                   (list 'mouse-1 position))))))
+            (tap approve)
+            (should-not sent)
+            (should emacsos-assist-web--approval-armed)
+            (tap approve)
+            (should (equal sent '("approve")))
+            (tap approve)
+            (tap reject)
+            (should (equal sent '("approve")))
+            (should (equal (cdr emacsos-assist-web--approval-armed) "reject"))
+            (execute-kbd-macro (kbd "C-f"))
+            (should-not emacsos-assist-web--approval-armed)
+            (tap reject)
+            (should (equal sent '("approve")))
+            (tap reject)
+            (should (equal sent '("reject" "approve")))))))))
+
+(ert-deftest test-assist-web-approval-tap-in-other-window-disarms ()
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let* ((button (test-assist-web--approval-button "Approve and send"))
+             (other (split-window-right))
+             (this-command 'push-button)
+             (last-input-event (list 'mouse-2 (list other (button-start button) '(0 . 0) 0))))
+        (set-window-buffer other (get-buffer-create " *approval keyboard test*"))
+        (unwind-protect
+            (progn
+              (button-activate button)
+              (should emacsos-assist-web--approval-armed)
+              (emacsos-assist-web--approval-disarm)
+              (should-not emacsos-assist-web--approval-armed))
+          (kill-buffer " *approval keyboard test*"))))))
+
+(ert-deftest test-assist-web-approval-old-post-callback-preserves-new-preview ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (let (callback)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _data fn &rest _) (setq callback fn))))
+        (emacsos-assist-web--submit-approval "approve"))
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (setf (alist-get 'token emacsos-assist-web--approval) "different-proposal-token-123456")
+      (emacsos-assist-web--render-approval)
+      (funcall callback nil "old request failed")
+      (should (string-match-p "Email awaiting approval" (buffer-string)))
+      (should-not (string-match-p "Decision not confirmed" (buffer-string))))))
+
+(ert-deftest test-assist-web-approval-editor-returns-to-full-review ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (emacsos-assist-web--edit-approval)
+    (should (eq (current-local-map) widget-keymap))
+    (should-not buffer-read-only)
+    (let* ((fields (sort (copy-sequence widget-field-list)
+                        (lambda (a b) (< (widget-field-start a) (widget-field-start b)))))
+           (to (nth 0 fields)) (subject (nth 1 fields)) (body (nth 2 fields)))
+      (widget-value-set to "edited@example.test")
+      (widget-value-set subject "Edited subject")
+      (widget-value-set body "New body\nFinal edited line")
+      (goto-char (point-min))
+      (search-forward "Review edited email")
+      (widget-apply (widget-at (1- (point))) :notify nil)
+      (should buffer-read-only)
+      (should (equal emacsos-assist-web--approval-edited
+                     '((to . "edited@example.test") (subject . "Edited subject")
+                       (body . "New body\nFinal edited line"))))
+      (should (string-match-p "Final edited line" (buffer-string)))
+      (should (test-assist-web--approval-button "Send edited email"))
+      (should (equal (alist-get 'token emacsos-assist-web--approval)
+                     (alist-get 'token test-assist-web--email-approval))))))
+
+(ert-deftest test-assist-web-approval-gmail-bodies-links-and-unavailable-preview ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval
+          '((kind . "gmail_delete") (token . "01234567890123456789012345678901")
+            (action . ((name . "gmail_delete") (args . ((message_ids . ("abc123"))))))
+            (messages . (((id . "abc123") (from . "sender@example.test")
+                          (to . "reader@example.test") (date . "Yesterday")
+                          (subject . "Subject") (body . "Complete mail body"))))))
+    (emacsos-assist-web--require-approval
+     `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "Complete mail body" (buffer-string)))
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (button-activate (test-assist-web--approval-button "Open in Gmail")))
+      (should (equal opened "https://mail.google.com/mail/u/0/#all/abc123")))
+    (setf (alist-get 'error emacsos-assist-web--approval) "Complete body unavailable"
+          (alist-get 'messages emacsos-assist-web--approval) nil)
+    (emacsos-assist-web--require-approval
+     `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "Complete body unavailable" (buffer-string)))
+    (should-not (string-match-p "Approve" (buffer-string)))
+    (should (test-assist-web--approval-button "Reject"))))
+
+(ert-deftest test-assist-web-approval-gmail-opaque-id-and-encoded-link ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval
+          '((kind . "gmail_archive") (token . "01234567890123456789012345678901")
+            (action . ((name . "gmail_archive")
+                       (args . ((message_ids . ("opaque id?#é"))))))
+            (messages . (((id . "opaque id?#é") (from . "sender@example.test")
+                          (to . "reader@example.test") (date . "Yesterday")
+                          (subject . "Subject") (body . "Complete mail body"))))))
+    (should (eq emacsos-assist-web--approval
+                (emacsos-assist-web--require-approval
+                 `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval))
+                 "thread-1")))
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p (regexp-quote "Id: opaque id?#é") (buffer-string)))
+    (should (test-assist-web--approval-button "Approve"))
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (button-activate (test-assist-web--approval-button "Open in Gmail")))
+      (should (equal opened "https://mail.google.com/mail/u/0/#all/opaque%20id%3F%23%C3%A9")))))
+
+(ert-deftest test-assist-web-approval-failure-requires-fresh-preview ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "thread-1"
+          emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--render-approval)
+    (let (payload)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path data callback &rest _)
+                   (setq payload data)
+                   (funcall callback nil "request timed out"))))
+        (emacsos-assist-web--submit-approval "approve"))
+      (should (equal (alist-get 'token payload)
+                     (alist-get 'token test-assist-web--email-approval)))
+      (should-not (plist-get (emacsos-assist-web--thread-safety-record "thread-1")
+                             :approval-pending))
+      (should (string-match-p "Decision not confirmed" (buffer-string)))
+      (should-not (string-match-p "Approve" (buffer-string)))
+      (should (test-assist-web--approval-button "Refresh proposal")))))
+
+(ert-deftest test-assist-web-approval-rejects-spoofing-and-mismatched-message-ids ()
+  (let ((proposal (copy-tree test-assist-web--email-approval)))
+    (setf (alist-get 'body (alist-get 'args (alist-get 'action proposal)))
+          (concat "Hidden" (string #x202e) "text"))
+    (should-error (emacsos-assist-web--require-approval
+                   `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1")))
+  (should-error
+   (emacsos-assist-web--require-approval
+    '((thread_id . "thread-1")
+      (proposal . ((kind . "gmail_archive") (token . "01234567890123456789012345678901")
+                   (action . ((name . "gmail_archive") (args . ((message_ids . ("abc"))))))
+                   (messages . (((id . "def") (from . "") (to . "")
+                                 (date . "") (subject . "") (body . "")))))))
+    "thread-1")))
+
+
+(ert-deftest test-assist-web-stopped-approval-opens-review-with-original-receipt ()
+  "Exact stopped approval exposes review even with the previous ready snapshot."
+  (let ((emacsos--assist-active-surface nil)
+        (source (generate-new-buffer " *approval source*")) callback paths)
+    (unwind-protect
+        (with-current-buffer source
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--snapshot (copy-tree test-assist-web--snapshot))
+          (emacsos-assist-web--write-prompt)
+          (let ((entry (emacsos-assist-web--entry "Email this person" 'accepted-unobserved "key-a")))
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :requires-reobserve) t)
+            (setq emacsos-assist-web--queue (list entry))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method path _payload cb &rest _)
+                         (push path paths) (setq callback cb)))
+                      ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+              (emacsos-assist-web--reobserve-entry entry)
+              (funcall callback '((id . "run-a") (thread_id . "thread-1")
+                                  (status . "awaiting_approval")) nil)
+              (should (plist-get entry :approval-stopped))
+              (let* ((header (emacsos-assist-web--thread-header))
+                     (position (string-match "Review" header))
+                     (map (get-text-property position 'local-map header)))
+                (should position)
+                (should (eq (lookup-key map [header-line mouse-1])
+                            'emacsos-assist-web-review-approval)))
+              (emacsos-assist-web-review-approval source)
+              (funcall callback `((thread_id . "thread-1")
+                                  (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "reject"))
+              (funcall callback '((thread_id . "thread-1") (run_id . "resume-a")) nil)
+              (should (equal (car paths) "threads/thread-1/runs/run-a"))
+              (should (eq (car emacsos-assist-web--queue) entry))
+              (should (equal (plist-get entry :text) "Email this person"))
+              (should (equal (plist-get entry :run-id) "run-a")))))
+      (when (get-buffer "*assist Approval thread-1*")
+        (kill-buffer "*assist Approval thread-1*"))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-old-approval-get-cannot-clear-new-denial ()
+  "An older preview response cannot reopen a proposal after canonical denial."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (let (callback)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (_method _path _payload cb &rest _) (setq callback cb))))
+        (emacsos-assist-web-review-approval (current-buffer)))
+      (cl-incf emacsos-assist-web--auth-epoch)
+      (setq emacsos-assist-web--denied t)
+      (funcall callback `((thread_id . "thread-1")
+                          (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+      (should emacsos-assist-web--denied)
+      (should-not (get-buffer "*assist Approval thread-1*")))))
+
+
+
+(ert-deftest test-assist-web-approval-rejects-multiline-headers ()
+  "Email proposal headers cannot insert trusted field labels or body lines."
+  (dolist (field '(from cc to subject))
+    (let* ((proposal (copy-tree test-assist-web--email-approval))
+           (target (if (memq field '(from cc)) proposal
+                     (alist-get 'args (alist-get 'action proposal)))))
+      (setf (alist-get field target) "attacker\nCc: hidden@example.test")
+      (should-error (emacsos-assist-web--require-approval
+                     `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1")))))
+
+(ert-deftest test-assist-web-empty-refresh-closes-stale-approval ()
+  "An authoritative empty preview removes the old decision controls."
+  (let ((source (generate-new-buffer " *empty approval source*"))
+        (preview (get-buffer-create "*assist Approval thread-1*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"))
+          (with-current-buffer preview
+            (emacsos-assist-web-approval-mode)
+            (setq emacsos-assist-web--approval-source source
+                  emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+            (emacsos-assist-web--render-approval))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload callback &rest _)
+                       (funcall callback '((thread_id . "thread-1") (proposal)) nil)))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+            (emacsos-assist-web-review-approval source))
+          (should-not (buffer-live-p preview)))
+      (when (buffer-live-p preview) (kill-buffer preview))
+      (kill-buffer source))))
+
+
+(ert-deftest test-assist-web-approval-editor-rejects-header-newlines ()
+  "Reviewing an edit preserves the editor until single-line headers are valid."
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (emacsos-assist-web--edit-approval)
+    (let* ((fields (sort (copy-sequence widget-field-list)
+                         (lambda (a b) (< (widget-field-start a) (widget-field-start b)))))
+           (subject (nth 1 fields)))
+      (widget-value-set subject "Spoof\nCc: hidden@example.test"))
+    (goto-char (point-min))
+    (search-forward "Review edited email")
+    (widget-apply (widget-at (1- (point))) :notify nil)
+    (should-not emacsos-assist-web--approval-edited)
+    (should-not buffer-read-only)))
+
+
+(ert-deftest test-assist-web-approval-rejects-multiline-mailbox-headers ()
+  "Exact Gmail previews admit multiline bodies but reject injected header rows."
+  (dolist (field '(from to date subject))
+    (let* ((message '((id . "abc123") (from . "sender@example.test")
+                      (to . "reader@example.test") (date . "Yesterday")
+                      (subject . "Subject") (body . "Full\nbody")))
+           (mail (copy-tree message))
+           (proposal `((kind . "gmail_delete") (token . "01234567890123456789012345678901")
+                       (action . ((name . "gmail_delete") (args . ((message_ids . ("abc123"))))))
+                       (messages . (,mail)))))
+      (setf (alist-get field mail) "Spoof\nFrom: someone@example.test")
+      (should-error (emacsos-assist-web--require-approval
+                     `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1")))))
+
+
+
+(ert-deftest test-assist-web-empty-old-refresh-preserves-newer-peer-proposal ()
+  "An empty response can close only the preview present when its read began."
+  (let ((source (generate-new-buffer " *old empty source*"))
+        (preview (get-buffer-create "*assist Approval thread-1*")) callback)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"))
+          (with-current-buffer preview
+            (emacsos-assist-web-approval-mode)
+            (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+            (emacsos-assist-web-review-approval source)
+            (with-current-buffer preview
+              (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+              (emacsos-assist-web--render-approval))
+            (funcall callback '((thread_id . "thread-1") (proposal)) nil))
+          (should (buffer-live-p preview))
+          (with-current-buffer preview
+            (should (test-assist-web--approval-button "Approve and send"))))
+      (when (buffer-live-p preview) (kill-buffer preview))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-approval-http-denial-fences-preview-and-old-callback ()
+  "Malformed approval denials latch every peer before an old callback can return."
+  (dolist (status '(401 403 404))
+    (let ((source (generate-new-buffer " *approval denial source*"))
+          (peer (generate-new-buffer " *approval denial peer*"))
+          (preview (get-buffer-create "*assist Approval thread-1*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          (emacsos-assist-web--requests nil)
+          old-callback)
+      (unwind-protect
+          (progn
+            (dolist (buffer (list source peer))
+              (with-current-buffer buffer
+                (emacsos-assist-web-mode)
+                (setq emacsos-assist-web--thread-id "thread-1")))
+            (with-current-buffer preview
+              (emacsos-assist-web-approval-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--approval-source source
+                    emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+              (emacsos-assist-web--render-approval))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _)
+                         (setq old-callback callback))))
+              (emacsos-assist-web-review-approval source))
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (_url callback &rest _)
+                         (let ((response (generate-new-buffer " *approval denial response*")))
+                           (with-current-buffer response
+                             (setq-local url-http-response-status status
+                                         url-http-content-type "text/plain"
+                                         url-http-end-of-headers (copy-marker (point-min)))
+                             (insert "malformed denial")
+                             (funcall callback nil))
+                           response))))
+              (with-current-buffer source
+                (emacsos-assist-web--request
+                 "GET" "threads/thread-1/approval" nil (lambda (&rest _) nil))))
+            (dolist (buffer (list source peer))
+              (with-current-buffer buffer
+                (should emacsos-assist-web--denied)
+                (should (= emacsos-assist-web--thread-denial-status status))
+                (should (> emacsos-assist-web--auth-epoch 0))))
+            (should-not (buffer-live-p preview))
+            (funcall old-callback
+                     `((thread_id . "thread-1")
+                       (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (should-not (get-buffer "*assist Approval thread-1*")))
+        (dolist (buffer (list preview peer source))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest test-assist-web-approval-orders-reads-across-peers ()
+  "An older peer's response cannot replace or close the newer peer's preview."
+  (dolist (old-value (list `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--email-approval)))
+                          '((thread_id . "thread-1") (proposal))))
+    (let ((a (generate-new-buffer " *approval older peer*"))
+          (b (generate-new-buffer " *approval newer peer*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          callbacks)
+      (unwind-protect
+          (progn
+            (dolist (buffer (list a b))
+              (with-current-buffer buffer
+                (emacsos-assist-web-mode)
+                (setq emacsos-assist-web--thread-id "thread-1")))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _)
+                         (push callback callbacks)))
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+              (emacsos-assist-web-review-approval a)
+              (emacsos-assist-web-review-approval b)
+              (let ((new (copy-tree test-assist-web--email-approval)))
+                (setf (alist-get 'token new) "newer-proposal-token-1234567890")
+                (funcall (car callbacks) `((thread_id . "thread-1") (proposal . ,new)) nil)
+                (funcall (cadr callbacks) old-value nil)
+                (with-current-buffer "*assist Approval thread-1*"
+                  (should (eq emacsos-assist-web--approval new))))))
+        (when-let ((preview (get-buffer "*assist Approval thread-1*")))
+          (kill-buffer preview))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(ert-deftest test-assist-web-approval-peer-acceptance-reobserves-receipt-owner ()
+  "The latest preview invoker cannot steal the stopped receipt's refresh."
+  (let ((owner (generate-new-buffer " *approval receipt owner*"))
+        (peer (generate-new-buffer " *approval preview peer*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        callback paths)
+    (unwind-protect
+        (progn
+          (dolist (buffer (list owner peer))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1")))
+          (with-current-buffer owner
+            (let ((entry (emacsos-assist-web--entry "Email this person" 'accepted-unobserved "key-a")))
+              (setf (plist-get entry :run-id) "run-a"
+                    (plist-get entry :requires-reobserve) t
+                    (plist-get entry :approval-stopped) t)
+              (setq emacsos-assist-web--queue (list entry))
+              (emacsos-assist-web--stop-reobserve entry 'approval)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method path _payload cb &rest _)
+                       (push path paths) (setq callback cb)))
+                    ((symbol-function 'emacsos-assist-web--save-draft) (lambda () t)))
+            (emacsos-assist-web-review-approval owner)
+            (funcall callback `((thread_id . "thread-1")
+                                (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (emacsos-assist-web-review-approval peer)
+            (funcall callback `((thread_id . "thread-1")
+                                (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (with-current-buffer "*assist Approval thread-1*"
+              (emacsos-assist-web--submit-approval "reject"))
+            (funcall callback '((thread_id . "thread-1") (run_id . "resume-a")) nil)
+            (should (member "threads/thread-1/runs/run-a" paths))
+            (with-current-buffer owner
+              (should (equal (plist-get (car emacsos-assist-web--queue) :run-id) "run-a")))))
+      (when-let ((preview (get-buffer "*assist Approval thread-1*")))
+        (kill-buffer preview))
+      (kill-buffer owner)
+      (kill-buffer peer))))
+
+(ert-deftest test-assist-web-approval-transient-failure-keeps-canonical-state ()
+  "Only definitive approval access denials affect canonical authorization."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (let (uncertain)
+      (cl-letf (((symbol-function 'emacsos-assist-web--canonical-uncertain)
+                 (lambda () (setq uncertain t))))
+        (dolist (status '(nil 500))
+          (should-not (emacsos-assist-web--http-access-status
+                       (current-buffer) "GET" "threads/thread-1/approval" status t))
+          (should-not uncertain))
+        (should (emacsos-assist-web--http-access-status
+                 (current-buffer) "GET" "threads/thread-1" nil t))
+        (should uncertain)))))
+
+(ert-deftest test-assist-web-approval-delayed-get-after-accepted-post ()
+  (let ((a (generate-new-buffer " *reviewer approval a*"))
+        (b (generate-new-buffer " *reviewer approval b*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        gets post)
+    (unwind-protect
+        (progn
+          (dolist (buf (list a b))
+            (with-current-buffer buf
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1")))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method _path _payload cb &rest _)
+                       (if (equal method "GET") (push cb gets) (setq post cb))))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+            (emacsos-assist-web-review-approval a)
+            (funcall (car gets) `((thread_id . "thread-1") (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (emacsos-assist-web-review-approval b)
+            (let ((delayed (car gets)))
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "approve"))
+              (funcall post '((thread_id . "thread-1") (run_id . "accepted-resume")) nil)
+              (should-not (get-buffer "*assist Approval thread-1*"))
+              (funcall delayed `((thread_id . "thread-1") (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (should-not (get-buffer "*assist Approval thread-1*")))))
+      (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+      (kill-buffer a) (kill-buffer b))))
+
+(ert-deftest test-assist-web-approval-valid-ack-survives-preview-reentry ()
+  (let ((a (generate-new-buffer " *reviewer approval a*"))
+        (b (generate-new-buffer " *reviewer approval b*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        gets post refreshed)
+    (unwind-protect
+        (progn
+          (dolist (buf (list a b))
+            (with-current-buffer buf
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1")))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method _path _payload cb &rest _)
+                       (if (equal method "GET") (push cb gets) (setq post cb))))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread)
+                     (lambda (buffer &rest _) (push buffer refreshed))))
+            (emacsos-assist-web-review-approval a)
+            (funcall (car gets) `((thread_id . "thread-1") (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (emacsos-assist-web-review-approval b)
+            (let ((delayed (car gets)))
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "approve"))
+              (funcall delayed `((thread_id . "thread-1") (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (funcall post '((thread_id . "thread-1") (run_id . "accepted-resume")) nil)
+              (should (memq a refreshed))
+              (should-not (get-buffer "*assist Approval thread-1*")))))
+      (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+      (kill-buffer a) (kill-buffer b))))
+
+(ert-deftest test-assist-web-approval-editor-enforces-api-field-boundaries ()
+  "Oversized edits stay in the editor; valid boundary text returns to review."
+  (dolist (field-limit '((to 320 ?a) (subject 998 ?a) (body 65536 ?a)
+                       (subject 499 ?é) (body 32768 ?é)))
+    (dolist (extra '(0 1))
+      (with-temp-buffer
+        (emacsos-assist-web-approval-mode)
+        (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+        (emacsos-assist-web--edit-approval)
+        (let* ((fields (sort (copy-sequence widget-field-list)
+                             (lambda (a b) (< (widget-field-start a) (widget-field-start b)))))
+               (field (nth (cl-position (car field-limit) '(to subject body)) fields))
+               (value (make-string (+ (cadr field-limit) extra) (caddr field-limit)))
+               notice)
+          (widget-value-set field value)
+          (goto-char (point-min))
+          (search-forward "Review edited email")
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format &rest args) (setq notice (apply #'format format args)))))
+            (widget-apply (widget-at (1- (point))) :notify nil))
+          (if (= extra 0)
+              (progn
+                (should buffer-read-only)
+                (should (equal (alist-get (car field-limit) emacsos-assist-web--approval-edited) value)))
+            (should-not buffer-read-only)
+            (should-not emacsos-assist-web--approval-edited)
+            (should (equal (widget-value field) value))
+            (should (string-prefix-p "Email exceeds approval limits" notice))))))))
+
+(ert-deftest test-assist-web-approval-pending-post-survives-preview-reentry ()
+  (dolist (recreate '(nil t))
+    (let ((source (generate-new-buffer " *pending approval source*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          get posts)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload callback &rest _)
+                         (if (equal method "GET") (setq get callback)
+                           (push callback posts))))
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+              (emacsos-assist-web-review-approval source)
+              (funcall get `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (emacsos-assist-web-review-approval source)
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "approve"))
+              (when recreate (kill-buffer "*assist Approval thread-1*"))
+              (funcall get `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (let ((reject (test-assist-web--approval-button "Reject")))
+                  (button-activate reject)
+                  (button-activate reject))
+                (should (= (length posts) 1))
+                (should-error (emacsos-assist-web--submit-approval "reject") :type 'user-error))
+              (funcall (car posts) '((thread_id . "thread-1") (run_id . "accepted-resume")) nil)
+              (should-not (get-buffer "*assist Approval thread-1*"))
+              (should-not (plist-get (emacsos-assist-web--thread-safety-record "thread-1")
+                                     :approval-pending))))
+        (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+        (kill-buffer source)))))
+
+(ert-deftest test-assist-web-approval-native-taps-in-two-preview-windows-rearm ()
+  (save-window-excursion
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((first (selected-window)) (second (split-window-right))
+            (approve (test-assist-web--approval-button "Approve and send")) sent)
+        (set-window-buffer second (current-buffer))
+        (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                   (lambda (decision) (setq sent decision))))
+          (cl-labels ((tap (window)
+                        (select-window window)
+                        (let ((position (list window (button-start approve) '(10 . 10) 0)))
+                          (execute-kbd-macro
+                           (vector (list 'down-mouse-1 position) (list 'mouse-1 position))))))
+            (tap first)
+            (tap second)
+            (should-not sent)
+            (tap second)
+            (should (equal sent "approve"))))))))
+
+(ert-deftest test-assist-web-approval-editor-canonicalizes-crlf-body ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+    (setf (alist-get 'body (alist-get 'args (alist-get 'action emacsos-assist-web--approval)))
+          "First\r\nLast")
+    (emacsos-assist-web--edit-approval)
+    (goto-char (point-min))
+    (search-forward "Review edited email")
+    (widget-apply (widget-at (1- (point))) :notify nil)
+    (should buffer-read-only)
+    (should (equal (alist-get 'body emacsos-assist-web--approval-edited) "First\nLast"))))
+
+(ert-deftest test-assist-web-approval-ack-closes-recreated-preview ()
+  (let ((source (generate-new-buffer " *reviewer recreated source*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        get post)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method _path _payload cb &rest _)
+                       (if (equal method "GET") (setq get cb) (setq post cb))))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+            (emacsos-assist-web-review-approval source)
+            (funcall get `((thread_id . "thread-1") (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (with-current-buffer "*assist Approval thread-1*" (emacsos-assist-web--submit-approval "approve"))
+            (kill-buffer "*assist Approval thread-1*")
+            (emacsos-assist-web-review-approval source)
+            (funcall get `((thread_id . "thread-1") (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+            (funcall post '((thread_id . "thread-1") (run_id . "accepted-resume")) nil)
+            (should-not (get-buffer "*assist Approval thread-1*"))))
+      (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+      (kill-buffer source))))
+
+
+
+(ert-deftest test-assist-web-approval-reuses-preapproval-safety-record ()
+  "An open thread's pre-approval record remains usable after code upgrade."
+  (let ((source (generate-new-buffer " *old safety approval source*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        get)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "thread-1"))
+          (let ((old (list :buffers (list source) :stops nil :denial nil)))
+            (puthash "thread-1" old emacsos-assist-web--thread-safety)
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _) (setq get callback))))
+              (emacsos-assist-web-review-approval source)
+              (should (eq old (gethash "thread-1" emacsos-assist-web--thread-safety)))
+              (should (= (plist-get old :approval-generation) 1))
+              (funcall get `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (should (test-assist-web--approval-button "Approve and send"))
+                (emacsos-assist-web--submit-approval "approve")
+                (should (plist-get old :approval-pending))
+                (should-error (emacsos-assist-web--submit-approval "reject") :type 'user-error)))))
+      (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-approval-scalar-ack-requires-fresh-preview ()
+  "Every non-object JSON acknowledgment removes unconfirmed decision controls."
+  (dolist (ack '("accepted" 1 t :false [] nil))
+    (let ((source (generate-new-buffer " *scalar ack source*"))
+          (preview (get-buffer-create "*assist Approval thread-1*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          post)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"))
+            (with-current-buffer preview
+              (emacsos-assist-web-approval-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"
+                    emacsos-assist-web--approval-source source
+                    emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+              (emacsos-assist-web--render-approval)
+              (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                         (lambda (_method _path _payload callback &rest _) (setq post callback))))
+                (emacsos-assist-web--submit-approval "approve")))
+            (funcall post ack nil)
+            (should-not (plist-get (emacsos-assist-web--thread-safety-record "thread-1") :approval-pending))
+            (with-current-buffer preview
+              (should (string-prefix-p "Decision not confirmed" (buffer-string)))
+              (should-not (test-assist-web--approval-button "Approve and send"))
+              (should-not (test-assist-web--approval-button "Reject"))
+              (should (test-assist-web--approval-button "Refresh proposal"))))
+        (when (buffer-live-p preview) (kill-buffer preview))
+        (kill-buffer source)))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here
