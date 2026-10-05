@@ -63,6 +63,33 @@
       (when-let ((buffer (get-buffer emacsos-assist-web--thread-list-buffer-name)))
         (kill-buffer buffer)))))
 
+(ert-deftest test-assist-desktop-empty-list-new-thread-shortcut ()
+  (let ((emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-state nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos-assist-web--new-thread-pending-p nil)
+        (catalog (make-hash-table :test #'equal))
+        started)
+    (dolist (field '("threads" "repositories" "harnesses"))
+      (puthash field [] catalog))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _body callback &rest _args)
+                       (funcall callback catalog nil)))
+                    ((symbol-function 'emacsos-assist-web--try-write-cache)
+                     (lambda (&rest _args) t))
+                    ((symbol-function 'emacsos-assist-web-new-thread)
+                     (lambda () (interactive) (setq started t))))
+            (call-interactively #'emacsos-desktop-assist)
+            (should (string-match-p "Use C-c a n" (buffer-string)))
+            (should (eq (key-binding (kbd "C-c a n"))
+                        #'emacsos-assist-web-new-thread))
+            (call-interactively (key-binding (kbd "C-c a n")))
+            (should started)))
+      (when-let ((buffer (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+        (kill-buffer buffer)))))
+
 (ert-deftest test-assist-desktop-conversation-and-git-keys ()
   (with-temp-buffer
     (emacsos-assist-web-mode)

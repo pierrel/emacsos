@@ -257,8 +257,9 @@ An =ok=true= result checks configuration, not connectivity or key permissions
 on the Git server.  Thread chat works without Git configuration; file/diff
 actions report an unavailable workspace until Git setup and fetching succeed.
 
-Run =M-x emacsos-desktop-assist=.  The list uses =g= to refresh and =RET= or
-mouse-1 to open a thread.  =M-x emacsos-assist-web-open-thread= offers filtered
+Run =M-x emacsos-desktop-assist=.  The list uses =g= to refresh, =C-c a n= to
+start a new thread, and =RET= or mouse-1 to open a thread.  The new-thread key is
+local to the thread list.  =M-x emacsos-assist-web-open-thread= offers filtered
 completion; =M-x emacsos-assist-web-new-thread= selects a repository and harness
 and opens a local draft.  Type after the final => = prompt in a thread/draft;
 =RET= inserts a newline and =C-RET= sends.  =C-c C-r= refreshes the thread,

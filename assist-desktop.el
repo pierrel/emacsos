@@ -12,6 +12,9 @@
              (file-name-directory (or load-file-name buffer-file-name)))
 (require 'assist-web)
 
+(define-key emacsos-assist-web-thread-list-mode-map (kbd "C-c a n")
+            #'emacsos-assist-web-new-thread)
+
 ;;;###autoload
 (defun emacsos-desktop-assist ()
   "Open the Assist thread list and refresh it asynchronously."
