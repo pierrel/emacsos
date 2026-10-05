@@ -13,6 +13,16 @@ export LOCAL_EMACSOS_DIR
 install-local:
 	deploy/install-local.sh
 
+DESKTOP_ASSIST_DIR ?= $(HOME)/.local/share/emacsos-assist
+export DESKTOP_ASSIST_DIR
+
+.PHONY: install-desktop test-install-desktop
+install-desktop:
+	python3 deploy/install-desktop.py
+
+test-install-desktop:
+	PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-install-desktop.py
+
 wvkbd-build:
 	WVKBD_REPO_DIR="$(WVKBD_REPO_DIR)" WVKBD_BUILD_DIR="$(WVKBD_BUILD_DIR)" \
 		deploy/pinephone/build-wvkbd-emacsos.sh
@@ -216,10 +226,12 @@ test-elisp: test-install-local
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
 
 .PHONY: test-desktop-assist
-test-desktop-assist:
-	emacs -Q --batch -l tests/test-assist-desktop.el -f ert-run-tests-batch-and-exit
-	emacs -Q --batch -L . -L tests -l tests/test-assist-web.el -l tests/test-assist-web-git.el -f ert-run-tests-batch-and-exit
-	PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-assist-web-git-helper.py
+test-desktop-assist: test-install-desktop
+	@desktop_home=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$desktop_home"' EXIT HUP INT TERM; \
+	HOME="$$desktop_home" emacs -Q --batch -l tests/test-assist-desktop.el -f ert-run-tests-batch-and-exit && \
+	HOME="$$desktop_home" emacs -Q --batch -L . -L tests -l tests/test-assist-web.el -l tests/test-assist-web-git.el -f ert-run-tests-batch-and-exit && \
+	HOME="$$desktop_home" PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-assist-web-git-helper.py
 
 test-assist-web-git:
 	PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-assist-web-git-helper.py

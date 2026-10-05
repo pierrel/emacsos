@@ -208,18 +208,55 @@ ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 
 =assist-desktop.el= loads the existing Assist Web client into ordinary Emacs.
 It does not load the phone OS, modem, keyboard, theme or server startup.
-Use Emacs 29 or newer with GnuTLS and native JSON support.  Thread Git workspaces
-also need Python 3.10+, Git, OpenSSH and GNU =timeout= on Linux; install Magit in
-your normal Emacs for =C-c d= diffs.  No Python server or local model is needed.
+Use Emacs 29 or newer with GnuTLS and native JSON support, Python 3.10+,
+Git, Make, OpenSSH and GNU coreutils.  Install Magit in your normal Emacs with
+=M-x package-install RET magit RET= for =C-c d= diffs.  No Python server or
+local model is needed on the laptop.
 
-You can load =assist-desktop.el= directly from this checkout.  For a small
-standalone installation, copy these five files together to a user directory:
+On macOS with Homebrew:
 
 #+begin_src sh
-mkdir -p ~/.local/share/emacsos-assist
-cp assist-desktop.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py \
-  ~/.local/share/emacsos-assist/
+xcode-select --install
+brew install --cask emacs-app
+brew install python coreutils
 #+end_src
+
+The Command Line Tools supply Git and Make; skip their installation if already
+present.  Coreutils supplies =gtimeout=.  In graphical Emacs, make Homebrew's
+=bin= directory visible in =exec-path= before loading the client: use
+=(add-to-list 'exec-path "/opt/homebrew/bin")= on Apple Silicon, or
+=(add-to-list 'exec-path "/usr/local/bin")= on Intel.  The Git client resolves
+Python and =timeout= or =gtimeout= through that path.  For batch checks, expose
+Emacs.app's =Contents/MacOS/= directory in your shell's =PATH= if =emacs= is
+not already available.
+
+On Linux, install your system's Emacs, Python, Git, Make, OpenSSH and coreutils
+packages; the timeout executable is normally named =timeout=.
+
+On the laptop, clone this feature branch while PR #57 is awaiting merge:
+
+#+begin_src sh
+mkdir -p ~/src
+cd ~/src
+git clone --branch emacsos-desktop-assist https://github.com/pierrel/emacsos.git
+cd emacsos
+make install-desktop
+#+end_src
+
+=make install-desktop= installs only the five Assist client files to
+=~/.local/share/emacsos-assist/=.  It preserves unrelated files and refuses
+an update if an installed client file was edited locally.  To select another
+location, use =make install-desktop DESKTOP_ASSIST_DIR="/your/path"= and adjust
+the loader path below.  You can also load =assist-desktop.el= directly from the
+checkout.
+
+Before connecting, make the Assist server reachable from the laptop through
+your trusted LAN or VPN/WireGuard connection.  Use its HTTPS URL, with
+=/api/v1/phone= appended; the hostname or address must match its certificate.
+Provision your token and, if needed, its trusted public CA certificate through
+your existing private setup.  Keep those files separate from the clone and
+installed code.  Create =~/.config/emacsos/= privately (=chmod 700=), and
+make the token and private Git files below mode =0600=.
 
 In your private Emacs init, set the endpoint, credential and any custom cache
 paths before loading the client (the endpoint below is a placeholder):
@@ -286,18 +323,52 @@ their saved routes bind each thread to a stable directory.  Local edits,
 untracked files, commits and unsaved visiting buffers are preserved; refresh
 reports pending changes rather than resetting, stashing or force pushing.
 
-To launch from a checkout without changing your init, put the private =setq=
-configuration above in =~/.config/emacsos/assist-desktop-config.el= and run:
+After PR #57 is merged, switch this clone to the release branch once:
+
+#+begin_src sh
+cd ~/src/emacsos
+git fetch origin
+git switch main
+git branch --set-upstream-to=origin/main main
+#+end_src
+
+Then update the installed code from that same checkout:
+
+#+begin_src sh
+cd ~/src/emacsos
+git pull --ff-only
+make install-desktop
+#+end_src
+
+Use the same =DESKTOP_ASSIST_DIR= override if you chose a custom destination.
+Restart Emacs after an update so all client files load together.  Installation
+and updates do not edit your init, private configuration, credentials, caches
+or thread workspaces.  If an installed file was changed locally, keep that
+work and reconcile it before retrying.  During an update, replaced client files
+are retained in a =.assist-desktop-update-*= directory, including edits saved
+concurrently with installation.  Its path is printed on success; after an
+interruption, find it under the installation directory.  Keep that recovery directory until you
+have checked the update; removing it later is your choice.
+
+To launch without changing your init, put the private =setq= configuration
+above in =~/.config/emacsos/assist-desktop-config.el= (mode =0600=) and run:
 
 #+begin_src sh
 emacs -Q --load ~/.config/emacsos/assist-desktop-config.el \
-  --load ./assist-desktop.el --funcall emacsos-desktop-assist
+  --load ~/.local/share/emacsos-assist/assist-desktop.el \
+  --funcall emacsos-desktop-assist
 #+end_src
 
 =-Q= skips installed package initialization, including Magit.  Use your ordinary
-Emacs with the init snippet for diffs.  =make test-desktop-assist= exercises the
-standalone loader, relevant client ERT tests and local Git-helper tests without
-production model/GPU use.  Batch/mocked checks do not prove a connected send.
+Emacs with the init snippet for diffs.  =make test-desktop-assist= exercises
+clean installation, repeated updates, preservation of local/private work,
+the standalone loader, relevant client ERT tests and local Git-helper tests
+without production model/GPU use.  The Linux installation and Git checks pass;
+macOS API bindings are checked with mocks, with no native macOS run yet.  On the
+laptop, run =make test-desktop-assist=, then open the thread list, open a real
+thread and use =C-c g=, =C-x C-f= and =C-c d= to check Git connectivity and Magit.
+A connected send is a separate live check.  Package references: [[https://formulae.brew.sh/cask/emacs-app][Emacs for macOS]] and
+[[https://elpa.nongnu.org/nongnu/magit.html][Magit]] and [[https://formulae.brew.sh/formula/coreutils][GNU coreutils]].
 
 * Canonical Assist Web threads
 

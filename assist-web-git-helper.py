@@ -260,14 +260,22 @@ def promote_workspace(stage: Path, checkout: Path) -> None:
     """Atomically install our staged directory without replacing any user path."""
     try:
         import ctypes
-        rename = ctypes.CDLL(None, use_errno=True).renameat2
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            rename = library.renamex_np
+            rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+            # Darwin sys/stdio.h RENAME_EXCL: preserve every existing destination.
+            arguments = (os.fsencode(stage), os.fsencode(checkout), 0x00000004)
+        else:
+            rename = library.renameat2
+            rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                               ctypes.c_char_p, ctypes.c_uint)
+            # Linux AT_FDCWD and RENAME_NOREPLACE, including empty directories.
+            arguments = (-100, os.fsencode(stage), -100, os.fsencode(checkout), 1)
     except (ImportError, AttributeError) as exc:
         raise Refusal("atomic workspace promotion unavailable") from exc
-    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                       ctypes.c_char_p, ctypes.c_uint)
     rename.restype = ctypes.c_int
-    # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
-    if rename(-100, os.fsencode(stage), -100, os.fsencode(checkout), 1):
+    if rename(*arguments):
         import errno
         error = ctypes.get_errno()
         if error == errno.EEXIST:

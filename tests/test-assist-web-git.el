@@ -3,6 +3,25 @@
 (require 'ert)
 (require 'assist-web)
 
+(ert-deftest test-assist-web-git-spawn-discovers-gnu-timeout ()
+  "Linux timeout and macOS gtimeout keep the same bounded helper arguments."
+  (dolist (name '("timeout" "gtimeout"))
+    (let ((command
+           (catch 'command
+             (cl-letf (((symbol-function 'executable-find)
+                        (lambda (program)
+                          (cond ((equal program name) (concat "/tools/" name))
+                                ((equal program "python3") "/tools/python3"))))
+                       ((symbol-function 'make-process)
+                        (lambda (&rest options)
+                          (throw 'command (plist-get options :command)))))
+               (emacsos-assist-web-git--spawn '((action . "probe")) #'ignore)))))
+      (should (equal command (list (concat "/tools/" name) "--kill-after=2" "90"
+                                  "/tools/python3" emacsos-assist-web-git-helper)))))
+  (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+    (should-error (emacsos-assist-web-git--spawn '((action . "probe")) #'ignore)
+                  :type 'user-error)))
+
 (ert-deftest test-assist-web-git-spawn-keeps-helper-attached-until-input-eof ()
   "A real pipe helper must not finish before its request is delivered."
   (let ((send (symbol-function 'process-send-string))

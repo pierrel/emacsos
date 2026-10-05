@@ -638,8 +638,13 @@ Modified buffers are never reverted. Repository local eval remains disabled."
           (make-process
            :name "assist-thread-git" :buffer nil :noquery t
            :connection-type 'pipe
-           :command (list "timeout" "--kill-after=2" "90"
-                          "python3" emacsos-assist-web-git-helper)
+           :command (list (or (executable-find "timeout")
+                              (executable-find "gtimeout")
+                              (user-error "Install GNU coreutils and expose timeout or gtimeout in Emacs exec-path"))
+                          "--kill-after=2" "90"
+                          (or (executable-find "python3")
+                              (user-error "Expose Python 3.10+ in Emacs exec-path"))
+                          emacsos-assist-web-git-helper)
            :filter (lambda (process chunk)
                      (if (> (+ (length output) (length chunk)) 4096)
                          (progn
