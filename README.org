@@ -221,14 +221,14 @@ cp assist-desktop.el chat.el assist-web.el assist-web-git.el assist-web-git-help
   ~/.local/share/emacsos-assist/
 #+end_src
 
-In your private Emacs init, load the client and set the endpoint and credential
-file paths (the endpoint below is a placeholder):
+In your private Emacs init, set the endpoint, credential and any custom cache
+paths before loading the client (the endpoint below is a placeholder):
 
 #+begin_src emacs-lisp
-(load "~/.local/share/emacsos-assist/assist-desktop.el" nil t)
 (setq emacsos-assist-web-api-url "https://assist.example/api/v1/phone"
       emacsos-assist-web-token-file "~/.config/emacsos/assist-web-token"
       emacsos-assist-web-ca-file "~/.config/emacsos/assist-web-ca.pem")
+(load "~/.local/share/emacsos-assist/assist-desktop.el" nil t)
 #+end_src
 
 The token file must be a regular user-owned file with mode =0600= containing
@@ -279,7 +279,8 @@ in =~/.cache/emacsos/assist-git/=; catalogs, snapshots and durable drafts live
 in =~/.cache/emacsos/assist-web/=.  Customize
 =emacsos-assist-web-git-workspace-directory=,
 =emacsos-assist-web-git-cache-directory= and =emacsos-assist-web-cache-directory=
-before first use if needed.  Preserve these settings for existing workspaces:
+before loading the client if needed: loading reads the selected catalog cache
+immediately.  Preserve these settings for existing workspaces:
 their saved routes bind each thread to a stable directory.  Local edits,
 untracked files, commits and unsaved visiting buffers are preserved; refresh
 reports pending changes rather than resetting, stashing or force pushing.
@@ -288,8 +289,8 @@ To launch from a checkout without changing your init, put the private =setq=
 configuration above in =~/.config/emacsos/assist-desktop-config.el= and run:
 
 #+begin_src sh
-emacs -Q --load ./assist-desktop.el \
-  --load ~/.config/emacsos/assist-desktop-config.el --funcall emacsos-desktop-assist
+emacs -Q --load ~/.config/emacsos/assist-desktop-config.el \
+  --load ./assist-desktop.el --funcall emacsos-desktop-assist
 #+end_src
 
 =-Q= skips installed package initialization, including Magit.  Use your ordinary

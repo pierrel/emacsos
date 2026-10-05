@@ -22,6 +22,25 @@
   (should (equal (process-list) test-assist-desktop--processes))
   (should (file-regular-p emacsos-assist-web-git-helper)))
 
+(ert-deftest test-assist-desktop-load-reads-preconfigured-catalog ()
+  (let ((cache (make-temp-file "assist-desktop-cache-" t))
+        (loader (locate-library "assist-desktop")))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "threads.json" cache)
+            (insert "{\"threads\":[],\"repositories\":[],\"harnesses\":[]}"))
+          (set-file-modes (expand-file-name "threads.json" cache) #o600)
+          (with-temp-buffer
+            (should
+             (= 0 (call-process
+                   (expand-file-name invocation-name invocation-directory)
+                   nil (current-buffer) nil "-Q" "--batch"
+                   "--eval" (format "(setq emacsos-assist-web-cache-directory %S)" cache)
+                   "--load" loader
+                   "--eval"
+                   "(unless (and (eq emacsos-assist-web--catalog-state 'cached) (assq 'threads emacsos-assist-web--catalog)) (kill-emacs 1))")))))
+      (delete-directory cache t))))
+
 (ert-deftest test-assist-desktop-entry-displays-refresh-failure ()
   (let ((emacsos-assist-web--catalog nil)
         (emacsos-assist-web--catalog-state nil)

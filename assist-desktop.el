@@ -3,8 +3,8 @@
 ;;; Commentary:
 ;; Load this file from a checkout or alongside chat.el, assist-web.el,
 ;; assist-web-git.el and assist-web-git-helper.py.  Configure the existing
-;; emacsos-assist-web options in your private init, then run
-;; M-x emacsos-desktop-assist.  See README.org for setup and commands.
+;; emacsos-assist-web options in your private init before loading this file,
+;; then run M-x emacsos-desktop-assist.  See README.org for setup and commands.
 
 ;;; Code:
 
