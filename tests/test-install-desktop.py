@@ -167,6 +167,35 @@ class DesktopInstallTest(unittest.TestCase):
             self.assertEqual(rename.argtypes,
                              (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint))
 
+    def test_stale_bytecode_refuses_update_without_changing_any_file(self):
+        self.assertEqual(self.install().returncode, 0)
+        bytecode = self.base / "bytecode"
+        bytecode.mkdir()
+        compiled_source = bytecode / "chat.el"
+        compiled_source.write_bytes((self.destination / "chat.el").read_bytes()
+                                    + b"\n(defconst desktop-stale-bytecode t)\n")
+        result = subprocess.run(
+            ["emacs", "-Q", "--batch", "-L", str(self.destination),
+             "-f", "batch-byte-compile", str(compiled_source)],
+            env={**os.environ, "HOME": str(self.home)},
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shutil.copyfile(compiled_source.with_suffix(".elc"), self.destination / "chat.elc")
+        result = subprocess.run(
+            ["emacs", "-Q", "--batch", "--load", str(self.destination / "assist-desktop.el"),
+             "--eval", "(unless (bound-and-true-p desktop-stale-bytecode) (kill-emacs 1))"],
+            env={**os.environ, "HOME": str(self.home)},
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before = {path.name: path.read_bytes() for path in self.destination.iterdir()}
+        with (self.source / "assist-desktop.el").open("a") as source:
+            source.write("\n;; Updated source fixture.\n")
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Compiled client file present: chat.elc", result.stderr)
+        self.assertEqual(before, {path.name: path.read_bytes()
+                                  for path in self.destination.iterdir()})
+
     def test_existing_symlink_and_empty_prefix_are_refused(self):
         self.destination.mkdir(parents=True)
         outside = self.base / "user-file"

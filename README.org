@@ -245,8 +245,10 @@ make install-desktop
 
 =make install-desktop= installs only the five Assist client files to
 =~/.local/share/emacsos-assist/=.  It preserves unrelated files and refuses
-an update if an installed client file was edited locally.  To select another
-location, use =make install-desktop DESKTOP_ASSIST_DIR="/your/path"= and adjust
+an update if an installed client file was edited locally.  Installation also
+refuses adjacent client =.elc= files, which Emacs can load ahead of updated source.
+Move the named compiled file outside the installation directory before retrying;
+refusal leaves both source and bytecode untouched.  To select another location, use =make install-desktop DESKTOP_ASSIST_DIR="/your/path"= and adjust
 the loader path below.  You can also load =assist-desktop.el= directly from the
 checkout.
 

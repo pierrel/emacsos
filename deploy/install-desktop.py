@@ -59,6 +59,10 @@ def install():
         if not isinstance(previous, dict):
             raise ValueError("Install record is invalid")
     for name in FILES:
+        compiled = target / (name + "c") if name.endswith(".el") else None
+        if compiled is not None and (compiled.exists() or compiled.is_symlink()):
+            raise ValueError(f"Compiled client file present: {compiled.name}; "
+                             "move it outside the install directory before retrying")
         installed = target / name
         if installed.exists() or installed.is_symlink():
             if (installed.is_symlink() or not installed.is_file()
