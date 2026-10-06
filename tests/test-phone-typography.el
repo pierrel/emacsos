@@ -9,7 +9,7 @@
       (require 'os)
       (remove-hook 'window-setup-hook #'emacsos--init)
 
-      ;; Evaluate only the phone typography functions, without the phone's services.
+      ;; Evaluate selected typography and Controls row functions without phone services.
       (with-temp-buffer
 	(insert-file-contents "deploy/pinephone/openrc-init.el")
 	(goto-char (point-min))
@@ -19,7 +19,9 @@
 		(when (and (eq (car-safe form) 'defun)
 			   (memq (cadr form) '(emacsos-pinephone-apply-typography
 					       emacsos-pinephone-buffer-typography
-					       emacsos-pinephone-display-typography)))
+					       emacsos-pinephone-display-typography
+                                               emacsos-pinephone-controls--bounded
+                                               emacsos-pinephone-controls--insert-row)))
 		  (eval form t))))
 	  (end-of-file nil)))
 
@@ -144,6 +146,58 @@
 	  (should (<= (string-pixel-width (propertize fitted 'face 'variable-pitch))
                       40))
 	  (should (string-suffix-p "…" fitted))))
+
+      (ert-deftest phone-typography-controls-wide-status-keeps-actions-visible ()
+        (let ((buffer (generate-new-buffer " *typography-controls*")))
+          (unwind-protect
+              (progn
+                (switch-to-buffer buffer)
+                (setq-local truncate-lines t)
+                (emacsos-pinephone-controls--insert-row
+                 "WiFi" (make-string 32 ?W)
+                 '(("Off" ignore nil) ("Networks" ignore nil)) 2)
+                (goto-char (point-min))
+                (redisplay t)
+                (should (equal (typography-test-font-family 1) "Inter"))
+                (should (<= (car (window-text-pixel-size
+                                 nil (point-min) (1- (point-max)) 10000))
+                            (window-body-width nil t)))
+                (let* ((off (next-button (point-min) t))
+                       (networks (and off (next-button (button-end off)))))
+                  (should off)
+                  (should networks)
+                  ;; The existing seven-cell action budget may abbreviate Networks.
+                  (should (string-match-p "Off" (button-label off)))
+                  (should (string-match-p "Net" (button-label networks)))
+                  (should (equal (typography-test-font-family (button-start networks))
+                                 "Inter"))))
+            (kill-buffer buffer))))
+
+      (ert-deftest phone-typography-armed-key-highlights-actual-letter ()
+        (let ((buffer (generate-new-buffer " *typography-armed*")))
+          (unwind-protect
+              (progn
+                (switch-to-buffer buffer)
+                (dolist (case '(("m" 0) ("qw" 1) ("ertyui" 5)))
+                  (erase-buffer)
+                  (let* ((group (car case))
+                         (index (cadr case))
+                         (emacsos--modifier 'C)
+                         (emacsos--armed-tap (list :group group :index index)))
+                    (cl-letf (((symbol-function 'emacsos--active-layout)
+                               (lambda () (list (list group))))
+                              ((symbol-function 'emacsos--bound-groups)
+                               (lambda (&rest _) (list (list group))))
+                              ((symbol-function 'emacsos--target)
+                               (lambda () (selected-window))))
+                      (emacsos--render-keyboard))
+                    (goto-char (point-min))
+                    (should (search-forward group nil t))
+                    (let ((position (+ (- (point) (length group)) index)))
+                      (should (string-match-p
+                               "yellow" (format "%S" (get-text-property position 'face))))))
+                  (redisplay t)))
+            (kill-buffer buffer))))
 
       (let* ((result (ert-run-tests-batch t))
 	     (failed (ert-stats-completed-unexpected result)))

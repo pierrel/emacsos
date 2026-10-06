@@ -887,7 +887,14 @@ see `emacsos--render-page'."
                              (dimmed-p kg)
                              (t subset)))
                  (trunc     (substring display 0 (min (length display) btn-w)))
-                 (label     (emacsos--center trunc btn-w)))
+                 (armed-p   (and armed-sub (equal subset armed-sub)
+                                 (numberp armed-idx) (< armed-idx (length trunc))))
+                 (label     (progn
+                              ;; Locate the surviving letter after padding and fitting.
+                              (when armed-p
+                                (put-text-property armed-idx (1+ armed-idx)
+                                                   'emacsos-armed-letter t trunc))
+                              (emacsos--center trunc btn-w))))
             (if dimmed-p
                 ;; Empty subset under MOD: render a button-shaped slot with
                 ;; a darker bg + dim fg.  Same box/height as live buttons so
@@ -908,13 +915,10 @@ see `emacsos--render-page'."
                              emacsos--btn-label-scale)
                 ;; Armed-character face stacking: bold yellow on the cycled
                 ;; character inside this group's button (when armed here).
-                (when (and armed-sub (equal subset armed-sub)
-                           (numberp armed-idx)
-                           (< armed-idx (length trunc)))
-                  (let* ((pad       (max 0 (- btn-w (length trunc))))
-                         (lead      (/ pad 2))
-                         (armed-pos (+ btn-start lead armed-idx)))
-                    (when (< armed-pos (point))
+                (when armed-p
+                  (let ((armed-pos (text-property-any
+                                    btn-start (point) 'emacsos-armed-letter t)))
+                    (when armed-pos
                       ;; PREPEND (no APPEND arg): in face merging, earlier
                       ;; entries win on conflict.  With APPEND=t the
                       ;; button face's `:foreground "white"' would win and

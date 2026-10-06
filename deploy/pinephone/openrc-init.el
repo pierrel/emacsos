@@ -963,7 +963,8 @@ Refresh a missing or stale PID only from one exact isolated keyboard process."
     (label status actions &optional reserved-actions)
   "Insert one fixed-height Controls row with LABEL, STATUS, and ACTIONS.
 Each ACTION is (TEXT FUNCTION ARG); an omitted ARG calls FUNCTION without one.
-RESERVED-ACTIONS keeps the status width stable when some actions are absent."
+RESERVED-ACTIONS keeps the status width stable when some actions are absent.
+Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (let* ((window (get-buffer-window (current-buffer)))
          (width (if window (window-body-width window) 40))
          (action-width 7)
@@ -971,8 +972,22 @@ RESERVED-ACTIONS keeps the status width stable when some actions are absent."
                           (1+ action-width)))
          (status-width (max 0 (- width (string-width label) action-space 1)))
          (row-height (+ (frame-char-height) (* 2 emacsos--btn-vpad))))
-    (insert (propertize label 'line-height row-height)
-            " " (emacsos-pinephone-controls--bounded status status-width))
+    (insert
+     (propertize label 'line-height row-height) " "
+     (if (and emacsos-proportional-button-labels (display-graphic-p))
+         (let* ((space (string-pixel-width (propertize " " 'face 'variable-pitch)))
+                (prefix (string-pixel-width
+                         (propertize (concat label " ") 'face 'variable-pitch)))
+                (button-pixels (floor (* action-width (frame-char-width)
+                                         emacsos--btn-label-scale)))
+                (reserved (* (max (length actions) (or reserved-actions 0))
+                             (+ space button-pixels)))
+                (pixels (max 0 (- (if window (window-body-width window t)
+                                    (* width (frame-char-width)))
+                                  prefix reserved))))
+           (emacsos--fit-pixel-width
+            (replace-regexp-in-string "[\n\r\t]+" " " (or status "")) pixels))
+       (emacsos-pinephone-controls--bounded status status-width)))
     (dolist (action actions)
       (insert " ")
       (emacsos--btn (emacsos--center (nth 0 action) action-width)
