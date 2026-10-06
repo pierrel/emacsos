@@ -19,6 +19,7 @@
 (require 'url-util)
 
 (declare-function emacsos--render-page "os")
+(declare-function emacsos--fit-pixel-width "os" (text pixels &optional face))
 (defvar url-http-content-type)
 (defvar url-http-end-of-headers)
 (defvar url-http-open-connections)
@@ -4124,8 +4125,12 @@ suppressing a genuine repeated submission."
          40)))
 
 (defun emacsos-assist-web--fit-list-line (text width)
-  "Fit TEXT into WIDTH columns with a visible truncation marker."
-  (truncate-string-to-width text width nil nil "…"))
+  "Fit TEXT into WIDTH frame columns with a visible truncation marker.
+The graphical phone measures proportional text against the same pixel budget."
+  (if (and (bound-and-true-p emacsos-proportional-button-labels)
+           (display-graphic-p))
+      (emacsos--fit-pixel-width text (* width (frame-char-width)))
+    (truncate-string-to-width text width nil nil "…")))
 
 (defun emacsos-assist-web--thread-row-position (id)
   "Return the first native list position whose stored thread ID equals ID."

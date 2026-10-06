@@ -155,7 +155,46 @@
 (global-set-key [WakeUp] #'ignore)
 
 (add-to-list 'default-frame-alist '(fullscreen . maximized))
-(add-to-list 'default-frame-alist '(font . "Monospace-14"))
+(add-to-list 'default-frame-alist '(font . "JetBrains Mono-14"))
+
+(defun emacsos-pinephone-buffer-typography ()
+  "Select Inter prose or JetBrains Mono code for the current phone buffer."
+  (buffer-face-set
+   (if (derived-mode-p 'prog-mode 'conf-mode 'vterm-mode
+                       'term-mode 'comint-mode 'dired-mode)
+       'fixed-pitch
+     'variable-pitch)))
+
+(defun emacsos-pinephone-display-typography (frame)
+  "Apply phone typography to every displayed buffer on FRAME.
+The global window-change hook receives a frame, including when a non-selected
+window changes its buffer without changing the current Lisp buffer."
+  (dolist (window (window-list frame 'no-minibuffer))
+    (with-current-buffer (window-buffer window)
+      (emacsos-pinephone-buffer-typography))))
+
+(defun emacsos-pinephone-apply-typography ()
+  "Apply the selected phone fonts without changing frame column geometry.
+UI and prose inherit Inter through buffer face remapping.  The underlying
+JetBrains Mono frame font supplies stable columns for control-row budgets."
+  (require 'face-remap)
+  (dolist (family '("Inter" "JetBrains Mono"))
+    (let ((font (find-font (font-spec :family family))))
+      (unless (and font (equal (format "%s" (font-get font :family)) family))
+        (error "Required phone font is unavailable: %s" family))))
+  (set-face-attribute 'default nil :family "JetBrains Mono" :height 140)
+  (set-face-attribute 'fixed-pitch nil :family "JetBrains Mono" :height 1.0)
+  (set-face-attribute 'variable-pitch nil :family "Inter" :height 1.0)
+  (dolist (face '(mode-line mode-line-inactive header-line))
+    (set-face-attribute face nil :family "Inter"))
+  (setq emacsos-proportional-button-labels t)
+  (add-hook 'window-buffer-change-functions
+            #'emacsos-pinephone-display-typography)
+  (add-hook 'after-change-major-mode-hook
+            #'emacsos-pinephone-buffer-typography)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (emacsos-pinephone-buffer-typography))))
 
 (defun emacsos-pinephone-enforce-frame-layout ()
   "Keep the Emacs frame inside the space reserved above wvkbd.
@@ -1103,8 +1142,8 @@ RESERVED-ACTIONS keeps the status width stable when some actions are absent."
         server-host "0.0.0.0"
         server-port 8766
         server-name "emacsos-openrc")
+  (emacsos-pinephone-apply-typography)
   (server-start)
-  (set-face-attribute 'default nil :height 140)
   (require 'os)
   (require 'swipe-learning)
   (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)

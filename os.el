@@ -15,6 +15,10 @@ supplies a safety-critical `emacsos--keyboard-plane' or utility row."
   :type 'boolean
   :group 'emacsos)
 
+(defvar emacsos-proportional-button-labels nil
+  "Whether graphical UI labels use proportional fonts and pixel fitting.
+The PinePhone startup enables this; ordinary desktop Emacs keeps its fonts.")
+
 (defcustom emacsos-control-window-percent 75
   "Percentage of the Emacs frame reserved for the bottom control pane."
   :type 'integer
@@ -641,21 +645,44 @@ a row past the window edge (which would wrap the keyboard).")
 
 (defconst emacsos--btn-hpad 1
   "Horizontal box padding (pixels) on a keyboard button's left+right edges.
-Kept small: unlike `emacsos--btn-vpad', horizontal padding adds width the
-per-row cell math (`emacsos--unit-width') doesn't account for, so a large
-value would overflow the ~20-col row and wrap the keyboard.  Maps to the
+Kept small for the ordinary monospace renderer, whose per-row cell math
+(`emacsos--unit-width') does not reserve this width.  Proportional buttons
+include both edges inside their pixel budget.  Maps to the
 VWIDTH (left/right) element of the face `:box' `:line-width'.")
 
 (defconst emacsos--btn-gap 1.5
   "Visual width (in character cells) of the gap between buttons in a row.")
 
 (defun emacsos--center (text width)
-  "Center TEXT in a field of WIDTH characters."
-  (let* ((len (string-width text))
-         (pad (max 0 (- width len)))
-         (l (/ pad 2))
-         (r (- pad l)))
-    (concat (make-string l ?\s) text (make-string r ?\s))))
+  "Center TEXT in WIDTH character cells.
+On the graphical phone, retain WIDTH for pixel fitting by `emacsos--btn'."
+  (if (and emacsos-proportional-button-labels (display-graphic-p))
+      (propertize text 'emacsos-button-width width)
+    (let* ((len (string-width text))
+           (pad (max 0 (- width len)))
+           (l (/ pad 2))
+           (r (- pad l)))
+      (concat (make-string l ?\s) text (make-string r ?\s)))))
+
+(defun emacsos--fit-pixel-width (text pixels &optional face)
+  "Fit TEXT within PIXELS, measuring FACE and marking truncation with ….
+FACE defaults to `variable-pitch'.  Search prefix lengths in logarithmic
+steps so a catalog of long proportional titles cannot stall the phone UI."
+  (let* ((face (or face 'variable-pitch))
+         (measure (lambda (value)
+                    (string-pixel-width (propertize value 'face face)))))
+    (cond
+     ((<= (funcall measure text) pixels) text)
+     ((> (funcall measure "…") pixels) "")
+     (t
+      (let ((low 0) (high (length text)))
+        (while (< low high)
+          (let ((middle (/ (+ low high 1) 2)))
+            (if (<= (funcall measure
+                             (concat (substring text 0 middle) "…")) pixels)
+                (setq low middle)
+              (setq high (1- middle)))))
+        (concat (substring text 0 low) "…"))))))
 
 (defun emacsos--unit-width (win-w gap-w units gaps)
   "Character width of ONE layout unit for a row spanning UNITS unit-widths
@@ -663,7 +690,9 @@ VWIDTH (left/right) element of the face `:box' `:line-width'.")
 columns.  A button may span more than one unit (e.g. a double-wide RET is
 2 units), so UNITS and the button count can differ.  Floored, min 1 so a
 pathologically narrow window can't drive a width <= 0 (which would crash
-the letter-key `substring').  Pure — testable off the device."
+the letter-key `substring').  Proportional buttons turn this cell budget
+into pixels and include their horizontal box padding.  Pure width arithmetic
+remains testable off the device."
   (max 1 (floor (/ (- win-w (* gaps gap-w)) (* units emacsos--btn-label-scale)))))
 
 (defun emacsos--key-display (kg)
@@ -692,7 +721,23 @@ pass `emacsos--btn-label-scale').  The button's tap-target HEIGHT is
 separate: it comes from the `:box' vertical padding (`emacsos--btn-vpad'),
 so a small label still gets a big button.  BG, if given, overrides the
 default gray background — used to accent a high-priority affordance (the
-Chat button) so it reads as the app, not plumbing."
+Chat button) so it reads as the app, not plumbing.  Proportional labels with
+a WIDTH from `emacsos--center' are fitted and centered in that pixel budget,
+including their horizontal box padding."
+  (when (and emacsos-proportional-button-labels (display-graphic-p))
+    (when-let ((width (get-text-property 0 'emacsos-button-width label)))
+      (let* ((face `(:inherit variable-pitch :height ,(or height 1.0)))
+             (pixels (max 0 (- (floor (* width (frame-char-width)
+                                         (or height 1.0)))
+                               (* 2 emacsos--btn-hpad))))
+             (text (emacsos--fit-pixel-width label pixels face))
+             (padding (- pixels (string-pixel-width
+                                (propertize text 'face face))))
+             (left (/ padding 2)))
+        (setq label (concat (propertize " " 'display `(space :width (,left)))
+                            text
+                            (propertize " " 'display
+                                        `(space :width (,(- padding left)))))))))
   (insert-text-button
    label
    ;; Every tap first offers pending confirmations a chance to disarm, then
@@ -704,6 +749,8 @@ Chat button) so it reads as the app, not plumbing."
    'face `(:box (:line-width (,emacsos--btn-hpad . ,emacsos--btn-vpad)
                  :style released-button)
            :background ,(or bg "gray25") :foreground "white"
+           ,@(when emacsos-proportional-button-labels
+               '(:inherit variable-pitch))
            ,@(when height `(:height ,height)))
    'mouse-face `(:box (:line-width (,emacsos--btn-hpad . ,emacsos--btn-vpad)
                        :style pressed-button)

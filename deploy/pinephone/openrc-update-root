@@ -18,7 +18,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=009dd59d2ce5f45e951ef534df8cecd634caa87e5945b185401a5364d126ad0c
+manifest_hash=675709eea305a935ef15c2cb10910ec10c3f161873a5d9dbcc87bc525a180edc
 mutating=0
 committed=0
 restart_only=0
@@ -31,6 +31,11 @@ keyboard_notice_dir_created=0
 bootstrap_helper_replaced=0
 service_cgroup=/sys/fs/cgroup/openrc.emacsos-ui
 backup_pairs='
+inter.ttf:/usr/local/share/emacsos-openrc/inter.ttf
+inter-OFL.txt:/usr/local/share/emacsos-openrc/inter-OFL.txt
+jetbrains-mono.ttf:/usr/local/share/emacsos-openrc/jetbrains-mono.ttf
+jetbrains-mono-OFL.txt:/usr/local/share/emacsos-openrc/jetbrains-mono-OFL.txt
+phone-fonts.conf:/usr/local/share/emacsos-openrc/phone-fonts.conf
 openrc-init.el:/usr/local/share/emacsos-openrc/init.el
 dtach-shell.el:/usr/local/share/emacsos-openrc/dtach-shell.el
 dtach-shell-init.el:/usr/local/share/emacsos-openrc/dtach-shell-init.el
@@ -547,6 +552,11 @@ cleanup() {
                 'emacsos-openrc-update: rollback refused while UI remains active' >&2
             retain_backup
         else
+            restore_file inter.ttf /usr/local/share/emacsos-openrc/inter.ttf 0644
+            restore_file inter-OFL.txt /usr/local/share/emacsos-openrc/inter-OFL.txt 0644
+            restore_file jetbrains-mono.ttf /usr/local/share/emacsos-openrc/jetbrains-mono.ttf 0644
+            restore_file jetbrains-mono-OFL.txt /usr/local/share/emacsos-openrc/jetbrains-mono-OFL.txt 0644
+            restore_file phone-fonts.conf /usr/local/share/emacsos-openrc/phone-fonts.conf 0644
             restore_file openrc-init.el /usr/local/share/emacsos-openrc/init.el 0644
             restore_file dtach-shell.el /usr/local/share/emacsos-openrc/dtach-shell.el 0644
             restore_file dtach-shell-init.el /usr/local/share/emacsos-openrc/dtach-shell-init.el 0644
@@ -702,7 +712,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -716,7 +726,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 42 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 47 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
@@ -727,7 +737,7 @@ legacy_assist_module || true
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
-for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
+for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
@@ -905,7 +915,7 @@ mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
 for module in os.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
-    dtach-shell.el dtach-shell-init.el; do
+    dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
 done
@@ -1009,7 +1019,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
 for module in os.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
-    dtach-shell.el dtach-shell-init.el; do
+    dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done
 cmp -s "$snapshot/assist-web-git-helper.py" \
