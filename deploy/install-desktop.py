@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Install the standalone Assist payload without changing private user setup."""
 
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 
@@ -45,56 +47,63 @@ def install():
     if not configured:
         raise ValueError("DESKTOP_ASSIST_DIR must not be empty")
     target = Path(configured).expanduser()
-    source = Path(__file__).resolve().parents[1]
-    payload = {name: (source / name).read_bytes() for name in FILES}
-    hashes = {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()}
-    manifest = target / ".assist-desktop-install.json"
-    previous = {}
-    if manifest.is_symlink():
-        raise ValueError("Install record must not be a symlink")
-    if manifest.exists():
-        if not manifest.is_file() or manifest.stat().st_size > 8192:
-            raise ValueError("Install record is invalid")
-        previous = json.loads(manifest.read_text())
-        if not isinstance(previous, dict):
-            raise ValueError("Install record is invalid")
-    for name in FILES:
-        compiled = target / (name + "c") if name.endswith(".el") else None
-        if compiled is not None and (compiled.exists() or compiled.is_symlink()):
-            raise ValueError(f"Compiled client file present: {compiled.name}; "
-                             "move it outside the install directory before retrying")
-        installed = target / name
-        if installed.exists() or installed.is_symlink():
-            if (installed.is_symlink() or not installed.is_file()
-                    or digest(installed) not in (hashes[name], previous.get(name))):
-                raise ValueError(f"Installed file changed: {name}; local work preserved")
     target.mkdir(parents=True, exist_ok=True)
-    # Exchanges leave the previous inode here, including a concurrent user save.
-    # Never recursively clean this directory: interruption must preserve its bytes.
-    staging = Path(tempfile.mkdtemp(prefix=".assist-desktop-update-", dir=target))
-    for name, data in payload.items():
-        item = staging / name
-        item.write_bytes(data)
-        item.chmod(0o755 if name.endswith(".py") else 0o644)
-    record = staging / manifest.name
-    record.write_text(json.dumps(hashes, sort_keys=True) + "\n")
-    record.chmod(0o600)
-    for name in FILES:
-        installed = target / name
-        item = staging / name
-        if installed.is_file() and not installed.is_symlink() and digest(installed) == hashes[name]:
-            item.unlink()
-            installed.chmod(0o755 if name.endswith(".py") else 0o644)
+    # Keep this inode: deleting the lock would let another updater bypass it.
+    descriptor = os.open(target / ".assist-desktop-install.lock",
+                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(descriptor, "r+") as install_lock:
+        if not stat.S_ISREG(os.fstat(install_lock.fileno()).st_mode):
+            raise ValueError("Install lock must be a regular file")
+        fcntl.flock(install_lock, fcntl.LOCK_EX)
+        source = Path(__file__).resolve().parents[1]
+        payload = {name: (source / name).read_bytes() for name in FILES}
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()}
+        manifest = target / ".assist-desktop-install.json"
+        previous = {}
+        if manifest.is_symlink():
+            raise ValueError("Install record must not be a symlink")
+        if manifest.exists():
+            if not manifest.is_file() or manifest.stat().st_size > 8192:
+                raise ValueError("Install record is invalid")
+            previous = json.loads(manifest.read_text())
+            if not isinstance(previous, dict):
+                raise ValueError("Install record is invalid")
+        for name in FILES:
+            compiled = target / (name + "c") if name.endswith(".el") else None
+            if compiled is not None and (compiled.exists() or compiled.is_symlink()):
+                raise ValueError(f"Compiled client file present: {compiled.name}; "
+                                 "move it outside the install directory before retrying")
+            installed = target / name
+            if installed.exists() or installed.is_symlink():
+                if (installed.is_symlink() or not installed.is_file()
+                        or digest(installed) not in (hashes[name], previous.get(name))):
+                    raise ValueError(f"Installed file changed: {name}; local work preserved")
+        # Exchanges leave the previous inode here, including a concurrent user save.
+        # Never recursively clean this directory: interruption must preserve its bytes.
+        staging = Path(tempfile.mkdtemp(prefix=".assist-desktop-update-", dir=target))
+        for name, data in payload.items():
+            item = staging / name
+            item.write_bytes(data)
+            item.chmod(0o755 if name.endswith(".py") else 0o644)
+        record = staging / manifest.name
+        record.write_text(json.dumps(hashes, sort_keys=True) + "\n")
+        record.chmod(0o600)
+        for name in FILES:
+            installed = target / name
+            item = staging / name
+            if installed.is_file() and not installed.is_symlink() and digest(installed) == hashes[name]:
+                item.unlink()
+                installed.chmod(0o755 if name.endswith(".py") else 0o644)
+            else:
+                handoff(item, installed, installed.exists() or installed.is_symlink())
+        os.replace(record, manifest)
+        if any(staging.iterdir()):
+            print(f"Previous client files preserved in {staging}")
         else:
-            handoff(item, installed, installed.exists() or installed.is_symlink())
-    os.replace(record, manifest)
-    if any(staging.iterdir()):
-        print(f"Previous client files preserved in {staging}")
-    else:
-        staging.rmdir()
-    print(f"Installed desktop Assist in {target}")
-    print("Private configuration, credentials, caches and thread workspaces were not changed.")
-    print("Configure before loading assist-desktop.el; run M-x emacsos-desktop-assist.")
+            staging.rmdir()
+        print(f"Installed desktop Assist in {target}")
+        print("Private configuration, credentials, caches and thread workspaces were not changed.")
+        print("Configure before loading assist-desktop.el; run M-x emacsos-desktop-assist.")
 
 
 if __name__ == "__main__":

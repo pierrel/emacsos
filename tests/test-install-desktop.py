@@ -1,11 +1,13 @@
 """Real desktop install/update checks in disposable homes and prefixes."""
 
 import ctypes
+import fcntl
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import selectors
 import subprocess
 import tempfile
 import unittest
@@ -195,6 +197,76 @@ class DesktopInstallTest(unittest.TestCase):
         self.assertIn("Compiled client file present: chat.elc", result.stderr)
         self.assertEqual(before, {path.name: path.read_bytes()
                                   for path in self.destination.iterdir()})
+
+    def test_concurrent_checkouts_serialize_through_prefix_alias(self):
+        self.assertEqual(self.install().returncode, 0)
+        second_source = self.base / "second-source"
+        shutil.copytree(self.source, second_source)
+        for source, version in ((self.source, "A"), (second_source, "B")):
+            for name in FILES:
+                with (source / name).open("a") as payload:
+                    payload.write(("\n# " if name.endswith(".py") else "\n;; ") + version + "\n")
+        alias = self.base / "same-prefix"
+        alias.symlink_to(self.destination, target_is_directory=True)
+        wrapper = """import importlib.util,sys
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+if sys.argv[2]=='A':
+ native=m.handoff; first=True
+ def pause(*arguments):
+  global first
+  native(*arguments)
+  if first:
+   first=False; print('ready',flush=True); sys.stdin.readline()
+ m.handoff=pause
+else: print('started',flush=True)
+m.install()
+"""
+        processes = []
+
+        def start(source, target, version):
+            child = subprocess.Popen(
+                ["python3", "-c", wrapper, str(source / "deploy/install-desktop.py"), version],
+                env={**os.environ, "HOME": str(self.home), "DESKTOP_ASSIST_DIR": str(target)},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            processes.append(child)
+            return child
+
+        def signal(child, expected):
+            with selectors.DefaultSelector() as monitor:
+                monitor.register(child.stdout, selectors.EVENT_READ)
+                self.assertTrue(monitor.select(5), "installer signal missing")
+                self.assertEqual(child.stdout.readline().strip(), expected)
+
+        try:
+            first = start(self.source, self.destination, "A")
+            signal(first, "ready")
+            descriptor = os.open(self.destination / ".assist-desktop-install.lock",
+                                 os.O_CREAT | os.O_RDWR, 0o600)
+            with os.fdopen(descriptor, "r+") as lock:
+                # A different process cannot enter while the real exchange is paused.
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            second = start(second_source, alias, "B")
+            signal(second, "started")
+            first.stdin.write("continue\n")
+            first.stdin.flush()
+            first_output, first_error = first.communicate(timeout=10)
+            second_output, second_error = second.communicate(timeout=10)
+            self.assertEqual(first.returncode, 0, first_error)
+            self.assertEqual(second.returncode, 0, second_error)
+            for name in FILES:
+                self.assertEqual((self.destination / name).read_bytes(),
+                                 (second_source / name).read_bytes())
+            import hashlib
+            expected = {name: hashlib.sha256((second_source / name).read_bytes()).hexdigest()
+                        for name in FILES}
+            self.assertEqual(json.loads((self.destination / ".assist-desktop-install.json").read_text()),
+                             expected)
+        finally:
+            for child in processes:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate(timeout=5)
 
     def test_existing_symlink_and_empty_prefix_are_refused(self):
         self.destination.mkdir(parents=True)

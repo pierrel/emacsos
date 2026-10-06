@@ -345,8 +345,10 @@ make install-desktop
 Use the same =DESKTOP_ASSIST_DIR= override if you chose a custom destination.
 Restart Emacs after an update so all client files load together.  Installation
 and updates do not edit your init, private configuration, credentials, caches
-or thread workspaces.  If an installed file was changed locally, keep that
-work and reconcile it before retrying.  During an update, replaced client files
+or thread workspaces.  Updates to the same installation directory are serialized,
+even through path aliases.  Keep the persistent =.assist-desktop-install.lock= file
+in place so every updater uses the same lock.  If an installed file was changed
+locally, keep that work and reconcile it before retrying.  During an update, replaced client files
 are retained in a =.assist-desktop-update-*= directory, including edits saved
 concurrently with installation.  Its path is printed on success; after an
 interruption, find it under the installation directory.  Keep that recovery directory until you
@@ -363,8 +365,8 @@ emacs -Q --load ~/.config/emacsos/assist-desktop-config.el \
 
 =-Q= skips installed package initialization, including Magit.  Use your ordinary
 Emacs with the init snippet for diffs.  =make test-desktop-assist= exercises
-clean installation, repeated updates, preservation of local/private work,
-the standalone loader, relevant client ERT tests and local Git-helper tests
+clean installation, repeated and concurrent updates, preservation of local/private
+work, the standalone loader, relevant client ERT tests and local Git-helper tests
 without production model/GPU use.  The Linux installation and Git checks pass;
 macOS API bindings are checked with mocks, with no native macOS run yet.  On the
 laptop, run =make test-desktop-assist=, then open the thread list, open a real
