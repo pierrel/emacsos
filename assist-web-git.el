@@ -30,7 +30,7 @@
 (defcustom emacsos-assist-web-git-cache-directory
   (expand-file-name "~/.cache/emacsos/assist-git")
   "Private metadata root, also containing existing legacy checkouts.
-Existing checkouts stay here in place; new user workspaces use
+Legacy checkouts stay here until explicitly moved; new workspaces use
 `emacsos-assist-web-git-workspace-directory'."
   :type 'directory
   :group 'emacsos-assist-web-git)
@@ -123,6 +123,8 @@ Existing checkouts stay here in place; new user workspaces use
       (let* ((record (emacsos-assist-web-git--read-route route))
              (legacy (plist-get record :legacy))
              (relative (plist-get record :relative)))
+        (when (equal (plist-get record :initialized) "moving")
+          (user-error "Workspace move interrupted; use Move workspace to resume"))
         (unless (and (equal (plist-get record :repo_key) (plist-get metadata :repo-key))
                      (equal (plist-get record :thread_id) (plist-get metadata :tid)))
           (user-error "Workspace binding identity is invalid"))
@@ -496,6 +498,21 @@ Modified buffers are never reverted. Repository local eval remains disabled."
                                      map))
             (emacsos-assist-web--details-link #'emacsos-assist-web-git-thread-details))))
 
+(defun emacsos-assist-web-git--legacy-route (metadata)
+  "Return METADATA's bound legacy route, including an interrupted move."
+  (when (emacsos-assist-web-git--usable metadata)
+    (let ((route (expand-file-name
+                  (concat "routes/" (emacsos-assist-web-git--workspace-identity metadata) ".json")
+                  emacsos-assist-web-git-cache-directory)))
+      (when (file-exists-p route)
+        (let ((record (emacsos-assist-web-git--read-route route)))
+          (when (and (equal (plist-get record :repo_key) (plist-get metadata :repo-key))
+                     (equal (plist-get record :thread_id) (plist-get metadata :tid))
+                     (stringp (plist-get record :legacy))
+                     (string-match-p "\\`[0-9a-f]\\{64\\}\\'" (plist-get record :legacy))
+                     (member (plist-get record :initialized) '(t "moving")))
+            record))))))
+
 (defun emacsos-assist-web-git-thread-details ()
   "Show full independent Git state, including an initial or failed refresh."
   (interactive)
@@ -513,6 +530,13 @@ Modified buffers are never reverted. Repository local eval remains disabled."
       (when fetching (insert "A background fetch is in progress.\n\n"))
       (when failure (insert "Last refresh: " failure "\n\n"))
       (insert "Browsing does not sync. Git Refresh fetches the selected remote branch; unsafe local advancement stays pending. Local work is preserved.\n\n")
+      (when (and (buffer-live-p thread)
+                 (with-current-buffer thread
+                   (emacsos-assist-web-git--legacy-route emacsos-assist-web-git--metadata)))
+        (insert-text-button "Move cached checkout to ~/assist"
+                            'follow-link t 'thread thread
+                            'action #'emacsos-assist-web-git--offer-workspace-move)
+        (insert "\n\n"))
       (when choices (insert "Return to the thread and tap Git to choose an existing workspace in place, or explicitly choose New.\n\n"))
       (special-mode)
       (visual-line-mode 1)
@@ -548,7 +572,8 @@ Modified buffers are never reverted. Repository local eval remains disabled."
 
 (defun emacsos-assist-web-git--short-state (state)
   "Return a phone-width status code for full explanation STATE."
-  (cond ((string-match-p "may change after this turn" state) "busy; may change")
+  (cond ((string-match-p "local branch preserved" state) "other branch")
+        ((string-match-p "may change after this turn" state) "busy; may change")
         ((string-prefix-p "local matches last fetched remote" state) "local=remote")
         ((string-prefix-p "edited" state) "edited")
         ((string-prefix-p "fetched remote" state) "remote")
@@ -1318,6 +1343,112 @@ This only reads local metadata; it does not invoke Git or synchronize files."
   (interactive)
   (emacsos-assist-web-git--command 'refresh))
 
+(defun emacsos-assist-web-git--move-busy-buffer-p (root thread)
+  "Whether a live buffer or its working directory still uses ROOT."
+  (cl-some
+   (lambda (buffer)
+     (unless (eq buffer thread)
+       (with-current-buffer buffer
+         (or (and buffer-file-name
+                  (or (equal (expand-file-name buffer-file-name) root)
+                      (emacsos-assist-web-git--in-checkout-p buffer-file-name root)))
+             (and buffer-file-truename
+                  (not (file-remote-p buffer-file-truename))
+                  (emacsos-assist-web-git--in-checkout-p buffer-file-truename root))
+             (and default-directory
+                  (or (equal (directory-file-name (expand-file-name default-directory)) root)
+                      (emacsos-assist-web-git--in-checkout-p default-directory root)
+                      (and (not (file-remote-p default-directory))
+                           (condition-case nil
+                               (let ((real (file-truename default-directory)))
+                                 (or (equal (directory-file-name real) root)
+                                     (emacsos-assist-web-git--in-checkout-p real root)))
+                             (file-error nil)))))
+             (and emacsos-assist-web-git--view-generation
+                  (equal (emacsos-assist-web-git-generation-path
+                          emacsos-assist-web-git--view-generation) root))))))
+   (buffer-list)))
+
+(defun emacsos-assist-web-git--move-workspace (button)
+  "Perform BUTTON's explicitly confirmed, same-filesystem move without Git sync."
+  (let ((thread (button-get button 'thread))
+        (identity (button-get button 'identity))
+        (confirmation (current-buffer)))
+    (unless (buffer-live-p thread) (user-error "Thread view closed"))
+    (with-current-buffer thread
+      (when-let ((reason (emacsos-assist-web-git--gate-reason)))
+        (user-error "%s" reason))
+      (let* ((metadata emacsos-assist-web-git--metadata)
+             (record (emacsos-assist-web-git--legacy-route metadata))
+             (root (and record (expand-file-name
+                                (concat "checkouts/" (plist-get record :legacy))
+                                emacsos-assist-web-git-cache-directory))))
+        (unless (and root (equal identity (emacsos-assist-web-git--workspace-identity metadata))
+                     (not emacsos-assist-web-git--request)
+                     (not (gethash root emacsos-assist-web-git--checkout-operations))
+                     (not (gethash (concat "thread:" identity)
+                                   emacsos-assist-web-git--checkout-operations)))
+          (user-error "Workspace changed or Git is busy; retry Move workspace"))
+        (when (emacsos-assist-web-git--move-busy-buffer-p root thread)
+          (user-error "Close local files and Magit views before moving; edits preserved"))
+        ;; This explicit, bounded operation blocks the Emacs event loop so a
+        ;; local view cannot open the old path between the buffer check and rename.
+        (let* ((payload `((action . "migrate")
+                          (repo_key . ,(plist-get metadata :repo-key))
+                          (thread_id . ,(plist-get metadata :tid))
+                          (cache_root . ,emacsos-assist-web-git-cache-directory)
+                          (workspace_root . ,emacsos-assist-web-git-workspace-directory)
+                          (checkout_path . ,root)
+                          (repo_label . ,(plist-get metadata :repo-label))
+                          (thread_label . ,(plist-get metadata :thread-label))))
+               (result (with-temp-buffer
+                         (insert (json-encode payload))
+                         (let ((code (call-process-region
+                                      (point-min) (point-max) "timeout" t t nil
+                                      "--kill-after=1" "8" "python3"
+                                      emacsos-assist-web-git-helper)))
+                           (unless (and (integerp code) (= code 0)
+                                        (<= (buffer-size) 4096))
+                             (user-error "Workspace move unavailable; local files preserved")))
+                         (emacsos-assist-web-git--parse-helper-result (buffer-string)))))
+          (unless (plist-get result :ok)
+            (user-error "%s" (or (plist-get result :reason)
+                                  "Workspace move unavailable; local files preserved")))
+          (unless (equal (plist-get result :checkout_path)
+                         (emacsos-assist-web-git--route-path metadata))
+            (user-error "Workspace move binding unavailable; local files preserved"))
+          (setq emacsos-assist-web-git--current nil
+                emacsos-assist-web-git--previous nil
+                emacsos-assist-web-git--unavailable
+                "Workspace moved to ~/assist; browse locally or Refresh")
+          (emacsos-assist-web-git--update-headers))))
+    (switch-to-buffer thread)
+    (when (buffer-live-p confirmation) (kill-buffer confirmation))
+    (message "Workspace moved as-is to ~/assist; no Git fetch or file rewrite")))
+
+(defun emacsos-assist-web-git--offer-workspace-move (button)
+  "Show a second explicit tap for BUTTON's legacy workspace move."
+  (let* ((thread (button-get button 'thread))
+         (identity (and (buffer-live-p thread)
+                        (with-current-buffer thread
+                          (and emacsos-assist-web-git--metadata
+                               (emacsos-assist-web-git--workspace-identity
+                                emacsos-assist-web-git--metadata)))))
+         (view (generate-new-buffer " *Assist Git move workspace*")))
+    (unless identity (user-error "Thread repository unavailable"))
+    (with-current-buffer view
+      (insert "Move this cached checkout as-is into ~/assist?\n\nGit history, local edits, staged and untracked files stay in the same directory inode. This does not fetch or switch branches. Close local file and Magit views first.\n\n")
+      (insert-text-button "Move workspace now"
+                          'follow-link t 'thread thread 'identity identity
+                          'action #'emacsos-assist-web-git--move-workspace)
+      (insert "\n\nq: keep it in place\n")
+      (special-mode)
+      (visual-line-mode 1)
+      (setq-local emacsos-assist-web-git--details-thread thread
+                  emacsos-assist-web-git--details-origin thread)
+      (local-set-key (kbd "q") #'emacsos-assist-web-git-view-details-back))
+    (switch-to-buffer view)))
+
 (defun emacsos-assist-web-git--bind-workspace-choice (button)
   "Apply BUTTON's explicit local choice to its still-authenticated thread."
   (let ((thread (button-get button 'thread))
@@ -1575,7 +1706,15 @@ discarding their edits or reusing their repository-local settings."
                                    (emacsos-assist-web-git-generation-oid generation)))
                    (emacsos-assist-web-git--pin view thread generation))
                  (if (plist-get intent :local)
-                     (message "Diff: cached remote/main...local thread HEAD; no sync")
+                     (let* ((seen (emacsos-assist-web-git-generation-metadata generation))
+                            (actual (plist-get seen :local-branch))
+                            (selected (with-current-buffer thread
+                                        (plist-get (or emacsos-assist-web-git--metadata seen)
+                                                   :branch))))
+                       (if (equal actual selected)
+                           (message "Diff: cached remote/main...local thread HEAD; no sync")
+                         (message "Diff: local %s, selected thread %s pending; no sync"
+                                  actual selected)))
                    (message "Diff: fetched remote main %s...thread %s"
                           (emacsos-assist-web-git--short
                            (emacsos-assist-web-git-generation-main generation))
@@ -1667,14 +1806,15 @@ otherwise the header follows THREAD's live state while the pinned view stays."
                         emacsos-assist-web-git--current))))))
          (view (generate-new-buffer " *Assist Web Git view details*")))
     (with-current-buffer view
-      (insert (format "Local checkout HEAD: %s\nFetched remote thread tip: %s\nFetched remote main base: %s\nCheckout selection branch: %s\n"
+      (insert (format "Local checkout HEAD: %s\nFetched remote thread tip: %s\nFetched remote main base: %s\nCheckout selection branch: %s\nActual local branch: %s\n"
                       (or (emacsos-assist-web-git-generation-oid generation)
                           "not read for local browsing")
                       (or (emacsos-assist-web-git-generation-remote generation)
                           "unavailable")
                       (or (emacsos-assist-web-git-generation-main generation)
                           "unavailable")
-                      (or (plist-get metadata :branch) "unavailable")))
+                      (or (plist-get metadata :branch) "unavailable")
+                      (or (plist-get metadata :local-branch) "unavailable")))
       (when (eq (emacsos-assist-web-git-generation-state generation) 'cached)
         (insert "\nLocal cached checkout; browsing performed no fetch. Magit compares cached remote/main against local HEAD.\n"))
       (when selected

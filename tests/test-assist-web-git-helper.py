@@ -363,6 +363,88 @@ class GitHelperTest(unittest.TestCase):
             "* -filter -ident -working-tree-encoding -text -eol\n")
         return checkout
 
+    def migrate(self, checkout, **changes):
+        return helper.migrate_workspace({"action": "migrate", "repo_key": "b" * 20,
+                                         "thread_id": "thread-1",
+                                         "cache_root": str(self.cache),
+                                         "workspace_root": str(self.root / "workspaces"),
+                                         "checkout_path": str(checkout),
+                                         "repo_label": "Life", "thread_label": "Swim notes",
+                                         **changes})
+
+    def test_explicit_move_preserves_dirty_index_untracked_refs_and_inode(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        (checkout / "personal-commit.txt").write_text("local commit\n")
+        run("-C", str(checkout), "add", "personal-commit.txt")
+        run("-C", str(checkout), "-c", "user.name=Sam",
+            "-c", "user.email=sam@example.invalid", "commit", "-qm", "local")
+        (checkout / "hello.txt").write_text("staged\n")
+        run("-C", str(checkout), "add", "hello.txt")
+        (checkout / "other.txt").write_text("unstaged\n")
+        (checkout / "personal.txt").write_text("untracked\n")
+        run("-C", str(checkout), "branch", "personal/keep")
+        before = (checkout.stat().st_dev, checkout.stat().st_ino,
+                  (checkout / ".git" / "index").read_bytes(),
+                  run("-C", str(checkout), "rev-parse", "HEAD"),
+                  run("-C", str(checkout), "status", "--porcelain", "--untracked-files=all"),
+                  run("-C", str(checkout), "show-ref"))
+        result = self.migrate(checkout)
+        target = Path(result["checkout_path"])
+        self.assertFalse(checkout.exists())
+        self.assertEqual((target.stat().st_dev, target.stat().st_ino,
+                          (target / ".git" / "index").read_bytes(),
+                          run("-C", str(target), "rev-parse", "HEAD"),
+                          run("-C", str(target), "status", "--porcelain", "--untracked-files=all"),
+                          run("-C", str(target), "show-ref")), before)
+        self.assertEqual((target / "personal.txt").read_text(), "untracked\n")
+        self.assertEqual(self.sync()["checkout_path"], str(target))
+
+    def test_interrupted_move_retries_same_inode_without_replacing_work(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        inode = checkout.stat().st_ino
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.migrate(checkout)
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        self.assertEqual(helper.read_route(route)["initialized"], "moving")
+        with self.assertRaisesRegex(helper.Refusal, "move interrupted"):
+            self.sync()
+        target = Path(self.migrate(checkout)["checkout_path"])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertFalse(checkout.exists())
+
+    def test_move_refuses_external_worktree_path_without_publishing_marker(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        run("-C", str(checkout), "config", "core.worktree", str(checkout))
+        with self.assertRaisesRegex(helper.Refusal, "external worktree path"):
+            self.migrate(checkout)
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        self.assertIs(helper.read_route(route)["initialized"], True)
+        self.assertTrue(checkout.exists())
+
+    def test_move_refuses_path_dependent_git_metadata(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        for relative in (".git/modules", ".git/objects/info/alternates"):
+            with self.subTest(relative=relative):
+                path = checkout / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if relative.endswith("modules"):
+                    path.mkdir()
+                else:
+                    path.write_text("../other-objects\n")
+                with self.assertRaisesRegex(helper.Refusal, "path-dependent Git metadata"):
+                    self.migrate(checkout)
+                self.assertIs(helper.read_route(route)["initialized"], True)
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    path.unlink()
+
     def test_readable_workspace_name_is_frozen_across_names_and_branches(self):
         first = self.sync(repo_label="Project Notes", thread_label="Plan the week")
         checkout = Path(first["checkout_path"])
