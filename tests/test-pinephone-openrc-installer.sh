@@ -24,7 +24,7 @@ addgroup -S user
 adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
-for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
+for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
@@ -809,6 +809,12 @@ awk '
     }
 ' /tmp/openrc-update-root
 
+# A modified pinned font must fail digest validation before the UI stops.
+printf '%s\n' tampered-font >/home/user/.cache/emacsos-openrc-update/inter.ttf
+assert_preflight_rejection font-digest
+install -o user -g user -m 0600 /source/inter.ttf \
+    /home/user/.cache/emacsos-openrc-update/inter.ttf
+
 # The update-only keyboard inputs retain the installer helper's strict staged
 # file contract before this transaction stops the UI or changes any payload.
 restore_keyboard_stage() {
@@ -1037,6 +1043,9 @@ fi
 # The updater's ordinary post-start verification must reject each state-free
 # keyboard-proof failure. The test proof fails once so rollback can start the
 # restored UI and the next case remains independent.
+# Rollback must restore existing font bytes and remove newly added font files.
+printf '%s\n' old-font >/usr/local/share/emacsos-openrc/inter.ttf
+rm -f /usr/local/share/emacsos-openrc/jetbrains-mono-OFL.txt
 for proof in missing wrong out-of-cgroup; do
     printf '%s\n' "$proof" >/tmp/wvkbd-proof-case
     if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
@@ -1047,7 +1056,12 @@ for proof in missing wrong out-of-cgroup; do
     grep -Fx "$proof" /tmp/wvkbd-proof-log >/dev/null
     grep -F 'updated UI did not become ready' /tmp/update-proof.out >/dev/null
     [ -f /run/emacsos-ui/ready ]
+    grep -Fx old-font /usr/local/share/emacsos-openrc/inter.ttf >/dev/null
+    [ ! -e /usr/local/share/emacsos-openrc/jetbrains-mono-OFL.txt ]
 done
+install -o root -g root -m 0644 /source/inter.ttf /usr/local/share/emacsos-openrc/inter.ttf
+install -o root -g root -m 0644 /source/jetbrains-mono-OFL.txt \
+    /usr/local/share/emacsos-openrc/jetbrains-mono-OFL.txt
 
 printf '%s\n' old-reference-directory-race >/var/lib/emacsos-lab/EMACSOS-COMMANDS.org
 chown emacsos-lab:emacsos-lab /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
