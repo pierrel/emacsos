@@ -248,20 +248,70 @@ thread-list metadata line now renders one status token per row
 (=repo · <token>=) instead of the raw stage, mirroring web's pill precedence
 exactly (busy stage → error → urgent → new → unmerged, else the raw stage).
 The six live busy stages map to one busy token; tokens are a fixed set of emoji
-literals so the existing display-isolation invariants hold. This is
-*display-only* — it clears nothing and adds no read-receipt / ack semantics.
+literals so the existing display-isolation invariants hold.
 
-Design: [[file:docs/2026-10-07-phone-thread-state-pills.org][2026-10-07-phone-thread-state-pills.org]].
-Two companion PRs: assist (catalog exposes =urgent= + =unmerged= on the phone
-wire) and EmacsOS (this client-side projection + pill). Land assist first; the
-client degrades to the raw stage against the old server (backward compatible
-both ways).
+Two follow-ups landed on the same two PRs (see
+[[file:docs/2026-10-07-phone-thread-state-pills-scope-expansion.org][2026-10-07-phone-thread-state-pills-scope-expansion.org]]):
+phone thread *opens* now clear =unread= + =urgent=, reusing the web helpers
+(=state._clear_unseen_response= / =_clear_urgent=, the same two
+=get_thread= calls), and =unmerged= is a tri-state string
+(=yes=/=no=/=unknown=) so the phone short-circuits the git check behind a
+stronger pill and "not checked" stays distinct from "confirmed clean".
+A separate [[* TODO Profile thread-list performance (web + phone): cheaper unmerged detection and smarter refresh][TODO: thread-list perf profiling]] tracks making
+the unmerged check itself cheap and the refresh cadence deliberate.
 
-Deferred to the P1 item (not this slice): read-receipt / ack (clear
-=unread= / =urgent= on view), the web's =following up= pill (needs turn
-=origin= on the phone catalog; a continuation thread with an unseen first reply
-shows only the busy token here, not =new=), and list search + the 500-thread
-cap parity.
+Design: [[file:docs/2026-10-07-phone-thread-state-pills.org][2026-10-07-phone-thread-state-pills.org]] (display slice) and
+[[file:docs/2026-10-07-phone-thread-state-pills-scope-expansion.org][2026-10-07-phone-thread-state-pills-scope-expansion.org]] (clear-on-open +
+tri-state). Two companion PRs: assist (catalog exposes =urgent= + the
+=unmerged= tri-state; thread-opens clear =unread= + =urgent=) and EmacsOS
+(this client-side projection + pill). Land assist first; the client degrades
+gracefully against the old server (backward compatible both ways, including
+the legacy JSON bool for =unmerged= across the two-PR window).
+
+Deferred to the P1 item (not this slice): the web's =following up= pill (needs
+turn =origin= on the phone catalog; a continuation thread with an unseen first
+reply shows only the busy token here, not =new=), and list search + the
+500-thread cap parity.
+
+** TODO Profile thread-list performance (web + phone): cheaper unmerged detection and smarter refresh
+
+Both surfaces build the thread list by calling the per-thread unmerged check
+(=assist/manage/web/state.py:_has_unmerged_changes=), which runs a git status
+probe per thread — up to one subprocess per row per refresh, silent-False on
+any error. Web's =render_index= (=assist/manage/web/threads.py=) already
+short-circuits (the unmerged check only runs when busy/error/urgent/new all
+fail), and the phone list now uses the same shared
+=state._unmerged_state= tri-state so "not checked" and "confirmed clean" stay
+distinct. But that only *skips* the check for a strong pill — a long settled
+list still pays the full per-thread git cost on every refresh.
+
+Profile the actual cost before optimizing: measure, on a realistic
+multi-hundred-thread list, how long one web list render and one phone catalog
+refresh take, how many git subprocesses the unmerged check spawns, and how
+often each surface re-fetches (web pull-refresh cadence, phone catalog poll
+while the list is displayed). Establish the baseline with the current
+per-thread =git status= so any later change is measured against it, not
+assumed.
+
+Then, in rough priority: (1) a *cheaper* unmerged signal than a fresh git
+subprocess per thread per refresh — e.g. a cached/dirty-bit derived from the
+thread's own working tree state that is refreshed lazily, or a single bulk
+scan of all thread dirs instead of N independent probes; keep the tri-state
+semantics (=yes=/=no=/=unknown=) so the display contract is unchanged. (2)
+*more careful refresh* — stop re-running the unmerged check when nothing in
+the thread's state could have changed since the last check (same stage, same
+urgent/unread), and let a strong pill keep short-circuiting. (3) bound or
+page the unmerged work so a very large list can't stall a refresh.
+
+Do not regress the web's existing short-circuit or the tri-state distinction
+introduced by the state-pills work; this item is about making the unmerged
+*check itself* cheap and the *refresh cadence* deliberate, on both surfaces.
+Acceptance: a documented baseline (render/refresh wall time + git-subprocess
+count at a known thread count) for web and phone; unmerged detection no longer
+spawns a fresh per-thread git probe on every refresh of an unchanged settled
+list; the =yes=/=no=/=unknown= contract and the busy→error→urgent→new→unmerged
+precedence are unchanged; and a settled list of a realistic size renders and
+refreshes within a stated budget on both surfaces.
 
 ** P2: Complete conversation and decision flows
 
