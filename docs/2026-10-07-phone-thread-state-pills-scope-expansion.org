@@ -1,0 +1,172 @@
+#+TITLE: Phone thread state pills: scope expansion (clear-on-open + unmerged tri-state)
+#+DATE: 2026-10-07
+#+PROPERTY: status implemented
+#+PROPERTY: repo emacsos + assist (cross-repo)
+
+* Lineage
+
+Supersedes, in part, [[file:2026-10-07-phone-thread-state-pills.org][2026-10-07-phone-thread-state-pills.org]]
+(the original display-slice design).  That doc is kept as-is (a dated design
+record).  The directly affected earlier doc is the one named; the changes below
+alter two of its explicit assumptions and its "out of scope" list:
+
+- The original doc's wire contract was =unmerged: bool=.  This change makes it
+  a *tri-state string* (=yes= / =no= / =unknown=) and short-circuits the git
+  check behind a stronger pill (see * Change 2).
+- The original doc listed "clear =unread= / =urgent= when the user views the
+  thread (read-receipt / ack)" as *out of scope / deferred*.  This change
+  implements that clear-on-open, reusing the web helpers (see * Change 1).
+- The original doc's * Follow-ups* still track the =following up= pill, list
+  search + the 500-thread cap, and =--completion-records= searchability.  A
+  NEW follow-up is added for profiling thread-list performance (cheaper
+  unmerged detection, smarter refresh) — tracked as a roadmap =** TODO=.
+
+The pill precedence (busy → error → urgent → new → unmerged; else raw stage),
+the emoji set, the single =repo · <emoji>= metadata line, and the
+forward/backward compatibility stance are unchanged from the original doc.
+
+* Why
+
+Follow-up review of the two open PRs (assist + emacsos) asked for three
+things, all kept within the existing two-PR architecture (no re-architect, no
+deployment):
+
+1. Phone thread *opens* should clear =unread= and =urgent=, reusing the
+   existing web logic rather than duplicating the behavior.
+2. The phone list should adopt the web's *short-circuit*: don't run a git
+   status check when a higher-priority indicator is already present.  Preserve
+   the distinction between "not checked" and "confirmed clean".
+3. A roadmap item for profiling thread-list performance across web and phone
+   (cheaper unmerged status detection, more careful refresh strategies).
+
+* Change 1 — phone open clears unread + urgent (reuse the web helpers)
+
+Web's thread *page* (=manage/web/threads.py::get_thread=, :3673-3674) already
+clears both flags on open by calling the two lock-free, missing-ok state
+helpers =state._clear_unseen_response(tid)= and =state._clear_urgent(tid)=.
+The phone's thread-open is =manage/web/phone_api.py::_snapshot=, which ran the
+same way but cleared nothing.
+
+Fix: in =_snapshot=, when =before is None= (the initial open — NOT history
+pagination, which passes a cursor), call the SAME two helpers.  No new
+clearing logic is written; the phone reuses the exact web semantics.
+
+- Why only =before is None=: opening the thread is the phone's "view";
+  =get_thread= (web) clears on the thread page, and history pagination is the
+  phone's analog of scrolling an already-opened view, so it must NOT clear.
+- Why it's safe here: =_snapshot= already runs off the event loop via
+  =anyio.to_thread=, and both helpers are lock-free, missing-ok, never-raise —
+  a flag hiccup can't 500 an open.  No event-loop liveness risk.
+- Shared functionality: the two helpers are the shared unit.  Web and phone
+  now both route "opened a thread → clear unseen + urgent" through them, so
+  the read-receipt / ack semantics have one implementation, not two copies.
+
+* Change 2 — unmerged is a tri-state; the phone short-circuits like web
+
+The phone list (=phone_api._list_threads=) previously called
+=state._has_unmerged_changes(tid)= *unconditionally* — one git status
+subprocess per thread per refresh, even for threads already showing a stronger
+pill (busy/error/urgent/new).  Web's =render_index= instead reaches the
+unmerged check only *after* busy/error/urgent/new all fail — i.e. it
+short-circuits.  The phone did not.
+
+Fix: a new shared helper in =manage/web/state.py=,
+
+    def _unmerged_state(tid, stage, urgent, unseen) -> str
+
+returns:
+
+- =unknown= — NOT checked, because a higher-priority indicator is present
+  (=(stage in BUSY_STAGES) or (stage == "error") or urgent or unseen=).  This
+  is the short-circuit; no git subprocess runs.
+- =yes= — a git check ran and the working tree has unmerged changes vs main.
+- =no= — a git check ran and it is *confirmed clean*.
+
+=phone_api._list_threads= now sets ="unmerged": state._unmerged_state(...)=.
+The wire field is a **string** (=yes= / =no= / =unknown=), not a bool.
+
+- "Not checked" vs "confirmed clean": =unknown= and =no= are deliberately
+  distinct.  =unknown= means "a stronger pill is showing, so we skipped the
+  check" — the client must NOT render the unmerged pill for it.  =no= means
+  "we checked and it is clean."  Collapsing them (e.g. to a single bool) would
+  lose that distinction, which the review asked to preserve.
+- Why a string on the wire (not JSON true/false/null): strings parse
+  identically in Emacs regardless of =:false-object=/=:null-object=, and they
+  read at a glance in the payload.  (The elisp client uses =:false-object nil=
+  / =:null-object nil= everywhere, so a JSON false→nil, but the tri-state
+  needs three states, so a bool/null pair would be ambiguous.)
+- Client pill: =emacsos-assist-web--state-pill='s unmerged clause now fires
+  only on =(equal unmerged "yes")= (plus legacy =(eq unmerged t)=, see below);
+  ="no"= and ="unknown"= fall through to the raw stage.  A short-circuited
+  thread already shows its stronger pill, so falling through is correct.
+- Two-PR transition window: the client and server land in *separate* PRs and
+  can be deployed in either order.  A new client against an *old* server still
+  gets the legacy JSON bool for =unmerged= (true→=t=, false→=nil=).  So the
+  pill also accepts =(eq unmerged t)=, keeping the emoji working across the
+  window instead of silently dropping unmerged threads until both land.  This
+  is the documented transition, not defensive code.
+- Web badge unchanged: web's =render_index= already short-circuits via its
+  =elif= order (unmerged is last), so it keeps working as-is; the *skip
+  predicate* now also lives in =_unmerged_state= for the phone.  Web's
+  unmerged test patches the =threads._has_unmerged_changes= name binding, so
+  it is unaffected by adding the helper to =state.py=.
+
+* Change 3 — roadmap item (thread-list perf profiling)
+
+A new =** TODO= in =roadmap.org=: "Profile thread-list performance (web +
+phone): cheaper unmerged detection and smarter refresh."  It captures the real
+cost the original doc flagged (up to =MAX_THREADS= git subprocesses per
+refresh) and scopes a *measure-first* effort: establish a baseline (render /
+refresh wall time + git-subprocess count at a known thread count) for both
+surfaces, then (1) a cheaper unmerged signal than a fresh per-thread git probe
+per refresh (cached/lazy dirty bit, or a single bulk scan of thread dirs),
+(2) more careful refresh (don't re-check when stage/urgent/unread are
+unchanged; keep the short-circuit), and (3) bound or page the unmerged work.
+It must NOT regress the short-circuit or the =yes=/=no=/=unknown= contract
+introduced here.  No code in this PR — it is a tracked follow-up.
+
+* Wire contract change (delta on the original)
+
+=GET /api/v1/phone/threads= per-thread object:
+  "urgent":   bool                 (unchanged)
+  "unread":   bool                 (unchanged)
+  "unmerged": "yes" | "no" | "unknown"   (was bool; now a tri-state string)
+Existing fields otherwise unchanged.
+
+Compatibility:
+- new client + old server: old server sends a JSON bool for =unmerged=
+  (true→=t=, false→=nil=).  The pill accepts =(eq unmerged t)= so =true= still
+  shows 🔀 and =false= falls to raw stage.  No error.
+- new client + new server: the tri-state string drives the pill (🔀 only for
+  ="yes"=).
+- old client + either server: the projection keeps =unmerged= as-is; an old
+  client that predates the field simply ignores it.
+
+* Files changed (this round, on top of the original slice)
+
+assist:
+- =manage/web/state.py= — new =_unmerged_state(tid, stage, urgent, unseen)=.
+- =manage/web/phone_api.py=
+  - =_list_threads= — ="unmerged"= now from =state._unmerged_state= (tri-state).
+  - =_snapshot= — clear =unread= + =urgent= on initial open (=before is None=),
+    reusing =state._clear_unseen_response= + =state._clear_urgent=.
+- =tests/test_phone_api.py= — tri-state list assertions (=yes=/=no=/=unknown=),
+  short-circuit (no git call for busy/urgent/unread), and clear-on-open /
+  history-does-not-clear tests.
+
+emacsos:
+- =assist-web.el= — =--state-pill= unmerged clause: only =yes= (or legacy =t=).
+- =tests/test-assist-web.el= — projection carries the tri-state string verbatim;
+  pill table covers ="yes"=→🔀, ="no"=/="unknown"=→raw stage, legacy =t=→🔀;
+  list-render metadata line covers a ="yes"= (🔀) and a ="no"= (raw stage) row.
+- =roadmap.org= — new =** TODO= thread-list perf-profiling item.
+- =docs/2026-10-07-phone-thread-state-pills-scope-expansion.org= — this doc.
+
+* Out of scope (still deferred)
+
+- The =following up= pill (needs turn =origin= on the phone catalog).
+- List *search* and the 500-thread cap parity.
+- =--completion-records= state searchability.
+- Any *deploy* — both PRs land to main via normal review; deployment is a
+  separate, user-owned step.  Live-phone verification is listed for
+  completeness but is NOT run in this task.

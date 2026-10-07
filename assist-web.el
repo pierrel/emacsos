@@ -4132,8 +4132,16 @@ six live stages) beats error, error beats urgent, urgent beats new (an unseen
 reply), new beats unmerged.  When none matches, the raw stage is returned so
 a settled thread still shows its state.  The tokens are fixed literals never
 interpolated from untrusted thread text, so they stay font-safe and pass the
-list's display-isolation checks."
-  (let ((status (alist-get 'status thread)))
+list's display-isolation checks.
+
+Unmerged is a TRI-STATE on the wire: \"yes\" (a git check ran, dirty),
+\"no\" (checked, confirmed clean), or \"unknown\" (not checked — a stronger
+pill is already present).  Only \"yes\" is unmerged; \"no\" and \"unknown\"
+fall through to the raw stage.  Legacy servers (before the assist PR lands)
+send a JSON bool, which parses to t/nil, so t is accepted too across the
+two-PR transition window."
+  (let ((status (alist-get 'status thread))
+        (unmerged (alist-get 'unmerged thread)))
     (cond
      ((member status
               '("queued" "cloning" "starting_sandbox" "processing"
@@ -4145,7 +4153,7 @@ list's display-isolation checks."
       "⚠️")
      ((alist-get 'unread thread)
       "📬")
-     ((alist-get 'unmerged thread)
+     ((or (equal unmerged "yes") (eq unmerged t))
       "🔀")
      (t status))))
 

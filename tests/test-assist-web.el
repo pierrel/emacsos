@@ -3506,10 +3506,16 @@
          (plain '((id . "plain") (description . "Plain")
                   (search_description . "plain")
                   (repo_label . "R") (status . "ready")))
+         ;; The unmerged wire field is a tri-state STRING ("yes"/"no"/"unknown"),
+         ;; not a bool; the projection must carry it verbatim.
+         (dirty `((id . "dirty") (description . "Dirty")
+                  (search_description . "dirty")
+                  (repo_label . "R") (status . "ready") (unmerged . "yes")))
          (catalog (emacsos-assist-web--require-catalog
-                   (test-assist-web--wire-catalog (list busy new plain) nil nil))))
+                   (test-assist-web--wire-catalog (list busy new plain dirty) nil nil))))
     ;; The projection keeps the three state fields as nil when the wire object
-    ;; omits them, so absent fields degrade to false rather than erroring.
+    ;; omits them, so absent fields degrade to false rather than erroring — and
+    ;; carries a present tri-state unmerged string unchanged.
     (should
      (equal (alist-get 'threads catalog)
             '(((id . "busy") (description . "Busy") (search_description . "busy")
@@ -3521,7 +3527,11 @@
               ((id . "plain") (description . "Plain")
                (search_description . "plain")
                (repo_label . "R") (status . "ready")
-               (unread . nil) (urgent . nil) (unmerged . nil)))))))
+               (unread . nil) (urgent . nil) (unmerged . nil))
+              ((id . "dirty") (description . "Dirty")
+               (search_description . "dirty")
+               (repo_label . "R") (status . "ready")
+               (unread . nil) (urgent . nil) (unmerged . "yes")))))))
 
 (ert-deftest test-assist-web-state-pill-matches-web-precedence ()
   (let ((busy "🔄")
@@ -3548,6 +3558,18 @@
     (should (equal (emacsos-assist-web--state-pill
                     `((status . "ready") (unmerged . t)))
                    unmerged))
+    ;; Unmerged is a tri-state string on the new wire: only "yes" is unmerged.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . "yes")))
+                   unmerged))
+    ;; "no" (checked, confirmed clean) and "unknown" (not checked behind a
+    ;; stronger pill) are NOT unmerged — they fall through to the raw stage.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . "no")))
+                   "ready"))
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . "unknown")))
+                   "ready"))
     ;; Nothing matches: the raw stage is returned so settled rows keep a state.
     (should (equal (emacsos-assist-web--state-pill
                     `((status . "ready")))
@@ -3571,9 +3593,17 @@
          (urgent `((id . "d") (description . "Urgent")
                    (search_description . "urgent")
                    (repo_label . "R") (status . "error") (urgent . t)))
+         (dirty `((id . "e") (description . "Dirty")
+                  (search_description . "dirty")
+                  (repo_label . "R") (status . "ready") (unmerged . "yes")))
+         (clean `((id . "f") (description . "Clean")
+                  (search_description . "clean")
+                  (repo_label . "R") (status . "ready") (unmerged . "no")))
          (emacsos-assist-web--catalog
-          (test-assist-web--catalog ready new busy urgent)))
+          (test-assist-web--catalog ready new busy urgent dirty clean)))
     ;; The metadata line is one status token, never a duplicated raw stage.
+    ;; Unmerged renders only for the tri-state "yes"; a confirmed-clean "no"
+    ;; thread shows its raw stage, not a token.
     (should
      (equal (mapcar (lambda (record)
                       (cons (alist-get 'id (plist-get record :thread))
@@ -3582,7 +3612,9 @@
             '(("a" . "R · ready")
               ("b" . "R · 📬")
               ("c" . "R · 🔄")
-              ("d" . "R · 🛑"))))))
+              ("d" . "R · 🛑")
+              ("e" . "R · 🔀")
+              ("f" . "R · ready"))))))
 
 (ert-deftest test-assist-web-native-list-renders-stable-collision-ordinals ()
   (let* ((a '((id . "a") (description . "Same description alpha")
