@@ -241,6 +241,28 @@ describes current processing. Every canonical thread beyond the first catalog
 page remains reachable by list navigation or search. Touch-list search reports
 a matching count or a clear no-match state.
 
+** TODO Phone thread list: state pills (display slice, in flight)
+
+The display half of [[* P1: Match Web list status, urgency and unread behavior][P1]]: the phone
+thread-list metadata line now renders one status token per row
+(=repo · <token>=) instead of the raw stage, mirroring web's pill precedence
+exactly (busy stage → error → urgent → new → unmerged, else the raw stage).
+The six live busy stages map to one busy token; tokens are a fixed set of emoji
+literals so the existing display-isolation invariants hold. This is
+*display-only* — it clears nothing and adds no read-receipt / ack semantics.
+
+Design: [[file:docs/2026-10-07-phone-thread-state-pills.org][2026-10-07-phone-thread-state-pills.org]].
+Two companion PRs: assist (catalog exposes =urgent= + =unmerged= on the phone
+wire) and EmacsOS (this client-side projection + pill). Land assist first; the
+client degrades to the raw stage against the old server (backward compatible
+both ways).
+
+Deferred to the P1 item (not this slice): read-receipt / ack (clear
+=unread= / =urgent= on view), the web's =following up= pill (needs turn
+=origin= on the phone catalog; a continuation thread with an unseen first reply
+shows only the busy token here, not =new=), and list search + the 500-thread
+cap parity.
+
 ** P2: Complete conversation and decision flows
 
 Render the snapshot's message =id= and =kind=, which distinguish background
