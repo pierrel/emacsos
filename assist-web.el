@@ -1946,7 +1946,8 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
     (let ((threads
            (mapcar (lambda (entry)
                      (emacsos-assist-web--catalog-entry
-                      entry '(id description search_description repo_label status)))
+                      entry '(id description search_description repo_label status
+                               unread urgent unmerged)))
                    (append wire-threads nil)))
           (repositories
            (mapcar (lambda (entry)
@@ -4085,7 +4086,7 @@ suppressing a genuine repeated submission."
                                   (alist-get 'description thread) width))
                     (metadata-source (format "%s · %s"
                                              (alist-get 'repo_label thread)
-                                             (alist-get 'status thread)))
+                                             (emacsos-assist-web--state-pill thread)))
                     (metadata (emacsos-assist-web--fit-list-line
                                metadata-source
                                (max 0 (- width
@@ -4123,6 +4124,30 @@ suppressing a genuine repeated submission."
        (if-let ((window (get-buffer-window (current-buffer) t)))
            (window-body-width window)
          40)))
+
+(defun emacsos-assist-web--state-pill (thread)
+  "Return the single status token for THREAD, mirroring the web thread list.
+One emoji per thread, first match wins, in the web's precedence: busy (all
+six live stages) beats error, error beats urgent, urgent beats new (an unseen
+reply), new beats unmerged.  When none matches, the raw stage is returned so
+a settled thread still shows its state.  The tokens are fixed literals never
+interpolated from untrusted thread text, so they stay font-safe and pass the
+list's display-isolation checks."
+  (let ((status (alist-get 'status thread)))
+    (cond
+     ((member status
+              '("queued" "cloning" "starting_sandbox" "processing"
+                "paused" "initializing"))
+      "🔄")
+     ((equal status "error")
+      "🛑")
+     ((alist-get 'urgent thread)
+      "⚠️")
+     ((alist-get 'unread thread)
+      "📬")
+     ((alist-get 'unmerged thread)
+      "🔀")
+     (t status))))
 
 (defun emacsos-assist-web--fit-list-line (text width)
   "Fit TEXT into WIDTH frame columns with a visible truncation marker.
