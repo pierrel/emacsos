@@ -189,7 +189,7 @@ probe_sway get_inputs &&
 /usr/local/libexec/emacsos-wvkbd-launch &
 keyboard_pid=$!
 export EMACSOS_WVKBD_PID=$keyboard_pid
-/usr/bin/emacs -Q --load "$root/init.el" &
+FONTCONFIG_FILE="$root/phone-fonts.conf" /usr/bin/emacs -Q --load "$root/init.el" &
 emacs_pid=$!
 
 attempt=0

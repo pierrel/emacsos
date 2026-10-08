@@ -11,7 +11,7 @@ snapshot=
 reference_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=6d309dd8b5cf40fc7919037e090c18d8057557dcbb1ca6d9c98f47d09d7b9c08
+manifest_hash=5a5b15bce16757b86783a1b863aaaf7e3c3141a54e47016a192239170d5e4ce4
 committed=0
 mutating=0
 lab_group_created=0
@@ -219,7 +219,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -233,12 +233,12 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 42 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 47 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
-for name in openrc-manifest.sha256 openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
+for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
@@ -458,7 +458,7 @@ else
     install -d -o root -g root -m 0755 /usr/local/libexec
 fi
 for module in os.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
-    dtach-shell.el dtach-shell-init.el; do
+    dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
 done
@@ -586,7 +586,7 @@ cmp -s "$snapshot/assist-web-token" \
 cmp -s "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 for module in os.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
-    dtach-shell.el dtach-shell-init.el; do
+    dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done
 cmp -s "$snapshot/assist-web-git-helper.py" \

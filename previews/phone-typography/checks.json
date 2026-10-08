@@ -1,0 +1,66 @@
+{
+  "geometry": [
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    },
+    {
+      "width": 360,
+      "height": 720,
+      "keyboard": 300,
+      "buffer": 397
+    }
+  ],
+  "controls": {
+    "size": "20px",
+    "weight": "600",
+    "spacing": "0.2px",
+    "line": "29px"
+  },
+  "directions": 8,
+  "views": 6,
+  "contactSheets": 7,
+  "individualPhoneImages": 8,
+  "assetHashes": 31,
+  "pageErrors": [],
+  "remoteRequests": [],
+  "rendering": "Chromium browser approximation. Source-derived geometry; actual Emacs metrics unavailable."
+}

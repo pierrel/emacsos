@@ -66,6 +66,11 @@ ssh -T "$@" "$phone_host" \
     "rm -rf -- '$stage' '$bootstrap' && install -d -m 0700 '$stage' '$bootstrap'"
 scp -q "$@" \
     "$deploy_dir/openrc-manifest.sha256" \
+    "$deploy_dir/inter.ttf" \
+    "$deploy_dir/inter-OFL.txt" \
+    "$deploy_dir/jetbrains-mono.ttf" \
+    "$deploy_dir/jetbrains-mono-OFL.txt" \
+    "$deploy_dir/phone-fonts.conf" \
     "$deploy_dir/openrc-init.el" \
     "$deploy_dir/dtach-shell.el" \
     "$deploy_dir/dtach-shell-init.el" \

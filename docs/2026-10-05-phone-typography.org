@@ -1,0 +1,80 @@
+#+title: Selected phone typography
+#+date: 2026-10-05
+
+* Requested behavior
+Pierre selected Inter for phone UI and prose, paired with JetBrains Mono for
+code and fixed-width content. These defaults belong to the PinePhone OpenRC
+session. Desktop Assist and the standalone Emacs installer remain separate.
+Root preserves the currently installed generic Email and HITL components when
+composing and installing this effort. This document does not claim installation
+or physical phone testing.
+
+* Fonts and provenance
+The product ships the original variable TTF files and their SIL Open Font
+License 1.1 texts. It does not use the private =Phone Type 03= / =Phone Code 03=
+preview derivatives. The Google Fonts source revision is
+=9710da1eacb3be272583c3224dcb70f9da6eadbb=; original URLs and source hashes are
+also recorded in =previews/phone-typography/font-manifest.json=.
+
+| Product payload | SHA256 |
+|-----------------+--------|
+| inter.ttf | 29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031 |
+| inter-OFL.txt | 5b9321a4298cfeb6b34354164a1c3afc3db114569984c502b9b35d988fd58c57 |
+| jetbrains-mono.ttf | 48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda |
+| jetbrains-mono-OFL.txt | b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d |
+
+Sources: [[https://github.com/google/fonts/tree/9710da1eacb3be272583c3224dcb70f9da6eadbb/ofl/inter][Inter]] and
+[[https://github.com/google/fonts/tree/9710da1eacb3be272583c3224dcb70f9da6eadbb/ofl/jetbrainsmono][JetBrains Mono]].
+
+Both OpenRC install and update transactions snapshot and digest-check the fonts,
+licenses and =phone-fonts.conf= with their existing bounded payload. They install
+these flat files under =/usr/local/share/emacsos-openrc=. The updater restores
+existing bytes or removes newly introduced files if installation fails. The
+session applies =FONTCONFIG_FILE= only to Emacs; the external keyboard keeps its
+existing configuration and source bytes.
+
+* Startup and layout
+The underlying frame/default face is JetBrains Mono 14, retaining a stable
+character-column basis. Phone buffer defaults remap prose and UI to Inter.
+Code, configuration, terminal and Dired mode hooks select fixed pitch; already
+existing code buffers are updated too. The mode line and header line use Inter.
+Chat's existing variable-pitch prose and fixed-pitch Markdown code faces remain
+in use. Startup checks that both selected font families are actually available
+before opening the Emacs server used by the session's readiness probe.
+
+Shared graphical buttons convert their existing cell budgets into pixels,
+including horizontal box padding, then fit Inter labels and clickable spacing
+to those budgets. Thread-list text uses the same bounded pixel fitter. Prefix
+fitting uses logarithmic measurements rather than measuring every shorter title.
+The shared behavior is enabled only by phone startup; ordinary desktop Emacs
+keeps its current face and button behavior.
+
+* Validation and Root installation recipe
+The standalone =tests/test-phone-typography.sh= runs disposable Alpine graphical
+Emacs with the product fonts. It checks actual prose and Markdown-code font
+selection, code buffers, reapplication, clickable button padding, control rows,
+long-title fit and the number of synchronous width measurements. This is X11
+fixture evidence, not proof of the phone's PGTK rendering or physical taps.
+
+Root integrates the exact reviewed typography source over the latest installed
+phone composition, preserving generic Email/HITL and keyboard bytes. Regenerate
+the final composition's =openrc-manifest.sha256= and its embedded installer and
+updater hashes, then run the existing manifest and root transaction checks.
+Use the existing OpenRC install/update transaction for the actual phone; never
+load new product modules into the running Emacs as a substitute for restart.
+
+After installation, compare all five font/config payload files and startup Lisp
+against the exact final composition. On the UI account's normal environment,
+Fontconfig must resolve Inter and JetBrains Mono to the installed original TTF
+files. The service's Emacs process must inherit the selected =FONTCONFIG_FILE=.
+Verify a fresh GUI startup has Inter UI/prose and JetBrains Mono code, no wrapped
+or clipped control rows at the actual 360 logical pixel screen, and functioning
+navigation, native thread list, SMS/call controls, generic Email and approval
+controls. Verify the keyboard hash is unchanged and record the exact package,
+tree and startup/live proof. Physical UI observations remain Root/Pierre work.
+
+* Historical supersessions
+The preview README's capture-time Droid/Monospace baseline and the staged font
+study described the comparison stage. This implementation supplies persistent
+selected fonts and proportional-label fitting; it does not rewrite prior preview
+checks or claim those browser/specimen captures were product screenshots.
