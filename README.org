@@ -226,8 +226,29 @@ acceptance-unknown committed turn; Send reuses its exact idempotency key to
 re-observe it.  Afterwards, only HTTP 200 =cancelled= confirms cancellation;
 structured HTTP 409 =running= or =transitioning= truthfully detaches, and other
 terminal outcomes reconcile the canonical snapshot.  =awaiting_approval= is a
-nonterminal Run state, but it ends this finite live-text observation and also
-reconciles the canonical snapshot so the approval state becomes visible.
+nonterminal Run state, but it ends this finite live-text observation. Its exact
+status check exposes the compact =Review= header action without discarding the accepted
+Run receipt or saved draft. After a decision, the same logical Run handle follows
+the approval resume and reconciles its completed canonical snapshot.
+Tap =Review= in a stopped Run header or =Review pending action= in its snapshot to fetch a complete scrollable preview. Outbound email
+shows From, To, fixed Cc, subject and body; =Edit email= changes To, subject and body
+and returns to review before sending. Email archive and Trash proposals show the
+exact affected messages, their bodies and =Open email= links. An unavailable
+complete email preview offers rejection only. Approve/send and reject use two taps;
+another action or window disarms confirmation. Tokens bind decisions to the displayed proposal.
+An in-flight decision blocks another submission across preview refreshes and recreated
+views until its acknowledgment settles. The editor uses the same canonical body text
+as the preview, with CRLF normalized to LF.
+After an unconfirmed decision, refresh to inspect server state before acting again.
+Oversized edits stay in the editor: To allows 320 characters, subject 998 UTF-8
+bytes and body 65536 UTF-8 bytes; the encoded request is capped at 512 KiB.
+An accepted decision rechecks its stopped Run owners even if another view
+refreshed the preview while the decision was in flight.
+Approval previews are fetched afresh and are not stored in the local snapshot cache.
+Headers remain single-line; bodies wrap and scroll. An empty fresh preview closes
+the old approval buffer and removes its decision controls.
+An approval access denial fences all thread peers and closes the old preview;
+an earlier response cannot reopen it.
 If Assist confirms that the thread was deleted while an observer is open, the
 client retains visible partial text and the next draft, clears the accepted
 retry identity, and starts the next submission as a new thread.  If the durable
