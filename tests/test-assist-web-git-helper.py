@@ -363,6 +363,88 @@ class GitHelperTest(unittest.TestCase):
             "* -filter -ident -working-tree-encoding -text -eol\n")
         return checkout
 
+    def migrate(self, checkout, **changes):
+        return helper.migrate_workspace({"action": "migrate", "repo_key": "b" * 20,
+                                         "thread_id": "thread-1",
+                                         "cache_root": str(self.cache),
+                                         "workspace_root": str(self.root / "workspaces"),
+                                         "checkout_path": str(checkout),
+                                         "repo_label": "Life", "thread_label": "Swim notes",
+                                         **changes})
+
+    def test_explicit_move_preserves_dirty_index_untracked_refs_and_inode(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        (checkout / "personal-commit.txt").write_text("local commit\n")
+        run("-C", str(checkout), "add", "personal-commit.txt")
+        run("-C", str(checkout), "-c", "user.name=Sam",
+            "-c", "user.email=sam@example.invalid", "commit", "-qm", "local")
+        (checkout / "hello.txt").write_text("staged\n")
+        run("-C", str(checkout), "add", "hello.txt")
+        (checkout / "other.txt").write_text("unstaged\n")
+        (checkout / "personal.txt").write_text("untracked\n")
+        run("-C", str(checkout), "branch", "personal/keep")
+        before = (checkout.stat().st_dev, checkout.stat().st_ino,
+                  (checkout / ".git" / "index").read_bytes(),
+                  run("-C", str(checkout), "rev-parse", "HEAD"),
+                  run("-C", str(checkout), "status", "--porcelain", "--untracked-files=all"),
+                  run("-C", str(checkout), "show-ref"))
+        result = self.migrate(checkout)
+        target = Path(result["checkout_path"])
+        self.assertFalse(checkout.exists())
+        self.assertEqual((target.stat().st_dev, target.stat().st_ino,
+                          (target / ".git" / "index").read_bytes(),
+                          run("-C", str(target), "rev-parse", "HEAD"),
+                          run("-C", str(target), "status", "--porcelain", "--untracked-files=all"),
+                          run("-C", str(target), "show-ref")), before)
+        self.assertEqual((target / "personal.txt").read_text(), "untracked\n")
+        self.assertEqual(self.sync()["checkout_path"], str(target))
+
+    def test_interrupted_move_retries_same_inode_without_replacing_work(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        inode = checkout.stat().st_ino
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.migrate(checkout)
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        self.assertEqual(helper.read_route(route)["initialized"], "moving")
+        with self.assertRaisesRegex(helper.Refusal, "move interrupted"):
+            self.sync()
+        target = Path(self.migrate(checkout)["checkout_path"])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertFalse(checkout.exists())
+
+    def test_move_refuses_external_worktree_path_without_publishing_marker(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        run("-C", str(checkout), "config", "core.worktree", str(checkout))
+        with self.assertRaisesRegex(helper.Refusal, "external worktree path"):
+            self.migrate(checkout)
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        self.assertIs(helper.read_route(route)["initialized"], True)
+        self.assertTrue(checkout.exists())
+
+    def test_move_refuses_path_dependent_git_metadata(self):
+        checkout = self.legacy_checkout("thread-1")
+        self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        for relative in (".git/modules", ".git/objects/info/alternates"):
+            with self.subTest(relative=relative):
+                path = checkout / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if relative.endswith("modules"):
+                    path.mkdir()
+                else:
+                    path.write_text("../other-objects\n")
+                with self.assertRaisesRegex(helper.Refusal, "path-dependent Git metadata"):
+                    self.migrate(checkout)
+                self.assertIs(helper.read_route(route)["initialized"], True)
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    path.unlink()
+
     def test_readable_workspace_name_is_frozen_across_names_and_branches(self):
         first = self.sync(repo_label="Project Notes", thread_label="Plan the week")
         checkout = Path(first["checkout_path"])
@@ -606,13 +688,265 @@ class GitHelperTest(unittest.TestCase):
             self.sync()
         self.assertEqual(checkout.stat().st_ino, state["inode"])
 
-    def test_interrupted_promotion_does_not_recreate_a_missing_workspace(self):
+    def test_interrupted_promotion_retries_same_staged_workspace(self):
         with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
             with self.assertRaises(OSError):
                 self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        checkout = self.root / "workspaces" / helper.read_route(route)["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        inode = stage.stat().st_ino
+        (stage / "personal.txt").write_text("keep untracked\n")
+        (stage / "hello.txt").write_text("keep staged\n")
+        run("-C", str(stage), "add", "hello.txt")
+        index = (stage / ".git" / "index").read_bytes()
+        result = self.sync()
+        self.assertEqual(checkout.stat().st_ino, inode)
+        self.assertEqual((checkout / ".git" / "index").read_bytes(), index)
+        self.assertEqual((checkout / "personal.txt").read_text(), "keep untracked\n")
+        self.assertTrue(result["dirty"])
+        self.assertIs(helper.read_route(route)["initialized"], True)
+
+    def test_atomic_promotion_works_without_libc_renameat2_wrapper(self):
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+
+        class WithoutRenameat2:
+            syscall = libc.syscall
+
+        stage, checkout = self.root / "stage", self.root / "destination"
+        stage.mkdir()
+        (stage / "keep").write_text("same bytes")
+        inode = stage.stat().st_ino
+        with patch.object(ctypes, "CDLL", return_value=WithoutRenameat2()):
+            helper.promote_workspace(stage, checkout)
+        self.assertEqual(checkout.stat().st_ino, inode)
+        self.assertEqual((checkout / "keep").read_text(), "same bytes")
+        stage.mkdir()
+        (stage / "other").write_text("preserved staging")
+        with patch.object(ctypes, "CDLL", return_value=WithoutRenameat2()):
+            with self.assertRaisesRegex(helper.Refusal, "destination already exists"):
+                helper.promote_workspace(stage, checkout)
+        self.assertEqual((stage / "other").read_text(), "preserved staging")
+        empty = self.root / "empty"
+        empty.mkdir()
+        empty_inode = empty.stat().st_ino
+        with patch.object(ctypes, "CDLL", return_value=WithoutRenameat2()):
+            with self.assertRaisesRegex(helper.Refusal, "destination already exists"):
+                helper.promote_workspace(stage, empty)
+        self.assertEqual(empty.stat().st_ino, empty_inode)
+
+    def test_atomic_promotion_fallback_uses_phone_abi_and_refuses_unavailable_kernel(self):
+        import ctypes
+        import errno
+        from unittest.mock import Mock
+
+        unavailable = Mock(side_effect=lambda *args: (ctypes.set_errno(errno.ENOSYS), -1)[1])
+
+        class WithoutRenameat2:
+            syscall = unavailable
+
+        stage, checkout = self.root / "stage", self.root / "destination"
+        stage.mkdir()
+        (stage / "keep").write_text("unchanged")
+        inode = stage.stat().st_ino
+        with patch.object(ctypes, "CDLL", return_value=WithoutRenameat2()):
+            with patch.object(helper.platform, "machine", return_value="aarch64"):
+                with self.assertRaisesRegex(helper.Refusal, "atomic workspace promotion unavailable"):
+                    helper.promote_workspace(stage, checkout)
+            self.assertEqual(unavailable.call_args.args[0].value, 276)
+            unavailable.reset_mock()
+            with patch.object(helper.platform, "machine", return_value="unsupported"):
+                with self.assertRaisesRegex(helper.Refusal, "atomic workspace promotion unavailable"):
+                    helper.promote_workspace(stage, checkout)
+            unavailable.assert_not_called()
+        self.assertEqual(stage.stat().st_ino, inode)
+        self.assertEqual((stage / "keep").read_text(), "unchanged")
+        self.assertFalse(checkout.exists())
+
+    def test_legacy_empty_installing_route_requires_explicit_recovery(self):
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        record = helper.read_route(route)
+        checkout = self.root / "workspaces" / record["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        if stage.exists():
+            shutil.rmtree(stage)  # Represent the installed helper's old exception cleanup.
+        for key in ("installation_device", "installation_inode", "installation_branch"):
+            record.pop(key, None)
+        helper.write_route(route, record)
         with self.assertRaisesRegex(helper.Refusal, "initialization interrupted"):
             self.sync()
-        self.assertFalse(any(path.is_dir() for path in (self.root / "workspaces" / "repo").iterdir()))
+        result = self.sync(recover_initialization=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(Path(result["checkout_path"]), checkout)
+        self.assertFalse(checkout.exists())
+        self.assertIs(helper.read_route(route)["initialized"], False)
+        self.assertEqual(Path(self.sync()["checkout_path"]), checkout)
+
+    def test_publication_failure_after_rename_keeps_local_commits_and_edits(self):
+        original = helper.write_route
+        def fail_final(route, record):
+            if record["initialized"] is True:
+                raise OSError("final route publication interrupted")
+            original(route, record)
+        with patch.object(helper, "write_route", side_effect=fail_final):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        record = helper.read_route(route)
+        checkout = self.root / "workspaces" / record["relative"]
+        inode = checkout.stat().st_ino
+        (checkout / "committed.txt").write_text("user commit\n")
+        run("-C", str(checkout), "add", "committed.txt")
+        run("-C", str(checkout), "-c", "user.name=Sam", "-c",
+            "user.email=sam@example.invalid", "commit", "-qm", "user commit")
+        local_oid = run("-C", str(checkout), "rev-parse", "HEAD")
+        (checkout / "hello.txt").write_text("staged user edit\n")
+        run("-C", str(checkout), "add", "hello.txt")
+        (checkout / "other.txt").write_text("unstaged user edit\n")
+        (checkout / "untracked.txt").write_text("untracked user file\n")
+        index = (checkout / ".git" / "index").read_bytes()
+        result = self.sync()
+        self.assertEqual((checkout.stat().st_ino, result["local_oid"],
+                          (checkout / ".git" / "index").read_bytes()), (inode, local_oid, index))
+        self.assertEqual((checkout / "other.txt").read_text(), "unstaged user edit\n")
+        self.assertEqual((checkout / "untracked.txt").read_text(), "untracked user file\n")
+        self.assertIs(helper.read_route(route)["initialized"], True)
+
+    def test_uncertain_marker_publication_preserves_stage_for_retry(self):
+        original = helper.write_route
+        def fail_after_marker(route, record):
+            original(route, record)
+            if record["initialized"] == "installing":
+                raise OSError("after replace")
+        with patch.object(helper, "write_route", side_effect=fail_after_marker):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        checkout = self.root / "workspaces" / helper.read_route(route)["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        inode = stage.stat().st_ino
+        self.sync()
+        self.assertEqual(checkout.stat().st_ino, inode)
+
+    def test_initialization_recovery_refuses_changed_identity_and_malformed_proof(self):
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        original = helper.read_route(route)
+        checkout = self.root / "workspaces" / original["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        index = (stage / ".git" / "index").read_bytes()
+        for change in ({"installation_inode": True}, {"installation_device": None},
+                       {"installation_inode": original["installation_inode"] + 1}):
+            with self.subTest(change=change):
+                helper.write_route(route, {**original, **change})
+                with self.assertRaises(helper.Refusal):
+                    self.sync(recover_initialization=True)
+                with self.assertRaises(helper.Refusal):
+                    self.sync()
+                self.assertEqual((stage / ".git" / "index").read_bytes(), index)
+                self.assertFalse(checkout.exists())
+
+    def test_staging_view_blocks_new_and_interrupted_initialization(self):
+        with self.assertRaisesRegex(helper.Refusal, "staging view"):
+            self.sync(allow_initialization=False)
+        self.assertFalse(any((self.root / "workspaces" / "repo").iterdir()))
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        checkout = self.root / "workspaces" / helper.read_route(route)["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        inode = stage.stat().st_ino
+        with self.assertRaisesRegex(helper.Refusal, "staging view"):
+            self.sync(allow_initialization=False)
+        self.assertEqual(stage.stat().st_ino, inode)
+        self.assertFalse(checkout.exists())
+
+    def test_old_marker_recovery_preserves_occupied_destination_and_staging(self):
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        record = helper.read_route(route)
+        for key in ("installation_device", "installation_inode", "installation_branch"):
+            record.pop(key)
+        helper.write_route(route, record)
+        checkout = self.root / "workspaces" / record["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        (stage / "keep").write_text("staged user bytes")
+        with self.assertRaisesRegex(helper.Refusal, "initialization interrupted"):
+            self.sync(recover_initialization=True)
+        stage.rename(checkout)
+        with self.assertRaisesRegex(helper.Refusal, "initialization interrupted"):
+            self.sync(recover_initialization=True)
+        self.assertEqual((checkout / "keep").read_text(), "staged user bytes")
+
+    def test_recovery_preserves_original_branch_when_server_selection_changes(self):
+        run("-C", str(self.repo), "branch", "thread/two", "main")
+        run("-C", str(self.repo), "push", "-q", "origin", "thread/two")
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        result = self.sync(branch="thread/two")
+        self.assertEqual(result["actual_branch"], "thread/one")
+        self.assertEqual(result["local_oid"], self.thread_oid)
+        self.assertIn("local branch changed", result["pending"])
+
+    def test_staging_recovery_refuses_external_worktree_and_missing_inode(self):
+        with patch.object(helper, "promote_workspace", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                self.sync()
+        route = self.cache / "routes" / (helper.stable_identity("b" * 20, "thread-1") + ".json")
+        checkout = self.root / "workspaces" / helper.read_route(route)["relative"]
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        run("-C", str(stage), "config", "core.worktree", str(stage))
+        with self.assertRaisesRegex(helper.Refusal, "external worktree"):
+            self.sync()
+        self.assertTrue(stage.exists())
+        self.assertFalse(checkout.exists())
+        held = stage.with_name("user-held-stage")
+        stage.rename(held)
+        with self.assertRaisesRegex(helper.Refusal, "initialization interrupted"):
+            self.sync()
+        self.assertTrue((held / "hello.txt").exists())
+        self.assertFalse(checkout.exists())
+
+    def test_installed_libc_failure_routes_recover_all_thread_identities_separately(self):
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        class WithoutRenameat2:
+            syscall = libc.syscall
+        paths = []
+        for index in range(7):
+            tid, branch = "affected-thread-" + str(index), "thread/affected-" + str(index)
+            run("-C", str(self.repo), "branch", branch)
+            run("-C", str(self.repo), "push", "-q", "origin", branch)
+            with patch.object(helper, "promote_workspace", side_effect=helper.Refusal("atomic workspace promotion unavailable")):
+                with self.assertRaises(helper.Refusal):
+                    self.sync(thread_id=tid, branch=branch)
+            route = self.cache / "routes" / (helper.stable_identity("b" * 20, tid) + ".json")
+            record = helper.read_route(route)
+            checkout = self.root / "workspaces" / record["relative"]
+            stage = checkout.with_name("." + checkout.name + ".initial")
+            shutil.rmtree(stage)  # Exact old installed helper exception cleanup.
+            for key in ("installation_device", "installation_inode", "installation_branch"):
+                record.pop(key)
+            helper.write_route(route, record)
+            with patch.object(helper, "git", wraps=helper.git) as invoked:
+                self.sync(thread_id=tid, branch=branch, recover_initialization=True)
+            self.assertFalse(any("fetch" in call.args[0] for call in invoked.call_args_list))
+            with patch.object(ctypes, "CDLL", return_value=WithoutRenameat2()):
+                result = self.sync(thread_id=tid, branch=branch)
+            self.assertEqual(result["actual_branch"], branch)
+            self.assertEqual(Path(result["checkout_path"]), checkout)
+            paths.append(checkout)
+        self.assertEqual(len(set(paths)), 7)
 
     def test_corrupt_route_state_cannot_admit_an_existing_workspace(self):
         checkout = Path(self.sync()["checkout_path"])
