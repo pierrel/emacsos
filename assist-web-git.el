@@ -60,7 +60,7 @@ Legacy checkouts stay here until explicitly moved; new workspaces use
 (defvar-local emacsos-assist-web-git--safe-file-view nil
   "Non-nil when this file visit was initialized without repository-local code.")
 (defvar emacsos-assist-web-git--checkout-operations (make-hash-table :test 'equal)
-  "In-app checkout advancement reservations, held until the helper finishes.")
+  "In-app advancement/initialization reservations until the helper finishes.")
 
 (defvar-local emacsos-assist-web-git--workspace-choices nil)
 (defvar-local emacsos-assist-web-git--workspace-choice nil)
@@ -208,10 +208,12 @@ Legacy checkouts stay here until explicitly moved; new workspaces use
              (process-list)))))
 
 (defun emacsos-assist-web-git--checkout-write-guard (&rest _)
-  "Keep a visiting edit/save or manual Magit operation out of active advancement."
+  "Keep edits, saves and manual Magit out of advancement or staging promotion."
   (let ((file (or buffer-file-name default-directory)) blocked)
+    (emacsos-assist-web-git--guard-initial-visit file)
     (maphash (lambda (root token)
-               (when (and (plist-get token :advance)
+               (when (and (or (plist-get token :advance)
+                              (equal root (plist-get token :initial-stage)))
                           (or (equal (expand-file-name file)
                                      (file-name-as-directory root))
                               (emacsos-assist-web-git--in-checkout-p file root)))
@@ -239,6 +241,22 @@ Legacy checkouts stay here until explicitly moved; new workspaces use
 
 (add-hook 'find-file-hook #'emacsos-assist-web-git--protect-new-file)
 (add-hook 'before-save-hook #'emacsos-assist-web-git--checkout-write-guard)
+
+(defun emacsos-assist-web-git--guard-initial-visit (file &rest _)
+  "Keep new file/directory consumers out of staging while it can be promoted."
+  (let ((file (if (consp file) (car file) file)))
+    (when (and (stringp file) (not (file-remote-p file)))
+      (let ((real (file-truename file)))
+        (maphash
+         (lambda (root request)
+           (when (and (equal root (plist-get request :initial-stage))
+                      (or (equal (directory-file-name real) root)
+                          (emacsos-assist-web-git--in-checkout-p real root)))
+             (user-error "Thread Git is initializing; retry after it finishes")))
+         emacsos-assist-web-git--checkout-operations)))))
+
+(advice-add 'find-file-noselect :before #'emacsos-assist-web-git--guard-initial-visit)
+(advice-add 'dired-noselect :before #'emacsos-assist-web-git--guard-initial-visit)
 (defun emacsos-assist-web-git--manual-git-uncertain ()
   "Drop live currentness before ordinary Magit can change a managed checkout."
   (let ((directory default-directory))
@@ -260,10 +278,13 @@ Legacy checkouts stay here until explicitly moved; new workspaces use
   (add-hook 'magit-pre-start-git-hook #'emacsos-assist-web-git--manual-git-uncertain t))
 
 (defun emacsos-assist-web-git--release-checkout (request)
-  "Release only REQUEST's own in-app advancement reservation."
+  "Release only REQUEST's own advancement and initialization reservations."
   (let ((root (plist-get request :checkout)))
     (when (eq request (gethash root emacsos-assist-web-git--checkout-operations))
       (remhash root emacsos-assist-web-git--checkout-operations)
+      (when (eq request (gethash (plist-get request :initial-stage)
+                                emacsos-assist-web-git--checkout-operations))
+        (remhash (plist-get request :initial-stage) emacsos-assist-web-git--checkout-operations))
       (when (eq request (gethash (plist-get request :workspace-key)
                                 emacsos-assist-web-git--checkout-operations))
         (remhash (plist-get request :workspace-key) emacsos-assist-web-git--checkout-operations))
@@ -1002,6 +1023,10 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                         :workspace-key (concat "thread:" (emacsos-assist-web-git--workspace-identity metadata))
                         :checkout (emacsos-assist-web-git--checkout-path metadata)))
          (root (plist-get request :checkout))
+         (stage (expand-file-name
+                 (concat "." (file-name-nondirectory root) ".initial")
+                 (file-name-directory root)))
+         (initialize (not (emacsos-assist-web-git--move-busy-buffer-p stage thread)))
          (advance (emacsos-assist-web-git--advance-checkout-p root)))
     (if (or (gethash root emacsos-assist-web-git--checkout-operations)
             (gethash (plist-get request :workspace-key) emacsos-assist-web-git--checkout-operations))
@@ -1009,12 +1034,15 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
               (list metadata (emacsos-assist-web-git--live-intents
                               intents (cadr emacsos-assist-web-git--next))))
     (emacsos-assist-web-git--request-put request :advance advance)
+    (emacsos-assist-web-git--request-put request :initial-stage stage)
     (setq emacsos-assist-web-git--request request
           emacsos-assist-web-git--unavailable nil)
     (emacsos-assist-web-git--update-headers)
     (condition-case error
         (progn
         (puthash root request emacsos-assist-web-git--checkout-operations)
+        (when initialize
+          (puthash stage request emacsos-assist-web-git--checkout-operations))
         (puthash (plist-get request :workspace-key) request emacsos-assist-web-git--checkout-operations)
         (when advance
           (dolist (buffer (buffer-list))
@@ -1032,6 +1060,7 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
                   (generation . ,id)
                   (thread_id . ,(plist-get metadata :tid))
                   (allow_ff . ,(if advance t :json-false))
+                  (allow_initialization . ,(if initialize t :json-false))
                   (repo_key . ,(plist-get metadata :repo-key))
                   (branch . ,(plist-get metadata :branch)))
                 (lambda (result)

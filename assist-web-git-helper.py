@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import selectors
 import shlex
@@ -40,7 +41,7 @@ OPERATION_LOCK: int | None = None
 
 
 class Refusal(Exception):
-    """A safe, bounded reason to decline a mirror refresh."""
+    """A safe, bounded reason to decline a checkout operation."""
 
 
 class WorkspaceChoice(Refusal):
@@ -231,7 +232,8 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
         if record.get("initialized") == "moving":
             raise Refusal("workspace move interrupted; use Move workspace to resume")
         if record.get("initialized") == "installing":
-            raise Refusal("workspace initialization interrupted; local files preserved")
+            # Recovery runs after both identity and physical locks are held.
+            return checkout, physical_lock(checkout, record.get("legacy"))
         if record.get("initialized") is False and (checkout.exists() or checkout.is_symlink()):
             raise Refusal("workspace destination already exists; local work preserved")
         if record.get("initialized") is not False and not checkout.exists():
@@ -311,19 +313,84 @@ def promote_workspace(stage: Path, checkout: Path) -> None:
     """Atomically move a directory without replacing any user path."""
     try:
         import ctypes
-        rename = ctypes.CDLL(None, use_errno=True).renameat2
-    except (ImportError, AttributeError) as exc:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except ImportError as exc:
         raise Refusal("atomic workspace promotion unavailable") from exc
-    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                       ctypes.c_char_p, ctypes.c_uint)
-    rename.restype = ctypes.c_int
+    arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(stage)),
+                 ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(checkout)), ctypes.c_uint(1))
     # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
-    if rename(-100, os.fsencode(stage), -100, os.fsencode(checkout), 1):
+    try:
+        rename = libc.renameat2
+    except AttributeError:
+        # musl may omit the libc wrapper; these are the supported Linux devices.
+        number = ({"aarch64": 276, "x86_64": 316}.get(platform.machine())
+                  if sys.platform == "linux" and ctypes.sizeof(ctypes.c_void_p) == 8 else None)
+        if number is None:
+            raise Refusal("atomic workspace promotion unavailable")
+        libc.syscall.restype = ctypes.c_long
+        result = libc.syscall(ctypes.c_long(number), *arguments)
+    else:
+        rename.restype = ctypes.c_int
+        result = rename(*arguments)
+    if result:
         import errno
         error = ctypes.get_errno()
         if error == errno.EEXIST:
             raise Refusal("workspace destination already exists; local work preserved")
+        if error == errno.ENOSYS:
+            raise Refusal("atomic workspace promotion unavailable")
         raise OSError(error, "workspace promotion failed")
+
+
+def finish_initialization(request: dict, route: Path, checkout: Path,
+                          stage: Path, url: str, env: dict) -> bool:
+    """Resume only the same prepared directory, under both checkout locks.
+
+    Old markers without inode proof require an explicit empty-path recovery;
+    their occupied paths remain untouched. Recovery never repeats Git checkout.
+    """
+    record = read_route(route)
+    if record.get("initialized") != "installing":
+        if request.get("recover_initialization") is True:
+            raise Refusal("workspace is not an interrupted initialization")
+        return False
+    if request.get("allow_initialization") is False:
+        raise Refusal("local staging view is open; initialization pending")
+    proof = (record.get("installation_device"), record.get("installation_inode"))
+    staged, installed = stage.exists() or stage.is_symlink(), checkout.exists() or checkout.is_symlink()
+    if all(key not in record for key in ("installation_device", "installation_inode", "installation_branch")):
+        if request.get("recover_initialization") is True and not staged and not installed:
+            write_route(route, {**record, "initialized": False})
+            sync_directory(route.parent)
+            return True
+        raise Refusal("workspace initialization interrupted; local files preserved")
+    if (not all(type(value) is int and value > 0 for value in proof)
+            or not isinstance(record.get("installation_branch"), str)):
+        raise Refusal("workspace initialization proof is invalid; local files preserved")
+    if request.get("recover_initialization") is True:
+        raise Refusal("workspace initialization contains retained work; normal Refresh resumes it")
+    if staged == installed:
+        raise Refusal("workspace initialization interrupted: paths changed; local files preserved")
+    present = stage if staged else checkout
+    workspace_directory(present)
+    info = present.lstat()
+    if ((info.st_dev, info.st_ino) != proof or (present / ".git").is_symlink()
+            or not (present / ".git").is_dir()):
+        raise Refusal("workspace initialization identity changed; local files preserved")
+    if git(["-C", str(present), "remote", "get-url", "origin"], env) != url:
+        raise Refusal("checkout remote differs from the configured repository")
+    if staged:
+        verify_relocatable(stage)
+        if git(["-C", str(stage), "symbolic-ref", "--short", "HEAD"], env) != record["installation_branch"]:
+            raise Refusal("initial checkout branch changed; local files preserved")
+        promote_workspace(stage, checkout)
+    sync_directory(checkout.parent)
+    record["initialized"] = True
+    for key in ("installation_device", "installation_inode", "installation_branch"):
+        record.pop(key, None)
+    write_route(route, record)
+    sync_directory(route.parent)
+    return False
 
 
 def migrate_workspace(request: dict) -> dict:
@@ -745,14 +812,20 @@ def sync_checkout(request: dict) -> dict:
         # A route freezes identity and installation state, not the safety of
         # workspace parents that may have changed since allocation.
         workspace_directory(checkout.parent)
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        route = root / "routes" / (identity + ".json")
+        if finish_initialization(request, route, checkout, stage, url, env):
+            return {"ok": True, "checkout_path": str(checkout), "recovery": "empty initialization ready"}
         if shutil.disk_usage(checkout.parent).free < FREE_MARGIN:
             raise Refusal("insufficient free space for Git fetch")
         new = not checkout.exists()
         if checkout.is_symlink():
             raise Refusal("checkout path is a symlink")
-        stage = checkout.with_name("." + checkout.name + ".initial")
         working = stage if new else checkout
+        preserve_stage = False
         if new:
+            if request.get("allow_initialization") is False:
+                raise Refusal("local staging view is open; initialization pending")
             if stage.exists() or stage.is_symlink():
                 raise Refusal("initial checkout interrupted; inspect staging before Retry")
             stage.mkdir(mode=0o700)
@@ -837,20 +910,25 @@ def sync_checkout(request: dict) -> dict:
                     raise Refusal("initial Git checkout exceeds its cache limit")
             actual = git(["-C", str(working), "symbolic-ref", "--short", "HEAD"], env)
             if new:
-                route = root / "routes" / (identity + ".json")
                 record = read_route(route)
-                record["initialized"] = "installing"
-                # An interrupted promotion refuses retry, whether the path is
-                # missing or occupied. It must not adopt somebody else's work.
+                info = working.lstat()
+                record.update(initialized="installing", installation_device=info.st_dev,
+                              installation_inode=info.st_ino, installation_branch=actual)
+                # Once preparation is published, preserve this exact directory
+                # across promotion/finalization errors for a same-inode retry.
+                preserve_stage = True
+                sync_directory(working)
+                sync_directory(checkout.parent)
+                sync_directory(workspaces)
+                sync_directory(workspaces.parent)
                 write_route(route, record)
-                promote_workspace(working, checkout)
-                record["initialized"] = True
-                write_route(route, record)
+                sync_directory(route.parent)
+                finish_initialization(request, route, checkout, stage, url, env)
             return {"ok": True, "checkout_path": str(checkout),
                     "thread_oid": remote_oid, "local_oid": local_oid, "main_oid": main_oid,
                     "dirty": dirty, "pending": pending, "actual_branch": actual}
         except BaseException:
-            if new and stage.exists():
+            if new and not preserve_stage and stage.exists():
                 shutil.rmtree(stage)
             raise
     finally:
