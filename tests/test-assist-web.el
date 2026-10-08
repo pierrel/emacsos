@@ -2764,6 +2764,28 @@
         (should-not rendered)
         (should send-callback)))))
 
+(ert-deftest test-assist-web-open-ack-fires-only-when-a-thread-buffer-is-created ()
+  (let* ((thread '((id . "thread-1") (description . "Thread")
+                   (repo_label . "Assist") (status . "ready")))
+         (name (format "%s <thread-1>" (emacsos-assist-web--thread-label thread)))
+         requests)
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (method path &rest _) (push (list method path) requests)))
+              ((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
+              ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore)
+              ((symbol-function 'switch-to-buffer) (lambda (&rest _) nil)))
+      (unwind-protect
+          (progn
+            (emacsos-assist-web--show-thread thread)
+            (should (equal requests
+                           (list (list "POST" "threads/thread-1/open"))))
+            ;; Re-selecting an already-open buffer is not a new view, so it
+            ;; must not re-ack (and the snapshot GET must not ack either).
+            (setq requests nil)
+            (emacsos-assist-web--show-thread thread)
+            (should (equal requests nil))))
+        (when (get-buffer name) (kill-buffer name)))))
+
 (ert-deftest test-assist-web-reopening-thread-preserves-live-buffer-state ()
   (let* ((thread '((id . "thread-1") (description . "Thread")
                    (repo_label . "Assist") (status . "running")))

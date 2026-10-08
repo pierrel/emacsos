@@ -4332,6 +4332,16 @@ The graphical phone measures proportional text against the same pixel budget."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
+    ;; Acknowledge the open exactly where the user's intent to view exists:
+    ;; the first refresh of a freshly created thread buffer.  The snapshot GET
+    ;; itself never clears flags — clients also use it for auth probes and
+    ;; busy-check polls — so the read-receipt goes to the dedicated open
+    ;; endpoint.  Fire-and-forget: a failed ack only defers the flag clear and
+    ;; must not disturb the snapshot render below.
+    (unless existing
+      (let ((ack-tid tid))
+        (emacsos-assist-web--request
+         "POST" (format "threads/%s/open" ack-tid) nil #'ignore)))
     ;; Opening a thread can fetch its branch while cached files remain usable.
     ;; A later canonical snapshot may select a newer branch and queue a successor.
     (with-current-buffer buffer

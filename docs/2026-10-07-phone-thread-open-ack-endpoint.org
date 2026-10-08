@@ -1,0 +1,80 @@
+# Phone thread open-ack: a dedicated endpoint, not a side effect on the read
+
+Status: implemented
+Date: 2026-10-07
+Repos: assist (`manage/web/phone_api.py`), emacsos (`assist-web.el`)
+
+## Lineage
+
+Directly affected earlier docs (one level deep, per the dated-doc rule):
+
+- `docs/2026-10-07-phone-thread-state-pills-scope-expansion.org` — Change 1
+  ("phone opens clear unread and urgent, reusing the web logic") specified the
+  clear on the phone thread open. This doc supersedes *where* that clear is
+  keyed: it was originally placed in `_snapshot` (the handler for
+  `GET /threads/{tid}`) gated on `before is None`. That placement is wrong and
+  is corrected here. Everything else in the scope-expansion doc (the tri-state,
+  the short-circuit, the perf roadmap item) is unchanged.
+
+## The defect
+
+`GET /api/v1/phone/threads/{tid}` is the phone's overloaded general-purpose
+thread read. The emacsos client fires it without a cursor not only when the
+user opens a thread, but also when:
+
+- an auth-only thread GET runs after a run-access fence
+  (`assist-web.el`, comment: "This authenticates thread scope only. It never
+  renders, caches, retires a queue entry, or projects Git metadata."), and
+- the busy-check canonical read polls whether an exact Run has settled.
+
+Keying the unseen/urgent clear onto "a no-cursor GET happened" therefore
+silently drops the urgent pill from the thread list before the user ever views
+the thread — a flag the agent raised to demand attention while work is still
+going. The web does not have this problem: its thread page
+(`GET /thread/{tid}`) is a single-purpose view, so the side effect matches the
+intent.
+
+Root cause: a mutation was keyed onto an overloaded read endpoint, and the
+caller audit ran only in the server repo, not across the wire boundary into
+the client. The general rule is recorded in the meta-repo AGENTS.md design
+philosophy (mutations belong to single-purpose endpoints; audit every caller of
+the endpoint in every client; negative test for the non-intended caller).
+
+## The fix
+
+**assist.** `_snapshot` is read-only again. A dedicated
+`POST /api/v1/phone/threads/{tid}/open` handler (`_open_thread`) performs the
+clear: it calls the same two lock-free, missing-ok, never-raise helpers the
+web thread page calls (`state._clear_unseen_response(tid)`,
+`state._clear_urgent(tid)`), after validating the thread exists. The read-
+receipt/ack semantics still have one implementation across both surfaces; what
+changed is the trigger, which now exists only where a user open exists.
+
+**emacsos.** `--show-thread` sends that POST fire-and-forget, exactly once:
+only when a *fresh* thread buffer is created (the first time the user opens
+the thread). Re-selecting an already-open buffer is not a new view and does
+not re-ack. A failed ack only defers the clear; it cannot disturb the
+snapshot render. The snapshot GET, auth probes, and busy-check polls never
+ack.
+
+## Validation
+
+- `tests/test_phone_api.py` (88 passed):
+  - `test_phone_thread_open_clears_unread_and_urgent` — POST `/open` clears
+    both flags and removes the flag files.
+  - `test_phone_snapshot_get_never_clears_unread_or_urgent` — **the negative
+    test for the defect**: a no-cursor `GET /threads/{tid}` (the exact request
+    the auth probes and busy-checks send) leaves both flags set.
+  - `test_phone_history_page_does_not_clear_unread_or_urgent` — history
+    pagination is a read and does not clear either.
+- `tests/test-assist-web.el`:
+  - `test-assist-web-open-ack-fires-only-when-a-thread-buffer-is-created` —
+    first open issues exactly one `POST threads/<tid>/open`; re-selecting the
+    same buffer issues nothing.
+
+## Compatibility
+
+- Old client + new server: no ack POST arrives, so the phone never clears —
+  the pre-PR behavior. Safe.
+- New client + old server: the ack POST 404s; fire-and-forget, no effect on
+  rendering. Flags clear when the assist PR lands. Safe.
