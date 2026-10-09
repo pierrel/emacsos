@@ -2764,27 +2764,50 @@
         (should-not rendered)
         (should send-callback)))))
 
-(ert-deftest test-assist-web-open-ack-fires-only-when-a-thread-buffer-is-created ()
-  (let* ((thread '((id . "thread-1") (description . "Thread")
-                   (repo_label . "Assist") (status . "ready")))
-         (name (format "%s <thread-1>" (emacsos-assist-web--thread-label thread)))
-         requests)
-    (cl-letf (((symbol-function 'emacsos-assist-web--request)
-               (lambda (method path &rest _) (push (list method path) requests)))
-              ((symbol-function 'emacsos-assist-web--read-cache) (lambda (&rest _) nil))
-              ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore)
-              ((symbol-function 'switch-to-buffer) (lambda (&rest _) nil)))
-      (unwind-protect
-          (progn
-            (emacsos-assist-web--show-thread thread)
-            (should (equal requests
-                           (list (list "POST" "threads/thread-1/open"))))
-            ;; Re-selecting an already-open buffer is not a new view, so it
-            ;; must not re-ack (and the snapshot GET must not ack either).
-            (setq requests nil)
-            (emacsos-assist-web--show-thread thread)
-            (should (equal requests nil))))
-        (when (get-buffer name) (kill-buffer name)))))
+(ert-deftest test-assist-web-settled-refresh-reacks-the-thread-read ()
+  "A settled refresh re-sends the read receipt to the dedicated open endpoint."
+  (let (requests callback)
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path _payload cb &rest _)
+                   (push (list method path) requests)
+                   (setq callback cb)))
+                ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                ((symbol-function 'emacsos-assist-web--try-write-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--git-note-safely)
+                 (lambda (&rest _) nil)))
+        (emacsos-assist-web-refresh-thread)
+        (funcall callback test-assist-web--snapshot nil)
+        (should (member '("GET" "threads/thread-1") requests))
+        (should (member '("POST" "threads/thread-1/open") requests)))
+)))
+
+(ert-deftest test-assist-web-busy-refresh-does-not-reack-the-thread-read ()
+  "A busy refresh renders no settled view and must not re-send the receipt."
+  (let (requests callback)
+    (let ((busy-snapshot
+           '((thread . ((id . "thread-1") (status . "processing")))
+             (messages . nil))))
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path _payload cb &rest _)
+                     (push (list method path) requests)
+                     (setq callback cb)))
+                  ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'emacsos-assist-web--git-note-safely)
+                   (lambda (&rest _) nil)))
+          (emacsos-assist-web-refresh-thread)
+          (funcall callback busy-snapshot nil)
+          (should (member '("GET" "threads/thread-1") requests))
+          (should-not (member '("POST" "threads/thread-1/open") requests))))
+)))
 
 (ert-deftest test-assist-web-reopening-thread-preserves-live-buffer-state ()
   (let* ((thread '((id . "thread-1") (description . "Thread")

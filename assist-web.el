@@ -3753,6 +3753,18 @@ of it, together with the oldest pagination cursor already reached."
               (alist-get 'next_before result) nil))
       result)))
 
+(defun emacsos-assist-web--ack-thread-read (tid)
+  "Send TID's read receipt to the dedicated open endpoint.
+Fire-and-forget: the snapshot GET is read-only (clients also use it for auth
+probes and busy-check polls), so the receipt goes to POST /open. A failed
+ack only defers the flag clear and must never disturb the render that
+triggered it."
+  (condition-case nil
+      (emacsos-assist-web--request
+       "POST" (format "threads/%s/open" (emacsos-assist-web--require-id tid))
+       nil #'ignore)
+    (error nil)))
+
 (defun emacsos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed."
   (let ((inhibit-read-only t)
@@ -4332,16 +4344,15 @@ The graphical phone measures proportional text against the same pixel budget."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
-    ;; Acknowledge the open exactly where the user's intent to view exists:
-    ;; the first refresh of a freshly created thread buffer.  The snapshot GET
-    ;; itself never clears flags — clients also use it for auth probes and
-    ;; busy-check polls — so the read-receipt goes to the dedicated open
-    ;; endpoint.  Fire-and-forget: a failed ack only defers the flag clear and
-    ;; must not disturb the snapshot render below.
-    (unless existing
-      (let ((ack-tid tid))
-        (emacsos-assist-web--request
-         "POST" (format "threads/%s/open" ack-tid) nil #'ignore)))
+    ;; The read receipt is sent on the settled refresh that follows, not here:
+    ;; the user's open (and each later explicit Refresh) reaches the refresh
+    ;; success, where a rendered settled snapshot re-acks. That is the
+    ;; observable moment the user read it, and the server re-marks the thread
+    ;; unread on every turn completion, so a buffer that stays open across a
+    ;; turn re-acks on its next settled refresh. The snapshot GET itself never
+    ;; clears flags — clients also use it for auth probes and busy-check
+    ;; polls — so the receipt goes to the dedicated open endpoint (see
+    ;; emacsos-assist-web--ack-thread-read).
     ;; Opening a thread can fetch its branch while cached files remain usable.
     ;; A later canonical snapshot may select a newer branch and queue a successor.
     (with-current-buffer buffer
@@ -4605,7 +4616,39 @@ VERIFIED-START-EPOCH fences later Run access denial."
                                      (unless (and busy emacsos-assist-web--in-flight)
                                        (emacsos-assist-web--render value)
                                        (setq emacsos-assist-web--display-recovery nil)
-                                       (force-mode-line-update t))
+                                       (force-mode-line-update t)
+                                       ;; Re-ack exactly where the user explicitly
+                                       ;; re-reads a thread: an explicit refresh
+                                       ;; that rendered a settled snapshot. The
+                                       ;; server re-marks a thread unread on every
+                                       ;; turn completion, so a buffer that stays
+                                       ;; open across a turn re-sends its receipt
+                                       ;; the moment the user refreshes it and the
+                                       ;; settled answer is displayed. This is the
+                                       ;; Q1/Q2 case: open a thread, send (or ask
+                                       ;; from the browser), let it settle, refresh
+                                       ;; the phone, and the thread must show read.
+                                       ;; Active snapshots are never displayed here
+                                       ;; (the busy/in-flight branch above skips
+                                       ;; rendering), so only a truly settled view
+                                       ;; re-acks — the same intent-to-view as the
+                                       ;; creation-time ack, extended to reopens.
+                                       ;; Probes (auth recheck, busy-check,
+                                       ;; snapshot GET) never reach this path, so
+                                       ;; they provably never re-ack. A dormant
+                                       ;; buffer (a dead stopped owner awaiting an
+                                       ;; explicit claim) is a passive recovery
+                                       ;; image, not a live user view, so it must
+                                       ;; not ack: an unclaimed stop's refresh
+                                       ;; makes only its exact Run GET and no
+                                       ;; read receipt.
+                                       (when (and (not (emacsos-assist-web--dormant-stop-p))
+                                                  (member
+                                                   (alist-get 'status
+                                                              (alist-get 'thread value))
+                                                   emacsos-assist-web--settled-snapshot-statuses))
+                                         (emacsos-assist-web--ack-thread-read
+                                          emacsos-assist-web--thread-id)))
                                      (unless (or retiring cached)
                                        (emacsos-assist-web--git-note-safely
                                         value nil git-auth-start-epoch

@@ -1,0 +1,165 @@
+#+TITLE: Phone thread state pills: re-ack on refresh + shared unmerged + tri-state git
+#+DATE: 2026-10-09
+#+PROPERTY: status implemented
+#+PROPERTY: repo emacsos + assist (cross-repo)
+
+* Lineage
+
+Supersedes, in part, [[file:2026-10-07-phone-thread-open-ack-endpoint.org][2026-10-07-phone-thread-open-ack-endpoint.org]]
+(the creation-time =POST /threads/{tid}/open= ack) and, in part,
+[[file:2026-10-07-phone-thread-state-pills-scope-expansion.org][2026-10-07-phone-thread-state-pills-scope-expansion.org]]
+(clear-on-open + unmerged tri-state).  Both are kept as-is (dated design
+records).  The changes below alter three of their explicit assumptions:
+
+- The ack-endpoint doc sent the read receipt exactly once, *when a thread
+  buffer was created*.  That is the Q1/Q2 gap: the server re-marks a thread
+  =unread= on *every* turn completion (=manage/web/threads.py=, the ready
+  =_set_status= path), so a buffer that stays open across a turn shows
+  =new= again after a refresh, even though the user just read it.  This change
+  moves the receipt from *creation* to *each settled explicit refresh* (see
+  * Change 1), keeping the same dedicated =POST /open= endpoint.
+- The scope-expansion doc made =unmerged= a tri-state string on the phone and
+  short-circuited the git check there, but the *web* =render_index= still ran
+  its own inline git-status branch.  This change routes the web through the
+  same =_unmerged_state= helper so phone and web share one logic path (see
+  * Change 2).
+- The scope-expansion doc's tri-state was =yes= / =no= on the wire, with git
+  *failure* collapsing to =no= ("confirmed clean").  That conflates "checked,
+  clean" with "could not check".  This change widens the tri-state to
+  =yes= / =no= / =unknown=, where =unknown= covers both "not a git repo" and
+  "git failed" (see * Change 3).
+
+The pill precedence (busy → error → urgent → new → unmerged; else raw stage),
+the emoji set, the short-circuit predicate, and the dedicated =POST /open=
+endpoint are unchanged.
+
+* Why
+
+Follow-up review of the two open PRs (assist #275 + emacsos #60) surfaced three
+issues, all kept within the existing two-PR architecture (no re-architect, no
+deployment):
+
+1. *Re-ack across turns.*  Q1/Q2: open a thread, send (or ask from the browser),
+    let it settle, refresh the phone — the thread showed =new= (unread) because
+    the server re-set =unread= on turn completion and the creation-time receipt
+    had already been consumed.  It must show read: the user just read the
+    latest version on the phone.
+2. *Shared unmerged logic.*  =_unmerged_state= was phone-only; the web
+    =render_index= inlined its own git-status branch.  They should use the same
+    logic even though it is not *required* that they do — a single helper keeps
+    the "not checked vs confirmed clean" distinction and the short-circuit
+    consistent across clients.
+3. *Tri-state git.*  =_has_unmerged_changes= returned =no= in both the "thread
+    has unmerged changes" case (correct) and the "git failed / not a repo" case
+    (wrong — that is "not checked", not "confirmed clean").  It should return
+    the right answer in the right situation.
+
+* Change 1 — re-ack on each settled explicit refresh (emacsos)
+
+The read receipt now goes out from the *refresh success* path, not from buffer
+creation or from =--render= directly.
+
+- =assist-web.el= gains =emacsos-assist-web--ack-thread-read (tid)=, a
+  fire-and-forget =condition-case=-wrapped =POST /threads/{tid}/open= (the same
+  dedicated endpoint; the snapshot =GET= remains read-only).
+- The receipt is sent in =--refresh-thread='s success path, immediately after
+  a non-busy snapshot is =--render='d, gated on *all three*:
+  + the buffer is *not* a dormant stop (=--dormant-stop-p= is false) — a dead
+    stopped owner is a passive recovery image, not a live user view, and an
+    unclaimed stop's refresh makes only its exact Run GET and no read receipt;
+  + the rendered snapshot's =thread= =status= is a *settled* status
+    (=member= of =--settled-snapshot-statuses=, i.e. ="ready"= / ="error"=).
+    =--snapshot-active-p= is not used: it errors on an unknown status, and
+    =--require-snapshot= validates the status is a bounded string but not that
+    it is a known one.
+- The creation-time ack in =--show-thread= is *dropped*; =--show-thread= still
+  ends in =--refresh-thread buffer=, so opening a thread still acks — via the
+  refresh success.  A pointer comment explains the receipt now comes from the
+  settled refresh.
+
+Why the refresh success and not =--render=:
+
+- =--render= is the universal funnel — it is also reached by dormant/stale
+  renders and send-internal paths.  Keying the receipt off =--render= fired the
+  =POST /open= there, breaking two invariants: a dormant buffer's refresh makes
+  *zero* extra requests (it must only re-assert its exact Run), and the
+  send-path =--request= stubs must not be clobbered by an unexpected =POST=
+  (an unmocked ack leaked across tests).  The refresh success is the single,
+  explicit "user re-read the thread" moment — the Q1/Q2 scenario — and it is
+  dormant-guarded.
+- Probes (auth recheck, busy-check, snapshot =GET=) never reach the refresh
+  success, so they provably never re-ack — the AGENTS.md
+  single-purpose-endpoint rule holds: the read receipt belongs to a dedicated
+  endpoint, and its only caller fires only on the intent it assumes.
+
+* Change 2 — web routes through the shared =_unmerged_state= (assist)
+
+- =manage/web/state.py= keeps =_unmerged_state(tid, stage, urgent, unseen)= as
+  the single source: it short-circuits to ="unknown"= when a higher-priority
+  indicator is already present (busy stage / =error= / =urgent= / =unseen=) and
+  otherwise passes through the git tri-state string.
+- =manage/web/threads.py='s =render_index= no longer inlines a git-status
+  branch.  Its final =elif= calls
+  =_unmerged_state(tid, stage, False, False) == "yes"= (the unmerged branch is
+  the fall-through, where =stage= is in scope and =urgent=/=unseen= are known
+  =False=).  The dead inline =_has_unmerged_changes= import is removed.
+- =manage/web/phone_api.py= =_list_threads= already called =_unmerged_state=;
+  no change.  Phone and web now share the one helper.
+
+* Change 3 — tri-state git =yes= / =no= / =unknown= (assist)
+
+- =assist/domain_manager.py= =has_changes_vs_main= returns a string:
+  + ="yes"= — any of the three checks is dirty (working-tree diff,
+    committed-branch diff vs =main=, untracked files);
+  + ="no"= — all three checks clean;
+  + ="unknown"= — no =dm= / no =repo= / not a git repo, *or* any git exception.
+- =manage/web/state.py= =_has_unmerged_changes= wraps =dm.has_changes_vs_main()=
+  and returns its tri-state string; *any* exception → ="unknown"= + debug log
+  (no longer =no=).
+- =_unmerged_state= passes ="unknown"= through to the wire.  The web badge and
+  the phone pill render only on ="yes"= (the pill also accepts the legacy
+  =t=); ="no"= and ="unknown"= both fall through to the raw stage.  ="unknown"=
+  is "not checked", ="no"= is "confirmed clean" — the distinction the short
+  circuit exists to preserve.
+
+* Tests
+
+emacsos (=LC_ALL=C make test-elisp=; =make test-server= 305 pass):
+
+- =test-assist-web-settled-refresh-reacks-the-thread-read= — a settled refresh
+  makes the snapshot =GET= *and* the =POST /threads/thread-1/open= receipt.
+- =test-assist-web-busy-refresh-does-not-reack-the-thread-read= — a busy
+  refresh (=status "processing"=) makes the =GET= but *no* =POST /open=.
+- The dormant invariant is covered by
+  =test-assist-web-git-normal-open-keeps-dormant-observing-bytes=: a dead
+  stopped owner's render + refresh makes only the exact Run GET, never a read
+  receipt.
+- =test-assist-web-reopening-thread-preserves-live-buffer-state= unchanged (the
+  dropped creation-time ack no longer fires there).
+
+assist (7-file =pytest=, deploy venv; 171 pass):
+
+- =tests/test_domain_manager.py= — tri-state =yes=/=no= plus three new
+  ="unknown"= tests (no-repo, git-failure, exception).  The "not a git repo"
+  test mocks =clone_repo= so the constructor reaches the post-init state (repo
+  set, no =.git/=) without touching git — the production regression shape
+  (thread =20260504091127-183e8f35=).
+- The five web test files
+  (=test_phone_api.py=, =test_web_unseen_badge.py=, =test_web_urgent_badge.py=,
+  =test_web_thread_ordering.py=, =test_web_ui_pull_refresh_copy_id.py=,
+  =test_web_thread_search_rename.py=) retarget to
+  =manage.web.state._has_unmerged_changes= with tri-state strings.
+- One pre-existing env failure (=test_domain_manager_with_temp_dir=) is
+  unrelated: the test asserts the domain startswith =/tmp= / =/var= but this
+  box sets =TMPDIR= to the Hermes scratch dir.  It fails identically on clean
+  HEAD (verified via =git stash=); not a regression.
+
+* Out of scope / follow-ups
+
+- The =following up= pill, list search, the 500-thread cap, and
+  =--completion-records= searchability (tracked in the original doc's
+  Follow-ups) are unchanged.
+- The thread-list performance roadmap item (cheaper unmerged detection,
+  smarter refresh) remains a =roadmap.org= =** TODO=; this change makes the
+  unmerged check a *single* helper on both clients, which the profiling work
+  will build on.
