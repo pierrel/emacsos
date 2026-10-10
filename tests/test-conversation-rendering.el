@@ -522,4 +522,38 @@
           (should-not issue) (should-not calls) (should-not result))
       (delete-directory root t))))
 
+(ert-deftest rendering-git-internals-reject-case-insensitive-aliases ()
+  (let* ((root (make-temp-file "render-case-fold" t))
+         (regular (symbol-function 'file-regular-p)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" root))
+          (write-region "private" nil (expand-file-name ".git/config" root) nil 'silent)
+          ;; Model case-insensitive lookup over the real metadata fixture.
+          (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory) (lambda () root))
+                    ((symbol-function 'file-regular-p)
+                     (lambda (file)
+                       (let ((case-fold-search t))
+                         (funcall regular (replace-regexp-in-string "/\\.git/" "/.git/" file t t))))))
+            (dolist (path '(".GIT/config" ".GiT/config" "/workspace/.GIT/config" "/user/.gIt/config"))
+              (should-not (emacsos-conversation--local-file path)))))
+      (delete-directory root t))))
+
+(ert-deftest rendering-table-back-releases-view-after-source-is-killed ()
+  (save-window-excursion
+    (let ((source (generate-new-buffer " *render-killed-source*")) view)
+      (unwind-protect
+          (progn
+            (switch-to-buffer source)
+            (insert rendering-test--table)
+            (emacsos-conversation--table-view rendering-test--table)
+            (setq view (current-buffer))
+            (kill-buffer source)
+            (should (markerp emacsos-conversation--return-marker))
+            (should-not (marker-buffer emacsos-conversation--return-marker))
+            (emacsos-conversation-table-back)
+            (should-not (buffer-live-p view)))
+        (when (buffer-live-p view) (kill-buffer view))
+        (when (buffer-live-p source) (kill-buffer source))))))
+
 (provide 'test-conversation-rendering)

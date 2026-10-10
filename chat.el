@@ -388,8 +388,8 @@ remain owned by the backend; this small kernel owns only discovery and binding."
 
 (defun emacsos-conversation--local-file (path)
   "Resolve PATH inside this conversation's existing local workspace.
-Server /tmp scratch, remote paths, Git internals and symbolic links
-are excluded. Containment is lexical so a rejected symlink cannot invoke a
+Server /tmp scratch, remote paths, Git internals in any letter case and
+symbolic links are excluded. Containment is lexical so a rejected symlink cannot invoke a
 remote file handler."
   (when (and (stringp path) (<= (length path) 4096)
              (not (string-match-p "[[:cntrl:]]" path))
@@ -407,7 +407,7 @@ remote file handler."
         (when (and file (not (file-remote-p root))
                    (not (file-remote-p file))
                    (string-prefix-p root file)
-                   (not (member ".git" (split-string relative "/" t)))
+                   (not (member-ignore-case ".git" (split-string relative "/" t)))
                    (not (member ".." (split-string relative "/" t))))
           (while (and cursor (not (equal (directory-file-name cursor)
                                          (directory-file-name root))))
@@ -547,14 +547,14 @@ Only PNG is decoded inline; fallback image links open as literal file text."
 				'face 'emacsos-chat-link-face)))))))))))))
 
 (defun emacsos-conversation-table-back ()
-  "Return to the source conversation and release the temporary table view."
+  "Release the table view, returning to the source if it still exists."
   (interactive)
   (emacsos-conversation--table-window)
-  (when (and (markerp emacsos-conversation--return-marker)
-             (marker-buffer emacsos-conversation--return-marker))
+  (when (markerp emacsos-conversation--return-marker)
     (let ((view (current-buffer)))
-      (switch-to-buffer (marker-buffer emacsos-conversation--return-marker))
-      (set-window-hscroll nil 0)
+      (when (marker-buffer emacsos-conversation--return-marker)
+        (switch-to-buffer (marker-buffer emacsos-conversation--return-marker))
+        (set-window-hscroll nil 0))
       (kill-buffer view))))
 
 (defun emacsos-conversation--table-window ()
