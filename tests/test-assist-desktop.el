@@ -145,10 +145,10 @@
     (should (eq (key-binding (kbd "C-<return>")) #'emacsos-conversation-send))
     (should (eq (alist-get 'send emacsos-conversation-actions)
                 #'emacsos-assist-web-send))
-    (should (eq (key-binding (kbd "C-x C-f")) #'find-file))
+    (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-find-file))
     (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
     (emacsos-assist-web-git--sync-keys)
-    (should (eq (key-binding (kbd "C-x C-f")) #'find-file))
+    (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-find-file))
     (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
     (should (eq (key-binding (kbd "C-c g")) #'emacsos-assist-web-git-refresh))))
 

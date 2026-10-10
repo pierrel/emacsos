@@ -5103,14 +5103,25 @@ VERIFIED-START-EPOCH fences later Run access denial."
               (error nil))
             (expand-file-name "~/"))))
 
+(defun emacsos-assist-web-find-file (&optional file)
+  "Visit FILE without interpreting file or directory local settings.
+With nil FILE, use the ordinary interactive `find-file' prompt and navigation."
+  (interactive)
+  (let ((enable-local-variables nil)
+        (enable-local-eval nil)
+        (enable-dir-local-variables nil))
+    (if file
+        (find-file file)
+      (call-interactively #'find-file))))
+
 (defun emacsos-assist-web-refresh-context ()
   "Refresh a thread and its Git view, or refresh the thread catalog."
   (interactive)
-  (if (derived-mode-p 'emacsos-assist-web-mode)
+  (if (and (derived-mode-p 'emacsos-assist-web-mode)
+           emacsos-assist-web--thread-id)
       (progn
         (call-interactively #'emacsos-assist-web-refresh-thread)
-        (when emacsos-assist-web--thread-id
-          (call-interactively #'emacsos-assist-web-git-refresh)))
+        (call-interactively #'emacsos-assist-web-git-refresh))
     (call-interactively #'emacsos-assist-web-refresh-threads)))
 
 (defun emacsos-assist-web--move-message (forward)
@@ -5159,6 +5170,9 @@ VERIFIED-START-EPOCH fences later Run access denial."
   (add-hook 'pre-command-hook #'emacsos-assist-web--set-workspace-directory nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
+
+(define-key emacsos-assist-web-mode-map (kbd "C-x C-f")
+            #'emacsos-assist-web-find-file)
 
 (define-key emacsos-assist-web-mode-map (kbd "C-c b")
             #'emacsos-assist-web-previous-message)

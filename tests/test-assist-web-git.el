@@ -5363,7 +5363,7 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
             (emacsos-assist-web-git--sync-keys)
             (should emacsos-assist-web-git-thread-mode)
             (should (eq (key-binding (kbd "C-x C-f"))
-                        #'find-file))
+                        #'emacsos-assist-web-find-file))
             (should (eq (key-binding (kbd "C-c d"))
                         #'emacsos-assist-web-git-diff))
             (setq-local emacsos-assist-web--thread-id nil)
