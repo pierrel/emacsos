@@ -214,6 +214,12 @@ to that list.  The list renders the validated local catalog immediately,
 refreshes it asynchronously, and exposes visible refresh or retry rows.  Each
 two-line row opens its exact thread with mouse-1 or RET.  Both entry points
 share the same complete thread, repository, and harness catalog.
+For a Git-backed thread, =C-x C-f= browses the fetched thread-branch checkout
+and =C-c d= opens its Magit comparison against fetched =remote/main=. The phone
+uses its separately configured Git remote and credential; the HTTPS snapshot
+selects the bound branch but does not transport Git objects. A busy turn keeps
+the latest fetchable branch visible with a warning that it may change when the
+turn finishes. A successful Run triggers another ordinary Git fetch.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second

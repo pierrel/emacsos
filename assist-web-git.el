@@ -976,7 +976,8 @@ Canonical snapshot errors and Git-only projection errors retain distinct tags."
       (setq emacsos-assist-web-git--unavailable
             (if (equal (plist-get metadata :actual-branch) "HEAD")
                 "detached HEAD; Git unavailable"
-              "no repository or published thread branch"))
+              (or (plist-get metadata :sync-error)
+                  "no repository or thread branch")))
       (emacsos-assist-web-git--update-headers)
       (when intent
         (emacsos-assist-web-git--release-intents

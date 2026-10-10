@@ -2120,10 +2120,9 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
 (defun emacsos-assist-web-git--metadata-from-snapshot (snapshot)
   "Select the authenticated committed ref from validated SNAPSHOT.
 
-Ready threads select their actual checkout. Busy threads prefer the published
-branch, falling back only to an authenticated actual non-main branch. The
-published OID is provenance, not a ceiling on legitimate phone pushes. Git
-checks the selected ref format before the fetch begins."
+Ready threads select their actual checkout.  Busy threads use the bound thread
+branch and show a warning that the remote may change after the turn.  Git checks
+the selected ref format before the fetch begins."
   (let* ((thread (alist-get 'thread snapshot))
          (workspace (alist-get 'workspace thread))
          (tid (emacsos-assist-web--require-id (alist-get 'id thread)))
@@ -2131,27 +2130,30 @@ checks the selected ref format before the fetch begins."
          (repo-key (alist-get 'repo_key workspace))
          (actual-branch (alist-get 'branch workspace))
          (head (alist-get 'revision workspace))
-         (published-branch (alist-get 'published_branch workspace))
-         (published-revision (alist-get 'published_revision workspace)))
+         (bound-branch (alist-get 'thread_branch workspace))
+         (sync-error (alist-get 'sync_error workspace)))
     (unless (or (null repo-key)
                 (and (stringp repo-key)
                      (string-match-p
                       emacsos-assist-web--git-repo-key-regexp repo-key)))
       (error "Assist Web returned an invalid Git repository key"))
-    (dolist (oid (list head published-revision))
-      (unless (or (null oid)
-                  (and (stringp oid)
-                       (string-match-p emacsos-assist-web--git-oid-regexp oid)))
-        (error "Assist Web returned an invalid Git object ID")))
-    (unless (or (and (null published-branch)
-                     (null published-revision))
-                (and (stringp published-branch)
-                     (stringp published-revision)))
-      (error "Assist Web returned an incomplete published Git ref"))
-    (when (equal published-branch "HEAD")
-      (error "Assist Web returned detached HEAD as a published Git ref"))
+    (unless (or (null head)
+                (and (stringp head)
+                     (string-match-p emacsos-assist-web--git-oid-regexp head)))
+      (error "Assist Web returned an invalid Git object ID"))
+    (when (and bound-branch
+               (not (and (stringp bound-branch)
+                         (<= (string-bytes bound-branch) 240)
+                         (not (member bound-branch '("main" "HEAD")))
+                         (not (string-match-p "[[:cntrl:]]" bound-branch)))))
+      (error "Assist Web returned an invalid bound Git branch"))
+    (unless (or (null sync-error)
+                (and (stringp sync-error)
+                     (<= (string-bytes sync-error) 256)
+                     (not (string-match-p "[[:cntrl:]]" sync-error))))
+      (error "Assist Web returned an invalid Git status"))
     (let* ((ready (equal status "ready"))
-           (branch (if ready actual-branch (or published-branch actual-branch))))
+           (branch (if ready actual-branch (or bound-branch actual-branch))))
       (when (and branch
                  (not (and (stringp branch)
                            (<= (string-bytes branch) 240)
@@ -2164,6 +2166,7 @@ checks the selected ref format before the fetch begins."
                          branch)
             :status status
             :repo-label (alist-get 'repo_label workspace)
+            :sync-error sync-error
             :thread-label (alist-get 'description thread)
             :actual-branch (and ready actual-branch)
             :head head))))

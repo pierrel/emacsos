@@ -1138,17 +1138,15 @@
         (when (buffer-live-p view) (kill-buffer view))
         (when (buffer-live-p thread) (kill-buffer thread))))))
 
-(defun test-assist-web-git--snapshot (status branch &optional published-branch)
-  "Make an authenticated-style STATUS snapshot with BRANCH and PUBLISHED-BRANCH."
+(defun test-assist-web-git--snapshot (status branch &optional bound-branch)
+  "Make an authenticated-style STATUS snapshot with BRANCH and BOUND-BRANCH."
   `((thread . ((id . "thread-1") (description . "Thread")
                 (status . ,status)
                 (workspace . ((repo_label . "Same label")
                               (repo_key . ,test-assist-web-git--key)
                               (branch . ,branch)
                               (revision . ,test-assist-web-git--head)
-                              (published_branch . ,published-branch)
-                              (published_revision . ,(and published-branch
-                                                          test-assist-web-git--published))))))
+                              (thread_branch . ,bound-branch)))))
     (messages . nil)))
 
 (ert-deftest test-assist-web-git-ready-selects-actual-checkout ()
@@ -1160,7 +1158,7 @@
                    test-assist-web-git--head))
     (should (emacsos-assist-web-git--usable metadata))))
 
-(ert-deftest test-assist-web-git-busy-selects-published-pair-through-main ()
+(ert-deftest test-assist-web-git-busy-selects-bound-branch-through-main ()
   (let* ((metadata (emacsos-assist-web-git--metadata-from-snapshot
                     (test-assist-web-git--snapshot "processing" "main"
                                                    "topic/old")))
@@ -1172,15 +1170,27 @@
     (should (equal (emacsos-assist-web-git--request-key metadata)
                    (emacsos-assist-web-git--request-key same-pair)))))
 
-(ert-deftest test-assist-web-git-null-and-half-published-pair ()
+(ert-deftest test-assist-web-git-missing-or-invalid-bound-branch ()
   (let ((empty (emacsos-assist-web-git--metadata-from-snapshot
                 (test-assist-web-git--snapshot "processing" "main"))))
     (should-not (emacsos-assist-web-git--usable empty)))
   (let ((broken (test-assist-web-git--snapshot "processing" "main")))
-    (setf (alist-get 'published_revision
+    (setf (alist-get 'thread_branch
                     (alist-get 'workspace (alist-get 'thread broken)))
-          test-assist-web-git--published)
+          "HEAD")
     (should-error (emacsos-assist-web-git--metadata-from-snapshot broken))))
+
+(ert-deftest test-assist-web-git-ready-checkout-failure-is-visible ()
+  (let ((snapshot (test-assist-web-git--snapshot "ready" nil "topic/one")))
+    (setf (alist-get 'sync_error
+                    (alist-get 'workspace (alist-get 'thread snapshot)))
+          "Thread checkout branch is unavailable")
+    (let ((metadata (emacsos-assist-web-git--metadata-from-snapshot snapshot)))
+      (should-not (emacsos-assist-web-git--usable metadata))
+      (with-temp-buffer
+        (emacsos-assist-web-git--enqueue metadata nil)
+        (should (equal emacsos-assist-web-git--unavailable
+                       "Thread checkout branch is unavailable"))))))
 
 (ert-deftest test-assist-web-git-rejects-bad-repository-identity ()
   (let ((snapshot (test-assist-web-git--snapshot "ready" "topic/one")))
@@ -1211,9 +1221,9 @@
            (metadata (emacsos-assist-web-git--metadata-from-snapshot valid))
            (generation (make-emacsos-assist-web-git-generation
                         :metadata metadata :state 'current)))
-      (setf (alist-get 'published_revision
+      (setf (alist-get 'thread_branch
                       (alist-get 'workspace (alist-get 'thread broken)))
-            test-assist-web-git--published)
+            "HEAD")
       (setq-local emacsos-assist-web-git--metadata metadata
                   emacsos-assist-web-git--current generation)
       (emacsos-assist-web-git--note-snapshot broken)
@@ -5165,9 +5175,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
 (ert-deftest test-assist-web-git-invalid-projection-does-not-reject-chat-refresh ()
   (let ((broken (test-assist-web-git--snapshot "ready" "topic/one"))
         rendered)
-    (setf (alist-get 'published_revision
+    (setf (alist-get 'thread_branch
                     (alist-get 'workspace (alist-get 'thread broken)))
-          test-assist-web-git--published)
+          "HEAD")
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq-local emacsos-assist-web--thread-id "thread-1")
@@ -5187,9 +5197,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
 (ert-deftest test-assist-web-git-invalid-projection-does-not-block-reconciliation ()
   (let ((broken (test-assist-web-git--snapshot "ready" "topic/one"))
         rendered)
-    (setf (alist-get 'published_revision
+    (setf (alist-get 'thread_branch
                     (alist-get 'workspace (alist-get 'thread broken)))
-          test-assist-web-git--published)
+          "HEAD")
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq-local emacsos-assist-web--thread-id "thread-1"
@@ -6731,9 +6741,9 @@ transport state; LATE-B adds B after A's stop. TAIL is independent unsent text."
       (should (eq (car problem) 'canonical)))
     (let ((snapshot (test-assist-web-git--snapshot "ready" "topic/one"))
           problem)
-      (setf (alist-get 'published_revision
+      (setf (alist-get 'thread_branch
                       (alist-get 'workspace (alist-get 'thread snapshot)))
-            test-assist-web-git--published)
+            "HEAD")
       (cl-letf (((symbol-function 'emacsos-assist-web--request)
                  (lambda (_method _path _payload callback &rest _)
                    (funcall callback snapshot nil))))
