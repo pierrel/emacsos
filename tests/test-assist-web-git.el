@@ -28,6 +28,10 @@
 (ert-deftest test-assist-web-git-canonical-thread-keys-preserve-file-opener ()
   (with-temp-buffer
       (emacsos-assist-web-mode)
+      ;; Isolate the fallback contract from an optional composed file opener.
+      (use-local-map (copy-keymap (current-local-map)))
+      (define-key (current-local-map) (kbd "C-x C-f") nil)
+      (setq-local emacsos-assist-web-git--fallback-file-opener nil)
       (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
       (emacsos-assist-web-git--sync-keys)
       (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
@@ -41,6 +45,8 @@
 (ert-deftest test-assist-web-git-draft-keeps-ordinary-file-opener ()
   (with-temp-buffer
     (emacsos-assist-web-mode)
+    (use-local-map (copy-keymap (current-local-map)))
+    (define-key (current-local-map) (kbd "C-x C-f") nil)
     (emacsos-assist-web-git--sync-keys)
     (should (eq (key-binding (kbd "C-x C-f")) #'find-file))
     (should-not emacsos-assist-web-git-thread-mode)))
