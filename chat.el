@@ -20,6 +20,7 @@
 (require 'font-lock)
 (require 'emacsos-typography)
 (require 'json)
+(require 'jka-compr)
 (require 'mouse)
 (require 'url)
 (require 'url-http)
@@ -264,8 +265,10 @@ its buffer.")
                (progn
                  (when (> (file-attribute-size (file-attributes file)) (* 1024 1024))
                    (user-error "File exceeds 1 MiB link-view limit; use Find file"))
-                 (let ((auto-mode-alist (cons '("\\.svgz?\\'" . fundamental-mode) auto-mode-alist))
-                       (magic-mode-alist nil) (magic-fallback-mode-alist nil))
+                 (let ((auto-mode-alist (cons (cons (concat (image-file-name-regexp) "\\|\\.svgz\\'")
+                                             #'fundamental-mode) auto-mode-alist))
+                       (magic-mode-alist nil) (magic-fallback-mode-alist nil)
+                       (jka-compr-inhibit t))
                    (emacsos-assist-web-find-file file))
                  (when (and (stringp lines) (string-match "\\`\\([0-9]+\\)" lines))
                    (goto-char (point-min))
@@ -373,6 +376,9 @@ remain owned by the backend; this small kernel owns only discovery and binding."
 (defvar emacsos-conversation--image-work-budget nil
   "Dynamically shared PNG byte/pixel allowance for one presentation pass.")
 
+(defvar emacsos-conversation--image-cache nil
+  "Dynamically shared local image results for one presentation pass.")
+
 (defvar-local emacsos-conversation--return-marker nil
   "Conversation location to return to from an isolated table view.")
 
@@ -438,7 +444,7 @@ are excluded."
 
 (defun emacsos-conversation--png (file &optional remaining)
   "Return a local PNG display within mutable byte/pixel allowance REMAINING.
-Only PNG is decoded; SVG and other active image formats remain file links."
+Only PNG is decoded inline; fallback image links open as literal file text."
   (let ((remaining (or remaining (cons (* 1024 1024) (* 2048 2048))))
         (window (or (get-buffer-window (current-buffer) t) (selected-window)))
         (work-budget (or emacsos-conversation--image-work-budget (cons (* 1024 1024) (* 2048 2048)))))
@@ -500,7 +506,8 @@ Only PNG is decoded; SVG and other active image formats remain file links."
     (let ((emacsos-conversation--image-work-budget
            (or emacsos-conversation--image-work-budget (cons (* 1024 1024) (* 2048 2048))))
           (remaining (emacsos-conversation--image-allowance))
-          (images (make-hash-table :test 'equal)) start)
+          (emacsos-conversation--image-cache
+           (or emacsos-conversation--image-cache (make-hash-table :test 'equal))) start)
       (while (setq start (text-property-any (point) end 'emacsos--chat-render-start t))
         (goto-char start)
         (forward-line 1)
@@ -519,11 +526,11 @@ Only PNG is decoded; SVG and other active image formats remain file links."
                        (object (list 'file path range))
                        (file (condition-case nil (emacsos-conversation--local-file path) (error nil)))
                        (image (and file
-                                   (if (not (eq (gethash file images :unseen) :unseen))
-                                       (gethash file images)
+                                   (if (not (eq (gethash file emacsos-conversation--image-cache :unseen) :unseen))
+                                       (gethash file emacsos-conversation--image-cache)
                                      (puthash file (condition-case nil
                                                        (emacsos-conversation--png file remaining)
-                                                     (error nil)) images)))))
+                                                     (error nil)) emacsos-conversation--image-cache)))))
                   (when path
                     (emacsos-conversation--object
                      start finish object
@@ -582,7 +589,8 @@ Only PNG is decoded; SVG and other active image formats remain file links."
       (local-set-key (kbd "<left>") #'emacsos-conversation-table-scroll-left)
       (local-set-key (kbd "<right>") #'emacsos-conversation-table-scroll-right)
       (let* ((inhibit-read-only t)
-             (rows (mapcar (lambda (line) (mapcar #'string-trim (cdr (butlast (split-string (string-trim line) "|")))))
+             (rows (mapcar (lambda (line) (mapcar #'string-trim
+                                     (split-string (string-remove-suffix "|" (substring (string-trim line) 1)) "|")))
                            (split-string source "\n" t)))
              (widths (make-vector (apply #'max (mapcar #'length rows)) 0)))
         (dolist (row rows)
@@ -594,7 +602,7 @@ Only PNG is decoded; SVG and other active image formats remain file links."
             (insert "Table exceeds alignment limit; showing source.\n\n" source)
           (dolist (row rows)
             (insert "| ")
-            (cl-loop for cell in row for col from 0 do
+            (cl-loop for col below (length widths) for cell = (or (pop row) "") do
                      (insert cell (make-string (- (aref widths col) (string-width cell)) ?\s) " | "))
             (insert "\n"))))
       (goto-char (point-min)))
@@ -710,6 +718,7 @@ characters remain unchanged."
 					      keymap ,emacsos-conversation-object-map
 					      mouse-face highlight)))
                 (unless (or (emacsos-conversation--safe-url-p target)
+                            (string-prefix-p "#" target)
                             (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*:" target))
                   (let ((label-beg (match-beginning 1)) (label-end (match-end 1)))
                     (save-match-data
@@ -780,9 +789,12 @@ best-effort and never allowed to interrupt chat lifecycle code."
   (condition-case error
       (when (<= (- (position-bytes end) (position-bytes beg))
                 emacsos--chat-presentation-max-bytes)
+        (with-silent-modifications
+          (remove-text-properties beg end '(display nil)))
         (save-excursion
           (goto-char beg)
-          (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) (* 2048 2048))) messages)
+          (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) (* 2048 2048)))
+                (emacsos-conversation--image-cache (make-hash-table :test 'equal)) messages)
             (while (re-search-forward "^\\(you> \\|bot> \\)" end t)
               (push (list (match-beginning 1) (match-end 1)
                           (if (eq (char-after (match-beginning 1)) ?y)

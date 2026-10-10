@@ -3843,6 +3843,7 @@ of it, together with the oldest pagination cursor already reached."
              'action (lambda (_) (emacsos-assist-web-review-approval source)))
             (insert "\n\n")))
         (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) (* 2048 2048)))
+              (emacsos-conversation--image-cache (make-hash-table :test 'equal))
               (emacsos--chat-presentation-max-bytes
                (if (<= presentation-bytes emacsos--chat-presentation-max-bytes)
                    emacsos--chat-presentation-max-bytes

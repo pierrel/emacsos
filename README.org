@@ -331,7 +331,9 @@ Complete =type: file= render fences use the current thread's existing local
 checkout, without fetching. PNG is the inline image format supported by the
 Assist render protocol; graphical Emacs displays bounded PNGs scaled to the
 window. Other available files open through the same safe local-file command.
-SVG opens as literal text. =/workspace/=, =/user/= and relative paths resolve
+Fallback image links, including SVG and oversized PNGs, open as literal text.
+Compressed links retain their stored bytes without automatic decompression.
+=/workspace/=, =/user/= and relative paths resolve
 inside this thread; symlinks, traversal and Git internals are refused. The
 server's persistent =/tmp/= scratch is absent from local Git checkouts and
 shows an unavailable-local-file fallback. Use Git Refresh for unsynced worktree
@@ -339,6 +341,7 @@ files. Maps remain readable render-fence source.
 
 Complete pipe tables with a Markdown separator row become explicit table
 objects. Open one to see aligned fixed-pitch columns in an isolated view.
+Separator rows may omit the trailing pipe; short data rows get empty cells.
 The fixed header provides Back, Left and Right controls; arrow keys scroll
 horizontally and =C-c b= returns. Conversation prose stays wrapped and copied,
 stored and unsent text stays unchanged. The table view is a snapshot, so reopen
@@ -348,7 +351,8 @@ Org behavior.
 Presentation retains the 256 KiB source budget. Local linked files are limited
 to 1 MiB. Inline PNGs share an aggregate
 1 MiB byte and 4,194,304-pixel allowance per buffer; repeated paths reuse one
-image within a presentation pass. The same aggregate allowance bounds attempted
+image across all messages within a presentation pass. The same aggregate
+allowance bounds attempted
 reads and decodes across a complete redraw, including invalid PNGs. PNG dimensions are at most 4096 per side and
 4,194,304 pixels. Larger or unsupported images remain file links. Oversized
 aligned table output falls back to its literal source in the table view.
