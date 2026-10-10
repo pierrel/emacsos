@@ -2,8 +2,8 @@
 # configuration EmacsOS uses on the phone (server-use-tcp t, host 0.0.0.0,
 # fixed port 12345).  Runs as uid 1000 -- no root inside the container.
 #
-# os.el + chat.el are baked in at /opt/emacsos so the round-trip step
-# in run.sh can `(load-file ...)` them into the daemon via emacsclient.
+# The EmacsOS modules are baked in at /opt/emacsos and added to load-path,
+# so run.sh can load chat.el with its dependencies via emacsclient.
 FROM debian:12-slim
 
 RUN apt-get update \
@@ -23,7 +23,7 @@ WORKDIR /home/phone
 # responsive without --daemon's user-init ordering quirks: we set the
 # TCP vars BEFORE server-start, then block forever processing socket
 # events.
-CMD ["emacs", "-Q", "--batch", \
+CMD ["emacs", "-Q", "--batch", "-L", "/opt/emacsos", \
      "--eval", "(setq server-use-tcp t server-host \"0.0.0.0\" server-port 12345)", \
      "--eval", "(server-start)", \
      "--eval", "(while t (accept-process-output nil 1))"]

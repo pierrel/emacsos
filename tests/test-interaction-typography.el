@@ -73,7 +73,7 @@
 
 (defvar interaction-test--repository-eval-ran nil)
 
-(ert-deftest interaction-file-opening-disables-locals-only-from-assist ()
+(ert-deftest interaction-file-opening-preserves-ordinary-locals-and-safe-wrapper ()
   (let* ((directory (make-temp-file "interaction-locals-" t))
          (emacsos-assist-web-cache-directory (make-temp-file "interaction-cache-" t))
          (safe-local-eval-forms '((setq interaction-test--repository-eval-ran t)))
@@ -83,20 +83,23 @@
         (progn
           (with-temp-file (expand-file-name ".dir-locals.el" directory)
             (insert "((nil . ((tab-width . 3))))\n"))
-          (dolist (context '(interactive explicit ordinary))
+          (dolist (context '(interactive explicit ordinary helper-relative))
             (let ((file (expand-file-name (format "%s.txt" context) directory))
                   (interaction-test--repository-eval-ran nil) view)
               (with-temp-file file
                 (insert "text\n\nLocal Variables:\nfill-column: 7\neval: (setq interaction-test--repository-eval-ran t)\nEnd:\n"))
               (unwind-protect
                   (with-temp-buffer
-                    (unless (eq context 'ordinary) (emacsos-assist-web-mode))
+                    (unless (memq context '(ordinary helper-relative))
+                      (emacsos-assist-web-mode))
                     (setq default-directory (file-name-as-directory directory))
-                    (if (eq context 'explicit)
-                        (emacsos-assist-web-find-file file)
-                      (cl-letf (((symbol-function 'read-file-name)
+                    (cond
+                     ((eq context 'helper-relative)
+                      (emacsos-assist-web-find-file (file-name-nondirectory file)))
+                     ((eq context 'explicit) (emacsos-assist-web-find-file file))
+                     (t (cl-letf (((symbol-function 'read-file-name)
                                  (lambda (&rest _) file)))
-                        (call-interactively (key-binding (kbd "C-x C-f")))))
+                        (call-interactively (key-binding (kbd "C-x C-f"))))))
                     (setq view (current-buffer))
                     (should (equal buffer-file-name file))
                     (if (eq context 'ordinary)
@@ -152,17 +155,30 @@
 
 (ert-deftest interaction-find-file-and-diff-use-workspace-boundary ()
   (interaction-test--thread
-    (let ((directory (make-temp-file "interaction-workspace-" t)) seen)
+    (let ((directory (make-temp-file "interaction-workspace-" t))
+          (available t) (lookups 0) seen diff)
       (unwind-protect
           (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory)
-                     (lambda () (file-name-as-directory directory)))
+                     (lambda ()
+                       (cl-incf lookups)
+                       (and available (file-name-as-directory directory))))
+                    ((symbol-function 'find-file)
+                     (lambda (&optional _file) (interactive)
+                       (setq seen default-directory)))
                     ((symbol-function 'emacsos-assist-web-git-diff)
-                     (lambda () (interactive) (setq seen default-directory))))
-            (run-hooks 'pre-command-hook)
-            (should (equal default-directory (file-name-as-directory directory)))
-            (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-find-file))
+                     (lambda () (interactive) (setq diff t))))
+            (dotimes (_ 100) (run-hooks 'pre-command-hook))
+            (should (= lookups 0))
+            (call-interactively (key-binding (kbd "C-x C-f")))
+            (should (= lookups 1))
+            (should (equal seen (file-name-as-directory directory)))
             (call-interactively (key-binding (kbd "C-c a d")))
-            (should (equal seen default-directory)))
+            (should diff)
+            ;; A removed checkout falls back before the next prompt, not while typing.
+            (setq available nil)
+            (call-interactively (key-binding (kbd "C-x C-f")))
+            (should (= lookups 2))
+            (should (equal seen (expand-file-name "~/"))))
         (delete-directory directory t)))))
 
 (ert-deftest typography-org-faces-preserve-source-and-global-customization ()

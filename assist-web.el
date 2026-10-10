@@ -5105,8 +5105,12 @@ VERIFIED-START-EPOCH fences later Run access denial."
 
 (defun emacsos-assist-web-find-file (&optional file)
   "Visit FILE without interpreting file or directory local settings.
-With nil FILE, use the ordinary interactive `find-file' prompt and navigation."
+Assist buffers select their checkout or home first; other buffers retain their
+directory.  FILE is not confined to that directory.  With nil FILE, use the
+ordinary interactive `find-file' prompt and navigation."
   (interactive)
+  (when (derived-mode-p 'emacsos-assist-web-mode)
+    (emacsos-assist-web--set-workspace-directory))
   (let ((enable-local-variables nil)
         (enable-local-eval nil)
         (enable-dir-local-variables nil))
@@ -5167,7 +5171,6 @@ With nil FILE, use the ordinary interactive `find-file' prompt and navigation."
   (add-hook 'after-change-functions #'emacsos-assist-web--after-change nil t)
   (add-hook 'before-change-functions #'emacsos-assist-web--protect-unclaimed-draft nil t)
   (add-hook 'post-command-hook #'emacsos-assist-web-git--sync-keys nil t)
-  (add-hook 'pre-command-hook #'emacsos-assist-web--set-workspace-directory nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
 

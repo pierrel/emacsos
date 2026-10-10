@@ -223,6 +223,7 @@ test-local-deploy-restart:
 	tests/test-local-deploy-restart.sh
 
 test-elisp: test-install-local
+	python3 -B tests/test-simulation-startup.py
 	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
 
 .PHONY: test-desktop-assist
