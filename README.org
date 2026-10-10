@@ -209,7 +209,7 @@ ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 =assist-desktop.el= loads the existing Assist Web client into ordinary Emacs.
 It does not load the phone OS, modem, keyboard, theme or server startup.
 Use Emacs 29 or newer with GnuTLS and native JSON support, Python 3.10+,
-Git, Make, OpenSSH and GNU coreutils.  Install Magit in your normal Emacs with
+Git, Make and OpenSSH.  Install Magit in your normal Emacs with
 =M-x package-install RET magit RET= for =C-c d= diffs.  No Python server or
 local model is needed on the laptop.
 
@@ -218,27 +218,26 @@ On macOS with Homebrew:
 #+begin_src sh
 xcode-select --install
 brew install --cask emacs-app
-brew install python coreutils
+brew install python
 #+end_src
 
 The Command Line Tools supply Git and Make; skip their installation if already
-present.  Coreutils supplies =gtimeout=.  In graphical Emacs, make Homebrew's
+present.  In graphical Emacs, make Homebrew's
 =bin= directory visible in =exec-path= before loading the client: use
 =(add-to-list 'exec-path "/opt/homebrew/bin")= on Apple Silicon, or
 =(add-to-list 'exec-path "/usr/local/bin")= on Intel.  The Git client resolves
-Python and =timeout= or =gtimeout= through that path.  For batch checks, expose
+Python through that path.  For batch checks, expose
 Emacs.app's =Contents/MacOS/= directory in your shell's =PATH= if =emacs= is
 not already available.
 
-On Linux, install your system's Emacs, Python, Git, Make, OpenSSH and coreutils
-packages; the timeout executable is normally named =timeout=.
+On Linux, install your system's Emacs, Python, Git, Make and OpenSSH packages.
 
-On the laptop, clone this feature branch while PR #57 is awaiting merge:
+On the laptop, clone the released desktop client:
 
 #+begin_src sh
 mkdir -p ~/src
 cd ~/src
-git clone --branch emacsos-desktop-assist https://github.com/pierrel/emacsos.git
+git clone https://github.com/pierrel/emacsos.git
 cd emacsos
 make install-desktop
 #+end_src
@@ -290,11 +289,9 @@ access.  A mapping example (replace both fields using the actual catalog/source)
 {"0123456789abcdef0123": "ssh://git@git.example/project.git"}
 #+end_src
 
-Check private Git file structure without contacting the remote:
-=python3 ~/.local/share/emacsos-assist/assist-web-git-helper.py --check-config=.
-An =ok=true= result checks configuration, not connectivity or key permissions
-on the Git server.  Thread chat works without Git configuration; file/diff
-actions report an unavailable workspace until Git setup and fetching succeed.
+Thread chat works without Git configuration; file/diff actions report an
+unavailable workspace until Git setup and fetching succeed.  The helper reads
+the private files only when a checkout sync or migration runs.
 
 Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
@@ -313,8 +310,13 @@ In a canonical thread, =C-x C-f= opens the existing local editable Git workspace
 without fetching, =C-c g= explicitly refreshes Git, and =C-c d= compares local
 =HEAD= against cached =origin/main= in Magit.  Use Magit's ordinary status/diff
 commands to inspect uncommitted edits.  =C-c ?= shows thread details and workspace
-location; file/diff views offer =C-c b= to return to the thread.  Git keys become
+location; use ordinary Emacs buffer navigation to return from file or Magit views.  Git keys become
 available after a new draft has a canonical thread ID.
+The checkout is ordinary Git: commit and push the thread branch explicitly at
+any time, including while an Assist turn is busy.  Sending chat never commits
+or pulls phone files.  The server fetches the published thread branch before a
+new turn; an exceptional competing push leaves a named =assist-result/<commit>=
+branch for manual reconciliation instead of rewriting either side.
 
 New files live under =~/assist/<repo>/<thread>-<stable-id>/=.  Existing legacy
 workspaces remain in place by default.  The explicit =Move cached checkout to ~/assist=
@@ -330,16 +332,7 @@ their saved routes bind each thread to a stable directory.  Local edits,
 untracked files, commits and unsaved visiting buffers are preserved; refresh
 reports pending changes rather than resetting, stashing or force pushing.
 
-After PR #57 is merged, switch this clone to the release branch once:
-
-#+begin_src sh
-cd ~/src/emacsos
-git fetch origin
-git switch main
-git branch --set-upstream-to=origin/main main
-#+end_src
-
-Then update the installed code from that same checkout:
+Update the installed code from the same checkout:
 
 #+begin_src sh
 cd ~/src/emacsos
@@ -377,7 +370,7 @@ macOS API bindings are checked with mocks, with no native macOS run yet.  On the
 laptop, run =make test-desktop-assist=, then open the thread list, open a real
 thread and use =C-c g=, =C-x C-f= and =C-c d= to check Git connectivity and Magit.
 A connected send is a separate live check.  Package references: [[https://formulae.brew.sh/cask/emacs-app][Emacs for macOS]] and
-[[https://elpa.nongnu.org/nongnu/magit.html][Magit]] and [[https://formulae.brew.sh/formula/coreutils][GNU coreutils]].
+[[https://elpa.nongnu.org/nongnu/magit.html][Magit]].
 
 * Canonical Assist Web threads
 
