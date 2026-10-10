@@ -296,11 +296,14 @@ An =ok=true= result checks configuration, not connectivity or key permissions
 on the Git server.  Thread chat works without Git configuration; file/diff
 actions report an unavailable workspace until Git setup and fetching succeed.
 
-Run =M-x emacsos-desktop-assist=.  The list uses =g= to refresh, =C-c a n= to
-start a new thread, and =RET= or mouse-1 to open a thread.  The new-thread key is
-local to the thread list.  =M-x emacsos-assist-web-open-thread= offers filtered
-completion; =M-x emacsos-assist-web-new-thread= selects a repository and harness
-and opens a local draft.  Type after the final => = prompt in a thread/draft;
+Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
+opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
+thread, and =C-c a r= refreshes the catalog from any buffer.  Unrelated user
+bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
+these global shortcuts and expose previous bindings.  The list also uses =g=
+to refresh, =RET= or mouse-1 to open a thread, and its local =C-c a n= shortcut.
+=M-x emacsos-desktop-assist= opens the same list.  =M-x emacsos-assist-web-new-thread=
+selects a repository and harness and opens a local draft.  Type after the final => = prompt in a thread/draft;
 =RET= inserts a newline and =C-RET= sends.  =C-c C-r= refreshes the thread,
 =C-c C-l= loads older messages, and =C-c C-k= aborts/detaches with the client's
 existing canonical outcome checks.  Loading the file alone makes no request;

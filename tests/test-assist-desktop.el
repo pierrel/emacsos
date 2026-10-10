@@ -22,6 +22,55 @@
   (should (equal (process-list) test-assist-desktop--processes))
   (should (file-regular-p emacsos-assist-web-git-helper)))
 
+(ert-deftest test-assist-desktop-prefix-opens-list-from-ordinary-buffer ()
+  "The phone's canonical Assist shortcuts also work outside desktop chat buffers."
+  (let ((emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-state nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        requested)
+    (unwind-protect
+        (save-window-excursion
+          (with-temp-buffer
+            (dolist (binding '(("l" . emacsos-assist-web-show-thread-list)
+                               ("t" . emacsos-assist-web-open-thread)
+                               ("n" . emacsos-assist-web-new-thread)
+                               ("r" . emacsos-assist-web-refresh-threads)))
+              (should (eq (key-binding (kbd (concat "C-c a " (car binding))))
+                          (cdr binding))))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _body callback &rest _args)
+                         (setq requested (list method path))
+                         (funcall callback nil "Offline shortcut test"))))
+              (call-interactively (key-binding (kbd "C-c a l")))
+              (should (derived-mode-p 'emacsos-assist-web-thread-list-mode))
+              (should (equal requested '("GET" "threads"))))))
+      (when-let ((buffer (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+        (kill-buffer buffer)))))
+
+(ert-deftest test-assist-desktop-prefix-preserves-unrelated-user-keys ()
+  "Desktop shortcuts leave user maps intact and can be disabled."
+  (let* ((original (current-global-map))
+         (user-map (copy-keymap original))
+         (loader (locate-library "assist-desktop")))
+    (unwind-protect
+        (progn
+          (define-key user-map (kbd "C-c a x") #'ignore)
+          (define-key user-map (kbd "C-c z") #'forward-char)
+          (define-key user-map (kbd "C-c a l") #'backward-char)
+          (use-global-map user-map)
+          (let ((before (copy-keymap user-map)))
+            (load loader nil t)
+            (should (equal user-map before)))
+          (with-temp-buffer
+            (should (eq (key-binding (kbd "C-c a l")) #'emacsos-assist-web-show-thread-list))
+            (should (eq (key-binding (kbd "C-c a x")) #'ignore)))
+          (emacsos-desktop-assist-mode -1)
+          (should (eq (key-binding (kbd "C-c a l")) #'backward-char))
+          (should (eq (key-binding (kbd "C-c z")) #'forward-char)))
+      (use-global-map original)
+      (when (fboundp 'emacsos-desktop-assist-mode)
+        (emacsos-desktop-assist-mode 1)))))
+
 (ert-deftest test-assist-desktop-load-reads-preconfigured-catalog ()
   (let ((cache (make-temp-file "assist-desktop-cache-" t))
         (loader (locate-library "assist-desktop")))
