@@ -3,7 +3,7 @@
 
 ;; This is deliberately separate from emacsos-assist.el.  A .assist file is a
 ;; phone-local conversation owned by emacsos-server; this mode is a client of
-;; Assist Web's canonical thread/run state.
+;; Assist Web's canonical thread/run state on phone and desktop.
 
 ;;; Code:
 
@@ -1537,7 +1537,7 @@ is durably superseded before the opening gate is removed."
 
 (defcustom emacsos-assist-web-cache-directory
   (expand-file-name "~/.cache/emacsos/assist-web")
-  "Private on-phone cache for Assist Web catalogs, snapshots, and drafts."
+  "Private local cache for Assist Web catalogs, snapshots, and drafts."
   :type 'directory
   :group 'emacsos-assist-web)
 

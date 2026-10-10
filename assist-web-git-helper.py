@@ -316,22 +316,32 @@ def promote_workspace(stage: Path, checkout: Path) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
     except ImportError as exc:
         raise Refusal("atomic workspace promotion unavailable") from exc
-    arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(stage)),
-                 ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(checkout)), ctypes.c_uint(1))
-    # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
-    try:
-        rename = libc.renameat2
-    except AttributeError:
-        # musl may omit the libc wrapper; these are the supported Linux devices.
-        number = ({"aarch64": 276, "x86_64": 316}.get(platform.machine())
-                  if sys.platform == "linux" and ctypes.sizeof(ctypes.c_void_p) == 8 else None)
-        if number is None:
-            raise Refusal("atomic workspace promotion unavailable")
-        libc.syscall.restype = ctypes.c_long
-        result = libc.syscall(ctypes.c_long(number), *arguments)
-    else:
+    if sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError as exc:
+            raise Refusal("atomic workspace promotion unavailable") from exc
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
         rename.restype = ctypes.c_int
-        result = rename(*arguments)
+        # Darwin sys/stdio.h RENAME_EXCL: preserve every existing destination.
+        result = rename(os.fsencode(stage), os.fsencode(checkout), 4)
+    else:
+        arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(stage)),
+                     ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(checkout)), ctypes.c_uint(1))
+        # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
+        try:
+            rename = libc.renameat2
+        except AttributeError:
+            # musl may omit the libc wrapper; these are the supported Linux devices.
+            number = ({"aarch64": 276, "x86_64": 316}.get(platform.machine())
+                      if sys.platform == "linux" and ctypes.sizeof(ctypes.c_void_p) == 8 else None)
+            if number is None:
+                raise Refusal("atomic workspace promotion unavailable")
+            libc.syscall.restype = ctypes.c_long
+            result = libc.syscall(ctypes.c_long(number), *arguments)
+        else:
+            rename.restype = ctypes.c_int
+            result = rename(*arguments)
     if result:
         import errno
         error = ctypes.get_errno()

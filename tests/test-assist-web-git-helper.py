@@ -25,6 +25,65 @@ def run(*args: str) -> str:
                                    stderr=subprocess.DEVNULL).strip()
 
 
+class WorkspacePromotionTest(unittest.TestCase):
+    def test_native_atomic_promotion_preserves_existing_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            stage.mkdir()
+            (stage / "local").write_text("stage")
+            destination = root / "destination"
+            for kind in ("file", "directory", "symlink"):
+                with self.subTest(kind=kind):
+                    if kind == "file":
+                        destination.write_text("keep")
+                    elif kind == "directory":
+                        destination.mkdir()
+                    else:
+                        destination.symlink_to(stage, target_is_directory=True)
+                    with self.assertRaisesRegex(helper.Refusal, "already exists"):
+                        helper.promote_workspace(stage, destination)
+                    self.assertEqual((stage / "local").read_text(), "stage")
+                    if kind == "directory":
+                        self.assertEqual(list(destination.iterdir()), [])
+                        destination.rmdir()
+                    else:
+                        if kind == "file":
+                            self.assertEqual(destination.read_text(), "keep")
+                        else:
+                            self.assertTrue(destination.is_symlink())
+                        destination.unlink()
+            helper.promote_workspace(stage, destination)
+            self.assertFalse(stage.exists())
+            self.assertEqual((destination / "local").read_text(), "stage")
+
+    def test_darwin_binding_and_errors(self):
+        import ctypes
+        import errno
+        from unittest.mock import Mock
+        rename = Mock(return_value=0)
+        library = Mock(renamex_np=rename)
+        with patch.object(helper.sys, "platform", "darwin"), \
+                patch.object(ctypes, "CDLL", return_value=library) as load:
+            helper.promote_workspace(Path("stage"), Path("destination"))
+            load.assert_called_once_with(None, use_errno=True)
+            rename.assert_called_once_with(b"stage", b"destination", 4)
+            self.assertEqual(rename.argtypes,
+                             (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint))
+            self.assertEqual(rename.restype, ctypes.c_int)
+            rename.return_value = -1
+            with patch.object(ctypes, "get_errno", return_value=errno.EEXIST):
+                with self.assertRaisesRegex(helper.Refusal, "local work preserved"):
+                    helper.promote_workspace(Path("stage"), Path("destination"))
+            with patch.object(ctypes, "get_errno", return_value=errno.ENOTSUP):
+                with self.assertRaises(OSError) as failure:
+                    helper.promote_workspace(Path("stage"), Path("destination"))
+                self.assertEqual(failure.exception.errno, errno.ENOTSUP)
+            with patch.object(ctypes, "CDLL", return_value=object()):
+                with self.assertRaisesRegex(helper.Refusal, "unavailable"):
+                    helper.promote_workspace(Path("stage"), Path("destination"))
+
+
 class HelperInputBoundaryTest(unittest.TestCase):
     """Helper input and local failures return fixed JSON categories."""
 
@@ -1189,10 +1248,10 @@ class GitHelperTest(unittest.TestCase):
         )
         with self.assertRaises(subprocess.CalledProcessError):
             subprocess.check_output(
-                [shutil.which("setsid"), shutil.which("timeout"),
+                [shutil.which("timeout") or shutil.which("gtimeout"),
                  "--kill-after=2", "1", sys.executable,
                  "-B", "-c", command], env={**os.environ, **env},
-                stderr=subprocess.DEVNULL, timeout=8)
+                stderr=subprocess.DEVNULL, timeout=8, start_new_session=True)
         time.sleep(2.2)
         self.assertFalse(marker.exists())
 

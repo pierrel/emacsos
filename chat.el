@@ -9,8 +9,9 @@
 ;; in the prompt area throughout.  ABORT cancels the in-flight
 ;; stream.
 ;;
-;; Loaded from os.el via (require 'chat).  Wire shape documented in
-;; emacsos/docs/2026-05-17-streaming-responses.org.
+;; Loaded by os.el for phone chat and by assist-web.el for shared conversation
+;; rendering on phone and desktop.  Phone chat wire shape is documented in
+;; docs/2026-05-17-streaming-responses.org.
 
 (require 'cl-lib)
 (require 'font-lock)

@@ -3,6 +3,25 @@
 (require 'ert)
 (require 'assist-web)
 
+(ert-deftest test-assist-web-git-spawn-discovers-gnu-timeout ()
+  "Linux timeout and macOS gtimeout keep the same bounded helper arguments."
+  (dolist (name '("timeout" "gtimeout"))
+    (let ((command
+           (catch 'command
+             (cl-letf (((symbol-function 'executable-find)
+                        (lambda (program)
+                          (cond ((equal program name) (concat "/tools/" name))
+                                ((equal program "python3") "/tools/python3"))))
+                       ((symbol-function 'make-process)
+                        (lambda (&rest options)
+                          (throw 'command (plist-get options :command)))))
+               (emacsos-assist-web-git--spawn '((action . "probe")) #'ignore)))))
+      (should (equal command (list (concat "/tools/" name) "--kill-after=2" "90"
+                                  "/tools/python3" emacsos-assist-web-git-helper)))))
+  (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+    (should-error (emacsos-assist-web-git--spawn '((action . "probe")) #'ignore)
+                  :type 'user-error)))
+
 (ert-deftest test-assist-web-git-spawn-keeps-helper-attached-until-input-eof ()
   "A real pipe helper must not finish before its request is delivered."
   (let ((send (symbol-function 'process-send-string))
@@ -245,6 +264,43 @@
       (kill-buffer thread)
       (when (file-symlink-p alias) (delete-file alias))
       (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-move-discovers-gnu-timeout ()
+  "An explicit move resolves desktop executables without changing its short budget."
+  (let ((thread (generate-new-buffer " *desktop move*")))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((metadata (test-assist-web-git--metadata
+                            "ready" "topic/one" test-assist-web-git--head))
+                 (identity (emacsos-assist-web-git--workspace-identity metadata))
+                 (button (insert-text-button "Move" 'thread thread 'identity identity)))
+            (with-current-buffer thread
+              (setq emacsos-assist-web-git--metadata metadata))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--gate-reason) #'ignore)
+                      ((symbol-function 'emacsos-assist-web-git--legacy-route)
+                       (lambda (_) (list :legacy (make-string 64 ?a))))
+                      ((symbol-function 'emacsos-assist-web-git--move-busy-buffer-p) #'ignore))
+              (dolist (name '("timeout" "gtimeout"))
+                (let ((command
+                       (catch 'command
+                         (cl-letf (((symbol-function 'executable-find)
+                                    (lambda (program)
+                                      (cond ((equal program name) (concat "/tools/" name))
+                                            ((equal program "python3") "/tools/python3"))))
+                                   ((symbol-function 'call-process-region)
+                                    (lambda (&rest arguments)
+                                      (throw 'command (cons (nth 2 arguments)
+                                                            (nthcdr 6 arguments))))))
+                           (emacsos-assist-web-git--move-workspace button)))))
+                  (should (equal command
+                                 (list (concat "/tools/" name) "--kill-after=1" "8"
+                                       "/tools/python3" emacsos-assist-web-git-helper)))))
+              (cl-letf (((symbol-function 'executable-find) #'ignore)
+                        ((symbol-function 'call-process-region)
+                         (lambda (&rest _) (ert-fail "missing executables must not start a move"))))
+                (should-error (emacsos-assist-web-git--move-workspace button)
+                              :type 'user-error)))))
+      (kill-buffer thread))))
 
 (ert-deftest test-assist-web-git-interrupted-move-is-explicitly-resumable ()
   "A bound moving route remains discoverable but ordinary browse refuses it."
