@@ -166,7 +166,7 @@
 
 (ert-deftest rendering-indented-fence-keeps-separate-targets-and-prose ()
   (with-temp-buffer
-    (insert "```render\ntype: file\npath: first.md\n  ```\nVisible prose\n```render\ntype: file\npath: second.md\n```\n")
+    (insert "  ```render\ntype: file\npath: first.md\n  ```\nVisible prose\n```render\ntype: file\npath: second.md\n```\n")
     (emacsos--chat-present-markdown-1 (point-min) (point-max))
     (should (equal (get-text-property 1 'emacsos-conversation-object) '(file "first.md" nil)))
     (goto-char 1) (search-forward "Visible prose")
@@ -411,5 +411,76 @@
             (should-not (buffer-modified-p)))
         (when (and view (not (eq view source))) (kill-buffer view))
         (kill-buffer source) (delete-directory root t)))))
+
+
+(ert-deftest rendering-mapped-remote-paths-never-reach-filesystem ()
+  (let ((root (make-temp-file "render-no-remote" t)) probed)
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory) (lambda () root))
+                  ((symbol-function 'file-in-directory-p) (lambda (&rest _) (setq probed t) nil)))
+          (dolist (path '("/workspace//ssh:host:/etc/passwd" "/user//ssh:host:/etc/passwd"))
+            (setq probed nil)
+            (should-not (emacsos-conversation--local-file path))
+            (should-not probed)))
+      (delete-directory root t))))
+
+(ert-deftest rendering-existing-image-and-compressed-visits-remain-untouched ()
+  (require 'assist-web)
+  (save-window-excursion
+    (let ((root (make-temp-file "render-existing" t))
+          (source (generate-new-buffer " *render-existing-source*")) existing)
+      (unwind-protect
+          (progn
+            (let ((coding-system-for-write 'no-conversion))
+              (write-region (base64-decode-string "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+                            nil (expand-file-name "visited.gif" root) nil 'silent))
+            (write-region (concat "<svg>" (make-string (* 2 1024 1024) ?x) "</svg>")
+                          nil (expand-file-name "visited.svgz" root) nil 'silent)
+            (make-symbolic-link (expand-file-name "visited.svgz" root) (expand-file-name "alias.svgz" root))
+            (dolist (pair '(("visited.gif" . "visited.gif") ("visited.svgz" . "visited.svgz") ("alias.svgz" . "visited.svgz")))
+              (setq existing (find-file-noselect (expand-file-name (car pair) root)))
+              (when (string-suffix-p ".svgz" (car pair))
+                (with-current-buffer existing
+                  (should (> (buffer-size) (* 1024 1024)))))
+              (let ((original (with-current-buffer existing (buffer-string)))
+                    (mode (buffer-local-value 'major-mode existing)))
+                (switch-to-buffer source)
+                (erase-buffer)
+                (insert (format "[file](%s)" (cdr pair)))
+                (emacsos--chat-present-markdown-1 1 (point-max))
+                (goto-char 2)
+                (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory) (lambda () root)))
+                  (emacsos-conversation--open-object))
+                (should (eq (current-buffer) source))
+                (should (buffer-live-p existing))
+                (should (eq (buffer-local-value 'major-mode existing) mode))
+                (with-current-buffer existing
+                  (should (equal original (buffer-string)))
+                  (should-not (buffer-modified-p))))
+              (kill-buffer existing) (setq existing nil)))
+        (when existing (kill-buffer existing))
+        (kill-buffer source) (delete-directory root t)))))
+
+(ert-deftest rendering-table-back-releases-temporary-snapshot ()
+  (save-window-excursion
+    (let ((source (generate-new-buffer " *render-table-lifetime*")) view)
+      (unwind-protect
+          (progn
+            (switch-to-buffer source)
+            (insert rendering-test--table "\n> unsent draft")
+            (emacsos--chat-present-markdown-1 1 (point-max))
+            (goto-char 1)
+            (let ((original (buffer-substring-no-properties 1 (point-max)))
+                  (initial (cl-count-if (lambda (b) (string-prefix-p "*Assist table*" (buffer-name b))) (buffer-list))))
+              (dotimes (_ 20)
+                (emacsos-conversation--open-object)
+                (setq view (current-buffer))
+                (emacsos-conversation-table-back)
+                (should (eq (current-buffer) source))
+                (should-not (buffer-live-p view))
+                (should (= initial (cl-count-if (lambda (b) (string-prefix-p "*Assist table*" (buffer-name b))) (buffer-list)))))
+              (should (equal original (buffer-substring-no-properties 1 (point-max))))))
+        (when (buffer-live-p view) (kill-buffer view))
+        (kill-buffer source)))))
 
 (provide 'test-conversation-rendering)

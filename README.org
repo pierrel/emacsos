@@ -333,6 +333,8 @@ Assist render protocol; graphical Emacs displays bounded PNGs scaled to the
 window. Other available files open through the same safe local-file command.
 Fallback image links, including SVG and oversized PNGs, open as literal text.
 Compressed links retain their stored bytes without automatic decompression.
+Already visited image or compressed files stay untouched; use Find file for
+those existing buffers.
 =/workspace/=, =/user/= and relative paths resolve
 inside this thread; symlinks, traversal and Git internals are refused. The
 server's persistent =/tmp/= scratch is absent from local Git checkouts and
@@ -345,7 +347,8 @@ Separator rows may omit the trailing pipe; short data rows get empty cells.
 The fixed header provides Back, Left and Right controls; arrow keys scroll
 horizontally and =C-c b= returns. Conversation prose stays wrapped and copied,
 stored and unsent text stays unchanged. The table view is a snapshot, so reopen
-it after a conversation refresh. Ordinary Org tables retain their existing
+it after a conversation refresh. Back releases the temporary table buffer.
+Ordinary Org tables retain their existing
 Org behavior.
 
 Presentation retains the 256 KiB source budget. Local linked files are limited

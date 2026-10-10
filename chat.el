@@ -265,10 +265,14 @@ its buffer.")
                (progn
                  (when (> (file-attribute-size (file-attributes file)) (* 1024 1024))
                    (user-error "File exceeds 1 MiB link-view limit; use Find file"))
-                 (let ((auto-mode-alist (cons (cons (concat (image-file-name-regexp) "\\|\\.svgz\\'")
-                                             #'fundamental-mode) auto-mode-alist))
-                       (magic-mode-alist nil) (magic-fallback-mode-alist nil)
-                       (jka-compr-inhibit t))
+                 (let* ((image-regexp (concat (image-file-name-regexp) "\\|\\.svgz\\'"))
+                        (auto-mode-alist (cons (cons image-regexp #'fundamental-mode) auto-mode-alist))
+                        (magic-mode-alist nil) (magic-fallback-mode-alist nil)
+                        (jka-compr-inhibit t))
+                   (when (and (find-buffer-visiting file)
+                              (or (string-match-p image-regexp file)
+                                  (jka-compr-get-compression-info file)))
+                     (user-error "Image or compressed file already open; use Find file"))
                    (emacsos-assist-web-find-file file))
                  (when (and (stringp lines) (string-match "\\`\\([0-9]+\\)" lines))
                    (goto-char (point-min))
@@ -399,6 +403,7 @@ are excluded."
              (file (and relative (expand-file-name relative root)))
              (cursor file))
         (when (and file (not (file-remote-p root))
+                   (not (file-remote-p file))
                    (file-in-directory-p file root)
                    (not (member ".git" (split-string relative "/" t)))
                    (not (member ".." (split-string relative "/" t))))
@@ -540,13 +545,15 @@ Only PNG is decoded inline; fallback image links open as literal file text."
 				'face 'emacsos-chat-link-face)))))))))))))
 
 (defun emacsos-conversation-table-back ()
-  "Return to the source conversation without changing its draft or viewport."
+  "Return to the source conversation and release the temporary table view."
   (interactive)
   (emacsos-conversation--table-window)
   (when (and (markerp emacsos-conversation--return-marker)
              (marker-buffer emacsos-conversation--return-marker))
-    (switch-to-buffer (marker-buffer emacsos-conversation--return-marker))
-    (set-window-hscroll nil 0)))
+    (let ((view (current-buffer)))
+      (switch-to-buffer (marker-buffer emacsos-conversation--return-marker))
+      (set-window-hscroll nil 0)
+      (kill-buffer view))))
 
 (defun emacsos-conversation--table-window ()
   "Select the table header event's window for a mouse action."
@@ -637,7 +644,7 @@ characters remain unchanged."
                     (line-end (line-end-position)))
                 (cond
                  ((looking-at (if in-fence "[ \t]*```[ \t]*\r?$" "[ \t]*```"))
-                  (when (and (not in-fence) (save-match-data (looking-at "```render[ \t]*\r?$")))
+                  (when (and (not in-fence) (save-match-data (looking-at "[ \t]*```render[ \t]*\r?$")))
                     (put-text-property line-start line-end 'emacsos--chat-render-start t))
                   (emacsos--chat-add-face line-start line-end
                                           'emacsos-chat-code-face)
