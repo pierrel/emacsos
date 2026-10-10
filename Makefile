@@ -1,4 +1,4 @@
-.PHONY: start start-server local-connect-server local-deploy install-local phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-assist-web-git test-swipe-learning test-install-local test-local-deploy-restart test-pinephone-scripts pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install wvkbd-phone-bench test-wvkbd-build
+.PHONY: start start-server local-connect-server local-deploy install-local phone-install cellular-bringup install-modem-at-ports wg-add-peer wg-phone-bringup playground-install server setup-server test-server test-elisp test-assist-web-git test-swipe-learning test-install-local test-local-deploy-restart test-pinephone-scripts test-phone-typography pinephone-openrc-install pinephone-openrc-ui pinephone-openrc-console smoke install-server-service deploy-sms-forward deploy-call-bridge wvkbd-build wvkbd-phone-install wvkbd-phone-bench test-wvkbd-build
 
 PINEPHONE_HOST ?= phone
 export PINEPHONE_HOST
@@ -236,6 +236,9 @@ test-desktop-assist: test-install-desktop
 test-assist-web-git:
 	PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-assist-web-git-helper.py
 	emacs -Q --batch -L . -L tests -l tests/test-assist-web-git.el -f ert-run-tests-batch-and-exit
+
+test-phone-typography:
+	tests/test-phone-typography.sh
 
 test-swipe-learning:
 	python3 -m unittest -v tests/test-swipe-learning-collector.py tests/test-emacsos-wvkbd-launch.py

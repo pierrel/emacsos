@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded, noninteractive Git work for the Assist thread mirror.
+"""Bounded, noninteractive Git work for the Assist thread checkout.
 
-The Emacs client supplies a repository key, thread ID, branch, admitted workspace,
-private metadata root and fast-forward admission flag.  This process validates
-the request, resolves the remote from private device configuration, and never
-emits the URL, SSH diagnostics, or credential material.
+Sync validates the client request and resolves the remote from private device
+configuration. An explicit move only renames a bound local checkout. Neither
+operation emits a URL, SSH diagnostic, or credential material.
 """
 
 import fcntl
@@ -12,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import selectors
 import shlex
@@ -41,7 +41,7 @@ OPERATION_LOCK: int | None = None
 
 
 class Refusal(Exception):
-    """A safe, bounded reason to decline a mirror refresh."""
+    """A safe, bounded reason to decline a checkout operation."""
 
 
 class WorkspaceChoice(Refusal):
@@ -83,10 +83,20 @@ def route_path(record: dict, root: Path, workspaces: Path,
             or record.get("thread_id") != tid):
         raise Refusal("workspace binding is invalid")
     initialized = record.get("initialized")
-    if initialized is not False and initialized is not True and initialized != "installing":
+    if initialized is not False and initialized is not True and initialized not in ("installing", "moving"):
         raise Refusal("workspace binding is invalid")
     legacy = record.get("legacy")
     relative = record.get("relative")
+    if (initialized == "moving" and isinstance(legacy, str)
+            and re.fullmatch(r"[0-9a-f]{64}", legacy)
+            and isinstance(relative, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)
+            and relative.endswith("-" + stable_identity(repo_key, tid)[:12])
+            and type(record.get("source_device")) is int
+            and type(record.get("source_inode")) is int):
+        return root / "checkouts" / legacy
+    if initialized == "moving":
+        raise Refusal("workspace binding is invalid")
     if isinstance(legacy, str) and re.fullmatch(r"[0-9a-f]{64}", legacy) and relative is None:
         return root / "checkouts" / legacy
     if (legacy is None and isinstance(relative, str)
@@ -116,6 +126,41 @@ def write_route(path: Path, record: dict) -> None:
             os.unlink(temporary)
 
 
+def sync_directory(path: Path) -> None:
+    """Make a completed route or same-filesystem rename durable."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def verify_relocatable(source: Path) -> None:
+    """Refuse Git metadata whose paths could change meaning after relocation."""
+    gitdir = source / ".git"
+    if not gitdir.is_dir() or gitdir.is_symlink():
+        raise Refusal("legacy workspace Git directory is invalid")
+    if ((gitdir / "worktrees").exists() or (gitdir / "worktrees").is_symlink()
+            or (gitdir / "modules").exists() or (gitdir / "modules").is_symlink()
+            or (gitdir / "objects" / "info" / "alternates").exists()
+            or (gitdir / "objects" / "info" / "alternates").is_symlink()
+            or (gitdir / "config.worktree").exists()
+            or (gitdir / "config.worktree").is_symlink()):
+        raise Refusal("path-dependent Git metadata prevents moving")
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/dev/null",
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+           "LC_ALL": "C"}
+    keys = git(["-C", str(source), "config", "--local", "--no-includes",
+                "--name-only", "--list"], env, seconds=2,
+               output_limit=65536).lower().splitlines()
+    if any(key == "core.worktree" or key == "include.path"
+           or key.startswith("includeif.") or key == "extensions.worktreeconfig"
+           for key in keys):
+        raise Refusal("Git configuration contains an external worktree path")
+    if git(["-C", str(source), "rev-parse", "--show-toplevel"], env, seconds=2) != str(source):
+        raise Refusal("Git worktree root differs from workspace")
+
+
 def workspace_bindings(root: Path, workspaces: Path) -> dict[Path, str]:
     """Read bounded valid bindings, refusing duplicate physical ownership."""
     bindings = {}
@@ -136,6 +181,11 @@ def workspace_bindings(root: Path, workspaces: Path) -> dict[Path, str]:
         if checkout in bindings:
             raise Refusal("workspace is already bound to another thread")
         bindings[checkout] = identity
+        if record.get("initialized") == "moving":
+            destination = workspaces / record["relative"]
+            if destination in bindings:
+                raise Refusal("workspace is already bound to another thread")
+            bindings[destination] = identity
     return bindings
 
 
@@ -179,8 +229,11 @@ def allocate_workspace(request: dict, root: Path, workspaces: Path,
     if route.exists() or route.is_symlink():
         record = read_route(route)
         checkout = route_path(record, root, workspaces, repo_key, tid)
+        if record.get("initialized") == "moving":
+            raise Refusal("workspace move interrupted; use Move workspace to resume")
         if record.get("initialized") == "installing":
-            raise Refusal("workspace initialization interrupted; local files preserved")
+            # Recovery runs after both identity and physical locks are held.
+            return checkout, physical_lock(checkout, record.get("legacy"))
         if record.get("initialized") is False and (checkout.exists() or checkout.is_symlink()):
             raise Refusal("workspace destination already exists; local work preserved")
         if record.get("initialized") is not False and not checkout.exists():
@@ -257,30 +310,220 @@ def private_directory(path: Path) -> None:
 
 
 def promote_workspace(stage: Path, checkout: Path) -> None:
-    """Atomically install our staged directory without replacing any user path."""
+    """Atomically move a directory without replacing any user path."""
     try:
         import ctypes
-        library = ctypes.CDLL(None, use_errno=True)
-        if sys.platform == "darwin":
-            rename = library.renamex_np
-            rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
-            # Darwin sys/stdio.h RENAME_EXCL: preserve every existing destination.
-            arguments = (os.fsencode(stage), os.fsencode(checkout), 0x00000004)
-        else:
-            rename = library.renameat2
-            rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                               ctypes.c_char_p, ctypes.c_uint)
-            # Linux AT_FDCWD and RENAME_NOREPLACE, including empty directories.
-            arguments = (-100, os.fsencode(stage), -100, os.fsencode(checkout), 1)
-    except (ImportError, AttributeError) as exc:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except ImportError as exc:
         raise Refusal("atomic workspace promotion unavailable") from exc
-    rename.restype = ctypes.c_int
-    if rename(*arguments):
+    if sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError as exc:
+            raise Refusal("atomic workspace promotion unavailable") from exc
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        # Darwin sys/stdio.h RENAME_EXCL: preserve every existing destination.
+        result = rename(os.fsencode(stage), os.fsencode(checkout), 4)
+    else:
+        arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(stage)),
+                     ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(checkout)), ctypes.c_uint(1))
+        # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
+        try:
+            rename = libc.renameat2
+        except AttributeError:
+            # musl may omit the libc wrapper; these are the supported Linux devices.
+            number = ({"aarch64": 276, "x86_64": 316}.get(platform.machine())
+                      if sys.platform == "linux" and ctypes.sizeof(ctypes.c_void_p) == 8 else None)
+            if number is None:
+                raise Refusal("atomic workspace promotion unavailable")
+            libc.syscall.restype = ctypes.c_long
+            result = libc.syscall(ctypes.c_long(number), *arguments)
+        else:
+            rename.restype = ctypes.c_int
+            result = rename(*arguments)
+    if result:
         import errno
         error = ctypes.get_errno()
         if error == errno.EEXIST:
             raise Refusal("workspace destination already exists; local work preserved")
+        if error == errno.ENOSYS:
+            raise Refusal("atomic workspace promotion unavailable")
         raise OSError(error, "workspace promotion failed")
+
+
+def finish_initialization(request: dict, route: Path, checkout: Path,
+                          stage: Path, url: str, env: dict) -> bool:
+    """Resume only the same prepared directory, under both checkout locks.
+
+    Old markers without inode proof require an explicit empty-path recovery;
+    their occupied paths remain untouched. Recovery never repeats Git checkout.
+    """
+    record = read_route(route)
+    if record.get("initialized") != "installing":
+        if request.get("recover_initialization") is True:
+            raise Refusal("workspace is not an interrupted initialization")
+        return False
+    if request.get("allow_initialization") is False:
+        raise Refusal("local staging view is open; initialization pending")
+    proof = (record.get("installation_device"), record.get("installation_inode"))
+    staged, installed = stage.exists() or stage.is_symlink(), checkout.exists() or checkout.is_symlink()
+    if all(key not in record for key in ("installation_device", "installation_inode", "installation_branch")):
+        if request.get("recover_initialization") is True and not staged and not installed:
+            write_route(route, {**record, "initialized": False})
+            sync_directory(route.parent)
+            return True
+        raise Refusal("workspace initialization interrupted; local files preserved")
+    if (not all(type(value) is int and value > 0 for value in proof)
+            or not isinstance(record.get("installation_branch"), str)):
+        raise Refusal("workspace initialization proof is invalid; local files preserved")
+    if request.get("recover_initialization") is True:
+        raise Refusal("workspace initialization contains retained work; normal Refresh resumes it")
+    if staged == installed:
+        raise Refusal("workspace initialization interrupted: paths changed; local files preserved")
+    present = stage if staged else checkout
+    workspace_directory(present)
+    info = present.lstat()
+    if ((info.st_dev, info.st_ino) != proof or (present / ".git").is_symlink()
+            or not (present / ".git").is_dir()):
+        raise Refusal("workspace initialization identity changed; local files preserved")
+    if git(["-C", str(present), "remote", "get-url", "origin"], env) != url:
+        raise Refusal("checkout remote differs from the configured repository")
+    if staged:
+        verify_relocatable(stage)
+        if git(["-C", str(stage), "symbolic-ref", "--short", "HEAD"], env) != record["installation_branch"]:
+            raise Refusal("initial checkout branch changed; local files preserved")
+        promote_workspace(stage, checkout)
+    sync_directory(checkout.parent)
+    record["initialized"] = True
+    for key in ("installation_device", "installation_inode", "installation_branch"):
+        record.pop(key, None)
+    write_route(route, record)
+    sync_directory(route.parent)
+    return False
+
+
+def migrate_workspace(request: dict) -> dict:
+    """Move one explicitly selected bound legacy checkout, preserving its inode."""
+    repo_key, tid = request.get("repo_key"), request.get("thread_id")
+    raw_root, raw_workspaces = request.get("cache_root"), request.get("workspace_root")
+    if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
+            or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)
+            or not isinstance(raw_root, str) or not isinstance(raw_workspaces, str)
+            or not Path(raw_root).is_absolute() or not Path(raw_workspaces).is_absolute()
+            or ".." in Path(raw_root).parts or ".." in Path(raw_workspaces).parts):
+        raise Refusal("workspace move request is invalid")
+    root, workspaces = Path(raw_root), Path(raw_workspaces)
+    identity = stable_identity(repo_key, tid)
+    private_directory(root)
+    private_directory(root / "routes")
+    private_directory(root / "checkouts")
+    private_directory(root / "locks")
+    route = root / "routes" / (identity + ".json")
+    allocation = os.open(root / "locks" / ("workspace-" + identity),
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(allocation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refusal("another Git operation is still using this checkout") from exc
+        record = read_route(route)
+        if (not isinstance(record, dict) or record.get("repo_key") != repo_key
+                or record.get("thread_id") != tid
+                or not isinstance(record.get("legacy"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", record["legacy"])
+                or record.get("initialized") not in (True, "moving")):
+            raise Refusal("only a bound legacy workspace can be moved")
+        source = root / "checkouts" / record["legacy"]
+        if request.get("checkout_path") != str(source):
+            raise Refusal("workspace move binding changed")
+        physical = os.open(root / "locks" / record["legacy"],
+                           os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        publication = None
+        try:
+            try:
+                fcntl.flock(physical, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise Refusal("another Git operation is still using this checkout") from exc
+            fresh = record["initialized"] is True
+            if fresh:
+                if record.get("relative") is not None:
+                    raise Refusal("workspace binding is invalid")
+                if not source.exists() or source.is_symlink():
+                    raise Refusal("legacy workspace source is unavailable")
+                private_directory(source)
+                verify_relocatable(source)
+                relative = (workspace_slug(request.get("repo_label"), "repo") + "/"
+                            + workspace_slug(request.get("thread_label"), "thread")
+                            + "-" + identity[:12])
+                destination = workspaces / relative
+                workspace_directory(destination.parent)
+                sync_directory(destination.parent)
+                sync_directory(workspaces)
+                sync_directory(workspaces.parent)
+                if source.stat().st_dev != destination.parent.stat().st_dev:
+                    raise Refusal("workspace move requires one filesystem")
+                if destination.exists() or destination.is_symlink():
+                    raise Refusal("workspace destination already exists; local work preserved")
+                info = source.lstat()
+                record = {**record, "relative": relative, "initialized": "moving",
+                          "source_device": info.st_dev, "source_inode": info.st_ino}
+            else:
+                route_path(record, root, workspaces, repo_key, tid)
+                relative = record["relative"]
+                destination = workspaces / relative
+                workspace_directory(destination.parent)
+                sync_directory(destination.parent)
+                sync_directory(workspaces)
+                sync_directory(workspaces.parent)
+                if source.exists() and not destination.exists():
+                    verify_relocatable(source)
+            publication = os.open(root / "locks" / "workspace-bindings",
+                                  os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(publication, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise Refusal("another Git operation is allocating a workspace") from exc
+            bindings = workspace_bindings(root, workspaces)
+            if (bindings.get(source) != identity
+                    or bindings.get(destination) not in (None, identity)):
+                raise Refusal("workspace is already bound to another thread")
+            if not fresh and bindings.get(destination) != identity:
+                raise Refusal("workspace move binding changed")
+            if fresh and (destination.exists() or destination.is_symlink()):
+                raise Refusal("workspace destination already exists; local work preserved")
+            if fresh:
+                write_route(route, record)
+                sync_directory(route.parent)
+            source_exists = source.exists() or source.is_symlink()
+            destination_exists = destination.exists() or destination.is_symlink()
+            if source_exists == destination_exists:
+                raise Refusal("workspace move interrupted; local files preserved")
+            present = source if source_exists else destination
+            info = present.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_dev != record["source_device"]
+                    or info.st_ino != record["source_inode"]
+                    or (present / ".git").is_symlink()
+                    or not (present / ".git").is_dir()):
+                raise Refusal("workspace move identity changed; local files preserved")
+            if source_exists:
+                if source.stat().st_dev != destination.parent.stat().st_dev:
+                    raise Refusal("workspace move requires one filesystem")
+                promote_workspace(source, destination)
+                sync_directory(source.parent)
+                sync_directory(destination.parent)
+            write_route(route, {"repo_key": repo_key, "thread_id": tid,
+                                "legacy": None, "relative": relative,
+                                "initialized": True})
+            sync_directory(route.parent)
+            return {"ok": True, "checkout_path": str(destination)}
+        finally:
+            if publication is not None:
+                os.close(publication)
+            os.close(physical)
+    finally:
+        os.close(allocation)
 
 
 def remote_url(value: str) -> str:
@@ -579,14 +822,20 @@ def sync_checkout(request: dict) -> dict:
         # A route freezes identity and installation state, not the safety of
         # workspace parents that may have changed since allocation.
         workspace_directory(checkout.parent)
+        stage = checkout.with_name("." + checkout.name + ".initial")
+        route = root / "routes" / (identity + ".json")
+        if finish_initialization(request, route, checkout, stage, url, env):
+            return {"ok": True, "checkout_path": str(checkout), "recovery": "empty initialization ready"}
         if shutil.disk_usage(checkout.parent).free < FREE_MARGIN:
             raise Refusal("insufficient free space for Git fetch")
         new = not checkout.exists()
         if checkout.is_symlink():
             raise Refusal("checkout path is a symlink")
-        stage = checkout.with_name("." + checkout.name + ".initial")
         working = stage if new else checkout
+        preserve_stage = False
         if new:
+            if request.get("allow_initialization") is False:
+                raise Refusal("local staging view is open; initialization pending")
             if stage.exists() or stage.is_symlink():
                 raise Refusal("initial checkout interrupted; inspect staging before Retry")
             stage.mkdir(mode=0o700)
@@ -671,20 +920,25 @@ def sync_checkout(request: dict) -> dict:
                     raise Refusal("initial Git checkout exceeds its cache limit")
             actual = git(["-C", str(working), "symbolic-ref", "--short", "HEAD"], env)
             if new:
-                route = root / "routes" / (identity + ".json")
                 record = read_route(route)
-                record["initialized"] = "installing"
-                # An interrupted promotion refuses retry, whether the path is
-                # missing or occupied. It must not adopt somebody else's work.
+                info = working.lstat()
+                record.update(initialized="installing", installation_device=info.st_dev,
+                              installation_inode=info.st_ino, installation_branch=actual)
+                # Once preparation is published, preserve this exact directory
+                # across promotion/finalization errors for a same-inode retry.
+                preserve_stage = True
+                sync_directory(working)
+                sync_directory(checkout.parent)
+                sync_directory(workspaces)
+                sync_directory(workspaces.parent)
                 write_route(route, record)
-                promote_workspace(working, checkout)
-                record["initialized"] = True
-                write_route(route, record)
+                sync_directory(route.parent)
+                finish_initialization(request, route, checkout, stage, url, env)
             return {"ok": True, "checkout_path": str(checkout),
                     "thread_oid": remote_oid, "local_oid": local_oid, "main_oid": main_oid,
                     "dirty": dirty, "pending": pending, "actual_branch": actual}
         except BaseException:
-            if new and stage.exists():
+            if new and not preserve_stage and stage.exists():
                 shutil.rmtree(stage)
             raise
     finally:
@@ -711,6 +965,8 @@ def main() -> None:
             action = request.get("action")
             if action == "sync":
                 result = sync_checkout(request)
+            elif action == "migrate":
+                result = migrate_workspace(request)
             elif action == "cleanup":
                 result = cleanup(request)
             else:

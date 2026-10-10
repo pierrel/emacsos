@@ -49,7 +49,7 @@ done
 
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
-for name in openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
+for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
     openrc-session-power openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root \
@@ -89,7 +89,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 42 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 47 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -153,6 +153,10 @@ dtach-shell.el
 emacsos-assist.el
 emacsos-ui.initd
 emacsos-wvkbd-launch
+inter-OFL.txt
+inter.ttf
+jetbrains-mono-OFL.txt
+jetbrains-mono.ttf
 network.el
 openrc-assist-web-url
 openrc-boot-mode
@@ -172,6 +176,7 @@ openrc-sway.config
 openrc-wifi-connect-root
 os.el
 phone-call.el
+phone-fonts.conf
 phone-sms-chat.el
 phone-sms.el
 swipe-learning-collector.py
@@ -245,7 +250,7 @@ grep -F 'export EMACSOS_WVKBD_PID=$keyboard_pid' "$deploy_dir/openrc-session" >/
 keyboard_line=$(grep -nF '/usr/local/libexec/emacsos-wvkbd-launch &' \
     "$deploy_dir/openrc-session")
 keyboard_line=${keyboard_line%%:*}
-emacs_line=$(grep -nF '/usr/bin/emacs -Q --load "$root/init.el" &' \
+emacs_line=$(grep -nF 'FONTCONFIG_FILE="$root/phone-fonts.conf" /usr/bin/emacs -Q --load "$root/init.el" &' \
     "$deploy_dir/openrc-session")
 emacs_line=${emacs_line%%:*}
 [ "$keyboard_line" -lt "$emacs_line" ]
@@ -333,7 +338,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 42 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 47 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null

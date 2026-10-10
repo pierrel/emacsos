@@ -693,8 +693,8 @@ plain *chat* buffer gets nil context (the legacy fixed conversation)."
   (setq emacsos--chat-rollback-pending nil)
   (with-current-buffer buf
     ;; Chat is prose, not code — render the transcript + input in the
-    ;; proportional `variable-pitch' face (the keyboard stays monospace
-    ;; in its own buffer).  The face family is set in the init snippet.
+    ;; proportional `variable-pitch' face.  Control rows retain a mono column
+    ;; basis; the platform startup selects each face family.
     (variable-pitch-mode 1)
     (emacsos--chat-enable-presentation)
     (emacsos-conversation-install-actions

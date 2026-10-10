@@ -225,6 +225,107 @@
               (emacsos-assist-web-git--command 'files))))
       (delete-directory cache t))))
 
+(ert-deftest test-assist-web-git-explicit-move-keeps-open-user-buffers-in-place ()
+  "An open file or directory consumer blocks a checkout move, including unsaved work."
+  (let* ((root (make-temp-file "git-move-open-" t))
+         (alias (concat root "-alias"))
+         (thread (generate-new-buffer " *git-move-thread*"))
+         (file (generate-new-buffer " *git-move-file*"))
+         (directory (generate-new-buffer " *git-move-directory*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer file
+            (setq buffer-file-name (expand-file-name "personal.txt" root))
+            (insert "unsaved")
+            (set-buffer-modified-p t))
+          (should (emacsos-assist-web-git--move-busy-buffer-p root thread))
+          (kill-buffer file)
+          (setq file nil)
+          (with-current-buffer directory
+            (setq default-directory (file-name-as-directory root)))
+          (should (emacsos-assist-web-git--move-busy-buffer-p root thread))
+          (kill-buffer directory)
+          (setq directory nil)
+          (with-temp-file (expand-file-name "personal.txt" root)
+            (insert "on disk"))
+          (make-symbolic-link root alias)
+          (setq file (generate-new-buffer " *git-move-alias*"))
+          (with-current-buffer file
+            (setq buffer-file-name (expand-file-name "personal.txt" alias)
+                  buffer-file-truename (file-truename buffer-file-name)))
+          (should (emacsos-assist-web-git--move-busy-buffer-p root thread))
+          (kill-buffer file)
+          (setq file nil)
+          (should-not (emacsos-assist-web-git--move-busy-buffer-p root thread)))
+      (when (buffer-live-p file)
+        (with-current-buffer file (set-buffer-modified-p nil))
+        (kill-buffer file))
+      (when (buffer-live-p directory) (kill-buffer directory))
+      (kill-buffer thread)
+      (when (file-symlink-p alias) (delete-file alias))
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-move-discovers-gnu-timeout ()
+  "An explicit move resolves desktop executables without changing its short budget."
+  (let ((thread (generate-new-buffer " *desktop move*")))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((metadata (test-assist-web-git--metadata
+                            "ready" "topic/one" test-assist-web-git--head))
+                 (identity (emacsos-assist-web-git--workspace-identity metadata))
+                 (button (insert-text-button "Move" 'thread thread 'identity identity)))
+            (with-current-buffer thread
+              (setq emacsos-assist-web-git--metadata metadata))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--gate-reason) #'ignore)
+                      ((symbol-function 'emacsos-assist-web-git--legacy-route)
+                       (lambda (_) (list :legacy (make-string 64 ?a))))
+                      ((symbol-function 'emacsos-assist-web-git--move-busy-buffer-p) #'ignore))
+              (dolist (name '("timeout" "gtimeout"))
+                (let ((command
+                       (catch 'command
+                         (cl-letf (((symbol-function 'executable-find)
+                                    (lambda (program)
+                                      (cond ((equal program name) (concat "/tools/" name))
+                                            ((equal program "python3") "/tools/python3"))))
+                                   ((symbol-function 'call-process-region)
+                                    (lambda (&rest arguments)
+                                      (throw 'command (cons (nth 2 arguments)
+                                                            (nthcdr 6 arguments))))))
+                           (emacsos-assist-web-git--move-workspace button)))))
+                  (should (equal command
+                                 (list (concat "/tools/" name) "--kill-after=1" "8"
+                                       "/tools/python3" emacsos-assist-web-git-helper)))))
+              (cl-letf (((symbol-function 'executable-find) #'ignore)
+                        ((symbol-function 'call-process-region)
+                         (lambda (&rest _) (ert-fail "missing executables must not start a move"))))
+                (should-error (emacsos-assist-web-git--move-workspace button)
+                              :type 'user-error)))))
+      (kill-buffer thread))))
+
+(ert-deftest test-assist-web-git-interrupted-move-is-explicitly-resumable ()
+  "A bound moving route remains discoverable but ordinary browse refuses it."
+  (let* ((cache (make-temp-file "git-move-route-" t))
+         (emacsos-assist-web-git-cache-directory cache)
+         (metadata (test-assist-web-git--metadata "ready" "topic/one" test-assist-web-git--head))
+         (identity (emacsos-assist-web-git--workspace-identity metadata))
+         (route (expand-file-name (concat "routes/" identity ".json") cache))
+         (legacy (make-string 64 ?a)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory route) t)
+          (with-temp-file route
+            (insert (json-encode `((repo_key . ,(plist-get metadata :repo-key))
+                                   (thread_id . ,(plist-get metadata :tid))
+                                   (legacy . ,legacy)
+                                   (relative . ,(concat "repo/thread-" (substring identity 0 12)))
+                                   (initialized . "moving")
+                                   (source_device . 1) (source_inode . 2)))))
+          (set-file-modes route #o600)
+          (should (equal (plist-get (emacsos-assist-web-git--legacy-route metadata) :legacy)
+                         legacy))
+          (should-error (emacsos-assist-web-git--route-path metadata) :type 'user-error))
+      (delete-directory cache t))))
+
 (ert-deftest test-assist-web-git-known-legacy-browse-keeps-unsaved-file-in-place ()
   "Browsing an unregistered exact legacy checkout neither writes a route nor loses edits."
   (let* ((cache (make-temp-file "git-legacy-browse-" t))
@@ -871,6 +972,53 @@
         (kill-buffer view)
         (delete-directory cache t)))))
 
+(ert-deftest test-assist-web-git-local-magit-names-other-branch ()
+  "A local HEAD from another branch must not be called the selected thread."
+  (save-window-excursion
+    (let ((cache (make-temp-file "git-other-branch-" t))
+          (view (generate-new-buffer " *git-other-branch-view*"))
+          (original-require (symbol-function 'require))
+          range notices)
+      (unwind-protect
+          (with-temp-buffer
+            (emacsos-assist-web-mode)
+            (switch-to-buffer (current-buffer))
+            (setq emacsos-assist-web--thread-id "thread-1"
+                  emacsos-assist-web-git-thread-mode t)
+            (let* ((emacsos-assist-web-git-cache-directory cache)
+                   (emacsos-assist-web-git-workspace-directory
+                    (expand-file-name "workspaces" cache))
+                   (metadata (test-assist-web-git--metadata
+                              "ready" "topic/selected" test-assist-web-git--head))
+                   (root (emacsos-assist-web-git--new-checkout-path metadata))
+                   (relative (file-relative-name root emacsos-assist-web-git-workspace-directory)))
+              (make-directory (expand-file-name ".git" root) t)
+              (with-temp-file (expand-file-name ".git/HEAD" root)
+                (insert "ref: refs/heads/topic/other\n"))
+              (test-assist-web-git--write-route metadata nil relative)
+              (setq emacsos-assist-web-git--metadata metadata)
+              (cl-letf (((symbol-function 'require)
+                         (lambda (feature &rest args)
+                           (if (eq feature 'magit) t
+                             (apply original-require feature args))))
+                        ((symbol-function 'magit-diff-range)
+                         (lambda (value &rest _)
+                           (setq range value)
+                           (set-window-buffer (selected-window) view)))
+                        ((symbol-function 'message)
+                         (lambda (format-string &rest args)
+                           (push (apply #'format format-string args) notices)))
+                        ((symbol-function 'emacsos-assist-web-git--spawn)
+                         (lambda (&rest _) (ert-fail "diff must not fetch"))))
+                (emacsos-assist-web-git--command 'diff))
+              (should (equal range "refs/remotes/origin/main...HEAD"))
+              (should (cl-some (lambda (notice)
+                                 (and (string-match-p "topic/other" notice)
+                                      (string-match-p "topic/selected" notice)))
+                               notices))))
+        (when (buffer-live-p view) (kill-buffer view))
+        (delete-directory cache t)))))
+
 (ert-deftest test-assist-web-git-local-file-opens-during-background-reservation ()
   "Opening local files is available while edit protection preserves the checkout."
   (save-window-excursion
@@ -933,6 +1081,65 @@
           (insert "unsaved edit")
           (should-not (emacsos-assist-web-git--advance-checkout-p root))
           (should (equal (buffer-string) "unsaved edit")))
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-initial-stage-consumer-bars-promotion ()
+  "An unsaved staging visit, including an alias, blocks initialization only."
+  (let ((cache (make-temp-file "assist-git-initial-consumer-" t))
+        (file (generate-new-buffer " *git initial unsaved*")))
+    (unwind-protect
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (let* ((emacsos-assist-web-git-cache-directory cache)
+                 (emacsos-assist-web-git-workspace-directory (expand-file-name "workspaces" cache))
+                 (metadata (test-assist-web-git--metadata "ready" "topic/one" test-assist-web-git--head))
+                 (root (emacsos-assist-web-git--checkout-path metadata))
+                 (stage (expand-file-name (concat "." (file-name-nondirectory root) ".initial")
+                                         (file-name-directory root)))
+                 (alias (expand-file-name "alias" cache)) payload)
+            (make-directory stage t)
+            (make-symbolic-link stage alias)
+            (with-current-buffer file
+              (setq buffer-file-name (expand-file-name "work.txt" alias)
+                    buffer-file-truename (expand-file-name "work.txt" stage))
+              (insert "unsaved local text"))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--spawn)
+                       (lambda (value _callback) (setq payload value) nil)))
+              (emacsos-assist-web-git--begin-workspace metadata nil))
+            (should (eq (alist-get 'allow_initialization payload) :json-false))
+            (should-not (gethash stage emacsos-assist-web-git--checkout-operations))
+            (with-current-buffer file
+              (should (equal (buffer-string) "unsaved local text"))
+              (should (buffer-modified-p)))
+            (emacsos-assist-web-git--release-checkout emacsos-assist-web-git--request)))
+      (when (buffer-live-p file) (kill-buffer file))
+      (delete-directory cache t))))
+
+(ert-deftest test-assist-web-git-initial-stage-reservation-bars-new-consumers ()
+  "An active staging promotion excludes ordinary file and directory visits."
+  (let* ((root (make-temp-file "assist-git-initial-guard-" t))
+         (stage (expand-file-name ".workspace.initial" root))
+         (checkout (expand-file-name "workspace" root))
+         (alias (expand-file-name "alias" root))
+         (request (list :checkout checkout :initial-stage stage :advance nil)))
+    (unwind-protect
+        (progn
+          (make-directory stage)
+          (make-symbolic-link stage alias)
+          (puthash checkout request emacsos-assist-web-git--checkout-operations)
+          (puthash stage request emacsos-assist-web-git--checkout-operations)
+          (dolist (path (list stage alias))
+            (should-error (find-file-noselect (expand-file-name "work.txt" path)) :type 'user-error)
+            (should-error (dired-noselect path) :type 'user-error))
+          (dolist (path (list stage alias))
+            (with-temp-buffer
+              (setq default-directory (file-name-as-directory path))
+              (should-error (emacsos-assist-web-git--checkout-write-guard) :type 'user-error)))
+          (emacsos-assist-web-git--release-checkout request)
+          (should-not (gethash stage emacsos-assist-web-git--checkout-operations))
+          (let ((buffer (find-file-noselect (expand-file-name "work.txt" stage))))
+            (kill-buffer buffer)))
       (delete-directory root t))))
 
 (ert-deftest test-assist-web-git-full-client-update-guards-new-edit-and-save ()
@@ -1858,12 +2065,12 @@
             (should (equal (substring-no-properties
                             (emacsos-assist-web--lifecycle-header))
                            (if (equal status "awaiting_approval")
-                               "Approval needed [?] "
+                               " [Review]  [?] "
                              "Run changed; Refresh [?] ")))
             (emacsos-assist-web-details)
             (should (string-match-p
                      (if (equal status "awaiting_approval")
-                         "Approve this Run" "will not reattach")
+                         "Tap Review" "will not reattach")
                      (buffer-string)))
             (emacsos-assist-web-display-details-back)
             (when (equal status "awaiting_approval")
@@ -1916,7 +2123,7 @@
                        emacsos-assist-web-git--current) 'current))
           (should (string-match-p
                    (if (equal status "awaiting_approval")
-                       "Approval needed" "Run changed; Refresh")
+                       "Review" "Run changed; Refresh")
                    (substring-no-properties
                     (emacsos-assist-web--thread-header)))))))))
 
@@ -2405,7 +2612,7 @@
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (dolist (case '((disconnect "Observation unavailable; Refresh" "outcome was known")
-                      (approval "Approval needed" "Approve this Run")
+                      (approval "Review" "Tap Review")
                       (terminal-sse "Run changed; Refresh" "stream ended")))
         (setq-local emacsos-assist-web--stopped-reobserve
                     (list :kind (car case)))
@@ -2703,7 +2910,7 @@
           (should-not (emacsos-assist-web--operator-repair-p))
           (should (string-match-p
                    (if (equal status "awaiting_approval")
-                       "Approval needed" "Run reconciling")
+                       "Review" "Run reconciling")
                    (substring-no-properties
                     (emacsos-assist-web--thread-header)))))))))
 
@@ -3314,7 +3521,7 @@
               (should-not emacsos-assist-web--stopped-reobserve)
               (should (emacsos-assist-web--run-gated-p))
               (should (string-match-p
-                       "Approval needed"
+                       "Review"
                        (substring-no-properties
                         (emacsos-assist-web--thread-header))))
               (emacsos-assist-web-git-thread-mode 1)
