@@ -3842,7 +3842,8 @@ of it, together with the oldest pagination cursor already reached."
              "Review pending action" 'follow-link t
              'action (lambda (_) (emacsos-assist-web-review-approval source)))
             (insert "\n\n")))
-        (let ((emacsos--chat-presentation-max-bytes
+        (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) (* 2048 2048)))
+              (emacsos--chat-presentation-max-bytes
                (if (<= presentation-bytes emacsos--chat-presentation-max-bytes)
                    emacsos--chat-presentation-max-bytes
                  0)))
