@@ -22,7 +22,7 @@ cmp "$repo/assist-web-git-helper.py" "$destination/assist-web-git-helper.py"
 [ "$(stat -c '%a' "$destination/assist-web-git-helper.py")" = 755 ]
 [ "$(cat "$destination/sentinel")" = keep ]
 [ "$(find "$destination" -maxdepth 1 -type f -printf '%f\n' | sort | tr '\n' ' ')" = \
-  "assist-web-git-helper.py assist-web-git.el assist-web.el chat.el sentinel " ]
+  "assist-web-git-helper.py assist-web-git.el assist-web.el chat.el emacsos-typography.el sentinel " ]
 grep -Fq 'Credentials, certificates, and Emacs configuration were not changed.' \
   "$temporary/install.out"
 grep -Fq 'Set emacsos-assist-web-api-url to your HTTPS Assist phone API endpoint.' \

@@ -148,7 +148,7 @@
     (should (eq (key-binding (kbd "C-x C-f")) #'find-file))
     (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
     (emacsos-assist-web-git--sync-keys)
-    (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-git-find-file))
+    (should (eq (key-binding (kbd "C-x C-f")) #'find-file))
     (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
     (should (eq (key-binding (kbd "C-c g")) #'emacsos-assist-web-git-refresh))))
 

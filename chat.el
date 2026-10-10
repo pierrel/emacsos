@@ -15,6 +15,7 @@
 
 (require 'cl-lib)
 (require 'font-lock)
+(require 'emacsos-typography)
 (require 'json)
 (require 'mouse)
 (require 'url)
@@ -343,7 +344,8 @@ remain owned by the backend; this small kernel owns only discovery and binding."
 
 The caller supplies one message body.  The grammar is intentionally small:
 triple-backtick fences; logical-line headings, lists, and quotes; then
-single-line non-nested code, links, bold, and italic.  Source characters are
+pipe tables; single-line non-nested code, links, bold, and italic.
+Source characters are
 never replaced or hidden."
   (when (and (<= beg end)
              (<= (- (position-bytes end) (position-bytes beg))
@@ -372,6 +374,11 @@ never replaced or hidden."
                                      'emacsos--chat-verbatim t)
                   (setq in-fence (not in-fence)))
                  (in-fence
+                  (emacsos--chat-add-face line-start line-end
+                                         'emacsos-chat-code-face)
+                  (put-text-property line-start line-end
+                                     'emacsos--chat-verbatim t))
+                 ((looking-at "[ \t]*|.*|[ \t]*$")
                   (emacsos--chat-add-face line-start line-end
                                          'emacsos-chat-code-face)
                   (put-text-property line-start line-end
@@ -419,7 +426,7 @@ never replaced or hidden."
 
           (goto-char (point-min))
           (while (re-search-forward
-                  "\\[\\([^]\n]+\\)\\](\\([^()\n]+\\))" nil t)
+                  "\\[\\([^][\n]+\\)\\](\\([^()\n]+\\))" nil t)
             (unless (emacsos--chat-match-verbatim-p)
               (emacsos--chat-add-face (match-beginning 1) (match-end 1)
                                      'emacsos-chat-link-face)
@@ -476,6 +483,9 @@ best-effort and never allowed to interrupt chat lifecycle code."
         (with-silent-modifications
           (remove-text-properties prefix-start body-start
                                   '(font-lock-face nil))
+          (add-text-properties
+           prefix-start (1+ prefix-start)
+           '(emacsos-conversation-message-start t rear-nonsticky t))
           (emacsos--chat-add-face
            prefix-start body-start
            (if (eq role 'user)

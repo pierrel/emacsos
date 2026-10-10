@@ -13,7 +13,7 @@ RUN apt-get update \
 # Bake in the EmacsOS modules.  Built from the repo root with the
 # simulation directory as -f context so we can COPY ../../*.el; see
 # run.sh for the build command.
-COPY os.el chat.el /opt/emacsos/
+COPY os.el emacsos-typography.el chat.el /opt/emacsos/
 
 RUN useradd --create-home --uid 1000 phone
 USER phone

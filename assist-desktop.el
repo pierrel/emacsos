@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 ;; Load this file from a checkout or alongside chat.el, assist-web.el,
-;; assist-web-git.el and assist-web-git-helper.py.  Configure the existing
+;; assist-web-git.el, emacsos-typography.el and assist-web-git-helper.py.  Configure the existing
 ;; emacsos-assist-web options in your private init before loading this file,
 ;; then use C-c a l or M-x emacsos-desktop-assist.  Loading enables the canonical
 ;; Assist shortcuts through emacsos-desktop-assist-mode.  See README.org for setup.
@@ -21,6 +21,8 @@
     (define-key map (kbd "C-c a l") #'emacsos-assist-web-show-thread-list)
     (define-key map (kbd "C-c a t") #'emacsos-assist-web-open-thread)
     (define-key map (kbd "C-c a n") #'emacsos-assist-web-new-thread)
+    (define-key map (kbd "C-c a g") #'emacsos-assist-web-refresh-context)
+    (define-key map (kbd "C-c a d") #'emacsos-assist-web-git-diff)
     (define-key map (kbd "C-c a r") #'emacsos-assist-web-refresh-threads)
     map)
   "Desktop shortcuts for canonical Assist threads.")

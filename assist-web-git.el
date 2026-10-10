@@ -377,9 +377,16 @@ Modified buffers are never reverted. Repository local eval remains disabled."
     map))
 
 
+(defun emacsos-assist-web-git-local-directory ()
+  "Return this thread's existing local checkout without starting Git."
+  (when emacsos-assist-web-git--metadata
+    (let ((directory (emacsos-assist-web-git--route-path
+                      emacsos-assist-web-git--metadata)))
+      (and directory (not (file-remote-p directory))
+           (file-directory-p directory) (file-name-as-directory directory)))))
+
 (defvar emacsos-assist-web-git-thread-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-x C-f") #'emacsos-assist-web-git-find-file)
     (define-key map (kbd "C-c d") #'emacsos-assist-web-git-diff)
     (define-key map (kbd "C-c g") #'emacsos-assist-web-git-refresh)
     (define-key map (kbd "C-c ?") #'emacsos-assist-web-details)
@@ -1670,7 +1677,7 @@ discarding their edits or reusing their repository-local settings."
                                      (1+ (plist-get intent :serial)))
                (emacsos-assist-web-git--clear-feedback window)
                (set-window-buffer window thread))
-             (message "File selection cancelled; C-x C-f to retry"))
+             (message "File selection cancelled; M-x emacsos-assist-web-git-find-file to retry"))
             ((eq (caar exit) 'details)
              (when (emacsos-assist-web-git--intent-live-p intent)
                (set-window-parameter window 'assist-web-git-intent
@@ -1874,7 +1881,7 @@ otherwise the header follows THREAD's live state while the pinned view stays."
           (insert " It may change after the active turn."))
         (insert "\n"))
       (if chooser-snapshot
-          (insert (format "\nChooser state at exit: %s (not live). File selection ended for Details. No file was selected; typed but unselected input was discarded. Back returns to the thread; C-x C-f starts a new chooser.\n"
+          (insert (format "\nChooser state at exit: %s (not live). File selection ended for Details. No file was selected; typed but unselected input was discarded. Back returns to the thread; M-x emacsos-assist-web-git-find-file starts a new chooser.\n"
                           (car chooser-snapshot)))
         (insert "\nThe header shows live freshness; this text records captured checkout provenance. Back returns to the pinned file or diff.\n"))
       (special-mode)

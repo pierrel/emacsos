@@ -55,6 +55,8 @@ or =e=, to type either prefix.
 | =C-c a t= | Open a canonical thread by completion |
 | =C-c a n= | New canonical thread |
 | =C-c a r= | Refresh thread list |
+| =C-c a g= | Refresh thread and Git, or thread list |
+| =C-c a d= | Magit diff for current thread |
 | =C-c a f= | New .assist file |
 | =C-c e c= | Ordinary chat |
 | =C-c e d= | Stage call |
@@ -84,6 +86,9 @@ the generic =phone-install= target does not define them.
 | =C-c C-o= | Open the HTTP(S) object in canonical Assist, ordinary, or file-backed chat |
 | =C-c C-l= | Load older canonical history |
 | =C-c C-f= | Forget a file-backed conversation |
+| =C-c b= | Previous message in canonical Assist |
+| =C-c f= | Next message, ending at editable input in canonical Assist |
+| =C-x C-f= | Ordinary find-file, existing thread checkout or home |
 
 An unsupported direct binding gives the standard unavailable-conversation
 message without invoking another backend.

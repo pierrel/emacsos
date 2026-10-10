@@ -158,7 +158,7 @@
 (add-to-list 'default-frame-alist '(font . "JetBrains Mono-14"))
 
 (defun emacsos-pinephone-buffer-typography ()
-  "Select Inter prose or JetBrains Mono code for the current phone buffer."
+  "Select prose or fixed-pitch faces for the current phone buffer."
   (buffer-face-set
    (if (derived-mode-p 'prog-mode 'conf-mode 'vterm-mode
                        'term-mode 'comint-mode 'dired-mode)
@@ -175,18 +175,22 @@ window changes its buffer without changing the current Lisp buffer."
 
 (defun emacsos-pinephone-apply-typography ()
   "Apply the selected phone fonts without changing frame column geometry.
-UI and prose inherit Inter through buffer face remapping.  The underlying
-JetBrains Mono frame font supplies stable columns for control-row budgets."
+UI and prose prefer available Inter through buffer face remapping.  The installed
+JetBrains Mono frame font supplies stable columns for control-row budgets.
+Missing fonts retain existing faces; saved/customized faces take precedence."
   (require 'face-remap)
   (dolist (family '("Inter" "JetBrains Mono"))
     (let ((font (find-font (font-spec :family family))))
-      (unless (and font (equal (format "%s" (font-get font :family)) family))
-        (error "Required phone font is unavailable: %s" family))))
-  (set-face-attribute 'default nil :family "JetBrains Mono" :height 140)
-  (set-face-attribute 'fixed-pitch nil :family "JetBrains Mono" :height 1.0)
-  (set-face-attribute 'variable-pitch nil :family "Inter" :height 1.0)
-  (dolist (face '(mode-line mode-line-inactive header-line))
-    (set-face-attribute face nil :family "Inter"))
+      ;; Missing fonts retain the existing face; explicit face customization wins.
+      (when (and font (equal (format "%s" (font-get font :family)) family))
+        (dolist (face (if (equal family "Inter")
+                         '(variable-pitch mode-line mode-line-inactive header-line)
+                       '(default fixed-pitch)))
+          (unless (or (get face 'customized-face) (get face 'saved-face))
+            (set-face-attribute face nil :family family)
+            (when (memq face '(default fixed-pitch variable-pitch))
+              (set-face-attribute face nil :height
+                                  (if (eq face 'default) 140 1.0))))))))
   (setq emacsos-proportional-button-labels t)
   (add-hook 'window-buffer-change-functions
             #'emacsos-pinephone-display-typography)
