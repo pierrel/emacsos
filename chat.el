@@ -389,14 +389,16 @@ remain owned by the backend; this small kernel owns only discovery and binding."
 (defun emacsos-conversation--local-file (path)
   "Resolve PATH inside this conversation's existing local workspace.
 Server /tmp scratch, remote paths, Git internals and symbolic links
-are excluded."
+are excluded. Containment is lexical so a rejected symlink cannot invoke a
+remote file handler."
   (when (and (stringp path) (<= (length path) 4096)
              (not (string-match-p "[[:cntrl:]]" path))
              (not (file-remote-p path))
              (not (string-prefix-p "/tmp/" path))
              (fboundp 'emacsos-assist-web-git-local-directory))
     (when-let ((root (emacsos-assist-web-git-local-directory)))
-      (let* ((relative (cond ((string-prefix-p "/workspace/" path) (substring path 11))
+      (let* ((root (file-name-as-directory (expand-file-name root)))
+             (relative (cond ((string-prefix-p "/workspace/" path) (substring path 11))
                              ((string-prefix-p "/user/" path) (substring path 6))
                              ((file-name-absolute-p path) nil)
                              (t path)))
@@ -404,7 +406,7 @@ are excluded."
              (cursor file))
         (when (and file (not (file-remote-p root))
                    (not (file-remote-p file))
-                   (file-in-directory-p file root)
+                   (string-prefix-p root file)
                    (not (member ".git" (split-string relative "/" t)))
                    (not (member ".." (split-string relative "/" t))))
           (while (and cursor (not (equal (directory-file-name cursor)

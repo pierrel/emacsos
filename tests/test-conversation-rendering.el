@@ -417,7 +417,9 @@
   (let ((root (make-temp-file "render-no-remote" t)) probed)
     (unwind-protect
         (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory) (lambda () root))
-                  ((symbol-function 'file-in-directory-p) (lambda (&rest _) (setq probed t) nil)))
+                  ((symbol-function 'file-in-directory-p) (lambda (&rest _) (setq probed t) nil))
+                  ((symbol-function 'file-symlink-p) (lambda (&rest _) (setq probed t) nil))
+                  ((symbol-function 'file-regular-p) (lambda (&rest _) (setq probed t) nil)))
           (dolist (path '("/workspace//ssh:host:/etc/passwd" "/user//ssh:host:/etc/passwd"))
             (setq probed nil)
             (should-not (emacsos-conversation--local-file path))
@@ -482,5 +484,24 @@
               (should (equal original (buffer-substring-no-properties 1 (point-max))))))
         (when (buffer-live-p view) (kill-buffer view))
         (kill-buffer source)))))
+
+
+(ert-deftest rendering-symlink-checks-never-invoke-remote-handlers ()
+  (let ((root (make-temp-file "render-symlink-handler" t)) calls issue result)
+    (unwind-protect
+        (progn
+          (make-symbolic-link "/ssh:host:/etc/passwd" (expand-file-name "escape.md" root))
+          (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory) (lambda () root)))
+            (let ((file-name-handler-alist
+                   (cons (cons "\\`/ssh:host:.*\\'"
+                               (lambda (operation &rest _args)
+                                 (push operation calls)
+                                 (error "Unexpected remote handler")))
+                         file-name-handler-alist)))
+              (condition-case problem
+                  (setq result (emacsos-conversation--local-file "escape.md"))
+                (error (setq issue problem)))))
+          (should-not issue) (should-not calls) (should-not result))
+      (delete-directory root t))))
 
 (provide 'test-conversation-rendering)
