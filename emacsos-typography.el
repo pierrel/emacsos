@@ -10,6 +10,7 @@
 ;;; Code:
 (require 'face-remap)
 (require 'jit-lock)
+(require 'seq)
 
 (defgroup emacsos-typography nil
   "Shared phone and desktop prose presentation."
@@ -32,13 +33,17 @@ fonts and text terminals retain the existing face; no fonts are downloaded."
 (defvar-local emacsos-typography--cookies nil)
 (defvar-local emacsos-markdown--styled-end nil)
 
-(defun emacsos-typography--explicit-font-p (face)
-  "Return non-nil when FACE customization explicitly selects font attributes."
-  (when-let ((spec (or (get face 'customized-face) (get face 'saved-face))))
-    (let ((attributes (face-spec-choose spec (selected-frame))))
-      (or (plist-member attributes :family)
-          (plist-member attributes :font)
-          (plist-member attributes :inherit)))))
+(defun emacsos-typography--explicit-font-p (face &optional attributes)
+  "Return non-nil when FACE explicitly customizes any of ATTRIBUTES.
+ATTRIBUTES defaults to family, font and inheritance.  Inspect both active and
+saved face specs so a color-only active setting cannot mask saved font choices."
+  (seq-some
+   (lambda (property)
+     (when-let ((spec (get face property)))
+       (let ((selected (face-spec-choose spec (selected-frame))))
+         (seq-some (lambda (attribute) (plist-member selected attribute))
+                   (or attributes '(:family :font :inherit))))))
+   '(customized-face saved-face)))
 
 (defun emacsos-typography-apply ()
   "Apply local prose faces without changing user themes or global faces."

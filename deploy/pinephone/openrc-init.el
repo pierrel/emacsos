@@ -189,10 +189,7 @@ Missing fonts retain existing faces; explicit font and height choices win."
           (unless (emacsos-typography--explicit-font-p face)
             (set-face-attribute face nil :family family)
             (when (and (memq face '(default fixed-pitch variable-pitch))
-                       (not (plist-member
-                             (face-spec-choose
-                              (or (get face 'customized-face) (get face 'saved-face))
-                              (selected-frame)) :height)))
+                       (not (emacsos-typography--explicit-font-p face '(:height))))
               (set-face-attribute face nil :height
                                   (if (eq face 'default) 140 1.0))))))))
   (setq emacsos-proportional-button-labels t)
