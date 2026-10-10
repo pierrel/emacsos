@@ -576,10 +576,12 @@ Only PNG is decoded inline; fallback image links open as literal file text."
   (set-window-hscroll nil (+ (window-hscroll) 12)))
 
 (defun emacsos-conversation--table-control (label command)
-  "Return a header LABEL that explicitly invokes COMMAND."
-  (let ((map (make-sparse-keymap)))
+  "Return a 40-pixel touch header LABEL that invokes COMMAND."
+  (let* ((map (make-sparse-keymap))
+         (edge (propertize " " 'mouse-face 'highlight 'local-map map
+                           'display '(space :width (20) :height (40)))))
     (define-key map [header-line mouse-1] command)
-    (propertize label 'keymap map 'mouse-face 'highlight)))
+    (concat edge (propertize label 'local-map map 'mouse-face 'highlight) edge)))
 
 (defun emacsos-conversation--table-view (source)
   "Open aligned table SOURCE in its own horizontally scrollable window."

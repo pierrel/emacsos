@@ -186,8 +186,26 @@
             (setq prose-window (split-window table-window nil 'below))
             (set-window-buffer prose-window prose)
             (select-window prose-window)
-            (let ((last-input-event (list 'mouse-1 (list table-window 'header-line '(0 . 0) 0))))
-              (emacsos-conversation-table-scroll-right))
+            (with-current-buffer view
+              (cl-loop for control in header-line-format
+                       for command in '(emacsos-conversation-table-back
+                                        emacsos-conversation-table-scroll-left
+                                        emacsos-conversation-table-scroll-right) do
+                       (should (equal (get-text-property 0 'display control)
+                                      '(space :width (20) :height (40))))
+                       (should (equal (get-text-property (1- (length control)) 'display control)
+                                      '(space :width (20) :height (40))))
+                       (dotimes (offset (length control))
+                         (let ((position (list table-window 'header-line '(0 . 0) 0
+                                               (cons control offset))))
+                           (should (eq (key-binding [header-line mouse-1] nil nil position)
+                                       command))))))
+            (let* ((control (with-current-buffer view (nth 2 header-line-format)))
+                   (last-input-event (list 'mouse-1
+                                           (list table-window 'header-line '(0 . 0) 0
+                                                 (cons control 0)))))
+              (call-interactively (key-binding [header-line mouse-1] nil nil
+                                               (event-start last-input-event))))
             (should (eq (selected-window) table-window))
             (should (= (window-hscroll table-window) 12))
             (should (= (window-hscroll prose-window) 0))

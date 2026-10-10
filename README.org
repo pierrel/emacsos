@@ -344,7 +344,7 @@ files. Maps remain readable render-fence source.
 Complete pipe tables with a Markdown separator row become explicit table
 objects. Open one to see aligned fixed-pitch columns in an isolated view.
 Separator rows may omit the trailing pipe; short data rows get empty cells.
-The fixed header provides Back, Left and Right controls; arrow keys scroll
+The fixed header provides 40-pixel touch controls for Back, Left and Right; arrow keys scroll
 horizontally and =C-c b= returns. Conversation prose stays wrapped and copied,
 stored and unsent text stays unchanged. The table view is a snapshot, so reopen
 it after a conversation refresh. Back releases the temporary table buffer.
