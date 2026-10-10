@@ -1027,7 +1027,8 @@ don't leak ` *http*' buffers."
             (while properties
               (should (memq (pop properties)
                             '(font-lock-face wrap-prefix emacsos-conversation-url
-                              keymap mouse-face)))
+                              keymap mouse-face emacsos-conversation-message-start
+                              rear-nonsticky)))
               (pop properties)))
           (setq position (next-property-change position nil (point-max)))))
       (let ((kill-ring nil))

@@ -3811,6 +3811,7 @@ of it, together with the oldest pagination cursor already reached."
       (setq emacsos-assist-web--snapshot snapshot
             emacsos-assist-web--pending-rendered-p nil)
       (emacsos-assist-web-git--sync-keys)
+      (emacsos-assist-web--set-workspace-directory)
       (erase-buffer)
       ;; Queue markers belonged to the erased presentation, never to this
       ;; canonical snapshot.  Rebuild remaining provisional entries below.
@@ -3863,7 +3864,7 @@ of it, together with the oldest pagination cursor already reached."
                 ;; The canonical snapshot has already rendered the user turn,
                 ;; so recreate only the provisional assistant insertion range.
                 ;; A resumed SSE reset/delta must have these markers to render.
-                (let ((assistant-start (point)))
+                (let ((assistant-start (+ (point) 2)))
                   (insert "\n\nbot> ")
                   (let ((body-start (point)))
                     (insert "[queued]\n")
@@ -5094,9 +5095,71 @@ VERIFIED-START-EPOCH fences later Run access denial."
     (message "Fetching repositories for a new Assist thread…")
     (emacsos-assist-web-refresh-threads))))
 
+(defun emacsos-assist-web--set-workspace-directory ()
+  "Use this thread's existing checkout, or home when unavailable."
+  (setq default-directory
+        (or (condition-case nil
+                (emacsos-assist-web-git-local-directory)
+              (error nil))
+            (expand-file-name "~/"))))
+
+(defun emacsos-assist-web-find-file (&optional file)
+  "Visit FILE without interpreting file or directory local settings.
+Assist buffers select their checkout or home first; other buffers retain their
+directory.  FILE is not confined to that directory.  With nil FILE, use the
+ordinary interactive `find-file' prompt and navigation."
+  (interactive)
+  (when (derived-mode-p 'emacsos-assist-web-mode)
+    (emacsos-assist-web--set-workspace-directory))
+  (let ((enable-local-variables nil)
+        (enable-local-eval nil)
+        (enable-dir-local-variables nil))
+    (if file
+        (find-file file)
+      (call-interactively #'find-file))))
+
+(defun emacsos-assist-web-refresh-context ()
+  "Refresh a thread and its Git view, or refresh the thread catalog."
+  (interactive)
+  (if (and (derived-mode-p 'emacsos-assist-web-mode)
+           emacsos-assist-web--thread-id)
+      (progn
+        (call-interactively #'emacsos-assist-web-refresh-thread)
+        (call-interactively #'emacsos-assist-web-git-refresh))
+    (call-interactively #'emacsos-assist-web-refresh-threads)))
+
+(defun emacsos-assist-web--move-message (forward)
+  "Move to a message boundary or the compose input when FORWARD is non-nil."
+  (let ((input (emacsos-assist-web--prompt-start))
+        (position (point-min)) starts)
+    (while (< position (or input (point-max)))
+      (when (get-text-property position 'emacsos-conversation-message-start)
+        (push position starts))
+      (setq position (next-single-property-change
+                      position 'emacsos-conversation-message-start nil
+                      (or input (point-max)))))
+    (setq starts (nreverse starts))
+    (when (and input forward)
+      (setq starts (append starts (list input))))
+    (when-let ((target (if forward
+                          (seq-find (lambda (start) (> start (point))) starts)
+                        (car (last (seq-filter
+                                    (lambda (start) (< start (point))) starts))))))
+      (goto-char target))))
+
+(defun emacsos-assist-web-previous-message ()
+  "Move to the previous message boundary without changing or sending input."
+  (interactive)
+  (emacsos-assist-web--move-message nil))
+
+(defun emacsos-assist-web-next-message ()
+  "Move to the next message, ending at editable input without wrapping."
+  (interactive)
+  (emacsos-assist-web--move-message t))
+
 (define-derived-mode emacsos-assist-web-mode text-mode "Assist Web"
   "Major mode for a canonical Assist Web thread or unsent local draft."
-  (variable-pitch-mode 1)
+  (emacsos-assist-web--set-workspace-directory)
   (emacsos--chat-enable-presentation)
   (emacsos-conversation-install-actions
    '((send . emacsos-assist-web-send)
@@ -5110,6 +5173,14 @@ VERIFIED-START-EPOCH fences later Run access denial."
   (add-hook 'post-command-hook #'emacsos-assist-web-git--sync-keys nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
+
+(define-key emacsos-assist-web-mode-map (kbd "C-x C-f")
+            #'emacsos-assist-web-find-file)
+
+(define-key emacsos-assist-web-mode-map (kbd "C-c b")
+            #'emacsos-assist-web-previous-message)
+(define-key emacsos-assist-web-mode-map (kbd "C-c f")
+            #'emacsos-assist-web-next-message)
 
 (define-key emacsos-assist-web-mode-map (kbd "RET")
             #'emacsos-conversation-activate-or-newline)
@@ -5359,7 +5430,7 @@ nonowner cannot rewrite that image through passive kill or idle saves."
 (defun emacsos-assist-web--entry-insert-before (entry position)
   "Render ENTRY at destination POSITION without touching another entry's markers."
   (save-excursion
-    (let ((inhibit-read-only t) (start nil) body-start)
+    (let ((inhibit-read-only t) (start nil) body-start assistant-prefix)
       (goto-char position)
       (setq start (point))
       (insert "you> ")
@@ -5367,6 +5438,7 @@ nonowner cannot rewrite that image through passive kill or idle saves."
       (insert (plist-get entry :text))
       (setf (plist-get entry :user-start) (copy-marker start))
       (emacsos-conversation-commit-user start body-start (point))
+      (setq assistant-prefix (+ (point) 2))
       (insert "\n\nbot> ")
       (setq body-start (point))
       (insert "[queued]\n")
@@ -5374,7 +5446,7 @@ nonowner cannot rewrite that image through passive kill or idle saves."
                    (emacsos-conversation-begin-assistant body-start (point))))
         (setf (plist-get entry :assistant-start) assistant-start
               (plist-get entry :assistant-end) assistant-end))
-      (emacsos--chat-present-message start body-start (point) 'assistant)
+      (emacsos--chat-present-message assistant-prefix body-start (point) 'assistant)
       (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t))
       (setf (plist-get entry :rendered) t)
       (point))))

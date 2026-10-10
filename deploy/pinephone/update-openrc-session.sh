@@ -90,7 +90,7 @@ scp -q "$@" \
     "$deploy_dir/waydroid-container.conf" \
     "$deploy_dir/waydroid-container-wrapper" \
     "$phone_host:$stage/"
-scp -q "$@" "$repo_dir/os.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
+scp -q "$@" "$repo_dir/os.el" "$repo_dir/emacsos-typography.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
     "$repo_dir/assist-web-git.el" "$repo_dir/assist-web-git-helper.py" \
     "$repo_dir/emacsos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
     "$repo_dir/phone-sms.el" "$repo_dir/phone-sms-chat.el" \

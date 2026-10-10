@@ -66,8 +66,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 1. Build phone image.  Build context = repo root so the Dockerfile
-# can COPY os.el + chat.el (baked into the daemon for the round-trip
-# step below).
+# can COPY the EmacsOS modules into the daemon for the round-trip step below.
 log "building $IMAGE"
 docker build -q -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$REPO_DIR" >/dev/null \
     || fail "image build"
