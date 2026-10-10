@@ -177,18 +177,22 @@ window changes its buffer without changing the current Lisp buffer."
   "Apply the selected phone fonts without changing frame column geometry.
 UI and prose prefer available Inter through buffer face remapping.  The installed
 JetBrains Mono frame font supplies stable columns for control-row budgets.
-Missing fonts retain existing faces; saved/customized faces take precedence."
-  (require 'face-remap)
+Missing fonts retain existing faces; explicit font and height choices win."
+  (require 'emacsos-typography)
   (dolist (family '("Inter" "JetBrains Mono"))
     (let ((font (find-font (font-spec :family family))))
-      ;; Missing fonts retain the existing face; explicit face customization wins.
+      ;; Missing fonts retain existing faces; explicit font choices win.
       (when (and font (equal (format "%s" (font-get font :family)) family))
         (dolist (face (if (equal family "Inter")
                          '(variable-pitch mode-line mode-line-inactive header-line)
                        '(default fixed-pitch)))
-          (unless (or (get face 'customized-face) (get face 'saved-face))
+          (unless (emacsos-typography--explicit-font-p face)
             (set-face-attribute face nil :family family)
-            (when (memq face '(default fixed-pitch variable-pitch))
+            (when (and (memq face '(default fixed-pitch variable-pitch))
+                       (not (plist-member
+                             (face-spec-choose
+                              (or (get face 'customized-face) (get face 'saved-face))
+                              (selected-frame)) :height)))
               (set-face-attribute face nil :height
                                   (if (eq face 'default) 140 1.0))))))))
   (setq emacsos-proportional-button-labels t)
