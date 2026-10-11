@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 
-FILES = ("assist-desktop.el", "chat.el", "assist-web.el", "assist-web-git.el",
+FILES = ("assist-desktop.el", "emacsos-typography.el", "chat.el", "assist-web.el", "assist-web-git.el",
          "assist-web-git-helper.py")
 
 

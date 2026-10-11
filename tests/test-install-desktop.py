@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("assist-desktop.el", "chat.el", "assist-web.el", "assist-web-git.el",
+FILES = ("assist-desktop.el", "emacsos-typography.el", "chat.el", "assist-web.el", "assist-web-git.el",
          "assist-web-git-helper.py")
 
 
