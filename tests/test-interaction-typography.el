@@ -84,6 +84,51 @@
       (when (and process (process-live-p process)) (delete-process process))
       (delete-directory root t))))
 
+(ert-deftest interaction-terminal-error-retires-status-and-preserves-compose ()
+  (interaction-test--thread
+    (let* ((snapshot (copy-tree interaction-test--snapshot))
+           (thread (alist-get 'thread snapshot))
+           (entry (emacsos-assist-web--entry
+                   "failed submission" 'terminal-unreconciled
+                   "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+      (setf (alist-get 'status thread) "error"
+            (alist-get 'error thread) "Unsupported Git object directory"
+            (plist-get entry :run-id) "run-error"
+            (plist-get entry :verified-outcome) "error"
+            (alist-get 'thread snapshot) thread)
+      (setq emacsos-assist-web--queue-model-p t
+            emacsos-assist-web--queue (list entry))
+      (emacsos-assist-web--entry-render entry)
+      (goto-char (point-max)) (insert "unsent follow-up")
+      (emacsos-assist-web--stop-reobserve entry 'terminal-verified t)
+      (should (equal emacsos-assist-web--lifecycle-notice "Run reconciling"))
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method _path _payload callback &rest _)
+                   (should (equal method "GET"))
+                   (funcall callback snapshot nil))))
+        (emacsos-assist-web--reconcile-when-settled))
+      (should-not emacsos-assist-web--queue)
+      (should-not emacsos-assist-web--stopped-reobserve)
+      (should-not emacsos-assist-web--lifecycle-notice)
+      (should-not (string-match-p "Run reconcil"
+                                 (emacsos-assist-web--thread-header)))
+      (should (string-match-p "\\[error: Unsupported Git object directory\\]"
+                             (buffer-string)))
+      (should (equal (emacsos-assist-web--input) "unsent follow-up")))))
+
+(ert-deftest interaction-retirement-keeps-a-different-run-or-later-warning ()
+  (interaction-test--thread
+    (let ((entry (emacsos-assist-web--entry "failed" 'terminal-unreconciled "key")))
+      (setf (plist-get entry :run-id) "run-error")
+      (emacsos-assist-web--stop-reobserve entry 'terminal-verified t)
+      (emacsos-assist-web--retire-stopped-reobserve "thread-1" "other-run")
+      (should emacsos-assist-web--stopped-reobserve)
+      (should (equal emacsos-assist-web--lifecycle-notice "Run reconciling"))
+      (emacsos-assist-web--lifecycle-warning "Later warning")
+      (emacsos-assist-web--retire-stopped-reobserve "thread-1" "run-error")
+      (should-not emacsos-assist-web--stopped-reobserve)
+      (should (equal emacsos-assist-web--lifecycle-notice "Later warning")))))
+
 (ert-deftest interaction-new-draft-refreshes-catalog-without-sending ()
   (interaction-test--thread
     (setq-local emacsos-assist-web--thread-id nil)
