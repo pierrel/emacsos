@@ -843,7 +843,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 
 
 (defun emacsos-assist-web-status-details ()
-  "Explain Run recovery or thread access without blocking committed remote views."
+  "Explain Run recovery or thread access alongside local Git state."
   (interactive)
   (let* ((thread (current-buffer))
          (paused (bound-and-true-p emacsos-assist-web--reconcile-recovery-paused))
@@ -854,9 +854,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                    "The exact Run status could not be verified. This does not prove the thread is gone. A thread access check is pending; then Refresh the exact Run.")
                   ((and emacsos-assist-web--denied
                         (eql emacsos-assist-web--thread-denial-status 404))
-                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. The local Git checkout remains on this device.")
+                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. Any existing local Git checkout remains on this device.")
                   (emacsos-assist-web--denied
-                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. The local Git checkout remains on this device.")
+                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Any existing local Git checkout remains on this device.")
                   ((eq (emacsos-assist-web--shared-recovery-state) 'repair)
                    "The named exact Run receipt is missing, invalid, or conflicts with this thread view. Repair the saved draft before Refresh; this Refresh sent neither another Run GET nor a POST.")
                   ((eq (emacsos-assist-web--shared-recovery-state)
@@ -908,10 +908,10 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                          (t "The stream ended but the exact Run was still active. Refresh to check this Run; this observer will not reattach automatically."))))))
                   ((emacsos-assist-web--run-gated-p)
                    "The exact Run and canonical thread state still need verification. Refresh the Assist thread to check that Run.")
-                  (t "Git Refresh fetches the selected remote branch; the local checkout remains editable.")))
+                  (t "Git Refresh fetches the selected remote branch; an existing local checkout remains editable.")))
          (view (generate-new-buffer " *Assist Web Run status*")))
     (with-current-buffer view
-      (insert reason "\nGit Refresh independently checks the remote branch; browsing uses the local checkout.\n\nPress q to return.\n")
+      (insert reason "\nGit Refresh independently checks the remote branch; browsing uses an existing local checkout.\n\nPress q to return.\n")
       (special-mode)
       (visual-line-mode 1)
       (setq-local emacsos-assist-web--display-details-thread thread)
