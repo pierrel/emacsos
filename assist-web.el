@@ -1241,6 +1241,10 @@ The caller owns both the exact Run GET and subsequent canonical commit."
     (when (and (equal tid (plist-get emacsos-assist-web--stopped-reobserve :tid))
                (equal run-id
                       (plist-get emacsos-assist-web--stopped-reobserve :run-id)))
+      ;; Retire this stop's copied label without clearing a later warning.
+      (when (equal emacsos-assist-web--lifecycle-notice
+                   (emacsos-assist-web--stopped-label))
+        (setq emacsos-assist-web--lifecycle-notice nil))
       (setq emacsos-assist-web--stopped-reobserve nil)
       (condition-case nil
           (emacsos-assist-web--update-lifecycle-headers)
