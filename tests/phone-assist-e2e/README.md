@@ -10,7 +10,12 @@ Choose a new results directory for each run. Requires Docker, Python 3.10+,
 Git, OpenSSL and OpenSSH on the host. The first build downloads the image's
 system and locked Assist runtime dependencies. Build time is capped at ten
 minutes, execution at five minutes, and individual client waits at 45 seconds.
-No local model or phone hardware is used.
+No local model or phone hardware is used. Python optimization (`-O` or
+`PYTHONOPTIMIZE`) is rejected before resources are created because it disables
+the acceptance assertions.
+
+Run the lightweight privacy and cleanup regressions without Docker using
+`make test-phone-assist-e2e-harness`; this is also a prerequisite of `test-elisp`.
 
 The harness runs four disposable containers on its own internal network:
 headless Emacs, Assist, Git/SSH, and a credential-free shell simulator. It

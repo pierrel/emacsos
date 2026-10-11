@@ -388,6 +388,8 @@ class Harness:
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("E2E requires assertions; unset PYTHONOPTIMIZE and omit -O")
     parser = argparse.ArgumentParser(description=__doc__)
     root = Path(__file__).resolve().parents[2]
     parser.add_argument("--emacsos-source", type=Path, default=root)

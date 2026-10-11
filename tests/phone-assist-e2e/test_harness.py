@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +12,15 @@ from run import Harness
 
 
 class HarnessTests(unittest.TestCase):
+    def test_optimized_runner_refuses_before_creating_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            logs = Path(temporary) / "logs"
+            result = subprocess.run([sys.executable, "-O", str(Path(__file__).with_name("run.py")),
+                                     "--logs", str(logs)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("E2E requires assertions", result.stderr)
+            self.assertFalse(logs.exists())
+
     def test_snapshot_excludes_environment_and_untracked_credentials(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
