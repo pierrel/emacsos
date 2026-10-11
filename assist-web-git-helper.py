@@ -67,6 +67,16 @@ def private_file(path: Path, limit: int = 65536) -> bytes:
         os.close(descriptor)
 
 
+def desktop_git_file(config: Path, name: str, limit: int = 65536) -> bytes:
+    """Read one fixed private setup file with an actionable missing-file error."""
+    try:
+        return private_file(config / name, limit)
+    except FileNotFoundError as error:
+        raise Refusal(f"Desktop Git setup is missing {name}; provision it privately") from error
+    except PermissionError as error:
+        raise Refusal(f"Desktop Git setup cannot read {name}; check owner and mode") from error
+
+
 def directory(path: Path) -> None:
     """Admit or create only user-owned directories without symlink parents."""
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
@@ -100,7 +110,7 @@ def approved_url(value: object) -> str:
 
 
 def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
-    raw = private_file(config / "assist-git-remotes.json")
+    raw = desktop_git_file(config, "assist-git-remotes.json")
     def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         values = {}
         for key, value in pairs:
@@ -117,7 +127,8 @@ def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
         raise Refusal("Git repository map is invalid")
     url = approved_url(remotes.get(repo_key))
     key, hosts = config / "assist-git-key", config / "assist-git-known-hosts"
-    if not private_file(key, 16384) or not private_file(hosts):
+    if (not desktop_git_file(config, key.name, 16384)
+            or not desktop_git_file(config, hosts.name)):
         raise Refusal("Git credential or pinned host is unavailable")
     ssh = ("ssh -F /dev/null -i " + shlex.quote(str(key))
            + " -o UserKnownHostsFile=" + shlex.quote(str(hosts))

@@ -292,6 +292,12 @@ access.  A mapping example (replace both fields using the actual catalog/source)
 Thread chat works without Git configuration; file/diff actions report an
 unavailable workspace until Git setup and fetching succeed.  The helper reads
 the private files only when a checkout sync or migration runs.
+The desktop installer ships code only, not these three credential files.  If
+manual Git refresh names a missing file, provision that file in the desktop
+user's =~/.config/emacsos/= from an approved repository mapping, dedicated key
+and independently verified host pin; then refresh again.  The =repo_key= comes
+from the authenticated catalog, not a checkout's mutable =origin= or a server
+filesystem path.  Do not paste key or pin contents into a bug report.
 
 Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new

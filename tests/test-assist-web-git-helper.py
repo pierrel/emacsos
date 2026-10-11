@@ -413,6 +413,45 @@ class CheckoutTest(unittest.TestCase):
         with self.assertRaisesRegex(helper.Refusal, "duplicate"):
             self.real_configuration(config, key)
 
+    def test_missing_desktop_git_setup_names_only_fixed_files(self):
+        config = Path(self.temporary.name) / "desktop-config"
+        config.mkdir(mode=0o700)
+        key = self.request["repo_key"]
+        files = (
+            ("assist-git-remotes.json", json.dumps({key: "ssh://git@example.test/repo.git"})),
+            ("assist-git-key", "placeholder"),
+            ("assist-git-known-hosts", "placeholder"),
+        )
+        for name, content in files:
+            with self.assertRaisesRegex(helper.Refusal,
+                                        "Desktop Git setup is missing " + name) as caught:
+                self.real_configuration(config, key)
+            self.assertNotIn(str(config), str(caught.exception))
+            target = config / name
+            target.write_text(content)
+            os.chmod(target, 0o600)
+        self.assertEqual(self.real_configuration(config, key)[0],
+                         "ssh://git@example.test/repo.git")
+
+    def test_missing_desktop_map_reaches_client_as_actionable_refusal(self):
+        desktop_home = Path(self.temporary.name) / "desktop-home"
+        desktop_home.mkdir(mode=0o700)
+        (desktop_home / ".config" / "emacsos").mkdir(parents=True, mode=0o700)
+        environment = dict(os.environ, HOME=str(desktop_home), PYTHONDONTWRITEBYTECODE="1")
+        process = subprocess.run([sys.executable, str(SCRIPT)],
+                                 input=json.dumps(self.request), text=True,
+                                 capture_output=True, check=True, env=environment)
+        response = json.loads(process.stdout)
+        self.assertFalse(response["ok"])
+        self.assertIn("Desktop Git setup is missing assist-git-remotes.json",
+                      response["error"])
+        self.assertNotIn(str(desktop_home), response["error"])
+        self.assert_client_receipt(response, error=response["error"],
+                                   header="Desktop Git setup is missing")
+        target = helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                      self.request["thread_id"])
+        self.assertFalse(target.exists())
+
     def legacy_fixture(self, relative=False):
         cache = Path(self.temporary.name) / "cache"
         for name in ("routes", "checkouts", "locks"):
