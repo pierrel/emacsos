@@ -289,6 +289,59 @@ access.  A mapping example (replace both fields using the actual catalog/source)
 {"0123456789abcdef0123": "ssh://git@git.example/project.git"}
 #+end_src
 
+Set up desktop Git separately from the phone:
+
+1. Obtain the =repo_key= and published thread branch from the authenticated
+   thread catalog.  Have the repository operator approve the corresponding SSH
+   URL; never infer it from a checkout's mutable =origin= or a host path.  Put
+   that mapping in =assist-git-remotes.json= as above.  Verify the SSH host key
+   through an independent trusted channel before installing
+   =assist-git-known-hosts=; =ssh-keyscan= alone is not verification.
+2. Create =~/.config/emacsos/= mode =0700=.  If neither desktop key path exists,
+   generate a dedicated noninteractive desktop key:
+
+   #+begin_src sh
+   desktop_git_dir="$HOME/.config/emacsos"
+   install -d -m 700 "$desktop_git_dir"
+   ssh-keygen -t ed25519 -N '' -C emacsos-desktop-git \
+     -f "$desktop_git_dir/assist-git-desktop-key"
+   #+end_src
+
+   Stop if either key path already exists; do not overwrite it.  Deliver only
+   =assist-git-desktop-key.pub= through an approved channel.  The repository
+   operator verifies that exact public key and the desktop's actual VPN source,
+   then grants a separate source-restricted, time-bounded, repo-only Git
+   upload/receive command.  Keep the phone grant intact.  Do not copy a
+   source-restricted phone private key to the desktop.
+3. After the operator confirms the grant, install the authorized desktop
+   private key as =assist-git-key=.  Stop if that path already exists; reconcile
+   it without overwriting a private key.  Keep the map, key and independently
+   verified host-pin file regular,
+   user-owned and mode =0600=.  Neither the installer nor the thread catalog
+   transfers these files.
+4. Before refreshing Emacs, test the approved remote and published branch with
+   the same strict pinned SSH settings.  Substitute the approved URL and branch
+   from step 1; do not use a mutable checkout URL:
+
+   #+begin_src sh
+   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+   GIT_ALLOW_PROTOCOL=ssh GIT_TERMINAL_PROMPT=0 \
+   GIT_SSH_COMMAND='ssh -F /dev/null -i "$HOME/.config/emacsos/assist-git-key" -o UserKnownHostsFile="$HOME/.config/emacsos/assist-git-known-hosts" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8' \
+     git ls-remote --exit-code '<APPROVED_SSH_URL>' \
+       'refs/heads/<PUBLISHED_THREAD_BRANCH>' >/dev/null
+   #+end_src
+
+   A zero exit means this read-only remote check succeeded; it does not create
+   a checkout or prove a phone push.  If Emacs Refresh names a missing setup
+   file, provision that file.  For the shell check, host-key failure means
+   recheck the independent pin, never disable strict checking; public-key
+   denial means the operator must verify the desktop key and source-bound
+   grant; name resolution, timeout or no route means repair network/VPN access.
+   If the remote or ref is absent, verify the
+   approved mapping and published branch.  Do not paste private key contents,
+   host pins or raw credential-bearing diagnostics into a report.  Once the
+   read-only check succeeds, use =M-x emacsos-assist-web-git-refresh=.
+
 Thread chat works without Git configuration; file/diff actions report an
 unavailable workspace until Git setup and fetching succeed.  The helper reads
 the private files only when a checkout sync or migration runs.
