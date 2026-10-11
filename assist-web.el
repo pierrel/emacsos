@@ -843,7 +843,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 
 
 (defun emacsos-assist-web-status-details ()
-  "Explain Run recovery or thread access without blocking committed remote views."
+  "Explain Run recovery or thread access alongside local Git state."
   (interactive)
   (let* ((thread (current-buffer))
          (paused (bound-and-true-p emacsos-assist-web--reconcile-recovery-paused))
@@ -854,9 +854,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                    "The exact Run status could not be verified. This does not prove the thread is gone. A thread access check is pending; then Refresh the exact Run.")
                   ((and emacsos-assist-web--denied
                         (eql emacsos-assist-web--thread-denial-status 404))
-                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. Existing Git views are only cached history.")
+                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. Any existing local Git checkout remains on this device.")
                   (emacsos-assist-web--denied
-                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are only cached history.")
+                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Any existing local Git checkout remains on this device.")
                   ((eq (emacsos-assist-web--shared-recovery-state) 'repair)
                    "The named exact Run receipt is missing, invalid, or conflicts with this thread view. Repair the saved draft before Refresh; this Refresh sent neither another Run GET nor a POST.")
                   ((eq (emacsos-assist-web--shared-recovery-state)
@@ -908,10 +908,10 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                          (t "The stream ended but the exact Run was still active. Refresh to check this Run; this observer will not reattach automatically."))))))
                   ((emacsos-assist-web--run-gated-p)
                    "The exact Run and canonical thread state still need verification. Refresh the Assist thread to check that Run.")
-                  (t "Git Refresh fetches the selected remote branch; cached files remain browsable.")))
+                  (t "Git Refresh fetches the selected remote branch; an existing local checkout remains editable.")))
          (view (generate-new-buffer " *Assist Web Run status*")))
     (with-current-buffer view
-      (insert reason "\nGit Refresh independently checks the remote branch; browsing uses cached files.\n\nPress q to return.\n")
+      (insert reason "\nGit Refresh independently checks the remote branch; browsing uses an existing local checkout.\n\nPress q to return.\n")
       (special-mode)
       (visual-line-mode 1)
       (setq-local emacsos-assist-web--display-details-thread thread)
@@ -1075,7 +1075,7 @@ Only a resident queue entry or accepted legacy receipt may claim the gate."
                                    (equal (plist-get record :run-id) run-id)))
                             emacsos-assist-web--run-outcome-uncertain)))
     ;; Canonical ownership may temporarily span source and destination buffers.
-    ;; Their pinned views and in-flight fetches must share this exact denial.
+    ;; Their thread views and in-flight requests must share this exact denial.
     (dolist (other (buffer-list))
       (when (and (not (eq other thread))
                  (with-current-buffer other
@@ -2120,10 +2120,9 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
 (defun emacsos-assist-web-git--metadata-from-snapshot (snapshot)
   "Select the authenticated committed ref from validated SNAPSHOT.
 
-Ready threads select their actual checkout. Busy threads prefer the published
-branch, falling back only to an authenticated actual non-main branch. The
-published OID is provenance, not a ceiling on legitimate phone pushes. Git
-checks the selected ref format before the fetch begins."
+Ready threads select their actual checkout.  Busy threads use the bound thread
+branch and show a warning that the remote may change after the turn.  Git checks
+the selected ref format before the fetch begins."
   (let* ((thread (alist-get 'thread snapshot))
          (workspace (alist-get 'workspace thread))
          (tid (emacsos-assist-web--require-id (alist-get 'id thread)))
@@ -2131,27 +2130,36 @@ checks the selected ref format before the fetch begins."
          (repo-key (alist-get 'repo_key workspace))
          (actual-branch (alist-get 'branch workspace))
          (head (alist-get 'revision workspace))
-         (published-branch (alist-get 'published_branch workspace))
-         (published-revision (alist-get 'published_revision workspace)))
+         (bound-branch (alist-get 'thread_branch workspace))
+         (sync-error (alist-get 'sync_error workspace))
+         (publication-notice (alist-get 'publication_notice thread)))
     (unless (or (null repo-key)
                 (and (stringp repo-key)
                      (string-match-p
                       emacsos-assist-web--git-repo-key-regexp repo-key)))
       (error "Assist Web returned an invalid Git repository key"))
-    (dolist (oid (list head published-revision))
-      (unless (or (null oid)
-                  (and (stringp oid)
-                       (string-match-p emacsos-assist-web--git-oid-regexp oid)))
-        (error "Assist Web returned an invalid Git object ID")))
-    (unless (or (and (null published-branch)
-                     (null published-revision))
-                (and (stringp published-branch)
-                     (stringp published-revision)))
-      (error "Assist Web returned an incomplete published Git ref"))
-    (when (equal published-branch "HEAD")
-      (error "Assist Web returned detached HEAD as a published Git ref"))
+    (unless (or (null head)
+                (and (stringp head)
+                     (string-match-p emacsos-assist-web--git-oid-regexp head)))
+      (error "Assist Web returned an invalid Git object ID"))
+    (when (and bound-branch
+               (not (and (stringp bound-branch)
+                         (<= (string-bytes bound-branch) 240)
+                         (not (member bound-branch '("main" "HEAD")))
+                         (not (string-match-p "[[:cntrl:]]" bound-branch)))))
+      (error "Assist Web returned an invalid bound Git branch"))
+    (unless (or (null sync-error)
+                (and (stringp sync-error)
+                     (<= (string-bytes sync-error) 256)
+                     (not (string-match-p "[[:cntrl:]]" sync-error))))
+      (error "Assist Web returned an invalid Git status"))
+    (unless (or (null publication-notice)
+                (and (stringp publication-notice)
+                     (<= (string-bytes publication-notice) 512)
+                     (not (string-match-p "[[:cntrl:]]" publication-notice))))
+      (error "Assist Web returned an invalid Git publication notice"))
     (let* ((ready (equal status "ready"))
-           (branch (if ready actual-branch (or published-branch actual-branch))))
+           (branch (if ready actual-branch (or bound-branch actual-branch))))
       (when (and branch
                  (not (and (stringp branch)
                            (<= (string-bytes branch) 240)
@@ -2164,32 +2172,25 @@ checks the selected ref format before the fetch begins."
                          branch)
             :status status
             :repo-label (alist-get 'repo_label workspace)
+            :sync-error sync-error
+            :publication-notice publication-notice
             :thread-label (alist-get 'description thread)
             :actual-branch (and ready actual-branch)
             :head head))))
 
 (defun emacsos-assist-web-git--note-snapshot
-    (snapshot &optional legacy-success-run-id auth-start-epoch reconcile-token legacy-terminal-run-id)
-  "Update optional Git state from validated SNAPSHOT without rejecting chat.
-LEGACY-SUCCESS-RUN-ID is an exact successful Run retired by the legacy path.
-AUTH-START-EPOCH permits only a post-denial accepted canonical GET to clear
-the Git denial latch.  RECONCILE-TOKEN identifies an eligible committed
-post-conflict canonical read. LEGACY-TERMINAL-RUN-ID identifies a durably
-retired compatibility Run, including a terminal failure."
+    (snapshot &optional successful-run-id auth-start-epoch _reconcile-token _terminal-run-id)
+  "Select Git metadata from SNAPSHOT; refresh on new identity or SUCCESSFUL-RUN-ID.
+AUTH-START-EPOCH is the canonical authorization fence.  The canonical chat
+snapshot remains independent of optional Git availability."
   (condition-case nil
       (let ((metadata (emacsos-assist-web-git--metadata-from-snapshot snapshot)))
         (emacsos-assist-web--canonical-authorized auth-start-epoch)
         (unless (eq emacsos-assist-web--denied t)
-          (setq emacsos-assist-web--lifecycle-notice nil)
-          (if legacy-terminal-run-id
-              (emacsos-assist-web-git--canonical-accepted
-               metadata legacy-success-run-id reconcile-token legacy-terminal-run-id)
-            (emacsos-assist-web-git--canonical-accepted
-             metadata legacy-success-run-id reconcile-token))
-          (when (equal (plist-get metadata :actual-branch) "HEAD")
-            (setq emacsos-assist-web-git--unavailable
-                  "detached HEAD; Git unavailable")
-            (emacsos-assist-web-git--update-headers))))
+          (let ((new-checkout (emacsos-assist-web-git--note metadata)))
+            (when (and (plist-get metadata :branch)
+                       (or new-checkout successful-run-id))
+              (emacsos-assist-web-git-refresh)))))
     (error
      (unless (eq emacsos-assist-web--denied t)
        (condition-case nil
@@ -4330,8 +4331,8 @@ The graphical phone measures proportional text against the same pixel budget."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
-    ;; Opening a thread can fetch its branch while cached files remain usable.
-    ;; A later canonical snapshot may select a newer branch and queue a successor.
+    ;; Opening a thread can sync its branch while the local checkout remains usable.
+    ;; Canonical metadata updates invalidate older Git requests through the epoch.
     (with-current-buffer buffer
       (when (and emacsos-assist-web--snapshot
                  (not (emacsos-assist-web-git--gate-reason t)))
@@ -5121,13 +5122,15 @@ ordinary interactive `find-file' prompt and navigation."
       (call-interactively #'find-file))))
 
 (defun emacsos-assist-web-refresh-context ()
-  "Refresh a thread and its Git view, or refresh the thread catalog."
+  "Refresh a thread and its local Git checkout, or refresh the thread catalog."
   (interactive)
   (if (and (derived-mode-p 'emacsos-assist-web-mode)
            emacsos-assist-web--thread-id)
       (progn
         (call-interactively #'emacsos-assist-web-refresh-thread)
-        (call-interactively #'emacsos-assist-web-git-refresh))
+        ;; The checkout may have been removed since this buffer selected it.
+        (let ((default-directory (expand-file-name "~/")))
+          (call-interactively #'emacsos-assist-web-git-refresh)))
     (call-interactively #'emacsos-assist-web-refresh-threads)))
 
 (defun emacsos-assist-web--move-message (forward)

@@ -56,7 +56,7 @@ or =e=, to type either prefix.
 | =C-c a n= | New canonical thread |
 | =C-c a r= | Refresh thread list |
 | =C-c a g= | Refresh canonical thread and Git, or catalog |
-| =C-c a d= | Magit diff for current thread |
+| =C-c a d= | Magit diff or status for current thread |
 | =C-c a f= | New .assist file |
 | =C-c e c= | Ordinary chat |
 | =C-c e d= | Stage call |
