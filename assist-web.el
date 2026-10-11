@@ -854,9 +854,9 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                    "The exact Run status could not be verified. This does not prove the thread is gone. A thread access check is pending; then Refresh the exact Run.")
                   ((and emacsos-assist-web--denied
                         (eql emacsos-assist-web--thread-denial-status 404))
-                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. Existing Git views are only cached history.")
+                   "This thread is unavailable. Reopen it from the Assist thread list after checking access. The local Git checkout remains on this device.")
                   (emacsos-assist-web--denied
-                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. Existing Git views are only cached history.")
+                   "Assist denied access to this thread. Reauthorize Assist, reopen the thread, and then Retry. The local Git checkout remains on this device.")
                   ((eq (emacsos-assist-web--shared-recovery-state) 'repair)
                    "The named exact Run receipt is missing, invalid, or conflicts with this thread view. Repair the saved draft before Refresh; this Refresh sent neither another Run GET nor a POST.")
                   ((eq (emacsos-assist-web--shared-recovery-state)
@@ -908,10 +908,10 @@ A shared stop may outlive its original buffer pending exact durable recovery."
                          (t "The stream ended but the exact Run was still active. Refresh to check this Run; this observer will not reattach automatically."))))))
                   ((emacsos-assist-web--run-gated-p)
                    "The exact Run and canonical thread state still need verification. Refresh the Assist thread to check that Run.")
-                  (t "Git Refresh fetches the selected remote branch; cached files remain browsable.")))
+                  (t "Git Refresh fetches the selected remote branch; the local checkout remains editable.")))
          (view (generate-new-buffer " *Assist Web Run status*")))
     (with-current-buffer view
-      (insert reason "\nGit Refresh independently checks the remote branch; browsing uses cached files.\n\nPress q to return.\n")
+      (insert reason "\nGit Refresh independently checks the remote branch; browsing uses the local checkout.\n\nPress q to return.\n")
       (special-mode)
       (visual-line-mode 1)
       (setq-local emacsos-assist-web--display-details-thread thread)
@@ -1075,7 +1075,7 @@ Only a resident queue entry or accepted legacy receipt may claim the gate."
                                    (equal (plist-get record :run-id) run-id)))
                             emacsos-assist-web--run-outcome-uncertain)))
     ;; Canonical ownership may temporarily span source and destination buffers.
-    ;; Their pinned views and in-flight fetches must share this exact denial.
+    ;; Their thread views and in-flight requests must share this exact denial.
     (dolist (other (buffer-list))
       (when (and (not (eq other thread))
                  (with-current-buffer other
@@ -4329,8 +4329,8 @@ The graphical phone measures proportional text against the same pixel budget."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
-    ;; Opening a thread can fetch its branch while cached files remain usable.
-    ;; A later canonical snapshot may select a newer branch and queue a successor.
+    ;; Opening a thread can sync its branch while the local checkout remains usable.
+    ;; Canonical metadata updates invalidate older Git requests through the epoch.
     (with-current-buffer buffer
       (when (and emacsos-assist-web--snapshot
                  (not (emacsos-assist-web-git--gate-reason t)))
@@ -5120,13 +5120,15 @@ ordinary interactive `find-file' prompt and navigation."
       (call-interactively #'find-file))))
 
 (defun emacsos-assist-web-refresh-context ()
-  "Refresh a thread and its Git view, or refresh the thread catalog."
+  "Refresh a thread and its local Git checkout, or refresh the thread catalog."
   (interactive)
   (if (and (derived-mode-p 'emacsos-assist-web-mode)
            emacsos-assist-web--thread-id)
       (progn
         (call-interactively #'emacsos-assist-web-refresh-thread)
-        (call-interactively #'emacsos-assist-web-git-refresh))
+        ;; The checkout may have been removed since this buffer selected it.
+        (let ((default-directory (expand-file-name "~/")))
+          (call-interactively #'emacsos-assist-web-git-refresh)))
     (call-interactively #'emacsos-assist-web-refresh-threads)))
 
 (defun emacsos-assist-web--move-message (forward)

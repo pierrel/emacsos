@@ -54,6 +54,36 @@
         (should (equal called '(git thread)))
         (should (equal (emacsos-assist-web--input) "unsent"))))))
 
+(ert-deftest interaction-context-refresh-survives-removed-checkout ()
+  (let* ((root (make-temp-file "interaction-refresh-" t))
+         (checkout (expand-file-name "checkout/" root))
+         (helper (expand-file-name "helper.py" root))
+         (emacsos-assist-web-git-helper helper)
+         (emacsos-assist-web-git-workspace-directory root)
+         (emacsos-assist-web-git-legacy-directory root)
+         process)
+    (unwind-protect
+        (interaction-test--thread
+          (make-directory checkout)
+          (setq default-directory checkout
+                emacsos-assist-web-git--metadata
+                '(:tid "thread-1" :repo-key "demo" :branch "thread/test"))
+          (with-temp-file helper
+            (insert "import sys\nsys.stdin.readline()\nprint('{\"ok\":false,\"error\":\"isolated helper\"}')\n"))
+          (delete-directory checkout)
+          (cl-letf (((symbol-function 'emacsos-assist-web-refresh-thread)
+                     (lambda () (interactive))))
+            (emacsos-assist-web-refresh-context))
+          (setq process emacsos-assist-web-git--process)
+          (should (processp process))
+          (let ((deadline (+ (float-time) 3)))
+            (while (and (process-live-p process) (< (float-time) deadline))
+              (accept-process-output process 0.05)))
+          (should-not (process-live-p process))
+          (should (= (process-exit-status process) 0)))
+      (when (and process (process-live-p process)) (delete-process process))
+      (delete-directory root t))))
+
 (ert-deftest interaction-new-draft-refreshes-catalog-without-sending ()
   (interaction-test--thread
     (setq-local emacsos-assist-web--thread-id nil)
