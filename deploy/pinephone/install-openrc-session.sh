@@ -99,6 +99,7 @@ scp -q "$@" \
     "$phone_host:$stage/"
 scp -q "$@" \
     "$repo_dir/os.el" \
+    "$repo_dir/emacsos-typography.el" \
     "$repo_dir/chat.el" \
     "$repo_dir/assist-web.el" \
     "$repo_dir/assist-web-git.el" \
