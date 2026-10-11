@@ -1,0 +1,241 @@
+#+TITLE: Phone thread list: show state pills (new / urgent / unmerged)
+#+DATE: 2026-10-07
+#+PROPERTY: status implemented
+#+PROPERTY: repo emacsos + assist (cross-repo)
+
+* Summary
+
+The phone thread list (the native Emacs thread-list buffer in =assist-web.el=)
+currently shows each thread as two lines: the description, and a metadata line
+of =repo · stage=.  The web thread list already shows the same information
+plus a state pill (urgent / new / unmerged / error / busy-stage).  This change
+brings the phone in line with the web so the user can see at a glance which
+threads need attention: =new=, =urgent=, and =unmerged= (plus the busy/error
+process states).
+
+This is the emacsos roadmap item "P1: Match Web list status, urgency and
+unread behavior" — but scoped to the *display* slice only (the pills).  The
+clear-on-view / read-receipt semantics are a separate, later piece (see
+* Follow-ups).
+
+* Reference behaviour (the spec)
+
+Web renders one pill per thread, first match wins, in this precedence
+(=manage/web/threads.py= render_index, lines 283-349):
+
+1. busy stage — =Queued= / =Cloning= / =Starting= / =Initializing= /
+   =Processing= / =Paused= (=LIST_STAGE_LABELS=).  A continuation turn shows
+   =following up=.
+2. =error=
+3. =urgent=  (agent called =notify()=; =state._has_urgent=)
+4. =new=     (a reply the user hasn't opened; =state._has_unseen_response=)
+5. =unmerged= (unmerged work vs main; =state._has_unmerged_changes=)
+
+The web *list* is sorted urgent-first regardless of which pill shows
+(=_thread_status_rank=).  The phone catalog is already sorted by that exact
+rank in the server (=phone_api._list_threads=), so the server order is already
+correct; we only add the visible pill.
+
+* What already exists (grounded in code)
+
+- The phone catalog endpoint (=manage/web/phone_api.py::_list_threads=,
+  626-637) ALREADY returns per thread: =id, description,
+  search_description, harness, status (stage), repo_key, repo_label,
+  unread, activity_at, revision=.
+  So =unread= (→ "new") and =activity_at= are already on the wire.
+- The two helpers that produce =urgent= / =unmerged= already exist in
+  =manage/web/state.py= (=_has_urgent= :611, =_has_unmerged_changes= :315) —
+  the same ones web uses.
+- The client projection =emacsos-assist-web--catalog-entry= only KEEPS the
+  named keys (it is a whitelist), so the client silently drops =unread=,
+  =activity_at=, =urgent=, =unmerged= today.  Adding keys is opt-in and
+  backward-compatible: an old client ignores unknown fields, and a new client
+  tolerates a field being absent.
+
+So the only genuinely-missing wire fields are =urgent= and =unmerged=.
+
+* Scope (this PR)
+
+Two halves, both display-only, no state mutation:
+
+1. assist (server): =_list_threads= adds =urgent= and =unmerged= to each
+   thread dict, computed with the existing state helpers.
+   - =urgent= is a set lookup (cheap).
+   - =unmerged= calls =state._has_unmerged_changes=, which wraps
+     =DomainManager.has_changes_vs_main= — a git subprocess per thread.  On a
+     refresh this is up to =MAX_THREADS= (500) git ops in the threadpool, the
+     SAME operation web's =render_index= already pays per page-load.  On a git
+     error it silently returns =False=, so =unmerged= degrades to "not shown"
+     rather than erroring.  Tolerable (web already does it) but it is the real
+     cost of this change, not "two lines."
+2. emacsos (client):
+   - Extend the catalog projection to keep =urgent=, =unmerged=, =unread=.
+   - Compute a single state pill per thread from the pill precedence above.
+   - Render the pill on the thread-list metadata line.
+
+* Out of scope (deferred, tracked in * Follow-ups)
+
+- Clearing =urgent= / =unread= when the user views the thread (read-receipt /
+  ack semantics).  Display only; nothing is cleared.
+- The web's =following up= pill (needs the turn =origin=, which the phone
+  catalog does not carry; it's a busy-state nuance, not one of the three
+  states asked for).  KNOWN BEHAVIORAL GAP: a continuation-turn thread that
+  also has an unseen first reply shows =following up + new= on web but only
+  the busy-stage label on the phone — the "new" pill is masked for exactly
+  the threads the progressive-answer feature is about.  A user comparing the
+  two surfaces will notice; accepted for this display-only slice.
+- List *search* and the 500-thread cap semantics (also on the P1 roadmap
+  item) — separate concerns, not pills.
+- Making the states *searchable* in the thread command-menu completion
+  records (=--completion-records=) — a separate consumer/behavior the goal
+  (display-only pills) does not ask for; cut.
+
+* Design decisions and rationale
+
+- Pill precedence mirrors web exactly so the two surfaces never disagree.
+  The pill is a pure function of the per-thread fields
+  (status, unread, urgent, unmerged); no server-side pill string is sent.
+  (Web's pill is CSS; the phone's is a text label.  Same precedence,
+  different rendering.)
+- METADATA LINE — single uniform rule, one status token per row:
+  =repo · <emoji>= where <emoji> is the FIRST match in precedence, falling
+  back to the raw stage when nothing matches.  One token in all cases; no
+  replace-vs-append distinction (web never shows a raw stage alongside a
+  badge — a "new" thread shows only the "new" marker, not "ready new").
+- STATE EMOJI (client-side, a fixed literal set — never interpolated from
+  untrusted thread text, so no injection; font-safe, no VS16/ZWJ so they pass
+  the existing =--isolate-display-text= / =--collision-key-text= ERT):
+  - ⚠️  urgent      (web's red "urgent" — warning sign is the analog)
+  - 📬  new         (unread reply; =unread= / =_has_unseen_response=)
+  - 🔀  unmerged    (git merge/diverge glyph)
+  - 🛑  error       (distinct from ⚠️ so urgent and error never look alike)
+  - 🔄  busy        (ONE token for all six busy stages: queued/cloning/
+                    starting/processing/paused/initializing)
+  Precedence (first match wins, mirrors web): busy → error → urgent → new →
+  unmerged; else raw stage.
+- EMOJI are the status token (no color face, no word).  On a 320x240 screen we
+  rely on position (the server already sorts urgent-first to the top) plus the
+  emoji itself.  No color faces in the list buffer (special-mode, not a
+  face-rich UI); the emoji carry the signal.
+- =new= maps to the existing =unread= wire field (=_has_unseen_response=),
+  matching web's "new" meaning.
+- Client stays a pure function of the server payload; no client-side git
+  inspection.  (The phone has no git access; =unmerged= MUST come from the
+  server.)
+- BUSY check: a single 🔄 covers all six web busy stages
+  (queued/cloning/starting_sandbox/processing/paused/initializing) — the phone
+  shows one busy token, not per-stage labels (the phone list has no room for
+  a word per stage).  Do NOT reuse
+  =emacsos-assist-web--active-snapshot-statuses= (:1582) for the test — it
+  carries extra snapshot statuses (pending/running/transitioning/
+  awaiting_approval) that are not web stage labels and would mislabel rows;
+  the six-stage set is the elisp mirror of web's =BUSY_STAGES= and is the
+  deliberate small duplication (elisp cannot import the Python dict).
+- PRECEDENCE DRIFT: web's pill chain lives in =render_index= (HTML f-strings);
+  the phone carries a second copy in =--state-pill=.  If web's precedence
+  changes, the elisp =--state-pill= table MUST change in lockstep.  (A shared
+  helper is not possible across the Python/Elisp boundary; this is a
+  documented manual-sync cost.)
+- STALE CACHE: the phone persists the raw wire catalog and re-renders it as
+  "cached" on load.  Pills computed from a stale cache (urgent/unmerged/unread
+  frozen at last refresh) are a new visible consequence of that existing
+  cache.  Acceptable — the list already labels itself "cached."
+
+* Files to change
+
+assist:
+- =manage/web/phone_api.py= — =_list_threads= (:618, build at :626-637): add
+  ="urgent": state._has_urgent(tid), "unmerged": state._has_unmerged_changes(tid).
+
+emacsos:
+- =assist-web.el=
+  - =--require-catalog= (:1931) thread projection — the =--catalog-entry= call
+    at :1948: extend kept fields to
+    ='(id description search_description repo_label status unread urgent unmerged)=.
+    (No new validation: =unread= is already kept without boolean validation;
+    keep the three consistent — a missing/absent key is just =nil= → false.)
+  - New helper =emacsos-assist-web--state-pill= (thread) → string: the single
+    precedence function returning the emoji (🔄 busy / 🛑 error / ⚠️ urgent /
+    📬 new / 🔀 unmerged / raw stage), using the six-stage busy set above.
+  - =emacsos-assist-web--list-records= (:4078): build the metadata line as
+    =repo · X= where X = =--state-pill=, instead of =repo · <raw stage>=.
+    (=--insert-thread-row= :4175 and the collision key are untouched.)
+  - =--completion-records= (:3471) is NOT touched (searchability is out of
+    scope — see * Out of scope).
+
+* Wire contract change
+
+Additive to =GET /api/v1/phone/threads= per-thread object:
+  "urgent": bool
+  "unmerged": bool
+Existing fields unchanged.  Backward compatible:
+  - old client + new server: client projection ignores the two keys.
+  - new client + old server: keys absent → =alist-get= returns nil → pill
+    logic treats as false → falls back to stage.  No error.
+
+* Threat model / attack surface
+
+- No new network surface, no new endpoint, no root, no new untrusted input
+  path.  The two new fields are server-computed booleans; the client already
+  validates the catalog shape and bounds item counts.
+- The pill string is client-generated from a fixed set of literals
+  (never interpolated from untrusted thread text) — no injection into the
+  buffer.  The metadata line still passes through the existing
+  =--isolate-display-text= / =--fit-list-line= display-isolation helpers.
+- Resource bound: =unmerged= adds up to =MAX_THREADS= git subprocesses per
+  catalog refresh (see * Scope).  No NEW bound is introduced — it is the same
+  operation web's =render_index= already performs per page-load — but the
+  phone catalog can refresh in the background, so it is the main added cost on
+  a long list.  Authn/authz are unchanged.
+
+* Tests (acceptance)
+
+assist (pytest):
+- Extend =tests/test_phone_api.py::test_thread_list_uses_stored_titles_and_supplies_chooser_metadata=
+  (:160) — or a new test — to assert =urgent= and =unmerged= appear in the
+  catalog response, and flip their values by patching =state._has_urgent= /
+  =_has_unmerged_changes=.  The existing =test_phone_api.py= suite (82 tests)
+  must stay green.
+
+emacsos (ERT, =tests/test-assist-web.el=):
+- Catalog projection: a wire catalog carrying =urgent= / =unmerged= / =unread=
+  booleans is accepted and carried into the normalized thread; a missing field
+  is tolerated (=nil=).  (No boolean rejection — consistent with =unread=.)
+- Pill helper: table-drive the precedence — each of the six busy stages → 🔄;
+  error → 🛑; urgent → ⚠️; unread → 📬; unmerged → 🔀; precedence ordering
+  (busy beats urgent, urgent beats new, new beats unmerged); all-false →
+  raw stage.
+- List render: the metadata line shows =repo · <emoji>= (one token, no
+  duplicated stage) for a representative thread; existing
+  ordinal/collision/RTL list tests stay green (the emoji are font-safe, no
+  VS16/ZWJ, so =--isolate-display-text= / =--collision-key-text= ERT hold).
+
+Commands:
+  assist:  pytest tests/test_phone_api.py
+  emacsos: make test-elisp   (ERT) ; make test-server (server unchanged here, but run to be safe)
+  Live phone is the final check (deploy is OUT of scope for this task — see
+  note below).
+
+* Deploy note
+
+Per the task: do NOT deploy.  There is a lot deployed that isn't on main.
+Both PRs land to =main= via normal review; deployment is a separate,
+explicit step the user owns.  The live-phone verification is listed for
+completeness but will NOT be run as part of this task.
+
+* Follow-ups (not this PR)
+
+- Read-receipt / ack: clear =unread= and =urgent= when the thread is viewed
+  (the "Match Web ... unread behavior" half of the P1 item).
+- =following up= pill (needs turn =origin= on the phone catalog).
+- List search + 500-thread cap parity with web.
+
+* PRs (two, both to main)
+
+1. assist — phone catalog exposes urgent + unmerged.  Self-contained; the
+   client doesn't need it yet (absent → false).
+2. emacsos — phone thread list renders state pills.  Consumes the assist
+   fields; degrades gracefully if assist PR is not merged.
+
+Order: land assist first, then emacsos.  They can be opened in parallel since
+the emacsos side is safe against the old server.
