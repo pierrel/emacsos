@@ -204,6 +204,13 @@ shell:
 ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 #+end_src
 
+** Isolated Assist Web lifecycle E2E
+
+=python3 tests/phone-assist-e2e/run.py --logs /tmp/phone-assist-e2e-results=
+runs the actual Assist Web Emacs client against disposable Assist, Git/SSH and
+shell containers, using deterministic model output. See
+[[file:tests/phone-assist-e2e/README.md][the bounded harness and coverage]] for prerequisites, source selection and limits.
+
 * Desktop Assist only
 
 =assist-desktop.el= loads the existing Assist Web client into ordinary Emacs.

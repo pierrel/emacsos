@@ -1,0 +1,99 @@
+;;; client.el --- Actual phone client against the isolated E2E server -*- lexical-binding: t; -*-
+;;; Commentary:
+;; Test control supplies user actions; HTTPS, SSE, recovery and Git remain real.
+;;; Code:
+(require 'assist-web)
+(setq emacsos-assist-web-api-url "https://assist:8443/api/v1/phone"
+      emacsos-assist-web-ca-file "/secrets/ca.crt"
+      url-proxy-services nil)
+
+(defun phone-e2e-wait (predicate)
+  "Wait at most 45 seconds for PREDICATE while processing actual client events."
+  (let ((deadline (+ (float-time) 45)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.05)
+      (set-buffer (window-buffer (selected-window))))
+    (unless (funcall predicate)
+      (error "E2E client deadline: buffer=%s snapshot=%s requests=%s git-process=%s queue=%s"
+             (buffer-name) (and emacsos-assist-web--snapshot t)
+             (length emacsos-assist-web--requests) emacsos-assist-web-git--process
+             (mapcar (lambda (e) (plist-get e :state)) emacsos-assist-web--queue)))))
+
+(defun phone-e2e-request (method path &optional body)
+  "Make a real client METHOD request to PATH with BODY and await its receipt."
+  (let (finished value failure)
+    (emacsos-assist-web--request
+     method path body
+     (lambda (result problem) (setq value result failure problem finished t)))
+    (phone-e2e-wait (lambda () finished))
+    (when failure (error "%s" failure))
+    value))
+
+(defun phone-e2e-open (tid)
+  "Open TID through the production thread command and wait for canonical state."
+  (emacsos-assist-web--show-thread `((id . ,tid) (description . "E2E thread") (repo_label . "domain")))
+  (set-buffer (window-buffer (selected-window)))
+  (phone-e2e-wait (lambda () emacsos-assist-web--snapshot)))
+
+(defun phone-e2e-result ()
+  "Return observable client state without private credentials."
+  `((thread_id . ,emacsos-assist-web--thread-id)
+    (checkout . ,(emacsos-assist-web-git-local-directory))
+    (git . ,emacsos-assist-web-git--result)
+    (git_error . ,emacsos-assist-web-git--unavailable)
+    (denied . ,(eq emacsos-assist-web--denied t))
+    (text . ,(buffer-string))))
+
+(defun phone-e2e-main (action tid text)
+  "Run user ACTION on TID with TEXT and print one JSON receipt."
+  (condition-case problem
+      (progn
+        (when (equal action "accepted-fresh")
+          (setq emacsos-assist-web-cache-directory
+                (make-temp-file "/home/test/e2e-client-cache-" t)
+                action "accepted"))
+        (cond
+         ((equal action "new")
+          (let* ((catalog (phone-e2e-request "GET" "threads"))
+                 (repo (car (alist-get 'repositories catalog)))
+                 (buffer (get-buffer-create "*assist New thread*")))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--draft-id "new-thread"
+                    emacsos-assist-web--draft-repository (alist-get 'repo_key repo)
+                    emacsos-assist-web--draft-harness "deepagents")
+              (emacsos-assist-web--write-prompt))
+            (switch-to-buffer buffer)))
+         ((equal action "denied")
+          (condition-case nil (phone-e2e-open tid) (error nil))
+          (phone-e2e-wait (lambda () (eq emacsos-assist-web--denied t))))
+         (t (phone-e2e-open tid)))
+        (when (member action '("new" "send" "accepted"))
+          (emacsos-assist-web--replace-input text)
+          (emacsos-assist-web-send)
+          (if (equal action "accepted")
+              (phone-e2e-wait
+               (lambda ()
+                 (seq-some (lambda (entry)
+                             (and (equal (plist-get entry :text) text)
+                                  (plist-get entry :run-id)))
+                           emacsos-assist-web--queue)))
+            (phone-e2e-wait
+             (lambda () (and (not emacsos-assist-web--queue)
+                             (not emacsos-assist-web--in-flight)
+                             emacsos-assist-web--thread-id)))))
+        (when (member action '("new" "send" "refresh"))
+          (emacsos-assist-web-refresh-thread)
+          (phone-e2e-wait (lambda () (not emacsos-assist-web--requests)))
+          (phone-e2e-wait (lambda () (not emacsos-assist-web-git--process)))
+          (when (plist-get emacsos-assist-web-git--metadata :branch)
+            (emacsos-assist-web-git-refresh)
+            (phone-e2e-wait (lambda () (not emacsos-assist-web-git--process)))))
+        (princ (concat "E2E_JSON:" (json-encode (phone-e2e-result)) "\n")))
+    (error
+     (when (get-buffer "*Messages*")
+       (princ (with-current-buffer "*Messages*" (buffer-string))))
+     (princ (concat "E2E_JSON:" (json-encode `((error . ,(error-message-string problem)))) "\n"))
+     (kill-emacs 1))))
+(provide 'phone-e2e-client)
+;;; client.el ends here
