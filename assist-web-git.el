@@ -27,9 +27,14 @@
   :type 'directory :group 'emacsos-assist-web-git)
 
 (defcustom emacsos-assist-web-git-legacy-directory
-  (expand-file-name "~/.cache/emacsos/assist-git")
+  (if (boundp 'emacsos-assist-web-git-cache-directory)
+      (symbol-value 'emacsos-assist-web-git-cache-directory)
+    (expand-file-name "~/.cache/emacsos/assist-git"))
   "Old checkouts are left here until the user explicitly migrates them."
   :type 'directory :group 'emacsos-assist-web-git)
+
+(define-obsolete-variable-alias 'emacsos-assist-web-git-cache-directory
+  'emacsos-assist-web-git-legacy-directory "2026-10-10")
 
 (defcustom emacsos-assist-web-git-helper
   (expand-file-name "assist-web-git-helper.py"
@@ -76,12 +81,35 @@
                               (emacsos-assist-web-git--identity metadata))
                         emacsos-assist-web-git-workspace-directory))))
 
+(defun emacsos-assist-web-git--selected-path (metadata response)
+  "Return the helper-confirmed checkout for METADATA and RESPONSE."
+  (let ((path (alist-get 'checkout_path response))
+        (canonical (emacsos-assist-web-git--checkout-path metadata)))
+    (when (and (stringp path)
+               (or (equal path canonical)
+                   (and (eq (alist-get 'legacy response) t)
+                        (file-name-absolute-p path)
+                        (or (file-in-directory-p path
+                                                 emacsos-assist-web-git-workspace-directory)
+                            (file-in-directory-p path
+                                                 (expand-file-name
+                                                  "checkouts"
+                                                  emacsos-assist-web-git-legacy-directory)))
+                        (not (file-symlink-p path))
+                        (file-directory-p path)
+                        (file-directory-p (expand-file-name ".git" path))
+                        (not (file-symlink-p (expand-file-name ".git" path))))))
+      path)))
+
 (defun emacsos-assist-web-git-local-directory ()
   "Return the current thread's existing local Git directory, or nil.
 This is a query only; it never fetches, edits or creates a checkout."
   (let ((path (and emacsos-assist-web-git--metadata
-                   (emacsos-assist-web-git--checkout-path
-                    emacsos-assist-web-git--metadata))))
+                   (if emacsos-assist-web-git--result
+                       (emacsos-assist-web-git--selected-path
+                        emacsos-assist-web-git--metadata emacsos-assist-web-git--result)
+                     (emacsos-assist-web-git--checkout-path
+                      emacsos-assist-web-git--metadata)))))
     (when (and path (file-directory-p path)
                (not (file-symlink-p path))
                (file-directory-p (expand-file-name ".git" path))
@@ -207,25 +235,32 @@ PROCESS, when provided, must be the request this receipt completes."
                                   (json-parse-string output :object-type 'alist
                                                      :null-object nil :false-object nil)))
                    (ok (eq (alist-get 'ok response) t))
-                   (path (alist-get 'checkout_path response)))
-              (unless (and ok (stringp path)
-                           (equal path (emacsos-assist-web-git--checkout-path metadata)))
-                (error "Git helper did not confirm this checkout"))
-              (setq emacsos-assist-web-git--unavailable
-                    (plist-get emacsos-assist-web-git--metadata :sync-error))
-              (if (equal action "migrate")
+                   (path (emacsos-assist-web-git--selected-path metadata response))
+                   (reason (alist-get 'error response)))
+              (if (not ok)
                   (progn
-                    (message "Bound legacy checkout moved intact; refreshing its Git status")
-                    (emacsos-assist-web-git-refresh))
-                (setq emacsos-assist-web-git--result response)
-                (let ((pending (alist-get 'pending response))
-                      (remote (alist-get 'thread_oid response)))
-                  (when (and pending
-                             (or manual
-                                 (and (string-match-p "local edits are unchanged" pending)
-                                      (not (equal remote emacsos-assist-web-git--last-reminded-oid)))))
-                    (setq emacsos-assist-web-git--last-reminded-oid remote)
-                    (message "%s" pending))))
+                    (setq emacsos-assist-web-git--unavailable
+                          (if (and (stringp reason) (<= (length reason) 256)
+                                   (string-match-p "\\`[[:print:]]+\\'" reason))
+                              reason
+                            "checkout update unavailable; local work preserved"))
+                    (when manual (message "%s" emacsos-assist-web-git--unavailable)))
+                (unless path (error "Git helper did not confirm this checkout"))
+                (setq emacsos-assist-web-git--unavailable
+                      (plist-get emacsos-assist-web-git--metadata :sync-error))
+                (if (equal action "migrate")
+                    (progn
+                      (message "Bound legacy checkout moved intact; refreshing its Git status")
+                      (emacsos-assist-web-git-refresh))
+                  (setq emacsos-assist-web-git--result response)
+                  (let ((pending (alist-get 'pending response))
+                        (remote (alist-get 'thread_oid response)))
+                    (when (and pending
+                               (or manual
+                                   (and (string-match-p "local edits are unchanged" pending)
+                                        (not (equal remote emacsos-assist-web-git--last-reminded-oid)))))
+                      (setq emacsos-assist-web-git--last-reminded-oid remote)
+                      (message "%s" pending)))))
               (emacsos-assist-web-git--update-headers))
           (error
            (setq emacsos-assist-web-git--unavailable
@@ -244,6 +279,8 @@ MANUAL permits a repeated status reminder."
                       (repo_key . ,(plist-get metadata :repo-key))
                       (thread_id . ,(plist-get metadata :tid))
                       (branch . ,(plist-get metadata :branch))
+                      (legacy_root . ,(expand-file-name
+                                       emacsos-assist-web-git-legacy-directory))
                       (workspace_root . ,(expand-file-name
                                           emacsos-assist-web-git-workspace-directory))))
            (output "")
@@ -283,13 +320,22 @@ MANUAL permits a repeated status reminder."
     (let ((default-directory directory))
       (call-interactively #'find-file))))
 
+(defun emacsos-assist-web-git--local-edits-p ()
+  "Query the selected checkout's current tracked and untracked file state."
+  (with-temp-buffer
+    (unless (eq 0 (process-file "git" nil t nil
+                                "-c" "core.fsmonitor=false" "status" "--porcelain"
+                                "--untracked-files=normal"))
+      (user-error "Local Git status is unavailable"))
+    (not (= (buffer-size) 0))))
+
 (defun emacsos-assist-web-git-diff ()
-  "Open Magit for the actual checkout, including local edits when dirty."
+  "Open Magit for the actual checkout, querying local edits at invocation."
   (interactive)
   (let ((directory (emacsos-assist-web-git-local-directory)))
     (unless directory (user-error "Local Git checkout unavailable; Refresh first"))
     (let ((default-directory directory))
-      (if (alist-get 'dirty emacsos-assist-web-git--result)
+      (if (emacsos-assist-web-git--local-edits-p)
           (progn (require 'magit-status)
                  (magit-status-setup-buffer directory))
         (require 'magit-diff)
@@ -306,6 +352,23 @@ MANUAL permits a repeated status reminder."
                  (replace-regexp-in-string "\n" "; " status))
              "status not fetched")))
 
+(defun emacsos-assist-web-git--open-checkout-buffer-p (roots)
+  "Return non-nil when another open buffer is under a path in ROOTS."
+  (let ((caller (current-buffer))
+        (resolved (mapcar (lambda (root)
+                            (file-name-as-directory (file-truename root))) roots)))
+    (cl-some (lambda (buffer)
+               (unless (eq buffer caller)
+                 (with-current-buffer buffer
+                   (cl-some (lambda (location)
+                              (and location (not (file-remote-p location))
+                                   (cl-some (lambda (root)
+                                              (string-prefix-p root
+                                                               (file-truename location)))
+                                            resolved)))
+                            (list buffer-file-name default-directory)))))
+             (buffer-list))))
+
 (defun emacsos-assist-web-git-choose-workspace ()
   "Explicitly move this thread's bound legacy checkout without discarding work."
   (interactive)
@@ -315,15 +378,8 @@ MANUAL permits a repeated status reminder."
                       (expand-file-name "checkouts" emacsos-assist-web-git-legacy-directory))
                      (file-name-as-directory
                       (expand-file-name emacsos-assist-web-git-workspace-directory)))))
-    (when (cl-some (lambda (buffer)
-                     (with-current-buffer buffer
-                       (and buffer-file-name
-                            (cl-some (lambda (root)
-                                       (string-prefix-p root
-                                                        (expand-file-name buffer-file-name)))
-                                     roots))))
-                   (buffer-list))
-      (user-error "Close buffers visiting Assist checkout files before moving it")))
+    (when (emacsos-assist-web-git--open-checkout-buffer-p roots)
+      (user-error "Close buffers using Assist checkouts before moving one")))
   (when (y-or-n-p "Move this thread's exact bound legacy checkout to ~/assist, keeping all files? ")
     (emacsos-assist-web-git--enqueue emacsos-assist-web-git--metadata t "migrate")))
 

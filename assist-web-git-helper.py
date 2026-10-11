@@ -38,6 +38,12 @@ REMOTE_PATH = re.compile(r"/[A-Za-z0-9._/~+-]+\Z")
 MAX_BUNDLE = 256 * 1024 * 1024
 MAX_FETCH_BYTES = 512 * 1024 * 1024
 MAX_OUTPUT = 1024 * 1024
+MAX_TREE_BYTES = 1024 * 1024 * 1024
+MAX_TREE_ENTRIES = 50000
+MIN_FREE_BYTES = 128 * 1024 * 1024
+MAX_ATTRIBUTE_FILES = 64
+TRANSFORM_ATTRIBUTE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:filter|ident|eol|text|working-tree-encoding)(?![A-Za-z0-9_-])")
 ACTIVE_GIT: subprocess.Popen | None = None
 
 
@@ -118,6 +124,7 @@ def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
            + " -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8")
     environment = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                   "GIT_ATTR_NOSYSTEM": "1",
                    "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0",
                    "GIT_ALLOW_PROTOCOL": "ssh", "GIT_SSH_COMMAND": ssh, "LC_ALL": "C"}
     return url, environment
@@ -128,6 +135,8 @@ def git(arguments: list[str], environment: dict[str, str], *, seconds: int = 30,
         allowed: tuple[int, ...] = (0,)) -> str:
     global ACTIVE_GIT
     command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+               "-c", "core.attributesFile=/dev/null", "-c", "core.autocrlf=false",
+               "-c", "core.eol=lf",
                "-c", "core.commitGraph=false", "-c", "core.multiPackIndex=false",
                "-c", "pack.useBitmaps=false", "-c", "push.useBitmaps=false",
                "-c", "gc.auto=0", "-c", "maintenance.auto=false",
@@ -278,6 +287,29 @@ def legacy_checkout(cache: Path, workspace_root: Path,
     return old
 
 
+def legacy_locks(cache: Path, repo_key: str, thread_id: str,
+                 old: Path) -> list[int]:
+    """Exclude refresh and explicit migration of one bound old checkout."""
+    lock_root = cache / "locks"
+    directory(lock_root)
+    physical = (old.name if old.parent == cache / "checkouts" else
+                "path-" + hashlib.sha256(os.fsencode(old)).hexdigest())
+    names = ("workspace-" + hashlib.sha256((repo_key + "\n" + thread_id).encode()).hexdigest(),
+             physical)
+    locks = []
+    try:
+        for name in names:
+            descriptor = os.open(lock_root / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                                 0o600)
+            locks.append(descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return locks
+    except BaseException:
+        for descriptor in locks:
+            os.close(descriptor)
+        raise
+
+
 def verify_checkout_bound(path: Path, environment: dict[str, str]) -> None:
     """Refuse Git metadata that can redirect work outside PATH."""
     metadata = path / ".git"
@@ -295,14 +327,14 @@ def verify_checkout_bound(path: Path, environment: dict[str, str]) -> None:
                     stack.append(Path(entry.path))
                 elif not entry.is_file(follow_symlinks=False):
                     raise Refusal("Checkout Git metadata is not regular storage")
-    for relative in ("commondir", "worktrees", "modules",
+    for relative in ("commondir", "worktrees", "modules", "info/attributes",
                      "objects/info/alternates", "config.worktree"):
         candidate = metadata / relative
         if candidate.exists() or candidate.is_symlink():
             raise Refusal("Path-dependent Git metadata prevents checkout sync")
     keys = git(["-C", str(path), "config", "--local", "--no-includes",
                 "--name-only", "--list"], environment, output_limit=65536).lower().splitlines()
-    if any(key == "core.worktree" or key == "include.path"
+    if any(key == "core.worktree" or key == "include.path" or key.startswith("filter.")
            or key.startswith("includeif.") or key == "extensions.worktreeconfig"
            for key in keys):
         raise Refusal("Path-dependent Git configuration prevents checkout sync")
@@ -371,6 +403,79 @@ def network_snapshot(source: str, branch: str, checkout: Path | None,
     return main, thread, bundle
 
 
+def require_checkout_capacity(repository: Path, revision: str,
+                              environment: dict[str, str]) -> None:
+    """Admit bounded ordinary blobs without checkout-time transformations."""
+    listing = git(["-C", str(repository), "-c", "core.quotePath=true", "ls-tree",
+                   "-r", "-t", "-l", revision], environment, seconds=30,
+                  output_limit=8 * 1024 * 1024)
+    total = 0
+    count = 0
+    attributes = []
+    for entry in listing.splitlines():
+        header, separator, path = entry.partition("\t")
+        fields = header.split()
+        if not separator or len(fields) != 4 or fields[1] not in {"blob", "commit", "tree"}:
+            raise Refusal("Published Git tree cannot be sized safely")
+        if fields[1] == "blob":
+            if not fields[3].isdigit():
+                raise Refusal("Published Git tree cannot be sized safely")
+            total += int(fields[3])
+            if path == ".gitattributes" or path.endswith(("/.gitattributes",
+                                                             '/.gitattributes"')):
+                attributes.append(fields[2])
+        count += 1
+        if total > MAX_TREE_BYTES or count > MAX_TREE_ENTRIES:
+            raise Refusal("Published Git checkout exceeds its size bound")
+    if len(attributes) > MAX_ATTRIBUTE_FILES:
+        raise Refusal("Published Git attributes exceed their inspection bound")
+    for blob in attributes:
+        try:
+            content = git(["-C", str(repository), "cat-file", "blob", blob],
+                          environment, output_limit=65536)
+        except UnicodeError as error:
+            raise Refusal("Published Git attributes are not inspectable") from error
+        if any(TRANSFORM_ATTRIBUTE.search(line) for line in content.splitlines()
+               if not line.lstrip().startswith("#")):
+            raise Refusal("Checkout transformations need an explicit Git pull")
+    filesystem = os.statvfs(repository)
+    if filesystem.f_files and filesystem.f_favail < count * 2 + 1024:
+        raise Refusal("Not enough free inodes for the published Git checkout")
+    if (filesystem.f_bavail * filesystem.f_frsize
+            < total * 4 + count * 8192 + MIN_FREE_BYTES):
+        raise Refusal("Not enough free space for the published Git checkout")
+
+
+def verify_worktree_attributes(checkout: Path) -> None:
+    """Hold automatic updates if local attribute files can transform blobs."""
+    stack, count, deadline = [checkout], 0, time.monotonic() + 10
+    while stack:
+        folder = stack.pop()
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                count += 1
+                if count > 100000 or time.monotonic() > deadline:
+                    raise Refusal("Local Git attribute scan exceeded its bound")
+                if folder == checkout and entry.name == ".git":
+                    continue
+                if entry.name == ".gitattributes":
+                    descriptor = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    try:
+                        info = os.fstat(descriptor)
+                        if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+                            raise Refusal("Local Git attributes are not inspectable")
+                        content = os.read(descriptor, 65537).decode("utf-8", "strict")
+                    except UnicodeError as error:
+                        raise Refusal("Local Git attributes are not inspectable") from error
+                    finally:
+                        os.close(descriptor)
+                    if any(TRANSFORM_ATTRIBUTE.search(line) for line in content.splitlines()
+                           if not line.lstrip().startswith("#")):
+                        raise Refusal("Local checkout transformations need an explicit Git pull")
+                elif entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+
+
 def sync(request: dict, config: Path | None = None, cache: Path | None = None) -> dict:
     repo_key, thread_id, branch = (request.get("repo_key"), request.get("thread_id"),
                                    request.get("branch"))
@@ -388,6 +493,9 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
     directory(checkout.parent)
     lock_path = checkout.parent / ("." + checkout.name + ".lock")
     lock = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    stage_context = None
+    legacy_lock_files = []
+    legacy = False
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         exists = existing_checkout(checkout, source, environment)
@@ -397,12 +505,24 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
             route = cache / "routes" / (route_id + ".json")
             legacy_id = hashlib.sha256(
                 (repo_key + "\n" + thread_id + "\n" + branch).encode()).hexdigest()
-            if (route.exists() or route.is_symlink()
-                    or (cache / "checkouts" / legacy_id).exists()):
-                raise Refusal("Existing legacy checkout needs explicit migration")
-        stage = checkout.with_name("." + checkout.name + ".initial")
-        if not exists and (stage.exists() or stage.is_symlink()):
+            if route.exists() or route.is_symlink():
+                old = legacy_checkout(cache, root, repo_key, thread_id)
+                legacy_lock_files = legacy_locks(cache, repo_key, thread_id, old)
+                if legacy_checkout(cache, root, repo_key, thread_id) != old:
+                    raise Refusal("Legacy checkout binding changed")
+                if not existing_checkout(old, source, environment):
+                    raise Refusal("Bound legacy checkout is missing")
+                checkout, exists, legacy = old, True, True
+            elif (cache / "checkouts" / legacy_id).exists():
+                raise Refusal("Unbound legacy checkout needs local inspection")
+        old_stage = checkout.with_name("." + checkout.name + ".initial")
+        abandoned = next(checkout.parent.glob("." + checkout.name + ".initial-*"), None)
+        if not exists and (old_stage.exists() or old_stage.is_symlink() or abandoned):
             raise Refusal("Interrupted initial checkout needs local inspection")
+        if not exists:
+            stage_context = tempfile.TemporaryDirectory(
+                prefix="." + checkout.name + ".initial-", dir=checkout.parent)
+        stage = Path(stage_context.name) if stage_context else None
         with tempfile.TemporaryDirectory(prefix="assist-git-fetch-") as temporary_name:
             temporary = Path(temporary_name)
             main, remote, bundle = network_snapshot(source, branch,
@@ -410,7 +530,6 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
                                                     environment, temporary)
             working = checkout if exists else stage
             if not exists:
-                working.mkdir(mode=0o700)
                 git(["init", "--quiet", "--template=", str(working)], environment)
                 git(["-C", str(working), "remote", "add", "origin", source], environment)
                 git(["-C", str(working), "config", "core.sshCommand",
@@ -423,6 +542,7 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
             git(["-C", str(working), "update-ref",
                  "refs/remotes/origin/" + branch, remote], environment)
             if not exists:
+                require_checkout_capacity(working, remote, environment)
                 git(["-C", str(working), "checkout", "-b", branch, remote], environment)
                 git(["-C", str(working), "branch", "--set-upstream-to=origin/" + branch,
                      branch], environment)
@@ -446,6 +566,8 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
                                    "unchanged. Commit your edits, then fetch and merge; or "
                                    "stash them, pull, and reapply the stash.")
                     else:
+                        verify_worktree_attributes(checkout)
+                        require_checkout_capacity(checkout, remote, environment)
                         git(["-C", str(checkout), "merge", "--ff-only", "--no-autostash",
                              "--no-overwrite-ignore", remote], environment, seconds=30)
                         local = git(["-C", str(checkout), "rev-parse", "HEAD^{commit}"],
@@ -456,12 +578,17 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
                     pending = "Local commits are not published; push or reconcile in Magit"
                 else:
                     pending = "Local and published commits diverged; reconcile in Magit"
-            return {"ok": True, "checkout_path": str(checkout), "branch": actual,
+            return {"ok": True, "checkout_path": str(checkout), "legacy": legacy,
+                    "branch": actual,
                     "local_oid": local, "thread_oid": remote, "main_oid": main,
                     "dirty": dirty, "status_short": status[:240], "pending": pending}
     except BlockingIOError as error:
         raise Refusal("Another Git operation owns this checkout") from error
     finally:
+        if stage_context is not None:
+            stage_context.cleanup()
+        for descriptor in legacy_lock_files:
+            os.close(descriptor)
         os.close(lock)
 
 
@@ -487,17 +614,8 @@ def migrate(request: dict, config: Path | None = None,
     if not existing_checkout(old, source, environment):
         raise Refusal("Bound legacy checkout is missing")
     verify_checkout_bound(old, environment)
-    lock_root = old_root / "locks"
-    directory(lock_root)
-    physical = (old.name if old.parent == old_root / "checkouts" else
-                "path-" + hashlib.sha256(os.fsencode(old)).hexdigest())
-    names = ("workspace-" + hashlib.sha256((repo_key + "\n" + thread_id).encode()).hexdigest(),
-             physical)
-    locks = [os.open(lock_root / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-             for name in names]
+    locks = legacy_locks(old_root, repo_key, thread_id, old)
     try:
-        for lock in locks:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if legacy_checkout(old_root, root, repo_key, thread_id) != old:
             raise Refusal("Legacy checkout binding changed")
         if not existing_checkout(old, source, environment):
@@ -522,6 +640,19 @@ def migrate(request: dict, config: Path | None = None,
             os.close(lock)
 
 
+def selected_legacy_root(request: dict) -> Path | None:
+    """Accept one user-owned, non-symlink legacy root from the Emacs setting."""
+    value = request.get("legacy_root")
+    if value is None:
+        return None
+    if (not isinstance(value, str) or len(value) > 4096
+            or not Path(value).is_absolute() or ".." in Path(value).parts):
+        raise Refusal("Legacy Git route root is invalid")
+    root = Path(value)
+    directory(root)
+    return root
+
+
 def main() -> None:
     os.umask(0o077)
     signal.signal(signal.SIGTERM, stop_on_signal)
@@ -532,9 +663,13 @@ def main() -> None:
         request = json.loads(raw)
         if not isinstance(request, dict) or request.get("action") not in {"sync", "migrate"}:
             raise Refusal("Git action is invalid")
-        response = sync(request) if request["action"] == "sync" else migrate(request)
-    except (OSError, ValueError, UnicodeError, Refusal) as error:
+        legacy_root = selected_legacy_root(request)
+        response = (sync(request, cache=legacy_root) if request["action"] == "sync"
+                    else migrate(request, cache=legacy_root))
+    except Refusal as error:
         response = {"ok": False, "error": str(error)[:256]}
+    except (OSError, ValueError, UnicodeError):
+        response = {"ok": False, "error": "Git checkout update unavailable; local work preserved"}
     sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
 
 

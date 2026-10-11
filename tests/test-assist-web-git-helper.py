@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +38,15 @@ def commit(root, name, body):
 
 
 class WorkspacePromotionTest(unittest.TestCase):
+    def test_old_cache_setting_before_package_load_is_preserved(self):
+        expression = ("(progn (setq emacsos-assist-web-git-cache-directory "
+                      "\"/tmp/custom-before-load\") (require 'assist-web-git) "
+                      "(princ emacsos-assist-web-git-legacy-directory))")
+        result = subprocess.run(["emacs", "-Q", "--batch", "-L", str(SCRIPT.parent),
+                                 "--eval", expression], check=True, capture_output=True,
+                                text=True)
+        self.assertEqual(result.stdout, "/tmp/custom-before-load")
+
     def test_native_promotion_does_not_replace_existing_destination(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -121,6 +131,118 @@ class CheckoutTest(unittest.TestCase):
         self.assertEqual((checkout / "phone.txt").read_text(), "explicit phone push\n")
         self.assertEqual(git("rev-parse", "refs/remotes/origin/main", cwd=checkout),
                          first["main_oid"])
+
+    def test_failed_initial_checkout_removes_stage_and_can_retry(self):
+        target = helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                      self.request["thread_id"])
+        with patch.object(helper, "network_snapshot", side_effect=helper.Refusal("interrupted")):
+            with self.assertRaisesRegex(helper.Refusal, "interrupted"):
+                helper.sync(self.request)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.glob("." + target.name + ".initial-*")), [])
+        self.assertTrue(helper.sync(self.request)["ok"])
+
+    def test_crash_leftover_stage_requires_inspection_without_duplication(self):
+        target = helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                      self.request["thread_id"])
+        target.parent.mkdir()
+        abandoned = target.parent / ("." + target.name + ".initial-old")
+        abandoned.mkdir()
+        (abandoned / "unfinished").write_text("preserve")
+        with self.assertRaisesRegex(helper.Refusal, "local inspection"):
+            helper.sync(self.request)
+        self.assertEqual((abandoned / "unfinished").read_text(), "preserve")
+        self.assertEqual(list(target.parent.glob("." + target.name + ".initial-*")),
+                         [abandoned])
+
+    def test_repeated_blob_paths_are_bounded_before_checkout(self):
+        seed = Path(self.temporary.name) / "seed"
+        blob = git("rev-parse", "HEAD:README", cwd=seed)
+        for number in range(20):
+            git("update-index", "--add", "--cacheinfo", "100644", blob,
+                "copy-" + str(number), cwd=seed)
+        git("-c", "user.name=Test", "-c", "user.email=test@localhost",
+            "commit", "-m", "repeated blob", cwd=seed)
+        git("push", "origin", "assist/thread", cwd=seed)
+        target = helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                      self.request["thread_id"])
+        with patch.object(helper, "MAX_TREE_BYTES", 100):
+            with self.assertRaisesRegex(helper.Refusal, "size bound"):
+                helper.sync(self.request)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.glob("." + target.name + ".initial-*")), [])
+        self.assertTrue(helper.sync(self.request)["ok"])
+
+    def test_fast_forward_size_refusal_preserves_checkout(self):
+        checkout = Path(helper.sync(self.request)["checkout_path"])
+        before = git("rev-parse", "HEAD", cwd=checkout)
+        commit(self.phone, "later.txt", "later\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        with patch.object(helper, "MAX_TREE_BYTES", 8):
+            with self.assertRaisesRegex(helper.Refusal, "size bound"):
+                helper.sync(self.request)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), before)
+        self.assertFalse((checkout / "later.txt").exists())
+
+    def test_no_free_inodes_hold_before_initial_checkout(self):
+        available = SimpleNamespace(f_files=1000, f_favail=0,
+                                    f_bavail=1000000, f_frsize=4096)
+        with patch.object(helper.os, "statvfs", return_value=available):
+            with self.assertRaisesRegex(helper.Refusal, "inodes"):
+                helper.sync(self.request)
+
+    def test_deep_directory_tree_counts_checkout_inodes(self):
+        seed = Path(self.temporary.name) / "seed"
+        deep = seed.joinpath(*(f"level-{number}" for number in range(20)))
+        deep.mkdir(parents=True)
+        (deep / "empty").write_bytes(b"")
+        git("add", ".", cwd=seed)
+        git("-c", "user.name=Test", "-c", "user.email=test@localhost",
+            "commit", "-m", "deep zero-byte tree", cwd=seed)
+        git("push", "origin", "assist/thread", cwd=seed)
+        with patch.object(helper, "MAX_TREE_ENTRIES", 10):
+            with self.assertRaisesRegex(helper.Refusal, "size bound"):
+                helper.sync(self.request)
+
+    def test_ignored_local_attributes_hold_clean_fast_forward(self):
+        checkout = Path(helper.sync(self.request)["checkout_path"])
+        before = git("rev-parse", "HEAD", cwd=checkout)
+        (checkout / ".git" / "info").mkdir(exist_ok=True)
+        with (checkout / ".git" / "info" / "exclude").open("a") as ignore:
+            ignore.write("\n.gitattributes\n")
+        (checkout / ".gitattributes").write_text("*.txt text eol=crlf\n")
+        self.assertEqual(git("status", "--porcelain", cwd=checkout), "")
+        commit(self.phone, "later.txt", "later\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        with self.assertRaisesRegex(helper.Refusal, "Local checkout transformations"):
+            helper.sync(self.request)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), before)
+        self.assertFalse((checkout / "later.txt").exists())
+
+    def test_checkout_transform_attributes_require_manual_git(self):
+        seed = Path(self.temporary.name) / "seed"
+        commit(seed, ".gitattributes", "*.txt text eol=crlf\n")
+        git("push", "origin", "assist/thread", cwd=seed)
+        target = helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                      self.request["thread_id"])
+        with self.assertRaisesRegex(helper.Refusal, "explicit Git pull"):
+            helper.sync(self.request)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.glob("." + target.name + ".initial-*")), [])
+        commit(seed, ".gitattributes", "*.txt linguist-language=Python\n")
+        git("push", "origin", "assist/thread", cwd=seed)
+        self.assertTrue(helper.sync(self.request)["ok"])
+
+    def test_local_filter_config_cannot_run_during_fast_forward(self):
+        checkout = Path(helper.sync(self.request)["checkout_path"])
+        marker = Path(self.temporary.name) / "filter-ran"
+        git("config", "filter.unsafe.smudge", "touch " + str(marker), cwd=checkout)
+        commit(self.phone, "later.txt", "later\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        with self.assertRaisesRegex(helper.Refusal, "configuration"):
+            helper.sync(self.request)
+        self.assertFalse(marker.exists())
+        self.assertFalse((checkout / "later.txt").exists())
 
     def test_dirty_and_unpushed_local_work_survive_refresh(self):
         checkout = Path(helper.sync(self.request)["checkout_path"])
@@ -286,8 +408,10 @@ class CheckoutTest(unittest.TestCase):
     def test_explicit_legacy_migration_preserves_dirty_bytes_and_index(self):
         cache, old = self.legacy_fixture()
         before_index = (old / ".git" / "index").read_bytes()
-        with self.assertRaisesRegex(helper.Refusal, "explicit migration"):
-            helper.sync(self.request, cache=cache)
+        refreshed = helper.sync(self.request, cache=cache)
+        self.assertEqual(refreshed["checkout_path"], str(old))
+        self.assertTrue(refreshed["legacy"])
+        self.assertTrue(refreshed["dirty"])
         self.assertTrue(old.exists())
         result = helper.migrate(self.request, cache=cache)
         checkout = Path(result["checkout_path"])
@@ -298,6 +422,96 @@ class CheckoutTest(unittest.TestCase):
         self.assertEqual(git("rev-parse", "HEAD", cwd=checkout),
                          git("rev-parse", "HEAD", cwd=self.phone))
         self.assertTrue(helper.sync(self.request, cache=cache)["ok"])
+
+    def test_custom_legacy_root_refreshes_bound_path_without_moving_it(self):
+        cache, old = self.legacy_fixture()
+        self.assertEqual(helper.selected_legacy_root({"legacy_root": str(cache)}), cache)
+        result = helper.sync(self.request, cache=cache)
+        self.assertEqual(result["checkout_path"], str(old))
+        self.assertTrue(result["legacy"])
+        self.assertTrue(old.exists())
+        self.assertFalse(helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                              self.request["thread_id"]).exists())
+
+    def test_old_named_workspace_fast_forwards_only_when_clean(self):
+        cache, old = self.legacy_fixture(relative=True)
+        before_index = (old / ".git" / "index").read_bytes()
+        phone_tip = commit(self.phone, "phone.txt", "phone commit\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        held = helper.sync(self.request, cache=cache)
+        self.assertEqual(held["checkout_path"], str(old))
+        self.assertNotEqual(held["local_oid"], phone_tip)
+        self.assertEqual((old / "draft.txt").read_text(), "unchanged private draft\n")
+        self.assertEqual((old / ".git" / "index").read_bytes(), before_index)
+        (old / "draft.txt").unlink()
+        advanced = helper.sync(self.request, cache=cache)
+        self.assertEqual(advanced["local_oid"], phone_tip)
+        self.assertEqual(advanced["checkout_path"], str(old))
+
+    def test_changed_legacy_binding_does_not_create_another_checkout(self):
+        cache, old = self.legacy_fixture(relative=True)
+        route_id = hashlib.sha256((self.request["repo_key"] + "\n"
+                                   + self.request["thread_id"]).encode()).hexdigest()
+        route = cache / "routes" / (route_id + ".json")
+        data = json.loads(route.read_text())
+        data["repo_key"] = "b" * 20
+        route.write_text(json.dumps(data))
+        with self.assertRaisesRegex(helper.Refusal, "not movable"):
+            helper.sync(self.request, cache=cache)
+        self.assertTrue(old.exists())
+        self.assertFalse(helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                              self.request["thread_id"]).exists())
+
+    def test_bound_legacy_target_missing_or_source_changed_holds_without_new_checkout(self):
+        cache, old = self.legacy_fixture(relative=True)
+        canonical = helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                         self.request["thread_id"])
+        git("remote", "set-url", "origin", str(self.source) + ".other", cwd=old)
+        with self.assertRaisesRegex(helper.Refusal, "another Git remote"):
+            helper.sync(self.request, cache=cache)
+        self.assertFalse(canonical.exists())
+        git("remote", "set-url", "origin", self.source, cwd=old)
+        old.rename(old.with_name("old-held-for-test"))
+        with self.assertRaisesRegex(helper.Refusal, "missing"):
+            helper.sync(self.request, cache=cache)
+        self.assertFalse(canonical.exists())
+
+    def test_interrupted_bound_refresh_retries_without_losing_local_commit(self):
+        cache, old = self.legacy_fixture(relative=True)
+        local_tip = commit(old, "local.txt", "unpublished user commit\n")
+        phone_tip = commit(self.phone, "phone.txt", "separate remote commit\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        with patch.object(helper, "network_snapshot", side_effect=helper.Refusal("interrupted")):
+            with self.assertRaisesRegex(helper.Refusal, "interrupted"):
+                helper.sync(self.request, cache=cache)
+        refreshed = helper.sync(self.request, cache=cache)
+        self.assertEqual(refreshed["checkout_path"], str(old))
+        self.assertEqual(refreshed["local_oid"], local_tip)
+        self.assertEqual(refreshed["thread_oid"], phone_tip)
+        self.assertIn("diverged", refreshed["pending"])
+        self.assertEqual((old / "draft.txt").read_text(), "unchanged private draft\n")
+
+    def test_real_helper_receipt_selects_bound_legacy_path_in_emacs(self):
+        cache, old = self.legacy_fixture(relative=True)
+        result = helper.sync(self.request, cache=cache)
+        metadata = ("'(:tid \"thread-1\" :repo-key \"" + self.request["repo_key"]
+                    + "\" :branch \"assist/thread\")")
+        expression = ("(progn (require 'assist-web) (require 'assist-web-git) "
+                      "(with-temp-buffer "
+                      f"(setq emacsos-assist-web-git-workspace-directory {json.dumps(str(self.workspaces))} "
+                      f"emacsos-assist-web-git-legacy-directory {json.dumps(str(cache))} "
+                      f"emacsos-assist-web-git--metadata {metadata}) "
+                      "(emacsos-assist-web-git--receive (current-buffer) "
+                      "emacsos-assist-web-git--metadata 0 "
+                      f"{json.dumps(json.dumps(result))} 0 nil) "
+                      "(unless (string-match-p \"local edits\" "
+                      "(emacsos-assist-web-git--thread-header)) "
+                      "(error \"Client missed local edits\")) "
+                      "(princ (emacsos-assist-web-git-local-directory))))")
+        client = subprocess.run(["emacs", "-Q", "--batch", "-L", str(SCRIPT.parent),
+                                 "--eval", expression], capture_output=True, text=True,
+                                check=True)
+        self.assertEqual(Path(client.stdout), old)
 
     def test_migration_refuses_existing_target_without_touching_legacy(self):
         cache, old = self.legacy_fixture()

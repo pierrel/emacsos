@@ -102,7 +102,8 @@
 
 (ert-deftest test-assist-web-git-diff-uses-actual-local-status ()
   (with-temp-buffer
-    (let ((emacsos-assist-web-git--result '((dirty . t)))
+    (let ((emacsos-assist-web-git--result '((dirty . nil)))
+          (live-status "?? draft.txt")
           (status nil) (range nil))
       (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory)
                  (lambda () "/tmp/checkout/"))
@@ -110,14 +111,66 @@
                  (lambda (directory) (setq status directory)))
                 ((symbol-function 'magit-diff-range)
                  (lambda (revision) (setq range revision)))
+                ((symbol-function 'process-file)
+                 (lambda (&rest _)
+                   (when live-status (insert live-status))
+                   0))
                 ((symbol-function 'require) (lambda (&rest _) t)))
         (emacsos-assist-web-git-diff)
         (should (equal status "/tmp/checkout/"))
         (should-not range)
-        (setq emacsos-assist-web-git--result '((dirty . nil)) status nil)
+        (setq emacsos-assist-web-git--result '((dirty . t))
+              live-status nil status nil)
         (emacsos-assist-web-git-diff)
         (should (equal range "refs/remotes/origin/main...HEAD"))
         (should-not status)))))
+
+(ert-deftest test-assist-web-git-diff-refuses-unknown-local-status ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'emacsos-assist-web-git-local-directory)
+               (lambda () "/tmp/checkout/"))
+              ((symbol-function 'process-file) (lambda (&rest _) 1)))
+      (should-error (emacsos-assist-web-git-diff) :type 'user-error))))
+
+(ert-deftest test-assist-web-git-legacy-cache-setting-still-selects-request-root ()
+  (with-temp-buffer
+    (let ((emacsos-assist-web-git-cache-directory "/tmp/custom-legacy")
+          request)
+      (cl-letf (((symbol-function 'executable-find) (lambda (_) "/tools/python3"))
+                ((symbol-function 'make-process) (lambda (&rest _) 'test-process))
+                ((symbol-function 'process-send-string)
+                 (lambda (_process payload) (setq request (json-parse-string payload))))
+                ((symbol-function 'process-send-eof) #'ignore))
+        (emacsos-assist-web-git--enqueue test-assist-web-git--metadata)
+        (should (equal (gethash "legacy_root" request) "/tmp/custom-legacy"))))))
+
+(ert-deftest test-assist-web-git-migration-sees-directory-and-symlink-buffers ()
+  (let* ((root (make-temp-file "assist-web-git-buffer-" t))
+         (checkout (expand-file-name "checkouts/old" root))
+         (alias (expand-file-name "alias" root))
+         (view (generate-new-buffer " *assist-git-magit-view*")))
+    (unwind-protect
+        (progn
+          (make-directory checkout t)
+          (make-symbolic-link checkout alias)
+          (with-current-buffer view
+            (setq default-directory (file-name-as-directory alias)))
+          (should (emacsos-assist-web-git--open-checkout-buffer-p
+                   (list (expand-file-name "checkouts" root)))))
+      (kill-buffer view)
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-migration-ignores-caller-and-remote-buffer ()
+  (let* ((root (make-temp-file "assist-web-git-buffer-" t))
+         (remote (generate-new-buffer " *assist-git-remote-view*")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq default-directory (file-name-as-directory root))
+          (with-current-buffer remote
+            (setq default-directory "/ssh:example.test:/home/user/"))
+          (should-not (emacsos-assist-web-git--open-checkout-buffer-p (list root))))
+      (kill-buffer remote)
+      (delete-directory root t))))
 
 (ert-deftest test-assist-web-git-stale-helper-cannot-select-another-thread ()
   (with-temp-buffer
@@ -130,6 +183,51 @@
        "{\"ok\":true,\"checkout_path\":\"/tmp/other\"}" 0 nil)
       (should-not emacsos-assist-web-git--result)
       (should-not emacsos-assist-web-git--unavailable))))
+
+(ert-deftest test-assist-web-git-bound-legacy-receipt-keeps-old-workspace ()
+  (let* ((root (make-temp-file "assist-git-legacy-" t))
+         (old (expand-file-name "life/old-thread" root))
+         (emacsos-assist-web-git-workspace-directory root))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" old) t)
+          (with-temp-buffer
+            (setq emacsos-assist-web-git--metadata test-assist-web-git--metadata)
+            (emacsos-assist-web-git--receive
+             (current-buffer) test-assist-web-git--metadata 0
+             (json-serialize `((ok . t) (legacy . t) (checkout_path . ,old))) 0 t)
+            (should (equal (emacsos-assist-web-git-local-directory)
+                           (file-name-as-directory old)))
+            (should-not emacsos-assist-web-git--unavailable)))
+      (delete-directory root t))))
+
+(ert-deftest test-assist-web-git-legacy-receipt-outside-selected-roots-is-rejected ()
+  (let* ((root (make-temp-file "assist-git-selected-" t))
+         (outside (make-temp-file "assist-git-outside-" t))
+         (emacsos-assist-web-git-workspace-directory root))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" outside))
+          (with-temp-buffer
+            (setq emacsos-assist-web-git--metadata test-assist-web-git--metadata)
+            (emacsos-assist-web-git--receive
+             (current-buffer) test-assist-web-git--metadata 0
+             (json-serialize `((ok . t) (legacy . t) (checkout_path . ,outside))) 0 t)
+            (should-not emacsos-assist-web-git--result)
+            (should (equal emacsos-assist-web-git--unavailable
+                           "checkout update unavailable; local work preserved"))))
+      (delete-directory root t)
+      (delete-directory outside t))))
+
+(ert-deftest test-assist-web-git-manual-refusal-shows-bounded-reason ()
+  (with-temp-buffer
+    (setq emacsos-assist-web-git--metadata test-assist-web-git--metadata)
+    (emacsos-assist-web-git--receive
+     (current-buffer) test-assist-web-git--metadata 0
+     "{\"ok\":false,\"error\":\"Bound legacy checkout is missing\"}" 0 t)
+    (should (equal emacsos-assist-web-git--unavailable
+                   "Bound legacy checkout is missing"))
+    (should-not emacsos-assist-web-git--result)))
 
 (ert-deftest test-assist-web-git-stale-epoch-cannot-clear-new-request ()
   (with-temp-buffer
