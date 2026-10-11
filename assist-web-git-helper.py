@@ -44,6 +44,7 @@ MIN_FREE_BYTES = 128 * 1024 * 1024
 MAX_ATTRIBUTE_FILES = 64
 TRANSFORM_ATTRIBUTE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:filter|ident|eol|text|working-tree-encoding)(?![A-Za-z0-9_-])")
+OLD_LITERAL_ATTRIBUTES = b"* -filter -ident -working-tree-encoding -text -eol\n"
 ACTIVE_GIT: subprocess.Popen | None = None
 
 
@@ -311,7 +312,7 @@ def legacy_locks(cache: Path, repo_key: str, thread_id: str,
 
 
 def verify_checkout_bound(path: Path, environment: dict[str, str]) -> None:
-    """Refuse Git metadata that can redirect work outside PATH."""
+    """Refuse path-redirecting Git metadata and unknown local attributes."""
     metadata = path / ".git"
     stack, count, deadline = [metadata], 0, time.monotonic() + 10
     while stack:
@@ -327,11 +328,26 @@ def verify_checkout_bound(path: Path, environment: dict[str, str]) -> None:
                     stack.append(Path(entry.path))
                 elif not entry.is_file(follow_symlinks=False):
                     raise Refusal("Checkout Git metadata is not regular storage")
-    for relative in ("commondir", "worktrees", "modules", "info/attributes",
+    for relative in ("commondir", "worktrees", "modules",
                      "objects/info/alternates", "config.worktree"):
         candidate = metadata / relative
         if candidate.exists() or candidate.is_symlink():
             raise Refusal("Path-dependent Git metadata prevents checkout sync")
+    attributes = metadata / "info" / "attributes"
+    if attributes.exists() or attributes.is_symlink():
+        try:
+            descriptor = os.open(attributes, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(descriptor)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_size != len(OLD_LITERAL_ATTRIBUTES)
+                        or os.read(descriptor, len(OLD_LITERAL_ATTRIBUTES) + 1)
+                        != OLD_LITERAL_ATTRIBUTES):
+                    raise Refusal("Unknown local Git attributes require an explicit Git pull")
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            raise Refusal("Local Git attributes are not inspectable") from error
     keys = git(["-C", str(path), "config", "--local", "--no-includes",
                 "--name-only", "--list"], environment, output_limit=65536).lower().splitlines()
     if any(key == "core.worktree" or key == "include.path" or key.startswith("filter.")

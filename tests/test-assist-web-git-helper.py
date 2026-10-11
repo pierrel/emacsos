@@ -117,15 +117,43 @@ class CheckoutTest(unittest.TestCase):
                         "repo_key": "a" * 20, "thread_id": "thread-1",
                         "branch": "assist/thread"}
 
+    def assert_client_receipt(self, result, *, path=None, header=None, error=None,
+                              cache=None):
+        metadata = ("'(:tid \"thread-1\" :repo-key \"" + self.request["repo_key"]
+                    + "\" :branch \"assist/thread\")")
+        expression = ("(progn (require 'assist-web) (require 'assist-web-git) "
+                      "(with-temp-buffer "
+                      f"(setq emacsos-assist-web-git-workspace-directory {json.dumps(str(self.workspaces))} "
+                      f"emacsos-assist-web-git-legacy-directory {json.dumps(str(cache or self.workspaces))} "
+                      f"emacsos-assist-web-git--metadata {metadata}) "
+                      "(emacsos-assist-web-git--receive (current-buffer) "
+                      "emacsos-assist-web-git--metadata 0 "
+                      f"{json.dumps(json.dumps(result))} 0 nil) "
+                      f"(unless (equal (and (emacsos-assist-web-git-local-directory) "
+                      f"(directory-file-name (emacsos-assist-web-git-local-directory))) "
+                      f"{json.dumps(str(path)) if path else 'nil'}) "
+                      "(error \"Client selected wrong checkout\")) "
+                      f"(unless (equal emacsos-assist-web-git--unavailable "
+                      f"{json.dumps(error) if error else 'nil'}) "
+                      "(error \"Client missed helper error\")) "
+                      + (f"(unless (string-match-p {json.dumps(header)} "
+                         "(emacsos-assist-web-git--thread-header)) "
+                         "(error \"Client missed Git status\")) " if header else "")
+                      + "))")
+        subprocess.run(["emacs", "-Q", "--batch", "-L", str(SCRIPT.parent),
+                        "--eval", expression], capture_output=True, text=True, check=True)
+
     def test_new_checkout_and_later_phone_push_fast_forward(self):
         first = helper.sync(self.request)
         checkout = Path(first["checkout_path"])
+        self.assert_client_receipt(first, path=checkout, header="Git: assist/thread")
         self.assertTrue(checkout.is_relative_to(self.workspaces))
         self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), first["thread_oid"])
         self.assertIsNone(first["pending"])
         phone_tip = commit(self.phone, "phone.txt", "explicit phone push\n")
         git("push", "origin", "assist/thread", cwd=self.phone)
         updated = helper.sync(self.request)
+        self.assert_client_receipt(updated, path=checkout, header="Git: assist/thread")
         self.assertEqual(updated["local_oid"], phone_tip)
         self.assertEqual(updated["thread_oid"], phone_tip)
         self.assertEqual((checkout / "phone.txt").read_text(), "explicit phone push\n")
@@ -140,7 +168,9 @@ class CheckoutTest(unittest.TestCase):
                 helper.sync(self.request)
         self.assertFalse(target.exists())
         self.assertEqual(list(target.parent.glob("." + target.name + ".initial-*")), [])
-        self.assertTrue(helper.sync(self.request)["ok"])
+        recovered = helper.sync(self.request)
+        self.assertTrue(recovered["ok"])
+        self.assert_client_receipt(recovered, path=Path(recovered["checkout_path"]))
 
     def test_crash_leftover_stage_requires_inspection_without_duplication(self):
         target = helper.checkout_path(self.workspaces, self.request["repo_key"],
@@ -433,18 +463,73 @@ class CheckoutTest(unittest.TestCase):
         self.assertFalse(helper.checkout_path(self.workspaces, self.request["repo_key"],
                                               self.request["thread_id"]).exists())
 
+    def test_old_literal_attributes_policy_refreshes_bound_checkout_in_place(self):
+        cache, old = self.legacy_fixture(relative=True)
+        attributes = old / ".git" / "info" / "attributes"
+        attributes.write_bytes(helper.OLD_LITERAL_ATTRIBUTES)
+        (old / "draft.txt").unlink()
+        phone_tip = commit(self.phone, "phone.txt", "phone edit\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        result = helper.sync(self.request, cache=cache)
+        self.assertEqual(result["checkout_path"], str(old))
+        self.assertEqual(result["local_oid"], phone_tip)
+        self.assert_client_receipt(result, path=old, header="Git: assist/thread", cache=cache)
+        self.assertFalse(result["dirty"])
+        self.assertTrue(attributes.exists())
+        self.assertEqual(attributes.read_bytes(), helper.OLD_LITERAL_ATTRIBUTES)
+        self.assertFalse(helper.checkout_path(self.workspaces, self.request["repo_key"],
+                                              self.request["thread_id"]).exists())
+
+    def test_changed_local_info_attributes_hold_checkout_unchanged(self):
+        cache, old = self.legacy_fixture(relative=True)
+        attributes = old / ".git" / "info" / "attributes"
+        attributes.write_bytes(helper.OLD_LITERAL_ATTRIBUTES + b"*.txt filter=unsafe\n")
+        before = git("rev-parse", "HEAD", cwd=old)
+        phone_tip = commit(self.phone, "phone.txt", "phone edit\n")
+        git("push", "origin", "assist/thread", cwd=self.phone)
+        with self.assertRaisesRegex(helper.Refusal, "Unknown local Git attributes") as caught:
+            helper.sync(self.request, cache=cache)
+        self.assert_client_receipt({"ok": False, "error": str(caught.exception)},
+                                   error=str(caught.exception), cache=cache)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=old), before)
+        self.assertNotEqual(before, phone_tip)
+        self.assertFalse((old / "phone.txt").exists())
+
+    def test_hardlinked_old_attributes_policy_is_not_admitted(self):
+        cache, old = self.legacy_fixture(relative=True)
+        attributes = old / ".git" / "info" / "attributes"
+        attributes.write_bytes(helper.OLD_LITERAL_ATTRIBUTES)
+        os.link(attributes, Path(self.temporary.name) / "attributes-alias")
+        with self.assertRaisesRegex(helper.Refusal, "Unknown local Git attributes"):
+            helper.sync(self.request, cache=cache)
+        self.assertTrue(old.exists())
+
+    def test_old_checkout_on_other_branch_stays_usable_without_switching(self):
+        cache, old = self.legacy_fixture(relative=True)
+        (old / ".git" / "info" / "attributes").write_bytes(
+            helper.OLD_LITERAL_ATTRIBUTES)
+        (old / "draft.txt").unlink()
+        git("switch", "-c", "assist/earlier", cwd=old)
+        result = helper.sync(self.request, cache=cache)
+        self.assertEqual(result["branch"], "assist/earlier")
+        self.assertIn("select the thread branch", result["pending"])
+        self.assert_client_receipt(result, path=old, header="update pending", cache=cache)
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD", cwd=old), "assist/earlier")
+
     def test_old_named_workspace_fast_forwards_only_when_clean(self):
         cache, old = self.legacy_fixture(relative=True)
         before_index = (old / ".git" / "index").read_bytes()
         phone_tip = commit(self.phone, "phone.txt", "phone commit\n")
         git("push", "origin", "assist/thread", cwd=self.phone)
         held = helper.sync(self.request, cache=cache)
+        self.assert_client_receipt(held, path=old, header="local edits", cache=cache)
         self.assertEqual(held["checkout_path"], str(old))
         self.assertNotEqual(held["local_oid"], phone_tip)
         self.assertEqual((old / "draft.txt").read_text(), "unchanged private draft\n")
         self.assertEqual((old / ".git" / "index").read_bytes(), before_index)
         (old / "draft.txt").unlink()
         advanced = helper.sync(self.request, cache=cache)
+        self.assert_client_receipt(advanced, path=old, header="Git: assist/thread", cache=cache)
         self.assertEqual(advanced["local_oid"], phone_tip)
         self.assertEqual(advanced["checkout_path"], str(old))
 
@@ -485,6 +570,7 @@ class CheckoutTest(unittest.TestCase):
             with self.assertRaisesRegex(helper.Refusal, "interrupted"):
                 helper.sync(self.request, cache=cache)
         refreshed = helper.sync(self.request, cache=cache)
+        self.assert_client_receipt(refreshed, path=old, header="update pending", cache=cache)
         self.assertEqual(refreshed["checkout_path"], str(old))
         self.assertEqual(refreshed["local_oid"], local_tip)
         self.assertEqual(refreshed["thread_oid"], phone_tip)
