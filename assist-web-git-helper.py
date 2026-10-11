@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Bounded, noninteractive Git work for the Assist thread checkout.
+"""Fetch approved thread refs into an ordinary user-owned checkout.
 
-Sync validates the client request and resolves the remote from private device
-configuration. An explicit move only renames a bound local checkout. Neither
-operation emits a URL, SSH diagnostic, or credential material.
+The disposable bare repository owns network credentials. Repository-local Git
+configuration is never read by a credentialed command. Existing checkout files,
+index and branch are changed only by Git's clean fast-forward operation.
 """
 
+from __future__ import annotations
+
 import fcntl
+import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import resource
 import selectors
 import shlex
-import shutil
 import signal
 import stat
 import subprocess
@@ -25,965 +29,664 @@ import time
 from urllib.parse import urlsplit
 
 
-KEY_RE = re.compile(r"[0-9a-f]{20}\Z")
-ID_RE = re.compile(r"[0-9a-f]{32}\Z")
-OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*\Z")
-USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
-PATH_RE = re.compile(r"/[A-Za-z0-9._/~+-]+\Z")
-OBJECT_LIMIT = 256 * 1024 * 1024
-WORKTREE_LIMIT = 64 * 1024 * 1024
-TOTAL_LIMIT = 512 * 1024 * 1024
-FREE_MARGIN = 512 * 1024 * 1024
-FILE_LIMIT = 10000
+KEY = re.compile(r"[0-9a-f]{20}\Z")
+THREAD = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+OID = re.compile(r"[0-9a-f]{40}\Z")
+HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*\Z")
+USER = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
+REMOTE_PATH = re.compile(r"/[A-Za-z0-9._/~+-]+\Z")
+MAX_BUNDLE = 256 * 1024 * 1024
+MAX_FETCH_BYTES = 512 * 1024 * 1024
+MAX_OUTPUT = 1024 * 1024
+MAX_TREE_BYTES = 1024 * 1024 * 1024
+MAX_TREE_ENTRIES = 50000
+MIN_FREE_BYTES = 128 * 1024 * 1024
+MAX_ATTRIBUTE_FILES = 64
+TRANSFORM_ATTRIBUTE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:filter|ident|eol|text|working-tree-encoding)(?![A-Za-z0-9_-])")
+OLD_LITERAL_ATTRIBUTES = b"* -filter -ident -working-tree-encoding -text -eol\n"
 ACTIVE_GIT: subprocess.Popen | None = None
-OPERATION_LOCK: int | None = None
 
 
 class Refusal(Exception):
-    """A safe, bounded reason to decline a checkout operation."""
+    """A bounded, user-visible reason to preserve the checkout unchanged."""
 
 
-class WorkspaceChoice(Refusal):
-    """A bounded local choice, not authority to replace an existing workspace."""
-
-    def __init__(self, choices: list[dict]):
-        super().__init__("existing workspace needs local choice")
-        self.choices = choices
-
-
-def workspace_directory(path: Path) -> None:
-    """Create an owned directory, never follow symlinks or chmod existing work."""
-    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
-        raise Refusal("workspace directory is invalid")
-    if not path.exists():
-        workspace_directory(path.parent)
-        path.mkdir(mode=0o700, exist_ok=True)
-    info = path.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-            or info.st_mode & 0o022):
-        raise Refusal("workspace directory is invalid")
-
-
-def workspace_slug(value: object, fallback: str) -> str:
-    """Return one bounded filename component; labels are never source authority."""
-    if not isinstance(value, str) or len(value.encode()) > 4096:
-        return fallback
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:48].rstrip("-") or fallback
-
-
-def stable_identity(repo_key: str, tid: str) -> str:
-    return hashlib.sha256((repo_key + "\n" + tid).encode()).hexdigest()
-
-
-def route_path(record: dict, root: Path, workspaces: Path,
-               repo_key: str, tid: str) -> Path:
-    """Resolve an exact identity's private route under one of two fixed anchors."""
-    if (not isinstance(record, dict) or record.get("repo_key") != repo_key
-            or record.get("thread_id") != tid):
-        raise Refusal("workspace binding is invalid")
-    initialized = record.get("initialized")
-    if initialized is not False and initialized is not True and initialized not in ("installing", "moving"):
-        raise Refusal("workspace binding is invalid")
-    legacy = record.get("legacy")
-    relative = record.get("relative")
-    if (initialized == "moving" and isinstance(legacy, str)
-            and re.fullmatch(r"[0-9a-f]{64}", legacy)
-            and isinstance(relative, str)
-            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)
-            and relative.endswith("-" + stable_identity(repo_key, tid)[:12])
-            and type(record.get("source_device")) is int
-            and type(record.get("source_inode")) is int):
-        return root / "checkouts" / legacy
-    if initialized == "moving":
-        raise Refusal("workspace binding is invalid")
-    if isinstance(legacy, str) and re.fullmatch(r"[0-9a-f]{64}", legacy) and relative is None:
-        return root / "checkouts" / legacy
-    if (legacy is None and isinstance(relative, str)
-            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)
-            and relative.endswith("-" + stable_identity(repo_key, tid)[:12])):
-        return workspaces / relative
-    raise Refusal("workspace binding is invalid")
-
-
-def read_route(path: Path) -> dict:
-    if path.lstat().st_size > 2048:
-        raise Refusal("workspace binding is invalid")
-    return json.loads(private_file(path), object_pairs_hook=unique_object)
-
-
-def write_route(path: Path, record: dict) -> None:
-    """Atomically publish only private binding metadata, never workspace bytes."""
-    descriptor, temporary = tempfile.mkstemp(prefix=".route-", dir=path.parent)
+def private_file(path: Path, limit: int = 65536) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        with os.fdopen(descriptor, "w") as output:
-            json.dump(record, output)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def sync_directory(path: Path) -> None:
-    """Make a completed route or same-filesystem rename durable."""
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_size > limit):
+            raise Refusal("Git credential configuration is not private")
+        data = os.read(descriptor, limit + 1)
+        if len(data) > limit:
+            raise Refusal("Git credential configuration is too large")
+        return data
     finally:
         os.close(descriptor)
 
 
-def verify_relocatable(source: Path) -> None:
-    """Refuse Git metadata whose paths could change meaning after relocation."""
-    gitdir = source / ".git"
-    if not gitdir.is_dir() or gitdir.is_symlink():
-        raise Refusal("legacy workspace Git directory is invalid")
-    if ((gitdir / "worktrees").exists() or (gitdir / "worktrees").is_symlink()
-            or (gitdir / "modules").exists() or (gitdir / "modules").is_symlink()
-            or (gitdir / "objects" / "info" / "alternates").exists()
-            or (gitdir / "objects" / "info" / "alternates").is_symlink()
-            or (gitdir / "config.worktree").exists()
-            or (gitdir / "config.worktree").is_symlink()):
-        raise Refusal("path-dependent Git metadata prevents moving")
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/dev/null",
-           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-           "LC_ALL": "C"}
-    keys = git(["-C", str(source), "config", "--local", "--no-includes",
-                "--name-only", "--list"], env, seconds=2,
-               output_limit=65536).lower().splitlines()
-    if any(key == "core.worktree" or key == "include.path"
-           or key.startswith("includeif.") or key == "extensions.worktreeconfig"
-           for key in keys):
-        raise Refusal("Git configuration contains an external worktree path")
-    if git(["-C", str(source), "rev-parse", "--show-toplevel"], env, seconds=2) != str(source):
-        raise Refusal("Git worktree root differs from workspace")
-
-
-def workspace_bindings(root: Path, workspaces: Path) -> dict[Path, str]:
-    """Read bounded valid bindings, refusing duplicate physical ownership."""
-    bindings = {}
-    for index, route in enumerate((root / "routes").glob("*.json")):
-        if index >= FILE_LIMIT:
-            raise Refusal("workspace binding inventory exceeds its limit")
-        record = read_route(route)
-        if not isinstance(record, dict):
-            raise Refusal("workspace binding is invalid")
-        repo_key, tid = record.get("repo_key"), record.get("thread_id")
-        if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
-                or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)):
-            raise Refusal("workspace binding is invalid")
-        identity = stable_identity(repo_key, tid)
-        if route.name != identity + ".json":
-            raise Refusal("workspace binding is invalid")
-        checkout = route_path(record, root, workspaces, repo_key, tid)
-        if checkout in bindings:
-            raise Refusal("workspace is already bound to another thread")
-        bindings[checkout] = identity
-        if record.get("initialized") == "moving":
-            destination = workspaces / record["relative"]
-            if destination in bindings:
-                raise Refusal("workspace is already bound to another thread")
-            bindings[destination] = identity
-    return bindings
-
-
-def physical_lock(checkout: Path, legacy: str | None) -> str:
-    """Keep old physical locks; new locks depend on the path, not the thread."""
-    return legacy or "path-" + hashlib.sha256(os.fsencode(checkout)).hexdigest()
-
-
-def legacy_choices(root: Path, url: str, env: dict, bindings: dict[Path, str]) -> list[dict]:
-    """Inspect only bounded old managed paths, disclosing no configured URL."""
-    choices = []
-    for index, entry in enumerate((root / "checkouts").iterdir()):
-        if index >= FILE_LIMIT:
-            raise Refusal("legacy workspace inventory exceeds its limit")
-        if not re.fullmatch(r"[0-9a-f]{64}", entry.name):
-            continue
-        if entry in bindings:
-            continue
-        private_directory(entry)
-        if not (entry / ".git").is_dir() or (entry / ".git").is_symlink():
-            raise Refusal("legacy workspace source is unavailable")
-        if git(["-C", str(entry), "remote", "get-url", "origin"], env, seconds=2) == url:
-            branch = git(["-C", str(entry), "rev-parse", "--abbrev-ref", "HEAD"], env, seconds=2)
-            if branch == "HEAD":
-                branch = "detached"
-            choices.append({"identity": entry.name,
-                            "branch": re.sub(r"[^A-Za-z0-9._/-]", "?", branch)[:48]})
-            if len(choices) > 16:
-                raise Refusal("legacy workspace inventory exceeds its limit")
-    return choices
-
-
-def allocate_workspace(request: dict, root: Path, workspaces: Path,
-                       repo_key: str, tid: str, branch: str, url: str, env: dict) -> tuple[Path, str]:
-    """Freeze one path, registering legacy work in place without changing Git bytes."""
-    identity = stable_identity(repo_key, tid)
-    routes = root / "routes"
-    private_directory(routes)
-    bindings = workspace_bindings(root, workspaces)
-    route = routes / (identity + ".json")
-    if route.exists() or route.is_symlink():
-        record = read_route(route)
-        checkout = route_path(record, root, workspaces, repo_key, tid)
-        if record.get("initialized") == "moving":
-            raise Refusal("workspace move interrupted; use Move workspace to resume")
-        if record.get("initialized") == "installing":
-            # Recovery runs after both identity and physical locks are held.
-            return checkout, physical_lock(checkout, record.get("legacy"))
-        if record.get("initialized") is False and (checkout.exists() or checkout.is_symlink()):
-            raise Refusal("workspace destination already exists; local work preserved")
-        if record.get("initialized") is not False and not checkout.exists():
-            raise Refusal("bound workspace missing; restore its existing path")
-        return checkout, physical_lock(checkout, record.get("legacy"))
-    legacy = hashlib.sha256((repo_key + "\n" + tid + "\n" + branch).encode()).hexdigest()
-    choice = request.get("workspace_choice")
-    if choice is not None and (not isinstance(choice, str)
-                               or (choice != "new" and not re.fullmatch(r"[0-9a-f]{64}", choice))):
-        raise Refusal("workspace choice is invalid")
-    if (root / "checkouts" / legacy).exists():
-        choice = None  # An exact known existing workspace is never replaced.
-    if choice is None and not (root / "checkouts" / legacy).exists():
-        choices = legacy_choices(root, url, env, bindings)
-        if choices:
-            raise WorkspaceChoice(choices)
-    elif choice != "new":
-        legacy = choice or legacy
-        if choice is not None and not (root / "checkouts" / legacy).exists():
-            raise Refusal("chosen legacy workspace is unavailable")
-    if choice == "new" or not (root / "checkouts" / legacy).exists():
-        relative = (workspace_slug(request.get("repo_label"), "repo") + "/"
-                    + workspace_slug(request.get("thread_label"), "thread") + "-" + identity[:12])
-        record = {"repo_key": repo_key, "thread_id": tid, "legacy": None,
-                  "relative": relative, "initialized": False}
-        checkout = route_path(record, root, workspaces, repo_key, tid)
-        workspace_directory(checkout.parent)
-        if checkout.exists() or checkout.is_symlink():
-            raise Refusal("workspace destination already exists; local work preserved")
-    else:
-        record = {"repo_key": repo_key, "thread_id": tid, "legacy": legacy,
-                  "relative": None, "initialized": True}
-        checkout = route_path(record, root, workspaces, repo_key, tid)
-        private_directory(checkout)
-        if not (checkout / ".git").is_dir() or (checkout / ".git").is_symlink():
-            raise Refusal("legacy workspace Git directory is invalid")
-        if git(["-C", str(checkout), "remote", "get-url", "origin"], env, seconds=2) != url:
-            raise Refusal("legacy workspace remote differs from configured repository")
-    # Serialize only metadata publication, never the legacy Git inventory.
-    with os.fdopen(os.open(root / "locks" / "workspace-bindings",
-                           os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "rb") as publication:
-        try:
-            fcntl.flock(publication.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refusal("another Git operation is allocating a workspace") from exc
-        if checkout in workspace_bindings(root, workspaces):
-            raise Refusal("workspace is already bound to another thread")
-        if route.exists() or route.is_symlink():
-            raise Refusal("workspace binding changed; Refresh to retry")
-        # Atomic publication freezes allocation even if the following fetch fails.
-        write_route(route, record)
-    return checkout, physical_lock(checkout, record.get("legacy"))
-
-
-def private_file(path: Path, *, nonempty: bool = False) -> bytes:
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-        raise Refusal("private configuration owner or type is invalid")
-    if stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
-        raise Refusal("private configuration must be mode 0600")
-    if info.st_size > 65536 or (nonempty and info.st_size == 0):
-        raise Refusal("private configuration size is invalid")
-    return path.read_bytes()
-
-
-def private_directory(path: Path) -> None:
+def directory(path: Path) -> None:
+    """Admit or create only user-owned directories without symlink parents."""
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
-        raise Refusal("Git metadata directory is invalid")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        raise Refusal("Git workspace path is not a private directory")
+    if not path.exists():
+        directory(path.parent)
+        path.mkdir(mode=0o700)
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-            or stat.S_IMODE(info.st_mode) != 0o700):
-        raise Refusal("Git cache directory must be private mode 0700")
+            or info.st_mode & 0o022):
+        raise Refusal("Git workspace path is not a private directory")
 
 
-def promote_workspace(stage: Path, checkout: Path) -> None:
-    """Atomically move a directory without replacing any user path."""
-    try:
-        import ctypes
-        libc = ctypes.CDLL(None, use_errno=True)
-    except ImportError as exc:
-        raise Refusal("atomic workspace promotion unavailable") from exc
-    if sys.platform == "darwin":
-        try:
-            rename = libc.renamex_np
-        except AttributeError as exc:
-            raise Refusal("atomic workspace promotion unavailable") from exc
-        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
-        rename.restype = ctypes.c_int
-        # Darwin sys/stdio.h RENAME_EXCL: preserve every existing destination.
-        result = rename(os.fsencode(stage), os.fsencode(checkout), 4)
-    else:
-        arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(stage)),
-                     ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(checkout)), ctypes.c_uint(1))
-        # Linux AT_FDCWD and RENAME_NOREPLACE: no overwrite, including empty dirs.
-        try:
-            rename = libc.renameat2
-        except AttributeError:
-            # musl may omit the libc wrapper; these are the supported Linux devices.
-            number = ({"aarch64": 276, "x86_64": 316}.get(platform.machine())
-                      if sys.platform == "linux" and ctypes.sizeof(ctypes.c_void_p) == 8 else None)
-            if number is None:
-                raise Refusal("atomic workspace promotion unavailable")
-            libc.syscall.restype = ctypes.c_long
-            result = libc.syscall(ctypes.c_long(number), *arguments)
-        else:
-            rename.restype = ctypes.c_int
-            result = rename(*arguments)
-    if result:
-        import errno
-        error = ctypes.get_errno()
-        if error == errno.EEXIST:
-            raise Refusal("workspace destination already exists; local work preserved")
-        if error == errno.ENOSYS:
-            raise Refusal("atomic workspace promotion unavailable")
-        raise OSError(error, "workspace promotion failed")
-
-
-def finish_initialization(request: dict, route: Path, checkout: Path,
-                          stage: Path, url: str, env: dict) -> bool:
-    """Resume only the same prepared directory, under both checkout locks.
-
-    Old markers without inode proof require an explicit empty-path recovery;
-    their occupied paths remain untouched. Recovery never repeats Git checkout.
-    """
-    record = read_route(route)
-    if record.get("initialized") != "installing":
-        if request.get("recover_initialization") is True:
-            raise Refusal("workspace is not an interrupted initialization")
-        return False
-    if request.get("allow_initialization") is False:
-        raise Refusal("local staging view is open; initialization pending")
-    proof = (record.get("installation_device"), record.get("installation_inode"))
-    staged, installed = stage.exists() or stage.is_symlink(), checkout.exists() or checkout.is_symlink()
-    if all(key not in record for key in ("installation_device", "installation_inode", "installation_branch")):
-        if request.get("recover_initialization") is True and not staged and not installed:
-            write_route(route, {**record, "initialized": False})
-            sync_directory(route.parent)
-            return True
-        raise Refusal("workspace initialization interrupted; local files preserved")
-    if (not all(type(value) is int and value > 0 for value in proof)
-            or not isinstance(record.get("installation_branch"), str)):
-        raise Refusal("workspace initialization proof is invalid; local files preserved")
-    if request.get("recover_initialization") is True:
-        raise Refusal("workspace initialization contains retained work; normal Refresh resumes it")
-    if staged == installed:
-        raise Refusal("workspace initialization interrupted: paths changed; local files preserved")
-    present = stage if staged else checkout
-    workspace_directory(present)
-    info = present.lstat()
-    if ((info.st_dev, info.st_ino) != proof or (present / ".git").is_symlink()
-            or not (present / ".git").is_dir()):
-        raise Refusal("workspace initialization identity changed; local files preserved")
-    if git(["-C", str(present), "remote", "get-url", "origin"], env) != url:
-        raise Refusal("checkout remote differs from the configured repository")
-    if staged:
-        verify_relocatable(stage)
-        if git(["-C", str(stage), "symbolic-ref", "--short", "HEAD"], env) != record["installation_branch"]:
-            raise Refusal("initial checkout branch changed; local files preserved")
-        promote_workspace(stage, checkout)
-    sync_directory(checkout.parent)
-    record["initialized"] = True
-    for key in ("installation_device", "installation_inode", "installation_branch"):
-        record.pop(key, None)
-    write_route(route, record)
-    sync_directory(route.parent)
-    return False
-
-
-def migrate_workspace(request: dict) -> dict:
-    """Move one explicitly selected bound legacy checkout, preserving its inode."""
-    repo_key, tid = request.get("repo_key"), request.get("thread_id")
-    raw_root, raw_workspaces = request.get("cache_root"), request.get("workspace_root")
-    if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
-            or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)
-            or not isinstance(raw_root, str) or not isinstance(raw_workspaces, str)
-            or not Path(raw_root).is_absolute() or not Path(raw_workspaces).is_absolute()
-            or ".." in Path(raw_root).parts or ".." in Path(raw_workspaces).parts):
-        raise Refusal("workspace move request is invalid")
-    root, workspaces = Path(raw_root), Path(raw_workspaces)
-    identity = stable_identity(repo_key, tid)
-    private_directory(root)
-    private_directory(root / "routes")
-    private_directory(root / "checkouts")
-    private_directory(root / "locks")
-    route = root / "routes" / (identity + ".json")
-    allocation = os.open(root / "locks" / ("workspace-" + identity),
-                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        try:
-            fcntl.flock(allocation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refusal("another Git operation is still using this checkout") from exc
-        record = read_route(route)
-        if (not isinstance(record, dict) or record.get("repo_key") != repo_key
-                or record.get("thread_id") != tid
-                or not isinstance(record.get("legacy"), str)
-                or not re.fullmatch(r"[0-9a-f]{64}", record["legacy"])
-                or record.get("initialized") not in (True, "moving")):
-            raise Refusal("only a bound legacy workspace can be moved")
-        source = root / "checkouts" / record["legacy"]
-        if request.get("checkout_path") != str(source):
-            raise Refusal("workspace move binding changed")
-        physical = os.open(root / "locks" / record["legacy"],
-                           os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        publication = None
-        try:
-            try:
-                fcntl.flock(physical, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise Refusal("another Git operation is still using this checkout") from exc
-            fresh = record["initialized"] is True
-            if fresh:
-                if record.get("relative") is not None:
-                    raise Refusal("workspace binding is invalid")
-                if not source.exists() or source.is_symlink():
-                    raise Refusal("legacy workspace source is unavailable")
-                private_directory(source)
-                verify_relocatable(source)
-                relative = (workspace_slug(request.get("repo_label"), "repo") + "/"
-                            + workspace_slug(request.get("thread_label"), "thread")
-                            + "-" + identity[:12])
-                destination = workspaces / relative
-                workspace_directory(destination.parent)
-                sync_directory(destination.parent)
-                sync_directory(workspaces)
-                sync_directory(workspaces.parent)
-                if source.stat().st_dev != destination.parent.stat().st_dev:
-                    raise Refusal("workspace move requires one filesystem")
-                if destination.exists() or destination.is_symlink():
-                    raise Refusal("workspace destination already exists; local work preserved")
-                info = source.lstat()
-                record = {**record, "relative": relative, "initialized": "moving",
-                          "source_device": info.st_dev, "source_inode": info.st_ino}
-            else:
-                route_path(record, root, workspaces, repo_key, tid)
-                relative = record["relative"]
-                destination = workspaces / relative
-                workspace_directory(destination.parent)
-                sync_directory(destination.parent)
-                sync_directory(workspaces)
-                sync_directory(workspaces.parent)
-                if source.exists() and not destination.exists():
-                    verify_relocatable(source)
-            publication = os.open(root / "locks" / "workspace-bindings",
-                                  os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            try:
-                fcntl.flock(publication, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise Refusal("another Git operation is allocating a workspace") from exc
-            bindings = workspace_bindings(root, workspaces)
-            if (bindings.get(source) != identity
-                    or bindings.get(destination) not in (None, identity)):
-                raise Refusal("workspace is already bound to another thread")
-            if not fresh and bindings.get(destination) != identity:
-                raise Refusal("workspace move binding changed")
-            if fresh and (destination.exists() or destination.is_symlink()):
-                raise Refusal("workspace destination already exists; local work preserved")
-            if fresh:
-                write_route(route, record)
-                sync_directory(route.parent)
-            source_exists = source.exists() or source.is_symlink()
-            destination_exists = destination.exists() or destination.is_symlink()
-            if source_exists == destination_exists:
-                raise Refusal("workspace move interrupted; local files preserved")
-            present = source if source_exists else destination
-            info = present.lstat()
-            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-                    or info.st_dev != record["source_device"]
-                    or info.st_ino != record["source_inode"]
-                    or (present / ".git").is_symlink()
-                    or not (present / ".git").is_dir()):
-                raise Refusal("workspace move identity changed; local files preserved")
-            if source_exists:
-                if source.stat().st_dev != destination.parent.stat().st_dev:
-                    raise Refusal("workspace move requires one filesystem")
-                promote_workspace(source, destination)
-                sync_directory(source.parent)
-                sync_directory(destination.parent)
-            write_route(route, {"repo_key": repo_key, "thread_id": tid,
-                                "legacy": None, "relative": relative,
-                                "initialized": True})
-            sync_directory(route.parent)
-            return {"ok": True, "checkout_path": str(destination)}
-        finally:
-            if publication is not None:
-                os.close(publication)
-            os.close(physical)
-    finally:
-        os.close(allocation)
-
-
-def remote_url(value: str) -> str:
+def approved_url(value: object) -> str:
     if not isinstance(value, str) or len(value) > 512 or any(
             ord(char) < 33 or ord(char) > 126 for char in value):
-        raise Refusal("repository URL is invalid")
+        raise Refusal("Git repository map is invalid")
     parsed = urlsplit(value)
     try:
         port = parsed.port
-    except ValueError as exc:
-        raise Refusal("repository URL port is invalid") from exc
+    except ValueError as error:
+        raise Refusal("Git repository map is invalid") from error
     if (parsed.scheme != "ssh" or not parsed.username or parsed.password
             or not parsed.hostname or parsed.query or parsed.fragment
-            or not USER_RE.fullmatch(parsed.username)
-            or not HOST_RE.fullmatch(parsed.hostname)
-            or not PATH_RE.fullmatch(parsed.path)
-            or any(segment == ".." for segment in parsed.path.split("/"))
-            or "%" in value or (port is not None and not 1 <= port <= 65535)):
-        raise Refusal("repository URL must be a credential-free SSH URL")
+            or not USER.fullmatch(parsed.username) or not HOST.fullmatch(parsed.hostname)
+            or not REMOTE_PATH.fullmatch(parsed.path)
+            or any(part == ".." for part in parsed.path.split("/"))
+            or "%" in value or port is not None and not 1 <= port <= 65535):
+        raise Refusal("Git repository map requires a credential-free SSH URL")
     return value
 
 
-def unique_object(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise Refusal("duplicate repository key")
-        result[key] = value
-    return result
-
-
-def configuration(config: Path | None = None) -> tuple[dict[str, str], Path, Path]:
-    if config is None:
-        config = Path.home() / ".config" / "emacsos"
-    mapping = config / "assist-git-remotes.json"
-    key = config / "assist-git-key"
-    hosts = config / "assist-git-known-hosts"
+def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
+    raw = private_file(config / "assist-git-remotes.json")
+    def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        values = {}
+        for key, value in pairs:
+            if key in values:
+                raise Refusal("Git repository map has duplicate keys")
+            values[key] = value
+        return values
     try:
-        raw = private_file(mapping, nonempty=True)
-    except OSError as exc:
-        raise Refusal("Git repository map unavailable") from exc
-    try:
-        private_file(key, nonempty=True)
-    except OSError as exc:
-        raise Refusal("Git key unavailable") from exc
-    try:
-        private_file(hosts, nonempty=True)
-    except OSError as exc:
-        raise Refusal("Git host pin unavailable") from exc
-    try:
-        remotes = json.loads(raw, object_pairs_hook=unique_object)
-    except (UnicodeError, ValueError) as exc:
-        raise Refusal("repository map is malformed") from exc
-    if not isinstance(remotes, dict) or len(remotes) > 100:
-        raise Refusal("repository map is malformed")
-    for repo_key, url in remotes.items():
-        if not KEY_RE.fullmatch(repo_key):
-            raise Refusal("repository map key is invalid")
-        remote_url(url)
-    return remotes, key, hosts
+        remotes = json.loads(raw, object_pairs_hook=unique_pairs)
+    except (UnicodeError, ValueError) as error:
+        raise Refusal("Git repository map is invalid") from error
+    if (not isinstance(remotes, dict) or len(remotes) > 100
+            or any(not isinstance(key, str) or not KEY.fullmatch(key) for key in remotes)):
+        raise Refusal("Git repository map is invalid")
+    url = approved_url(remotes.get(repo_key))
+    key, hosts = config / "assist-git-key", config / "assist-git-known-hosts"
+    if not private_file(key, 16384) or not private_file(hosts):
+        raise Refusal("Git credential or pinned host is unavailable")
+    ssh = ("ssh -F /dev/null -i " + shlex.quote(str(key))
+           + " -o UserKnownHostsFile=" + shlex.quote(str(hosts))
+           + " -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
+           + " -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8")
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                   "GIT_ATTR_NOSYSTEM": "1",
+                   "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0",
+                   "GIT_ALLOW_PROTOCOL": "ssh", "GIT_SSH_COMMAND": ssh, "LC_ALL": "C"}
+    return url, environment
 
 
-def git_environment(key: Path, hosts: Path) -> dict[str, str]:
-    ssh = (
-        "ssh -F /dev/null -i " + shlex.quote(str(key))
-        + " -o UserKnownHostsFile=" + shlex.quote(str(hosts))
-        + " -o GlobalKnownHostsFile=/dev/null"
-        + " -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
-        + " -o BatchMode=yes -o NumberOfPasswordPrompts=0"
-        + " -o ConnectTimeout=8"
-    )
-    return {
-        "PATH": "/usr/bin:/bin",
-        "HOME": str(Path.home()),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-        "GIT_ALLOW_PROTOCOL": "ssh",
-        "GIT_PROTOCOL_FROM_USER": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "/bin/false",
-        "SSH_ASKPASS": "/bin/false",
-        "GIT_SSH_COMMAND": ssh,
-        "LC_ALL": "C",
-    }
-
-
-def terminate_git_tree(process: subprocess.Popen) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        pass
-    # Git can exit promptly while an SSH grandchild survives SIGTERM.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait(timeout=1)
-
-
-def stop_on_signal(signum: int, _frame: object) -> None:
-    if ACTIVE_GIT is not None:
-        terminate_git_tree(ACTIVE_GIT)
-    raise SystemExit(128 + signum)
-
-
-def git(args: list[str], env: dict[str, str], *, seconds: int = 20,
-        output_limit: int = 4096, presence_only: bool = False) -> str:
+def git(arguments: list[str], environment: dict[str, str], *, seconds: int = 30,
+        output_limit: int = 4096, network: bool = False,
+        allowed: tuple[int, ...] = (0,)) -> str:
     global ACTIVE_GIT
+    command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+               "-c", "core.attributesFile=/dev/null", "-c", "core.autocrlf=false",
+               "-c", "core.eol=lf",
+               "-c", "core.commitGraph=false", "-c", "core.multiPackIndex=false",
+               "-c", "pack.useBitmaps=false", "-c", "push.useBitmaps=false",
+               "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+               "-c", "fetch.fsckObjects=true", "-c", "protocol.ext.allow=never",
+               *arguments]
+    env = environment if network else {key: value for key, value in environment.items()
+                                       if key not in {"GIT_SSH_COMMAND", "GIT_ALLOW_PROTOCOL"}}
+    def limit_files() -> None:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE,
+                           (min(MAX_FETCH_BYTES, hard) if hard >= 0 else MAX_FETCH_BYTES,
+                            hard))
+        _, memory_hard = resource.getrlimit(resource.RLIMIT_AS)
+        memory_limit = 1024 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS,
+                           (min(memory_limit, memory_hard) if memory_hard >= 0
+                            else memory_limit, memory_hard))
+
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, env=env, start_new_session=True,
+                                   preexec_fn=limit_files)
+        ACTIVE_GIT = process
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     output = bytearray()
     try:
-        process = subprocess.Popen(
-            ["git", "-c", "core.hooksPath=/dev/null",
-             "-c", "core.fsmonitor=false",
-             "-c", "core.symlinks=false",
-             "-c", "fetch.recurseSubmodules=false",
-             "-c", "submodule.recurse=false",
-             "-c", "protocol.allow=never",
-             "-c", "protocol.ssh.allow=always", *args],
-            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, start_new_session=True,
-            pass_fds=(() if OPERATION_LOCK is None else (OPERATION_LOCK,)),
-        )
-        ACTIVE_GIT = process
         deadline = time.monotonic() + seconds
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise subprocess.TimeoutExpired(args, seconds)
+                    raise Refusal("Git operation timed out")
                 for key, _ in selector.select(remaining):
-                    chunk = os.read(key.fd, 4096 if presence_only else
-                                    min(4096, output_limit + 1 - len(output)))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    else:
-                        if presence_only:
-                            output[:] = b"1"
-                        else:
-                            output.extend(chunk)
+                    chunk = os.read(key.fd, min(4096, output_limit + 1 - len(output)))
+                    if chunk:
+                        output.extend(chunk)
                         if len(output) > output_limit:
-                            raise Refusal("Git command returned an oversized result")
-        process.wait(timeout=max(0.01, deadline - time.monotonic()))
-    except (OSError, subprocess.TimeoutExpired, Refusal) as exc:
-        if ACTIVE_GIT is not None:
-            terminate_git_tree(ACTIVE_GIT)
-        if isinstance(exc, Refusal):
-            raise
-        raise Refusal("Git operation timed out" if isinstance(
-            exc, subprocess.TimeoutExpired) else "Git command unavailable") from exc
+                            raise Refusal("Git result exceeded its bound")
+                    else:
+                        selector.unregister(key.fileobj)
+        process.wait(timeout=max(.01, deadline - time.monotonic()))
+        if process.returncode not in allowed:
+            raise Refusal("Git operation failed; local work is preserved")
+        return output.decode("utf-8", "strict").rstrip("\n")
+    except (OSError, subprocess.TimeoutExpired, Refusal):
+        terminate_git(process)
+        raise
     finally:
-        if ACTIVE_GIT is not None and ACTIVE_GIT.stdout is not None:
-            ACTIVE_GIT.stdout.close()
+        process.stdout.close()
         ACTIVE_GIT = None
-    if process.returncode:
-        raise Refusal("Git command failed")
-    return output.decode("utf-8", errors="strict").removesuffix("\n")
 
 
-def tree_size(root: Path, *, omit_git: bool = False) -> tuple[int, int]:
-    total = count = 0
-    stack = [root]
-    while stack:
-        directory = stack.pop()
-        for entry in os.scandir(directory):
-            if omit_git and directory == root and entry.name == ".git":
-                continue
-            info = entry.stat(follow_symlinks=False)
-            if stat.S_ISDIR(info.st_mode):
-                stack.append(Path(entry.path))
-            elif stat.S_ISREG(info.st_mode):
-                total += info.st_size
-                count += 1
-            else:
-                raise Refusal("mirror contains an unsupported file type")
-            if count > FILE_LIMIT or total > TOTAL_LIMIT:
-                raise Refusal("Git mirror exceeds its cache limit")
-    return total, count
-
-
-
-
-def cleanup(request: dict) -> dict:
-    generation = request.get("generation")
-    kind = request.get("kind")
-    raw_root = request.get("cache_root", "")
-    if not isinstance(raw_root, str):
-        raise Refusal("cleanup request is invalid")
-    root = Path(raw_root)
-    if (not isinstance(generation, str) or not ID_RE.fullmatch(generation)
-            or kind not in ("staging", "generations") or not root.is_absolute()):
-        raise Refusal("cleanup request is invalid")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    if ".." in root.parts:
-        raise Refusal("Git metadata directory is invalid")
-    root_fd = os.open("/", flags)
+def terminate_git(process: subprocess.Popen) -> None:
     try:
-        for component in root.parts[1:]:
-            try:
-                next_fd = os.open(component, flags, dir_fd=root_fd)
-            except FileNotFoundError:
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=root_fd)
-                except FileExistsError:
-                    pass
-                next_fd = os.open(component, flags, dir_fd=root_fd)
-            os.close(root_fd)
-            root_fd = next_fd
-        info = os.fstat(root_fd)
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
-            raise Refusal("Git cache directory must be private mode 0700")
-        try:
-            kind_fd = os.open(kind, flags, dir_fd=root_fd)
-        except FileNotFoundError:
-            return {"ok": True}
-        except OSError as exc:
-            raise Refusal("cleanup parent is invalid") from exc
-        try:
-            info = os.fstat(kind_fd)
-            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
-                raise Refusal("cleanup parent is invalid")
-            try:
-                target = os.stat(generation, dir_fd=kind_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                return {"ok": True}
-            if not stat.S_ISDIR(target.st_mode):
-                raise Refusal("cleanup target is invalid")
-            shutil.rmtree(generation, dir_fd=kind_fd)
-        finally:
-            os.close(kind_fd)
-    finally:
-        os.close(root_fd)
-    return {"ok": True}
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=2)
 
 
-def sync_checkout(request: dict) -> dict:
-    """Fetch the selected thread ref and safely FF its persistent local checkout.
+def stop_on_signal(signum: int, _frame: object) -> None:
+    if ACTIVE_GIT is not None:
+        terminate_git(ACTIVE_GIT)
+    raise SystemExit(128 + signum)
 
-    No operation resets, stashes, pushes or deletes an existing checkout.
-    The locked path must equal the client path admitted for buffer protection.
-    """
-    global OPERATION_LOCK
-    repo_key = request.get("repo_key")
-    branch = request.get("branch")
-    tid = request.get("thread_id")
-    raw_root = request.get("cache_root", "")
-    if not isinstance(raw_root, str):
-        raise Refusal("checkout request metadata is invalid")
-    root = Path(raw_root)
-    raw_workspaces = request.get("workspace_root")
-    admitted_path = request.get("checkout_path")
-    if not isinstance(raw_workspaces, str) or not isinstance(admitted_path, str):
-        raise Refusal("checkout request metadata is invalid")
-    workspaces = Path(raw_workspaces)
-    if (not isinstance(repo_key, str) or not KEY_RE.fullmatch(repo_key)
-            or not isinstance(tid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tid)
-            or not isinstance(branch, str) or not 1 <= len(branch.encode()) <= 240
-            or branch in ("main", "HEAD") or branch.startswith("-") or not root.is_absolute()
-            or not workspaces.is_absolute() or not Path(admitted_path).is_absolute()):
-        raise Refusal("checkout request metadata is invalid")
-    remotes, key, hosts = configuration()
-    url = remotes.get(repo_key)
-    if url is None:
-        raise Refusal("no configured Git remote for this repository key")
-    env = git_environment(key, hosts)
-    git(["check-ref-format", "refs/heads/" + branch], env)
-    private_directory(root)
-    private_directory(root / "checkouts")
-    identity = stable_identity(repo_key, tid)
-    private_directory(root / "locks")
-    allocation = os.open(root / "locks" / ("workspace-" + identity),
-                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    descriptor = allocation
-    try:
+
+def promote_workspace(stage: Path, checkout: Path) -> None:
+    """Atomically promote an initial checkout without replacing any user path."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refusal("another Git operation is still using this checkout") from exc
-        OPERATION_LOCK = allocation
-        checkout, physical = allocate_workspace(request, root, workspaces,
-                                                repo_key, tid, branch, url, env)
-        if str(checkout) != admitted_path:
-            raise Refusal("workspace binding changed; Refresh to retry")
-        descriptor = os.open(root / "locks" / physical,
-                             os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            rename = libc.renamex_np
+        except AttributeError as exc:
+            raise Refusal("Atomic checkout promotion unavailable") from exc
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(stage), os.fsencode(checkout), 4)
+    else:
+        arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(stage)),
+                     ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(checkout)), ctypes.c_uint(1))
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise Refusal("another Git operation is still using this checkout") from exc
-        OPERATION_LOCK = descriptor
-        # A route freezes identity and installation state, not the safety of
-        # workspace parents that may have changed since allocation.
-        workspace_directory(checkout.parent)
-        stage = checkout.with_name("." + checkout.name + ".initial")
-        route = root / "routes" / (identity + ".json")
-        if finish_initialization(request, route, checkout, stage, url, env):
-            return {"ok": True, "checkout_path": str(checkout), "recovery": "empty initialization ready"}
-        if shutil.disk_usage(checkout.parent).free < FREE_MARGIN:
-            raise Refusal("insufficient free space for Git fetch")
-        new = not checkout.exists()
-        if checkout.is_symlink():
-            raise Refusal("checkout path is a symlink")
-        working = stage if new else checkout
-        preserve_stage = False
-        if new:
-            if request.get("allow_initialization") is False:
-                raise Refusal("local staging view is open; initialization pending")
-            if stage.exists() or stage.is_symlink():
-                raise Refusal("initial checkout interrupted; inspect staging before Retry")
-            stage.mkdir(mode=0o700)
+            rename = libc.renameat2
+        except AttributeError:
+            number = ({"aarch64": 276, "x86_64": 316}.get(platform.machine())
+                      if sys.platform == "linux" and ctypes.sizeof(ctypes.c_void_p) == 8 else None)
+            if number is None:
+                raise Refusal("Atomic checkout promotion unavailable")
+            libc.syscall.restype = ctypes.c_long
+            result = libc.syscall(ctypes.c_long(number), *arguments)
         else:
-            workspace_directory(checkout)
-            if (not (checkout / ".git").is_dir() or (checkout / ".git").is_symlink()):
-                raise Refusal("checkout Git directory is invalid")
-        try:
-            if new:
-                git(["init", "--quiet", "--template=", "--initial-branch=thread",
-                     str(working)], env)
-                git(["-C", str(working), "remote", "add", "origin", url], env)
-                # Standard Git/Magit uses this same dedicated identity and pin.
-                git(["-C", str(working), "config", "core.sshCommand",
-                     env.get("GIT_SSH_COMMAND", "ssh")], env)
-                git(["-C", str(working), "config", "core.symlinks", "false"], env)
-                git(["-C", str(working), "config", "push.default", "simple"], env)
-            elif git(["-C", str(working), "remote", "get-url", "origin"], env) != url:
-                raise Refusal("checkout remote differs from the configured repository")
-            # Keep checkout bytes bounded by stored blobs, not repository-driven
-            # ident/encoding/filter expansion.  This local override also keeps
-            # ordinary Git operating on the same literal files as this client.
-            attributes = working / ".git" / "info" / "attributes"
-            literal_attributes = "* -filter -ident -working-tree-encoding -text -eol\n"
-            if new:
-                attributes.parent.mkdir(exist_ok=True)
-                attributes.write_text(literal_attributes)
-            elif (attributes.is_symlink() or not attributes.is_file()
-                  or attributes.stat().st_size > 1024
-                  or attributes.read_text() != literal_attributes):
-                raise Refusal("local checkout conversion policy changed; inspect Git configuration")
-            git(["-C", str(working), "fetch", "--no-tags", "--no-write-fetch-head",
-                 "--no-recurse-submodules", url,
-                 "+refs/heads/main:refs/remotes/origin/main",
-                 "+refs/heads/" + branch + ":refs/remotes/origin/" + branch],
-                env, seconds=60)
-            remote_oid = git(["-C", str(working), "rev-parse", "--verify",
-                              "refs/remotes/origin/" + branch + "^{commit}"], env)
-            main_oid = git(["-C", str(working), "rev-parse", "--verify",
-                            "refs/remotes/origin/main^{commit}"], env)
-            if not OID_RE.fullmatch(remote_oid) or not OID_RE.fullmatch(main_oid):
-                raise Refusal("fetched Git refs are invalid")
-            if tree_size(working / ".git" / "objects")[0] > OBJECT_LIMIT:
-                raise Refusal("Git objects exceed the checkout limit")
-            # Check expanded blob sizes before checkout, not compressed pack bytes.
-            sizes = git(["-C", str(working), "ls-tree", "-r",
-                         "--format=%(objecttype) %(objectsize)", remote_oid],
-                        env, output_limit=512 * 1024).splitlines()
-            if (len(sizes) > FILE_LIMIT
-                    or sum(int(line.split()[1]) for line in sizes
-                           if line.startswith("blob ")) > WORKTREE_LIMIT):
-                raise Refusal("committed thread files exceed the checkout limit")
-            pending = None
-            if new:
-                git(["-C", str(working), "checkout", "--quiet", "--no-overwrite-ignore",
-                     "-b", branch, "refs/remotes/origin/" + branch], env, seconds=30)
-                git(["-C", str(working), "branch", "--set-upstream-to=origin/" + branch,
-                     branch], env)
-            else:
-                actual = git(["-C", str(working), "symbolic-ref", "--short", "HEAD"], env)
-                dirty = git(["-C", str(working), "status", "--porcelain",
-                             "--untracked-files=all"], env, presence_only=True)
-                if actual != branch:
-                    pending = "local branch changed; select the thread branch in Magit"
-                elif dirty or request.get("allow_ff") is not True:
-                    pending = "local edits or Git operation; local update pending"
-                else:
-                    try:
-                        git(["-C", str(working), "merge", "--ff-only", "--no-autostash",
-                             "--no-overwrite-ignore", remote_oid], env, seconds=30)
-                    except Refusal:
-                        pending = "fast-forward unavailable; local update pending"
-            local_oid = git(["-C", str(working), "rev-parse", "--verify", "HEAD^{commit}"], env)
-            if not pending and local_oid != remote_oid:
-                pending = "local commits differ from remote; push or reconcile in Magit"
-            dirty = bool(git(["-C", str(working), "status", "--porcelain",
-                              "--untracked-files=all"], env, presence_only=True))
-            if new:
-                worktree_bytes, files = tree_size(working, omit_git=True)
-                if (worktree_bytes > WORKTREE_LIMIT or files > FILE_LIMIT
-                        or tree_size(working)[0] > TOTAL_LIMIT):
-                    raise Refusal("initial Git checkout exceeds its cache limit")
-            actual = git(["-C", str(working), "symbolic-ref", "--short", "HEAD"], env)
-            if new:
-                record = read_route(route)
-                info = working.lstat()
-                record.update(initialized="installing", installation_device=info.st_dev,
-                              installation_inode=info.st_ino, installation_branch=actual)
-                # Once preparation is published, preserve this exact directory
-                # across promotion/finalization errors for a same-inode retry.
-                preserve_stage = True
-                sync_directory(working)
-                sync_directory(checkout.parent)
-                sync_directory(workspaces)
-                sync_directory(workspaces.parent)
-                write_route(route, record)
-                sync_directory(route.parent)
-                finish_initialization(request, route, checkout, stage, url, env)
-            return {"ok": True, "checkout_path": str(checkout),
-                    "thread_oid": remote_oid, "local_oid": local_oid, "main_oid": main_oid,
-                    "dirty": dirty, "pending": pending, "actual_branch": actual}
-        except BaseException:
-            if new and not preserve_stage and stage.exists():
-                shutil.rmtree(stage)
-            raise
-    finally:
-        OPERATION_LOCK = None
-        if descriptor != allocation:
+            rename.restype = ctypes.c_int
+            result = rename(*arguments)
+    if result:
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
+            raise Refusal("Checkout destination already exists; local work preserved")
+        raise OSError(code, "Checkout promotion failed")
+
+
+def identity(repo_key: str, thread_id: str) -> str:
+    return hashlib.sha256((repo_key + "\n" + thread_id).encode()).hexdigest()[:16]
+
+
+def legacy_checkout(cache: Path, workspace_root: Path,
+                    repo_key: str, thread_id: str) -> Path:
+    """Resolve one private old binding, never guessing from a remote or branch."""
+    route = cache / "routes" / (
+        hashlib.sha256((repo_key + "\n" + thread_id).encode()).hexdigest() + ".json")
+    if not route.exists():
+        raise Refusal("No bound legacy checkout is available to move")
+    try:
+        record = json.loads(private_file(route, 2048))
+    except (UnicodeError, ValueError) as error:
+        raise Refusal("Legacy checkout binding is invalid") from error
+    if not isinstance(record, dict):
+        raise Refusal("Legacy checkout binding is invalid")
+    legacy, relative = record.get("legacy"), record.get("relative")
+    if (record.get("repo_key") != repo_key or record.get("thread_id") != thread_id
+            or record.get("initialized") is not True):
+        raise Refusal("Legacy checkout binding is not movable")
+    if (isinstance(legacy, str) and re.fullmatch(r"[0-9a-f]{64}", legacy)
+            and relative is None):
+        old = cache / "checkouts" / legacy
+        selected = ("legacy", legacy)
+    elif (legacy is None and isinstance(relative, str)
+          and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}/[a-z0-9][a-z0-9-]{0,47}-[0-9a-f]{12}", relative)
+          and relative.endswith("-" + hashlib.sha256(
+              (repo_key + "\n" + thread_id).encode()).hexdigest()[:12])):
+        old = workspace_root / relative
+        selected = ("relative", relative)
+    else:
+        raise Refusal("Legacy checkout binding is not movable")
+    routes = list((cache / "routes").glob("*.json"))
+    if len(routes) > 10000:
+        raise Refusal("Legacy checkout binding inventory is too large")
+    for other in routes:
+        if other != route:
+            try:
+                claim = json.loads(private_file(other, 2048))
+            except (UnicodeError, ValueError) as error:
+                raise Refusal("Legacy checkout binding inventory is invalid") from error
+            if isinstance(claim, dict) and claim.get(selected[0]) == selected[1]:
+                raise Refusal("Legacy checkout has more than one binding")
+    return old
+
+
+def legacy_locks(cache: Path, repo_key: str, thread_id: str,
+                 old: Path) -> list[int]:
+    """Exclude refresh and explicit migration of one bound old checkout."""
+    lock_root = cache / "locks"
+    directory(lock_root)
+    physical = (old.name if old.parent == cache / "checkouts" else
+                "path-" + hashlib.sha256(os.fsencode(old)).hexdigest())
+    names = ("workspace-" + hashlib.sha256((repo_key + "\n" + thread_id).encode()).hexdigest(),
+             physical)
+    locks = []
+    try:
+        for name in names:
+            descriptor = os.open(lock_root / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                                 0o600)
+            locks.append(descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return locks
+    except BaseException:
+        for descriptor in locks:
             os.close(descriptor)
-        os.close(allocation)
+        raise
+
+
+def verify_checkout_bound(path: Path, environment: dict[str, str]) -> None:
+    """Refuse path-redirecting Git metadata and unknown local attributes."""
+    metadata = path / ".git"
+    stack, count, deadline = [metadata], 0, time.monotonic() + 10
+    while stack:
+        folder = stack.pop()
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                count += 1
+                if count > 100000 or time.monotonic() > deadline:
+                    raise Refusal("Checkout Git metadata scan exceeded its bound")
+                if entry.is_symlink():
+                    raise Refusal("Checkout Git storage leaves its bound directory")
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                elif not entry.is_file(follow_symlinks=False):
+                    raise Refusal("Checkout Git metadata is not regular storage")
+    for relative in ("commondir", "worktrees", "modules",
+                     "objects/info/alternates", "config.worktree"):
+        candidate = metadata / relative
+        if candidate.exists() or candidate.is_symlink():
+            raise Refusal("Path-dependent Git metadata prevents checkout sync")
+    attributes = metadata / "info" / "attributes"
+    if attributes.exists() or attributes.is_symlink():
+        try:
+            descriptor = os.open(attributes, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(descriptor)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_size != len(OLD_LITERAL_ATTRIBUTES)
+                        or os.read(descriptor, len(OLD_LITERAL_ATTRIBUTES) + 1)
+                        != OLD_LITERAL_ATTRIBUTES):
+                    raise Refusal("Unknown local Git attributes require an explicit Git pull")
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            raise Refusal("Local Git attributes are not inspectable") from error
+    keys = git(["-C", str(path), "config", "--local", "--no-includes",
+                "--name-only", "--list"], environment, output_limit=65536).lower().splitlines()
+    if any(key == "core.worktree" or key == "include.path" or key.startswith("filter.")
+           or key.startswith("includeif.") or key == "extensions.worktreeconfig"
+           for key in keys):
+        raise Refusal("Path-dependent Git configuration prevents checkout sync")
+    if git(["-C", str(path), "rev-parse", "--show-toplevel"], environment) != str(path):
+        raise Refusal("Checkout root differs from its bound path")
+
+
+def checkout_path(root: Path, repo_key: str, thread_id: str) -> Path:
+    if not KEY.fullmatch(repo_key) or not THREAD.fullmatch(thread_id):
+        raise Refusal("Git thread identity is invalid")
+    return root / repo_key / (thread_id + "-" + identity(repo_key, thread_id))
+
+
+def existing_checkout(path: Path, url: str, environment: dict[str, str]) -> bool:
+    if not path.exists() and not path.is_symlink():
+        return False
+    directory(path)
+    metadata = path / ".git"
+    if metadata.is_symlink() or not metadata.is_dir():
+        raise Refusal("Existing path is not an ordinary Git checkout")
+    actual = git(["config", "--file", str(metadata / "config"), "--no-includes",
+                  "--get", "remote.origin.url"], environment)
+    if actual != url:
+        raise Refusal("Existing checkout belongs to another Git remote")
+    verify_checkout_bound(path, environment)
+    return True
+
+
+def network_snapshot(source: str, branch: str, checkout: Path | None,
+                     environment: dict[str, str], temporary: Path) -> tuple[str, str, Path | None]:
+    """Fetch only approved refs using private config, then bundle missing objects."""
+    repository = temporary / "fetch.git"
+    git(["init", "--bare", "--quiet", str(repository)], environment)
+    network_env = dict(environment)
+    local = None
+    if checkout is not None:
+        objects = checkout / ".git" / "objects"
+        if objects.is_symlink() or not objects.is_dir():
+            raise Refusal("Checkout objects are unavailable")
+        local = git(["-C", str(checkout), "rev-parse", "HEAD^{commit}"], environment)
+        if not OID.fullmatch(local):
+            raise Refusal("Local Git HEAD is invalid")
+        network_env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(objects)
+    refs = ["refs/heads/main:refs/remotes/origin/main",
+            "refs/heads/" + branch + ":refs/remotes/origin/thread"]
+    git(["--git-dir", str(repository), "fetch", "--no-tags", source, *refs],
+        network_env, seconds=90, network=True)
+    main = git(["--git-dir", str(repository), "rev-parse",
+                "refs/remotes/origin/main^{commit}"], network_env)
+    thread = git(["--git-dir", str(repository), "rev-parse",
+                  "refs/remotes/origin/thread^{commit}"], network_env)
+    if not OID.fullmatch(main) or not OID.fullmatch(thread):
+        raise Refusal("Fetched Git refs are invalid")
+    if local is not None and git(["--git-dir", str(repository), "rev-list", "--count",
+                                  "refs/remotes/origin/main", "refs/remotes/origin/thread",
+                                  "--not", local], network_env) == "0":
+        return main, thread, None
+    bundle = temporary / "incoming.bundle"
+    arguments = ["--git-dir", str(repository), "bundle", "create", str(bundle),
+                 "refs/remotes/origin/main", "refs/remotes/origin/thread"]
+    if local is not None:
+        arguments += ["--not", local]
+    git(arguments, network_env, seconds=60)
+    if bundle.stat().st_size > MAX_BUNDLE:
+        raise Refusal("Fetched Git history exceeds its bound")
+    return main, thread, bundle
+
+
+def require_checkout_capacity(repository: Path, revision: str,
+                              environment: dict[str, str]) -> None:
+    """Admit bounded ordinary blobs without checkout-time transformations."""
+    listing = git(["-C", str(repository), "-c", "core.quotePath=true", "ls-tree",
+                   "-r", "-t", "-l", revision], environment, seconds=30,
+                  output_limit=8 * 1024 * 1024)
+    total = 0
+    count = 0
+    attributes = []
+    for entry in listing.splitlines():
+        header, separator, path = entry.partition("\t")
+        fields = header.split()
+        if not separator or len(fields) != 4 or fields[1] not in {"blob", "commit", "tree"}:
+            raise Refusal("Published Git tree cannot be sized safely")
+        if fields[1] == "blob":
+            if not fields[3].isdigit():
+                raise Refusal("Published Git tree cannot be sized safely")
+            total += int(fields[3])
+            if path == ".gitattributes" or path.endswith(("/.gitattributes",
+                                                             '/.gitattributes"')):
+                attributes.append(fields[2])
+        count += 1
+        if total > MAX_TREE_BYTES or count > MAX_TREE_ENTRIES:
+            raise Refusal("Published Git checkout exceeds its size bound")
+    if len(attributes) > MAX_ATTRIBUTE_FILES:
+        raise Refusal("Published Git attributes exceed their inspection bound")
+    for blob in attributes:
+        try:
+            content = git(["-C", str(repository), "cat-file", "blob", blob],
+                          environment, output_limit=65536)
+        except UnicodeError as error:
+            raise Refusal("Published Git attributes are not inspectable") from error
+        if any(TRANSFORM_ATTRIBUTE.search(line) for line in content.splitlines()
+               if not line.lstrip().startswith("#")):
+            raise Refusal("Checkout transformations need an explicit Git pull")
+    filesystem = os.statvfs(repository)
+    if filesystem.f_files and filesystem.f_favail < count * 2 + 1024:
+        raise Refusal("Not enough free inodes for the published Git checkout")
+    if (filesystem.f_bavail * filesystem.f_frsize
+            < total * 4 + count * 8192 + MIN_FREE_BYTES):
+        raise Refusal("Not enough free space for the published Git checkout")
+
+
+def verify_worktree_attributes(checkout: Path) -> None:
+    """Hold automatic updates if local attribute files can transform blobs."""
+    stack, count, deadline = [checkout], 0, time.monotonic() + 10
+    while stack:
+        folder = stack.pop()
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                count += 1
+                if count > 100000 or time.monotonic() > deadline:
+                    raise Refusal("Local Git attribute scan exceeded its bound")
+                if folder == checkout and entry.name == ".git":
+                    continue
+                if entry.name == ".gitattributes":
+                    descriptor = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    try:
+                        info = os.fstat(descriptor)
+                        if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+                            raise Refusal("Local Git attributes are not inspectable")
+                        content = os.read(descriptor, 65537).decode("utf-8", "strict")
+                    except UnicodeError as error:
+                        raise Refusal("Local Git attributes are not inspectable") from error
+                    finally:
+                        os.close(descriptor)
+                    if any(TRANSFORM_ATTRIBUTE.search(line) for line in content.splitlines()
+                           if not line.lstrip().startswith("#")):
+                        raise Refusal("Local checkout transformations need an explicit Git pull")
+                elif entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+
+
+def sync(request: dict, config: Path | None = None, cache: Path | None = None) -> dict:
+    repo_key, thread_id, branch = (request.get("repo_key"), request.get("thread_id"),
+                                   request.get("branch"))
+    if (not isinstance(repo_key, str) or not isinstance(thread_id, str)
+            or not isinstance(branch, str) or branch in {"main", "HEAD"}
+            or len(branch.encode()) > 240 or branch.startswith("-")):
+        raise Refusal("Git thread metadata is invalid")
+    root = Path(request.get("workspace_root", ""))
+    if not root.is_absolute() or ".." in root.parts:
+        raise Refusal("Git workspace root is invalid")
+    checkout = checkout_path(root, repo_key, thread_id)
+    source, environment = configuration(config or Path.home() / ".config" / "emacsos",
+                                        repo_key)
+    git(["check-ref-format", "refs/heads/" + branch], environment)
+    directory(checkout.parent)
+    lock_path = checkout.parent / ("." + checkout.name + ".lock")
+    lock = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    stage_context = None
+    legacy_lock_files = []
+    legacy = False
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        exists = existing_checkout(checkout, source, environment)
+        if not exists:
+            cache = cache or Path.home() / ".cache" / "emacsos" / "assist-git"
+            route_id = hashlib.sha256((repo_key + "\n" + thread_id).encode()).hexdigest()
+            route = cache / "routes" / (route_id + ".json")
+            legacy_id = hashlib.sha256(
+                (repo_key + "\n" + thread_id + "\n" + branch).encode()).hexdigest()
+            if route.exists() or route.is_symlink():
+                old = legacy_checkout(cache, root, repo_key, thread_id)
+                legacy_lock_files = legacy_locks(cache, repo_key, thread_id, old)
+                if legacy_checkout(cache, root, repo_key, thread_id) != old:
+                    raise Refusal("Legacy checkout binding changed")
+                if not existing_checkout(old, source, environment):
+                    raise Refusal("Bound legacy checkout is missing")
+                checkout, exists, legacy = old, True, True
+            elif (cache / "checkouts" / legacy_id).exists():
+                raise Refusal("Unbound legacy checkout needs local inspection")
+        old_stage = checkout.with_name("." + checkout.name + ".initial")
+        abandoned = next(checkout.parent.glob("." + checkout.name + ".initial-*"), None)
+        if not exists and (old_stage.exists() or old_stage.is_symlink() or abandoned):
+            raise Refusal("Interrupted initial checkout needs local inspection")
+        if not exists:
+            stage_context = tempfile.TemporaryDirectory(
+                prefix="." + checkout.name + ".initial-", dir=checkout.parent)
+        stage = Path(stage_context.name) if stage_context else None
+        with tempfile.TemporaryDirectory(prefix="assist-git-fetch-") as temporary_name:
+            temporary = Path(temporary_name)
+            main, remote, bundle = network_snapshot(source, branch,
+                                                    checkout if exists else None,
+                                                    environment, temporary)
+            working = checkout if exists else stage
+            if not exists:
+                git(["init", "--quiet", "--template=", str(working)], environment)
+                git(["-C", str(working), "remote", "add", "origin", source], environment)
+                git(["-C", str(working), "config", "core.sshCommand",
+                     environment["GIT_SSH_COMMAND"]], environment)
+            if bundle is not None:
+                git(["-C", str(working), "bundle", "unbundle", str(bundle)],
+                    environment, seconds=60, output_limit=65536)
+            git(["-C", str(working), "update-ref", "refs/remotes/origin/main", main],
+                environment)
+            git(["-C", str(working), "update-ref",
+                 "refs/remotes/origin/" + branch, remote], environment)
+            if not exists:
+                require_checkout_capacity(working, remote, environment)
+                git(["-C", str(working), "checkout", "-b", branch, remote], environment)
+                git(["-C", str(working), "branch", "--set-upstream-to=origin/" + branch,
+                     branch], environment)
+                promote_workspace(stage, checkout)
+            actual = git(["-C", str(checkout), "symbolic-ref", "--short", "HEAD"],
+                         environment)
+            local = git(["-C", str(checkout), "rev-parse", "HEAD^{commit}"], environment)
+            status = git(["-C", str(checkout), "status", "--porcelain",
+                          "--untracked-files=normal"], environment,
+                         output_limit=MAX_OUTPUT)
+            dirty = bool(status)
+            pending = None
+            if actual != branch:
+                pending = "select the thread branch in Magit"
+            elif local != remote:
+                base = git(["-C", str(checkout), "merge-base", local, remote],
+                           environment, allowed=(0, 1))
+                if base == local:
+                    if dirty:
+                        pending = ("New thread commits are available. Your local edits are "
+                                   "unchanged. Commit your edits, then fetch and merge; or "
+                                   "stash them, pull, and reapply the stash.")
+                    else:
+                        verify_worktree_attributes(checkout)
+                        require_checkout_capacity(checkout, remote, environment)
+                        git(["-C", str(checkout), "merge", "--ff-only", "--no-autostash",
+                             "--no-overwrite-ignore", remote], environment, seconds=30)
+                        local = git(["-C", str(checkout), "rev-parse", "HEAD^{commit}"],
+                                    environment)
+                        if local != remote:
+                            raise Refusal("Git fast-forward did not reach the published branch")
+                elif base == remote:
+                    pending = "Local commits are not published; push or reconcile in Magit"
+                else:
+                    pending = "Local and published commits diverged; reconcile in Magit"
+            return {"ok": True, "checkout_path": str(checkout), "legacy": legacy,
+                    "branch": actual,
+                    "local_oid": local, "thread_oid": remote, "main_oid": main,
+                    "dirty": dirty, "status_short": status[:240], "pending": pending}
+    except BlockingIOError as error:
+        raise Refusal("Another Git operation owns this checkout") from error
+    finally:
+        if stage_context is not None:
+            stage_context.cleanup()
+        for descriptor in legacy_lock_files:
+            os.close(descriptor)
+        os.close(lock)
+
+
+def migrate(request: dict, config: Path | None = None,
+            cache: Path | None = None) -> dict:
+    """Move one explicitly selected bound checkout without touching its contents."""
+    repo_key, thread_id = request.get("repo_key"), request.get("thread_id")
+    root = Path(request.get("workspace_root", ""))
+    if (not isinstance(repo_key, str) or not isinstance(thread_id, str)
+            or not root.is_absolute() or ".." in root.parts):
+        raise Refusal("Git migration identity is invalid")
+    destination = checkout_path(root, repo_key, thread_id)
+    source, environment = configuration(config or Path.home() / ".config" / "emacsos",
+                                        repo_key)
+    old_root = cache or Path.home() / ".cache" / "emacsos" / "assist-git"
+    old = legacy_checkout(old_root, root, repo_key, thread_id)
+    if not old.exists() or old.is_symlink():
+        raise Refusal("Bound legacy checkout is missing")
+    directory(old)
+    directory(destination.parent)
+    if destination.exists() or destination.is_symlink():
+        raise Refusal("Local checkout already exists; migration will not replace it")
+    if not existing_checkout(old, source, environment):
+        raise Refusal("Bound legacy checkout is missing")
+    verify_checkout_bound(old, environment)
+    locks = legacy_locks(old_root, repo_key, thread_id, old)
+    try:
+        if legacy_checkout(old_root, root, repo_key, thread_id) != old:
+            raise Refusal("Legacy checkout binding changed")
+        if not existing_checkout(old, source, environment):
+            raise Refusal("Bound legacy checkout changed")
+        verify_checkout_bound(old, environment)
+        if destination.exists() or destination.is_symlink():
+            raise Refusal("Local checkout already exists; migration will not replace it")
+        if old.stat().st_dev != destination.parent.stat().st_dev:
+            raise Refusal("Checkout migration requires one filesystem")
+        promote_workspace(old, destination)
+        for parent in (old.parent, destination.parent):
+            descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        return {"ok": True, "checkout_path": str(destination)}
+    except BlockingIOError as error:
+        raise Refusal("Another Git operation owns this checkout") from error
+    finally:
+        for lock in locks:
+            os.close(lock)
+
+
+def selected_legacy_root(request: dict) -> Path | None:
+    """Accept one user-owned, non-symlink legacy root from the Emacs setting."""
+    value = request.get("legacy_root")
+    if value is None:
+        return None
+    if (not isinstance(value, str) or len(value) > 4096
+            or not Path(value).is_absolute() or ".." in Path(value).parts):
+        raise Refusal("Legacy Git route root is invalid")
+    root = Path(value)
+    directory(root)
+    return root
 
 
 def main() -> None:
     os.umask(0o077)
     signal.signal(signal.SIGTERM, stop_on_signal)
     try:
-        if (len(sys.argv) in (2, 3) and sys.argv[1] == "--check-config"):
-            configuration(Path(sys.argv[2]) if len(sys.argv) == 3 else None)
-            result = {"ok": True}
-        elif len(sys.argv) == 1:
-            raw = sys.stdin.buffer.read(4097)
-            if len(raw) > 4096:
-                raise Refusal("helper request is too large")
-            request = json.loads(raw)
-            if not isinstance(request, dict):
-                raise Refusal("helper request is invalid")
-            action = request.get("action")
-            if action == "sync":
-                result = sync_checkout(request)
-            elif action == "migrate":
-                result = migrate_workspace(request)
-            elif action == "cleanup":
-                result = cleanup(request)
-            else:
-                raise Refusal("helper action is invalid")
-        else:
-            raise Refusal("helper invocation is invalid")
-    except (Refusal, OSError, UnicodeError, ValueError) as exc:
-        if isinstance(exc, Refusal):
-            reason = str(exc)
-        elif isinstance(exc, OSError):
-            reason = "Git mirror local I/O unavailable"
-        else:
-            reason = "Git mirror local data invalid"
-        result = {"ok": False, "reason": reason}
-        if isinstance(exc, WorkspaceChoice):
-            result["workspace_choices"] = exc.choices
-    sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+        raw = sys.stdin.buffer.read(8193)
+        if len(raw) > 8192:
+            raise Refusal("Git request is too large")
+        request = json.loads(raw)
+        if not isinstance(request, dict) or request.get("action") not in {"sync", "migrate"}:
+            raise Refusal("Git action is invalid")
+        legacy_root = selected_legacy_root(request)
+        response = (sync(request, cache=legacy_root) if request["action"] == "sync"
+                    else migrate(request, cache=legacy_root))
+    except Refusal as error:
+        response = {"ok": False, "error": str(error)[:256]}
+    except (OSError, ValueError, UnicodeError):
+        response = {"ok": False, "error": "Git checkout update unavailable; local work preserved"}
+    sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
 
 
 if __name__ == "__main__":
