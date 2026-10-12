@@ -1,69 +1,58 @@
-# Phone / Assist container E2E
+# Phone client against the reusable real Assist fixture
 
-From the EmacsOS checkout with the matching Assist checkout alongside it:
-
-```sh
-python3 tests/phone-assist-e2e/run.py --logs /tmp/phone-assist-e2e-results
-```
-
-Choose a new results directory for each run. Requires Docker, Python 3.10+,
-Git, OpenSSL and OpenSSH on the host. The first build downloads the image's
-system dependencies and Assist runtime packages constrained by Assist's
-requirements plus the harness pins in `requirements.txt`. Build time is capped at ten
-minutes, execution at five minutes, and individual client waits at 45 seconds.
-No local model or phone hardware is used. Python optimization (`-O` or
-`PYTHONOPTIMIZE`) is rejected before resources are created because it disables
-the acceptance assertions.
-
-Run the lightweight privacy and cleanup regressions without Docker using
-`make test-phone-assist-e2e-harness`; this is also a prerequisite of `test-elisp`.
-
-The harness runs four disposable containers on its own internal network:
-headless Emacs, Assist, Git/SSH, and a credential-free shell simulator. It
-publishes no host ports, mounts no host checkout or Docker socket, and uses
-fresh repositories, separate client/server SSH keys, pinned host keys, a test
-CA and a synthetic phone API token. The source snapshot copies tracked files
-and the named harness files, excluding environment files and Git metadata.
-The shell simulator receives only the disposable thread volume.
-
-This runs actual `assist-web.el` HTTPS/SSE transport and queue recovery,
-`assist-web-git.el` and its helper, ordinary client commit/push, Assist HTTP
-admission, durable Runs, initialization/resume workers, Thread/LangGraph/SQLite,
-and the Git lifecycle. A test-only Assist adapter at
-`tests/phone_e2e_server.py` supplies a deterministic graph output node and its ready-model probe, and
-adapts shell operations and generation scans to the simulator. It does not
-prove model behavior, the production Docker/browser security implementation,
-or physical-phone behavior. These are explicit capability/lifecycle tests.
-
-Coverage:
-
-- New and existing thread checkout, server publication and terminal refresh.
-- Explicit client edit/commit/push followed by a server turn reading the edit.
-- Dirty client file and index preservation with a Git status notice.
-- Client push during execution, result-branch publication, explicit local
-  reconciliation and a subsequent successful turn.
-- Private Git setup failure and recovery; canonical auth denial then successful
-  authorization in the same resident Emacs buffer.
-- A resident client losing its real SSE observer, then explicitly refreshing the
-  completed Run to retrieve its result and clear the queue.
-- A second client with an independent cache durably accepting a queued Run
-  before a forced server kill, then verifying that it executes once after restart.
-- A hidden child owning the parent workspace while a parent user message is
-  queued. The test waits for a real reset-worker deferral before releasing the
-  child, then requires the user turn before exactly one task-result handoff.
-
-The child test intentionally fails against Assist versions with the missing-wake
-bug. To test an exact integration source without changing the harness branch:
+Start the standalone fixture from an Assist checkout, then run its direct smoke:
 
 ```sh
-python3 tests/phone-assist-e2e/run.py \
-  --assist-source /path/to/checked-assist-composition \
-  --assist-adapter ../assist/tests/phone_e2e_server.py \
-  --logs /tmp/phone-assist-e2e-composition-results
+python tests/e2e/start.py --logs /tmp/assist-fixture-new --seconds 900
+python tests/e2e/smoke.py --fixture /tmp/assist-fixture-new/fixture.json
 ```
 
-`source.json` records the selected Git heads and copied file hashes. `build.log`,
-client receipts, last observed state, container logs and `results.json` remain in the chosen results directory;
-credentials are deleted. Runtime containers, the thread volume and the network
-are removed on exit or interruption. The uniquely tagged test image remains
-as a build cache and can be removed by its exact tag after testing.
+While that launcher remains running, run from the EmacsOS checkout:
+
+```sh
+python tests/phone-assist-e2e/run.py --fixture /tmp/assist-fixture-new/fixture.json --logs /tmp/phone-client-new
+```
+
+The driver builds only an Emacs/Git/SSH client image and joins the fixture's exact
+internal network. It loads production `assist-web.el` and `assist-web-git.el`.
+The server is independently reusable; no Emacs source is needed to start it.
+See Assist's `tests/e2e/README.md` for the real backend, privileged private daemon,
+synthetic assets, source selection, bounds and teardown. This checks protocol and
+lifecycle, not sandbox security or small-model behavior. A browser is not tested.
+
+The nine sequential scenarios use a fresh synthetic Git-backed thread:
+
+1. `Write server.txt hello-server`: create through the actual client; require a
+   successful Run, server Git publication and matching client checkout/file.
+2. Reopen that thread, explicitly commit/push `phone.txt`, then `Read phone.txt`;
+   require the next server turn to read the pushed contents.
+3. Leave `server.txt` dirty, then `Write other.txt next-server`; require original
+   local bytes/index and an actionable pending-refresh notice, then restore/refresh.
+4. `Hold publication`: push `during.txt` while real inference waits, then release;
+   require an exceptional result branch, explicitly merge/push it and
+   `Read server-during.txt`; require both histories/files and a successful read.
+5. Remove private Git remotes configuration; require the real error, restore it
+   and require refresh recovery.
+6. In one resident buffer, replace its token, Refresh, require canonical denial
+   and an increased auth epoch; restore the token and Refresh the same buffer.
+7. In one resident buffer, send `Hold observer`, close the entry's actual SSE
+   process and await its production sentinel's accepted-unobserved state. Release
+   inference, require exact Run GET success, then interactive Refresh with result
+   visible and the queue cleared. This does not reproduce an open stalled SSE.
+8. Send `Hold restart`, durably accept `Accepted before restart`, kill only the
+   fixture's real server PID and restart its container/private daemon. Require
+   original accepted Run/work identity, release the hold and observe exactly one
+   transcript message and success.
+9. Dispatch a hidden child with `Hold child`, then accept `Queued user message`.
+   Require the actual reset queue to finish, the exact parent Run still held,
+   the child owner lease/live Docker generation intact and no reset retry/error.
+   Release the child; require the queued user to finish before exactly one
+   task-completion handoff. The driver never calls or replaces reset workers.
+
+Receipts, selected source hashes and last real state remain in `--logs`.
+The driver removes only its labelled client, including anonymous volumes; the
+launcher owns server/Git containers, daemon volume, network and temporary
+credentials. SIGINT/SIGTERM or a failed scenario still perform bounded cleanup.
+Assertions must remain enabled; optimized Python refuses before any resources.
+The source-only build images remain cached. Run fast driver regressions with
+`make test-phone-assist-e2e-harness`; the normal `make test-elisp` includes them.

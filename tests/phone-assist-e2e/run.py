@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Run bounded phone/Assist lifecycle checks on disposable Docker resources."""
+"""Drive nine real phone-client flows against an independently running Assist fixture."""
 from __future__ import annotations
-
 import argparse
 import hashlib
 import json
 from pathlib import Path
-import secrets
 import shutil
 import signal
 import subprocess
@@ -14,46 +12,44 @@ import tempfile
 import time
 import uuid
 
-
-FILES = ("Dockerfile", "run.py", "services.py", "client.el", "README.md", "test_harness.py", "requirements.txt")
-SOURCE = "ssh://test@git:2222/repos/domain.git"
+FILES = ("Dockerfile", "run.py", "client.el", "README.md", "test_harness.py")
 
 
-class Harness:
+class Driver:
     def __init__(self, args):
         self.args = args
+        self.fixture = json.loads(args.fixture.read_text())
         self.name = "phone-assist-e2e-" + uuid.uuid4().hex[:12]
-        self.network = self.name
-        self.image = self.name + ":test"
-        self.volume = self.name + "-threads"
-        self.containers = []
-        self.network_attempted = self.volume_attempted = False
-        self.deadline = time.monotonic() + 900
+        self.image = self.name + ":client"
+        self.created = False
         self.results = []
-        self.token = secrets.token_urlsafe(32)
-        self.args.logs.mkdir(parents=True, exist_ok=False)
+        self.token = Path(self.fixture["credentials"]["token"]).read_text().strip()
+        self.deadline = time.monotonic() + 1200
+        args.logs.mkdir(parents=True, exist_ok=False)
+        args.logs.chmod(0o700)
+
+    def scrub(self, text):
+        return text.replace(self.token, "[test-token]")
 
     def command(self, *args, timeout=45, input=None):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("E2E overall deadline exceeded")
-        process = subprocess.run(args, input=input, text=True, capture_output=True,
-                                 timeout=min(timeout, remaining))
-        if process.returncode:
-            raise RuntimeError(f"{args[0]} failed ({process.returncode}): "
-                               + self.scrub(process.stdout + process.stderr)[-6000:])
-        return process.stdout
-
-    def scrub(self, text):
-        return text.replace(self.token, "[test-token]")
+            raise TimeoutError("Client driver deadline exceeded")
+        result = subprocess.run(args, input=input, text=True, capture_output=True,
+                                timeout=min(timeout, remaining))
+        if result.returncode:
+            raise RuntimeError(f"{args[0]} failed ({result.returncode}): "
+                               + self.scrub(result.stdout + result.stderr)[-6000:])
+        return result.stdout
 
     def docker(self, *args, **kwargs):
         return self.command("docker", *args, **kwargs)
 
     def execute(self, service, *args, **kwargs):
-        return self.docker("exec", "--user", "1000:1000", self.name + "-" + service, *args, **kwargs)
+        assert service == "client"
+        return self.docker("exec", "--user", "1000:1000", self.name + "-client", *args, **kwargs)
 
-    def wait(self, description, predicate, seconds=45):
+    def wait(self, description, predicate, seconds=90):
         deadline = min(self.deadline, time.monotonic() + seconds)
         last = None
         while time.monotonic() < deadline:
@@ -61,14 +57,22 @@ class Harness:
                 value = predicate()
                 if value:
                     return value
-            except RuntimeError as exc:
-                last = exc
+            except RuntimeError as error:
+                last = error
             time.sleep(.1)
         raise TimeoutError(f"{description}: {last or 'condition not reached'}")
 
-    def stage(self, repo, target, added):
+    def verify_fixture(self):
+        for kind, name in (("container", self.fixture["server_container"]),
+                           ("network", self.fixture["network"])):
+            record = json.loads(self.docker(kind, "inspect", name))[0]
+            labels = (record["Config"] if kind == "container" else record).get("Labels", {})
+            if (labels or {}).get(self.fixture["label"]) != self.fixture["owner"]:
+                raise RuntimeError("Fixture ownership changed: " + name)
+
+    def stage(self, repo, target):
         files = self.command("git", "-C", str(repo), "ls-files", "-z").split("\0")
-        for relative in {*files, *added}:
+        for relative in {*files, *("tests/phone-assist-e2e/" + f for f in FILES)}:
             if not relative:
                 continue
             path = Path(relative)
@@ -84,110 +88,29 @@ class Harness:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, destination)
 
-    def copy(self, file, service, destination):
-        self.docker("cp", "-a", str(file), self.name + "-" + service + ":" + destination)
-
-    def start(self, service, *command, user="1000:1000", mounts=(), environment=()):
-        name = self.name + "-" + service
-        if service in {"assist", "client"}:
-            command = ("sh", "-c", "set -e; export HOME=/home/test; chown -R 1000:1000 /secrets /home/test/.ssh; "
-                       "touch /runtime/credentials-ready; "
-                       "exec setpriv --reuid=1000 --regid=1000 --init-groups \"$@\"", "bootstrap", *command)
-            user = "0:0"
-        self.containers.append(name)
-        self.docker("create", "--name", name, "--network", self.network,
-                    "--network-alias", service, "--user", user,
-                    "--label", "phone-assist-e2e.owner=" + self.name,
-                    "--memory", "1g", "--pids-limit", "128", "--cpus", "2",
-                    *mounts, *environment, self.image, *command)
-
     def bootstrap(self, temporary):
+        self.verify_fixture()
         context = temporary / "source"
-        self.stage(self.args.assist_source, context / "assist", [])
-        adapter = context / "assist/tests/phone_e2e_server.py"
-        adapter.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(self.args.assist_adapter, adapter)
-        self.stage(self.args.emacsos_source, context / "emacsos",
-                   ["tests/phone-assist-e2e/" + f for f in FILES])
-        identities = {}
-        for name, source in (("assist", self.args.assist_source), ("emacsos", self.args.emacsos_source)):
-            identities[name] = {"head": self.command("git", "-C", str(source), "rev-parse", "HEAD").strip(),
-                "files": {str(p.relative_to(context / name)): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in sorted((context / name).rglob("*")) if p.is_file()}}
-        (self.args.logs / "source.json").write_text(json.dumps(identities, indent=2))
-        print("Building isolated E2E image; logs: " + str(self.args.logs), flush=True)
+        self.stage(self.args.emacsos_source, context)
+        (self.args.logs / "source.json").write_text(json.dumps({
+            "emacsos_head": self.command("git", "-C", str(self.args.emacsos_source), "rev-parse", "HEAD").strip(),
+            "files": {str(p.relative_to(context)): hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in sorted(context.rglob("*")) if p.is_file()}}, indent=2))
         with (self.args.logs / "build.log").open("w") as log:
             build = subprocess.run(["docker", "build", "-t", self.image, "-f",
-                str(context / "emacsos/tests/phone-assist-e2e/Dockerfile"), str(context)],
+                str(context / "tests/phone-assist-e2e/Dockerfile"), str(context)],
                 stdout=log, stderr=log, timeout=600)
         if build.returncode:
-            raise RuntimeError("E2E image build failed; see build.log")
-        self.deadline = time.monotonic() + 300
-        self.network_attempted = True
-        self.docker("network", "create", "--internal", "--label",
-                    "phone-assist-e2e.owner=" + self.name, self.network)
-        self.volume_attempted = True
-        self.docker("volume", "create", "--label", "phone-assist-e2e.owner=" + self.name,
-                    self.volume)
-        private = temporary / "secrets"
-        private.mkdir(mode=0o700)
-        for key in ("client_key", "server_ssh", "ssh_host"):
-            self.command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private / key))
-        (private / "authorized_keys").write_text(
-            (private / "client_key.pub").read_text() + (private / "server_ssh.pub").read_text())
-        host = (private / "ssh_host.pub").read_text().split()
-        (private / "known_hosts").write_text("[git]:2222 " + " ".join(host[:2]) + "\n")
-        self.command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                     "-keyout", str(private / "ca.key"), "-out", str(private / "ca.crt"),
-                     "-days", "1", "-subj", "/CN=Disposable E2E CA",
-                     "-addext", "basicConstraints=critical,CA:TRUE",
-                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-        self.command("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout",
-                     str(private / "server.key"), "-out", str(private / "server.csr"),
-                     "-subj", "/CN=assist")
-        (private / "extensions").write_text("subjectAltName=DNS:assist\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\nbasicConstraints=critical,CA:FALSE\nauthorityKeyIdentifier=keyid,issuer\n")
-        self.command("openssl", "x509", "-req", "-in", str(private / "server.csr"),
-                     "-CA", str(private / "ca.crt"), "-CAkey", str(private / "ca.key"),
-                     "-CAcreateserial", "-out", str(private / "server.crt"), "-days", "1",
-                     "-extfile", str(private / "extensions"))
-        (private / "token").write_text(self.token)
-        (private / "ssh_config").write_text(
-            "Host git\n HostName git\n Port 2222\n User test\n IdentityFile /secrets/server_ssh\n"
-            " UserKnownHostsFile /secrets/known_hosts\n GlobalKnownHostsFile /dev/null\n"
-            " StrictHostKeyChecking yes\n IdentitiesOnly yes\n BatchMode yes\n")
-        key = hashlib.sha256(SOURCE.encode()).hexdigest()[:20]
-        (private / "remotes.json").write_text(json.dumps({key: SOURCE}))
-        for file in private.iterdir():
-            file.chmod(0o600)
-        service_script = "/src/emacsos/tests/phone-assist-e2e/services.py"
-        self.start("git", "python", service_script, "git", user="0:0")
-        self.start("shell", "python", service_script, "shell",
-                   mounts=("-v", self.volume + ":/state/threads"))
-        self.start("assist", "python", "tests/phone_e2e_server.py",
-                   mounts=("-v", self.volume + ":/state/threads"), environment=(
-                       "-e", "ASSIST_THREADS_DIR=/state/threads", "-e", "ASSIST_DOMAINS=" + SOURCE,
-                       "-e", "ASSIST_MODEL_URL=http://model.invalid:1/v1"))
-        self.start("client", "sleep", "300")
-        for file, service, destination in (
-            ("authorized_keys", "git", "/home/test/.ssh/authorized_keys"),
-            ("ssh_host", "git", "/secrets/ssh_host"),
-            ("server_ssh", "assist", "/secrets/server_ssh"),
-            ("known_hosts", "assist", "/secrets/known_hosts"),
-            ("ssh_config", "assist", "/home/test/.ssh/config"),
-            ("server.crt", "assist", "/secrets/server.crt"),
-            ("server.key", "assist", "/secrets/server.key"),
-            ("token", "assist", "/secrets/token"),
-            ("ca.crt", "client", "/secrets/ca.crt"),
-            ("token", "client", "/secrets/token"),
-            ("client_key", "client", "/secrets/client_key"),
-            ("known_hosts", "client", "/secrets/known_hosts"),
-            ("remotes.json", "client", "/secrets/remotes.json")):
-            self.copy(private / file, service, destination)
-        # Each service corrects copied private-file ownership before its runtime starts.
-        for service in ("git", "assist", "client"):
-            self.docker("start", self.name + "-" + service)
-
-        self.docker("start", self.name + "-shell")
+            raise RuntimeError("Client image build failed; see build.log")
+        self.created = True
+        self.docker("create", "--name", self.name + "-client", "--network", self.fixture["network"],
+            "--label", "phone-assist-e2e.owner=" + self.name, "--memory", "1g", "--pids-limit", "128",
+            "--cpus", "2", "--user", "0:0", "-e", "ASSIST_E2E_URL=" + self.fixture["container_url"],
+            self.image, "sh", "-c", "set -e; chown -R 1000:1000 /secrets; touch /runtime/credentials-ready; "
+            "exec setpriv --reuid=1000 --regid=1000 --init-groups sleep 900")
+        for name, source in self.fixture["credentials"].items():
+            self.docker("cp", "-a", source, self.name + "-client:/secrets/" + name)
+        self.docker("start", self.name + "-client")
         self.wait("client credential bootstrap", lambda: self.execute(
             "client", "test", "-f", "/runtime/credentials-ready") == "")
         self.execute("client", "sh", "-c",
@@ -195,16 +118,16 @@ class Harness:
             "cp /secrets/client_key ~/.config/emacsos/assist-git-key; "
             "cp /secrets/known_hosts ~/.config/emacsos/assist-git-known-hosts; "
             "cp /secrets/remotes.json ~/.config/emacsos/assist-git-remotes.json")
-        self.wait("Assist startup", lambda: self.api("GET", "/api/v1/phone/threads"))
 
     def api(self, method, path, body=None):
-        script = ("import json,requests; from pathlib import Path; "
+        script = ("import json,os,ssl,urllib.request; from pathlib import Path; "
             "v=json.load(__import__('sys').stdin); "
-            "r=requests.request(v['method'],'https://assist:8443'+v['path'],json=v['body'],"
-            "headers={'Authorization':'Bearer '+Path('/secrets/token').read_text().strip()},"
-            "verify='/secrets/ca.crt',timeout=5); r.raise_for_status(); print(r.text)")
-        return json.loads(self.docker("exec", "--user", "1000:1000", "-i", self.name + "-client", "python", "-c", script,
-            input=json.dumps({"method": method, "path": path, "body": body})))
+            "h={'Authorization':'Bearer '+Path('/secrets/token').read_text().strip(),'Content-Type':'application/json'}; "
+            "r=urllib.request.urlopen(urllib.request.Request(os.environ['ASSIST_E2E_URL']+v['path'],"
+            "method=v['method'],data=None if v['body'] is None else json.dumps(v['body']).encode(),headers=h),"
+            "context=ssl.create_default_context(cafile='/secrets/ca.crt'),timeout=5); print(r.read().decode())")
+        return json.loads(self.docker("exec", "--user", "1000:1000", "-i", self.name + "-client",
+            "python", "-c", script, input=json.dumps({"method": method, "path": path, "body": body})))
 
     def client(self, action, tid="", text=""):
         expression = "(phone-e2e-main " + " ".join(json.dumps(x) for x in (action, tid, text)) + ")"
@@ -312,8 +235,12 @@ class Harness:
         before = self.state(tid)
         accepted = next(r for r in before["runs"] if r["text"] == "Accepted before restart")
         assert accepted["status"] in {"pending", "revocation_pending"}
-        self.docker("kill", "--signal", "KILL", self.name + "-assist")
-        self.docker("start", self.name + "-assist")
+        self.verify_fixture()
+        server = self.fixture["server_container"]
+        self.docker("exec", server, "sh", "-c", 'kill -KILL "$(cat /runtime/server.pid)"')
+        self.wait("server container exits", lambda:
+            self.docker("inspect", "--format", "{{.State.Running}}", server).strip() == "false")
+        self.docker("start", server)
         self.wait("restart recovery barrier", lambda: "Hold restart" in self.state(tid)["holds"])
         after = self.state(tid)
         retained = next(r for r in after["runs"] if r["id"] == accepted["id"])
@@ -330,11 +257,12 @@ class Harness:
         self.client("accepted", tid, "Queued user message")
         accepted = next(r for r in self.state(tid)["runs"] if r["text"] == "Queued user message")
         held = self.wait("real reset deferred on live child", lambda:
-            (s if s["lease"] and s["lease"]["owner_run_id"] == child["run_id"]
-             and any(refusal["owner_run_id"] == child["run_id"]
-                     and accepted["id"] in refusal["held_run_ids"]
-                     and refusal["generation"] in s["lease"]["generations"]
-                     for refusal in s["reset_refusals"]) else None)
+            (s if s["reset_worker_idle"] and s["lease"]
+             and s["lease"]["owner_run_id"] == child["run_id"]
+             and set(s["generations"]).intersection(s["lease"]["generations"])
+             and any(r["id"] == accepted["id"] and r["status"] == "revocation_pending"
+                     and not r.get("error") and not r.get("revocation_retry_at")
+                     for r in s["runs"]) else None)
             if (s := self.state(tid)) else None)
         accepted = next(r for r in held["runs"] if r["text"] == "Queued user message")
         assert accepted["status"] == "revocation_pending"
@@ -350,72 +278,54 @@ class Harness:
         self.passed("live child completion wakes queued parent user before exactly one handoff")
 
     def cleanup(self):
+        if not self.created:
+            return
+        name = self.name + "-client"
         failures = []
-        resources = [("container", name) for name in reversed(self.containers)]
-        if self.volume_attempted:
-            resources.append(("volume", self.volume))
-        if self.network_attempted:
-            resources.append(("network", self.network))
-        for kind, name in resources:
-            try:
-                inspected = subprocess.run(["docker", kind, "inspect", name],
-                                           capture_output=True, text=True, timeout=5)
-                if inspected.returncode:
-                    if "No such" in inspected.stderr:
-                        continue
-                    raise RuntimeError(inspected.stderr)
-                record = json.loads(inspected.stdout)[0]
-                labels = (record["Config"] if kind == "container" else record).get("Labels", {})
-                if (labels or {}).get("phone-assist-e2e.owner") != self.name:
-                    continue  # A name collision belongs to someone else.
-            except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError, KeyError) as error:
-                failures.append("ownership inspection: " + str(error))
-                continue
-            if kind == "container":
-                try:
-                    logs = subprocess.run(["docker", "logs", name], capture_output=True,
-                                          text=True, timeout=5)
-                    (self.args.logs / (name.rsplit("-", 1)[-1] + ".log")).write_text(
-                        self.scrub(logs.stdout + logs.stderr))
-                except (OSError, subprocess.TimeoutExpired) as error:
-                    failures.append("log collection: " + str(error))
-            command = ["docker", "rm", "-f", name] if kind == "container" else ["docker", kind, "rm", name]
-            try:
-                removal = subprocess.run(command, capture_output=True, text=True, timeout=10)
-                if removal.returncode:
-                    failures.append("resource removal: " + removal.stderr)
-            except (OSError, subprocess.TimeoutExpired) as error:
-                failures.append("resource removal: " + str(error))
+        record = subprocess.run(["docker", "container", "inspect", name],
+                                capture_output=True, text=True, timeout=5)
+        if record.returncode:
+            if "No such" in record.stderr:
+                return
+            raise RuntimeError(record.stderr)
+        labels = json.loads(record.stdout)[0]["Config"].get("Labels", {})
+        if (labels or {}).get("phone-assist-e2e.owner") != self.name:
+            return
+        try:
+            logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True, timeout=5)
+            (self.args.logs / "client.log").write_text(self.scrub(logs.stdout + logs.stderr))
+        except (OSError, subprocess.TimeoutExpired) as error:
+            failures.append("log collection: " + str(error))
+        removal = subprocess.run(["docker", "rm", "-f", "-v", name],
+                                 capture_output=True, text=True, timeout=20)
+        if removal.returncode:
+            failures.append("client removal: " + removal.stderr)
         if failures:
-            (self.args.logs / "cleanup-errors.log").write_text(self.scrub("\n".join(failures)))
-            raise RuntimeError("E2E cleanup had failures; see cleanup-errors.log")
+            raise RuntimeError("Client cleanup failed: " + self.scrub("; ".join(failures)))
 
 
 def main():
     if not __debug__:
         raise RuntimeError("E2E requires assertions; unset PYTHONOPTIMIZE and omit -O")
     parser = argparse.ArgumentParser(description=__doc__)
-    root = Path(__file__).resolve().parents[2]
-    parser.add_argument("--emacsos-source", type=Path, default=root)
-    parser.add_argument("--assist-source", type=Path, default=root.parent / "assist")
-    parser.add_argument("--assist-adapter", type=Path,
-                        default=root.parent / "assist/tests/phone_e2e_server.py")
+    parser.add_argument("--fixture", type=Path, required=True)
+    parser.add_argument("--emacsos-source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--logs", type=Path, required=True)
     args = parser.parse_args()
     def interrupted(signum, frame):
-        raise KeyboardInterrupt("E2E interrupted; cleaning up owned resources")
+        raise KeyboardInterrupt("Client interrupted; cleaning up its container")
     signal.signal(signal.SIGTERM, interrupted)
-    harness = Harness(args)
+    driver = Driver(args)
     try:
-        with tempfile.TemporaryDirectory(prefix=harness.name + "-") as name:
-            harness.bootstrap(Path(name))
-            harness.scenarios()
+        with tempfile.TemporaryDirectory(prefix=driver.name + "-") as name:
+            driver.bootstrap(Path(name))
+            driver.scenarios()
     finally:
         try:
-            harness.cleanup()
+            driver.cleanup()
         finally:
             (args.logs / "results.json").write_text(json.dumps({
-                "passed": harness.results, "image": harness.image}, indent=2))
+                "passed": driver.results, "image": driver.image}, indent=2))
 
 
 if __name__ == "__main__":

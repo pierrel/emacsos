@@ -3,7 +3,7 @@
 ;; Test control supplies user actions; HTTPS, SSE, recovery and Git remain real.
 ;;; Code:
 (require 'assist-web)
-(setq emacsos-assist-web-api-url "https://assist:8443/api/v1/phone"
+(setq emacsos-assist-web-api-url (concat (getenv "ASSIST_E2E_URL") "/api/v1/phone")
       emacsos-assist-web-ca-file "/secrets/ca.crt"
       url-proxy-services nil)
 
@@ -86,7 +86,7 @@
        (lambda ()
          (zerop (call-process
                  "python" nil nil nil "-c"
-                 "import requests,sys; from pathlib import Path; s=requests.Session(); s.headers['Authorization']='Bearer '+Path('/secrets/token').read_text().strip(); s.verify='/secrets/ca.crt'; v=s.get('https://assist:8443/__e2e/state/'+sys.argv[1],timeout=5); v.raise_for_status(); sys.exit(1) if 'Hold observer' not in v.json()['holds'] else None; r=s.post('https://assist:8443/__e2e/release',json={'text':'Hold observer'},timeout=5); r.raise_for_status()"
+                 "import json,os,ssl,sys,urllib.request; from pathlib import Path; h={'Authorization':'Bearer '+Path('/secrets/token').read_text().strip(),'Content-Type':'application/json'}; c=ssl.create_default_context(cafile='/secrets/ca.crt'); u=os.environ['ASSIST_E2E_URL']; v=urllib.request.urlopen(urllib.request.Request(u+'/__e2e/state/'+sys.argv[1],headers=h),context=c,timeout=5); sys.exit(1) if 'Hold observer' not in json.load(v)['holds'] else None; r=urllib.request.urlopen(urllib.request.Request(u+'/__e2e/release',data=json.dumps({'text':'Hold observer'}).encode(),headers=h),context=c,timeout=5); r.close()"
                  emacsos-assist-web--thread-id))))
       (setq phone-e2e-stage "wait-exact-run-success")
       (phone-e2e-wait
