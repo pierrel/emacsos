@@ -165,6 +165,14 @@ ordinary chat, editing, and Assist buffers have no separate Emacs control pane.
 | Open or choose a persistent terminal | =M-x dtach-shell= or =C-c d= |
 | Reconnect the current persistent terminal | =M-x dtach-shell-reconnect= or =C-c S-d= |
 
+On PinePhone, tap =History= above a terminal or drag its text to enter
+native vterm copy mode.  =Live= resumes terminal output.  The header shows
+=Output paused= while browsing; producers may block until you return to live.
+Normal desktop terminal bindings are unchanged.  Native history contains only
+retained terminal scrollback.  Launch Codex with =codex --no-alt-screen= to
+retain its inline history; copy mode cannot recover an application's hidden
+alternate-screen history.
+
 * PinePhone/OpenRC hardware
 
 | Control | Action |
