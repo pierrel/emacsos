@@ -7,6 +7,8 @@
       emacsos-assist-web-ca-file "/secrets/ca.crt"
       url-proxy-services nil)
 
+(defvar phone-e2e-stage nil)
+
 (defun phone-e2e-wait (predicate)
   "Wait at most 45 seconds for PREDICATE while processing actual client events."
   (let ((deadline (+ (float-time) 45)))
@@ -14,8 +16,8 @@
       (accept-process-output nil 0.05)
       (set-buffer (window-buffer (selected-window))))
     (unless (funcall predicate)
-      (error "E2E client deadline: buffer=%s snapshot=%s requests=%s git-process=%s queue=%s"
-             (buffer-name) (and emacsos-assist-web--snapshot t)
+      (error "E2E client deadline: stage=%s buffer=%s snapshot=%s requests=%s git-process=%s queue=%s"
+             phone-e2e-stage (buffer-name) (and emacsos-assist-web--snapshot t)
              (length emacsos-assist-web--requests) emacsos-assist-web-git--process
              (mapcar (lambda (e) (plist-get e :state)) emacsos-assist-web--queue)))))
 
@@ -44,10 +46,64 @@
     (denied . ,(eq emacsos-assist-web--denied t))
     (text . ,(buffer-string))))
 
+(defun phone-e2e-auth-recovery ()
+  "Deny then reauthorize one resident buffer through real canonical requests."
+  (let ((buffer (current-buffer))
+        (initial-epoch emacsos-assist-web--auth-epoch))
+    (phone-e2e-wait (lambda () (not emacsos-assist-web--requests)))
+    (with-temp-file emacsos-assist-web-token-file (insert "invalid"))
+    (emacsos-assist-web-refresh-thread)
+    (phone-e2e-wait (lambda () (eq emacsos-assist-web--denied t)))
+    (let ((denied-epoch emacsos-assist-web--auth-epoch))
+      (phone-e2e-wait (lambda () (not emacsos-assist-web--requests)))
+      (copy-file "/secrets/token" emacsos-assist-web-token-file t)
+      (emacsos-assist-web-refresh-thread)
+      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--requests)
+                                     (not emacsos-assist-web--denied))))
+      `((auth_denied_seen . t) (auth_initial_epoch . ,initial-epoch)
+        (auth_denied_epoch . ,denied-epoch)
+        (same_buffer . ,(eq buffer (current-buffer)))))))
+
+(defun phone-e2e-observer-recovery (text)
+  "Lose the real observer then Refresh its terminal Run in the same buffer."
+  (let ((buffer (current-buffer)))
+    (emacsos-assist-web--replace-input text)
+    (emacsos-assist-web-send)
+    (setq phone-e2e-stage "wait-live-observer")
+    (phone-e2e-wait
+     (lambda () (let ((entry (car emacsos-assist-web--queue)))
+                  (and (eq (plist-get entry :state) 'observing)
+                       (process-live-p (plist-get entry :stream-process))))))
+    (let* ((entry (car emacsos-assist-web--queue))
+           (run-id (plist-get entry :run-id)))
+      (setq phone-e2e-stage "close-observer")
+      (delete-process (plist-get entry :stream-process))
+      (phone-e2e-wait
+       (lambda () (and (eq (plist-get entry :state) 'accepted-unobserved)
+                       (not (plist-get entry :stream-process)))))
+      (setq phone-e2e-stage "release-exact-model-hold")
+      (phone-e2e-wait
+       (lambda ()
+         (zerop (call-process
+                 "python" nil nil nil "-c"
+                 "import requests,sys; from pathlib import Path; s=requests.Session(); s.headers['Authorization']='Bearer '+Path('/secrets/token').read_text().strip(); s.verify='/secrets/ca.crt'; v=s.get('https://assist:8443/__e2e/state/'+sys.argv[1],timeout=5); v.raise_for_status(); sys.exit(1) if 'Hold observer' not in v.json()['holds'] else None; r=s.post('https://assist:8443/__e2e/release',json={'text':'Hold observer'},timeout=5); r.raise_for_status()"
+                 emacsos-assist-web--thread-id))))
+      (setq phone-e2e-stage "wait-exact-run-success")
+      (phone-e2e-wait
+       (lambda () (equal (alist-get 'status (phone-e2e-request
+                    "GET" (format "threads/%s/runs/%s" emacsos-assist-web--thread-id run-id)))
+                         "success")))
+      (setq phone-e2e-stage "refresh-terminal-run")
+      (call-interactively #'emacsos-assist-web-refresh-thread)
+      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--queue)
+                                     (not emacsos-assist-web--requests))))
+      `((observer_lost . t) (queue_cleared . t)
+        (same_buffer . ,(eq buffer (current-buffer)))))))
+
 (defun phone-e2e-main (action tid text)
   "Run user ACTION on TID with TEXT and print one JSON receipt."
   (condition-case problem
-      (progn
+      (let (recovery)
         (when (equal action "accepted-fresh")
           (setq emacsos-assist-web-cache-directory
                 (make-temp-file "/home/test/e2e-client-cache-" t)
@@ -68,6 +124,9 @@
           (condition-case nil (phone-e2e-open tid) (error nil))
           (phone-e2e-wait (lambda () (eq emacsos-assist-web--denied t))))
          (t (phone-e2e-open tid)))
+        (cond
+         ((equal action "auth-recovery") (setq recovery (phone-e2e-auth-recovery)))
+         ((equal action "observer-recovery") (setq recovery (phone-e2e-observer-recovery text))))
         (when (member action '("new" "send" "accepted"))
           (emacsos-assist-web--replace-input text)
           (emacsos-assist-web-send)
@@ -89,7 +148,7 @@
           (when (plist-get emacsos-assist-web-git--metadata :branch)
             (emacsos-assist-web-git-refresh)
             (phone-e2e-wait (lambda () (not emacsos-assist-web-git--process)))))
-        (princ (concat "E2E_JSON:" (json-encode (phone-e2e-result)) "\n")))
+        (princ (concat "E2E_JSON:" (json-encode (append recovery (phone-e2e-result))) "\n")))
     (error
      (when (get-buffer "*Messages*")
        (princ (with-current-buffer "*Messages*" (buffer-string))))

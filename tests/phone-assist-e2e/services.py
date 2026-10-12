@@ -8,6 +8,10 @@ import subprocess
 import sys
 
 
+THREADS_ROOT = Path("/state/threads")
+WORKSPACE_LINK = Path("/runtime/workspace")
+
+
 def git_service():
     subprocess.run(["ssh-keygen", "-A"], check=True)
     subprocess.run(["usermod", "-p", "e2e-public-key-only", "test"], check=True)
@@ -36,10 +40,10 @@ class ShellHandler(BaseHTTPRequestHandler):
             return
         data = json.loads(self.rfile.read(length))
         worktree = Path(data["worktree"]).resolve()
-        if not worktree.is_relative_to("/state/threads") or not worktree.is_dir():
+        if not worktree.is_relative_to(THREADS_ROOT) or not worktree.is_dir():
             self.send_error(400)
             return
-        link = Path("/runtime/workspace")
+        link = WORKSPACE_LINK
         link.unlink(missing_ok=True)
         link.symlink_to(worktree)
         if self.path == "/execute":
@@ -50,8 +54,9 @@ class ShellHandler(BaseHTTPRequestHandler):
                       "truncated": len(process.stdout) + len(process.stderr) > 65536}
         elif self.path == "/upload":
             for name, content in data["files"]:
-                path = Path(name)
-                if not (name.startswith("/workspace/") or name.startswith("/tmp/assist-git-")):
+                path = Path(name).resolve()
+                if not (path.is_relative_to(worktree) or path in {
+                        Path("/tmp/assist-git-incoming.bundle"), Path("/tmp/assist-git-merge.bundle")}):
                     self.send_error(400)
                     return
                 path.write_bytes(base64.b64decode(content, validate=True))

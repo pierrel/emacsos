@@ -42,7 +42,10 @@ Coverage:
 - Dirty client file and index preservation with a Git status notice.
 - Client push during execution, result-branch publication, explicit local
   reconciliation and a subsequent successful turn.
-- Private Git setup failure and recovery; canonical auth denial and recovery.
+- Private Git setup failure and recovery; canonical auth denial then successful
+  authorization in the same resident Emacs buffer.
+- A resident client losing its real SSE observer, then explicitly refreshing the
+  completed Run to retrieve its result and clear the queue.
 - A second client with an independent cache durably accepting a queued Run
   before a forced server kill, then verifying that it executes once after restart.
 - A hidden child owning the parent workspace while a parent user message is

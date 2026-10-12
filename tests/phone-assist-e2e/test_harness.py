@@ -1,5 +1,11 @@
 """Source privacy and cleanup regressions, without Docker or a model."""
 import argparse
+import base64
+from http.server import HTTPServer
+import threading
+import urllib.request
+import urllib.error
+import services
 import json
 from pathlib import Path
 import subprocess
@@ -12,6 +18,43 @@ from run import Harness
 
 
 class HarnessTests(unittest.TestCase):
+    def test_upload_rejects_traversal_symlinks_and_unrecognized_bundle_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree, sibling = root / "threads/one", root / "threads/two"
+            worktree.mkdir(parents=True)
+            sibling.mkdir()
+            victim = sibling / "victim"
+            victim.write_bytes(b"unchanged")
+            (worktree / "escape").symlink_to(sibling, target_is_directory=True)
+            with patch.object(services, "THREADS_ROOT", root / "threads"), patch.object(
+                    services, "WORKSPACE_LINK", root / "workspace"):
+                server = HTTPServer(("127.0.0.1", 0), services.ShellHandler)
+                worker = threading.Thread(target=server.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    def upload(name):
+                        body = json.dumps({"worktree": str(worktree), "files": [
+                            [name, base64.b64encode(b"new").decode()]]}).encode()
+                        return urllib.request.urlopen(urllib.request.Request(
+                            f"http://127.0.0.1:{server.server_port}/upload", data=body), timeout=2)
+                    with upload(str(worktree / "allowed")) as response:
+                        self.assertEqual(response.status, 200)
+                    self.assertEqual((worktree / "allowed").read_bytes(), b"new")
+                    for destination in [str(worktree / "../two/victim"),
+                                        str(worktree / "escape/victim"),
+                                        "/tmp/assist-git-not-a-transfer.bundle"]:
+                        with self.subTest(destination=destination), self.assertRaises(
+                                urllib.error.HTTPError) as denied:
+                            upload(destination)
+                        self.assertEqual(denied.exception.code, 400)
+                        denied.exception.close()
+                        self.assertEqual(victim.read_bytes(), b"unchanged")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    worker.join(2)
+
     def test_optimized_runner_refuses_before_creating_resources(self):
         with tempfile.TemporaryDirectory() as temporary:
             logs = Path(temporary) / "logs"

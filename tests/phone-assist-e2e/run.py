@@ -296,11 +296,15 @@ class Harness:
         assert not self.client("refresh", tid)["git_error"]
         self.passed("private Git configuration failure and recovery")
 
-        self.execute("client", "sh", "-c", "printf invalid > ~/.config/emacsos/assist-web-token")
-        assert self.client("denied", tid)["denied"]
-        self.execute("client", "sh", "-c", "cp /secrets/token ~/.config/emacsos/assist-web-token")
-        assert not self.client("refresh", tid)["denied"]
+        recovered = self.client("auth-recovery", tid)
+        assert recovered["auth_denied_seen"] and recovered["same_buffer"] and not recovered["denied"]
+        assert recovered["auth_denied_epoch"] > recovered["auth_initial_epoch"]
         self.passed("canonical authentication denial and recovery")
+
+        recovered = self.client("observer-recovery", tid, "Hold observer")
+        assert recovered["observer_lost"] and recovered["same_buffer"] and recovered["queue_cleared"]
+        assert "Completed: Hold observer" in recovered["text"]
+        self.passed("same resident client refresh recovers completed Run after observer loss")
 
         self.client("accepted", tid, "Hold restart")
         self.wait("restart model barrier", lambda: "Hold restart" in self.state(tid)["holds"])
