@@ -13,6 +13,7 @@ import time
 import uuid
 
 FILES = ("Dockerfile", "run.py", "client.el", "README.md", "test_harness.py")
+RUN_SECONDS = 1200
 
 
 class Driver:
@@ -24,7 +25,7 @@ class Driver:
         self.created = False
         self.results = []
         self.token = Path(self.fixture["credentials"]["token"]).read_text().strip()
-        self.deadline = time.monotonic() + 1200
+        self.deadline = time.monotonic() + RUN_SECONDS
         args.logs.mkdir(parents=True, exist_ok=False)
         args.logs.chmod(0o700)
 
@@ -108,7 +109,7 @@ class Driver:
             "--label", "phone-assist-e2e.owner=" + self.name, "--memory", "1g", "--pids-limit", "128",
             "--cpus", "2", "--user", "0:0", "-e", "ASSIST_E2E_URL=" + self.fixture["container_url"],
             self.image, "sh", "-c", "set -e; chown -R 1000:1000 /secrets; touch /runtime/credentials-ready; "
-            "exec setpriv --reuid=1000 --regid=1000 --init-groups sleep 900")
+            "exec setpriv --reuid=1000 --regid=1000 --init-groups sleep " + str(RUN_SECONDS))
         for name, source in self.fixture["credentials"].items():
             self.docker("cp", "-a", source, self.name + "-client:/secrets/" + name)
         self.docker("start", self.name + "-client")
@@ -187,7 +188,10 @@ class Driver:
         assert self.git(checkout, "write-tree") == before_index
         assert "local edits are unchanged" in result["git"]["pending"]
         self.git(checkout, "restore", "server.txt")
-        self.client("refresh", tid)
+        refreshed = self.client("refresh", tid)
+        assert not refreshed["git_error"]
+        assert refreshed["git"]["local_oid"] == refreshed["git"]["thread_oid"]
+        assert self.execute("client", "cat", checkout + "/other.txt") == "next-server"
         self.passed("dirty client retains bytes and index with actionable notice")
 
         self.client("accepted", tid, "Hold publication")
@@ -221,7 +225,7 @@ class Driver:
         self.passed("private Git configuration failure and recovery")
 
         recovered = self.client("auth-recovery", tid)
-        assert recovered["canonical_refreshed"]
+        assert recovered["canonical_refreshed"] and recovered["git_refreshed"]
         assert recovered["auth_denied_seen"] and recovered["same_buffer"] and not recovered["denied"]
         assert recovered["auth_denied_epoch"] > recovered["auth_initial_epoch"]
         self.passed("canonical authentication denial and recovery")

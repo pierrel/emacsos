@@ -206,7 +206,8 @@ ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 
 ** Isolated Assist Web lifecycle E2E
 
-Start the standalone real Assist fixture with its =tests/e2e/start.py= command,
+From Assist, start the standalone fixture with
+=python3 tests/e2e/start.py --logs /tmp/assist-fixture-new --seconds 1800=,
 then run =python3 tests/phone-assist-e2e/run.py --fixture /tmp/assist-fixture-new/fixture.json --logs /tmp/phone-assist-e2e-results=.
 The actual Assist Web Emacs client joins that fixture through HTTPS, SSE and
 Git/SSH. Assist uses its existing Docker sandbox backend with deterministic

@@ -3,7 +3,7 @@
 Start the standalone fixture from an Assist checkout, then run its direct smoke:
 
 ```sh
-python tests/e2e/start.py --logs /tmp/assist-fixture-new --seconds 900
+python tests/e2e/start.py --logs /tmp/assist-fixture-new --seconds 1800
 python tests/e2e/smoke.py --fixture /tmp/assist-fixture-new/fixture.json
 ```
 
@@ -12,6 +12,10 @@ While that launcher remains running, run from the EmacsOS checkout:
 ```sh
 python tests/phone-assist-e2e/run.py --fixture /tmp/assist-fixture-new/fixture.json --logs /tmp/phone-client-new
 ```
+
+Run the client promptly after the smoke. Its 1200-second total budget includes
+the build; its owned container stays alive for that full budget. The paired
+1800-second fixture lifetime leaves time for the smoke and client startup.
 
 The driver builds only an Emacs/Git/SSH client image and joins the fixture's exact
 internal network. It loads production `assist-web.el` and `assist-web-git.el`.
@@ -28,6 +32,7 @@ The nine sequential scenarios use a fresh synthetic Git-backed thread:
    require the next server turn to read the pushed contents.
 3. Leave `server.txt` dirty, then `Write other.txt next-server`; require original
    local bytes/index and an actionable pending-refresh notice, then restore/refresh.
+   Require successful Git recovery, matching tips and the published `other.txt` bytes.
 4. `Hold publication`: push `during.txt` while real inference waits, then release;
    require an exceptional result branch, explicitly merge/push it and
    `Read server-during.txt`; require both histories/files and a successful read.
@@ -35,7 +40,7 @@ The nine sequential scenarios use a fresh synthetic Git-backed thread:
    and require refresh recovery.
 6. In one resident buffer, replace its token, Refresh, require canonical denial
    and an increased auth epoch; restore the token and Refresh the same buffer.
-   Require a newly rendered canonical snapshot and recovered Git state.
+   Require a newly rendered canonical snapshot and a new successful Git receipt.
 7. In one resident buffer, send `Hold observer`, close the entry's actual SSE
    process and await its production sentinel's accepted-unobserved state. Release
    inference, require exact Run GET success, then interactive Refresh with result

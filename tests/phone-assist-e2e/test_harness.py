@@ -12,6 +12,47 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_auth_recovery_requires_a_new_git_receipt(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(dolist (fresh '(nil t))
+          (let ((emacsos-assist-web-token-file (make-temp-file "e2e-token-"))
+                (emacsos-assist-web--snapshot (list 'before))
+                (emacsos-assist-web--requests nil)
+                (emacsos-assist-web--denied nil)
+                (emacsos-assist-web--auth-epoch 0)
+                (emacsos-assist-web-git--result (list 'old-git))
+                (emacsos-assist-web-git--process nil)
+                (emacsos-assist-web-git--unavailable nil)
+                (refreshes 0) failed result)
+            (unwind-protect
+                (cl-letf (((symbol-function 'phone-e2e-wait)
+                           (lambda (predicate)
+                             (unless (funcall predicate) (error "unmet recovery condition"))))
+                          ((symbol-function 'copy-file) (lambda (&rest _) nil))
+                          ((symbol-function 'emacsos-assist-web-refresh-thread)
+                           (lambda () (interactive)
+                             (cl-incf refreshes)
+                             (if (= refreshes 1)
+                                 (setq emacsos-assist-web--denied t
+                                       emacsos-assist-web--auth-epoch 1)
+                               (setq emacsos-assist-web--denied nil
+                                     emacsos-assist-web--snapshot (list 'new-canonical))
+                               (when fresh
+                                 (setq emacsos-assist-web-git--result (list 'new-git)))))))
+                  (condition-case nil
+                      (setq result (phone-e2e-auth-recovery))
+                    (error (setq failed t)))
+                  (if fresh
+                      (unless (and (not failed) (alist-get 'git_refreshed result))
+                        (error "fresh Git recovery failed"))
+                    (unless failed (error "stale Git receipt passed recovery"))))
+              (delete-file emacsos-assist-web-token-file))))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_timeout_does_not_report_a_recovered_transient_error(self):
         driver = Driver.__new__(Driver)
         driver.deadline = 10

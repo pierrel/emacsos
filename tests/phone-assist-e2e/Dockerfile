@@ -8,4 +8,3 @@ COPY . /src/emacsos/
 ENV PYTHONDONTWRITEBYTECODE=1 HOME=/home/test
 WORKDIR /src/emacsos
 USER test
-CMD ["sleep", "900"]
