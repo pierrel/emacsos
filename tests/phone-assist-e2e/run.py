@@ -260,7 +260,7 @@ class Driver:
         held = self.wait("real reset deferred on live child", lambda:
             (s if s["reset_worker_idle"] and s["lease"]
              and s["lease"]["owner_run_id"] == child["run_id"]
-             and set(s["generations"]).intersection(s["lease"]["generations"])
+             and s["live_registered_generation"] in s["lease"]["generations"]
              and any(r["id"] == accepted["id"] and r["status"] == "revocation_pending"
                      and not r.get("error") and not r.get("revocation_retry_at")
                      for r in s["runs"]) else None)
@@ -276,6 +276,15 @@ class Driver:
         assert len(handoffs) == 1
         user = next(r for r in finished["runs"] if r["id"] == accepted["id"])
         assert user["updated_at"] <= handoffs[0]["updated_at"]
+        self.wait("terminal reset queue idle", lambda: self.state(tid)["reset_worker_idle"])
+        self.verify_fixture()
+        census = self.wait("terminal native Docker sandbox census", lambda:
+            {"sandbox_ids": [], "server_container": self.fixture["server_container"],
+             "owner": self.fixture["owner"], "reset_worker_idle": True}
+            if not self.docker("exec", self.fixture["server_container"], "docker", "ps",
+                "--all", "--no-trunc", "--filter", "label=assist.sandbox=true",
+                "--format", "{{.ID}}").strip() else None)
+        (self.args.logs / "terminal-sandbox-census.json").write_text(json.dumps(census, indent=2))
         self.passed("live child completion wakes queued parent user before exactly one handoff")
 
     def cleanup(self):

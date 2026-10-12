@@ -46,9 +46,13 @@ The nine sequential scenarios use a fresh synthetic Git-backed thread:
    transcript message and success.
 9. Dispatch a hidden child with `Hold child`, then accept `Queued user message`.
    Require the actual reset queue to finish, the exact parent Run still held,
-   the child owner lease/live Docker generation intact and no reset retry/error.
+   the child owner lease intact, its exact registered Docker generation still running,
+   and no reset retry/error.
    Release the child; require the queued user to finish before exactly one
-   task-completion handoff. The driver never calls or replaces reset workers.
+   task-completion handoff. After the real reset queue settles, require a direct
+   native Docker census of all sandbox-labelled containers in the private daemon
+   to be empty, including unregistered leftovers. Save the terminal census receipt.
+   The driver never calls or replaces reset workers.
 
 Receipts, selected source hashes and last real state remain in `--logs`.
 The driver removes only its labelled client, including anonymous volumes; the
