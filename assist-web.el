@@ -1184,9 +1184,6 @@ An auth-only GET leaves exact Run outcome uncertain."
               (condition-case nil
                   (emacsos-assist-web--update-lifecycle-headers)
                 ((error quit) nil)))))))
-    (dolist (item (copy-sequence emacsos-assist-web-git--feedback-windows))
-      (when (window-live-p (car item))
-        (emacsos-assist-web-git--clear-feedback (car item))))
     (emacsos-assist-web--update-lifecycle-headers))))
 
 

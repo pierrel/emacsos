@@ -8380,6 +8380,34 @@
         (dolist (buffer (list preview peer source))
           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
+(ert-deftest test-assist-web-canonical-reauthorization-clears-thread-denial ()
+  "Canonical authorization clears a denied thread and its live peers."
+  (let ((source (generate-new-buffer " *reauthorization source*"))
+        (peer (generate-new-buffer " *reauthorization peer*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list source peer))
+            (with-current-buffer buffer
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1")))
+          (with-current-buffer source
+            (emacsos-assist-web--canonical-denied 401)
+            (let ((epoch emacsos-assist-web--auth-epoch))
+              (should emacsos-assist-web--denied)
+              (should (plist-get
+                       (emacsos-assist-web--thread-safety-record "thread-1")
+                       :denial))
+              (emacsos-assist-web--canonical-authorized epoch)
+              (should-not emacsos-assist-web--denied)
+              (should-not (plist-get
+                           (emacsos-assist-web--thread-safety-record "thread-1")
+                           :denial))))
+          (with-current-buffer peer
+            (should-not emacsos-assist-web--denied)))
+      (dolist (buffer (list peer source))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest test-assist-web-approval-orders-reads-across-peers ()
   "An older peer's response cannot replace or close the newer peer's preview."
   (dolist (old-value (list `((thread_id . "thread-1")
