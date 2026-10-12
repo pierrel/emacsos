@@ -16,8 +16,7 @@ adduser -S -D -H -h /var/lib/emacsos-lab -s /sbin/nologin \
     -G emacsos-lab emacsos-lab
 install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /run/emacsos-ui /var/lib/emacsos-lab /usr/local/share/emacsos-openrc
-sed -e 's|^external_power=.*$|external_power=/tmp/external-power/online|' \
-    /source/session-power >/tmp/session-power.test
+cp /source/session-power /tmp/session-power.test
 install -o root -g root -m 0755 /tmp/session-power.test \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 /source/process-group \
@@ -26,7 +25,6 @@ sed -e 's|^power=/sys/power$|power=/tmp/power|' \
     -e 's|^power_key=.*$|power_key=/tmp/power-key/wakeup|' \
     -e 's|^axp_power_key=.*$|axp_power_key=/tmp/axp-power-key/wakeup|' \
     -e 's|^modem=.*$|modem=/tmp/modem|' \
-    -e 's|^external_power=.*$|external_power=/tmp/external-power/online|' \
     /source/suspend-root >/tmp/suspend-root.test
 chmod 0755 /tmp/suspend-root.test
 
@@ -92,12 +90,18 @@ done
 
 as_lab() {
     su -s /bin/sh emacsos-lab -c \
-        "/usr/local/share/emacsos-openrc/session-power $1"
+        "/usr/local/share/emacsos-openrc/session-power $*"
 }
 
 install -d -m 0755 /tmp/external-power
 printf '%s\n' 0 >/tmp/external-power/online
 
+mkfifo -m 0600 /run/emacsos-ui/power-events
+chown emacsos-lab:emacsos-lab /run/emacsos-ui/power-events
+su -s /bin/sh emacsos-lab -c \
+    'exec /usr/local/share/emacsos-openrc/process-group /usr/local/share/emacsos-openrc/session-power monitor' &
+power_pid=$!
+trap 'kill "$socket_pid" "$power_pid" 2>/dev/null || true' EXIT
 as_lab wake
 [ "$(cat /run/emacsos-ui/power-state)" = active ]
 [ "$(sed -n '1p' /tmp/swaymsg.log)" = \
@@ -133,78 +137,78 @@ as_lab press
 [ "$(sed -n '6p' /tmp/swaymsg.log)" = \
     '-s /run/emacsos-ui/sway-ipc.test.sock output DSI-1 power off' ]
 
-# The second idle timer cannot suspend a manually blanked screen until the
-# first timer has marked it as idle-originated.
+# Manual blanking owns its timer immediately. Generic seat resume, repeated
+# idle callbacks and volume activity cannot authorize display wake.
 printf '%s\n' 0 >/tmp/suspend-status
-as_lab suspend
-[ ! -e /tmp/doas.log ]
-
+generation=$(cat /run/emacsos-ui/power-generation)
 before=$(wc -l </tmp/swaymsg.log)
+as_lab resume
 as_lab idle-blank
 [ "$(wc -l </tmp/swaymsg.log)" -eq "$before" ]
-as_lab suspend
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+[ "$(cat /run/emacsos-ui/power-generation)" = "$generation" ]
+as_lab suspend "$generation"
 [ "$(cat /tmp/doas.log)" = /usr/local/sbin/emacsos-openrc-suspend ]
 rm -f /tmp/doas.log
 
-# USB power keeps the display active and also wakes an already idle-blanked
-# display rather than allowing the root helper to suspend it.
-printf '%s\n' 1 >/tmp/external-power/online
-as_lab suspend
-[ "$(cat /run/emacsos-ui/power-state)" = active ]
-[ ! -e /tmp/doas.log ]
-printf '%s\n' 0 >/tmp/external-power/online
-as_lab idle-blank
+# Suspend failure must remain dark instead of waking the phone unattended.
+printf '%s\n' 1 >/tmp/suspend-status
+if as_lab suspend "$generation"; then
+    printf '%s\n' 'failed suspend was reported as successful' >&2
+    exit 1
+fi
 [ "$(cat /run/emacsos-ui/power-state)" = blank ]
+[ "$(wc -l </tmp/swaymsg.log)" -eq "$before" ]
+printf '%s\n' 0 >/tmp/suspend-status
+rm -f /tmp/doas.log
 
-# A power key that resumes an idle-blanked seat launches both callbacks.  They
-# must finish active regardless of which one owns the transition lock first.
-mkfifo /tmp/wtype-continue
-touch /tmp/block-wtype
-as_lab resume &
-resume_first_pid=$!
-attempt=0
-while [ ! -e /tmp/wtype-reached ]; do
-    [ "$attempt" -lt 20 ]
-    attempt=$((attempt + 1))
-    sleep 0.05
-done
-as_lab press &
-press_second_pid=$!
-printf '%s\n' continue >/tmp/wtype-continue
-wait "$resume_first_pid"
-wait "$press_second_pid"
-[ "$(cat /run/emacsos-ui/power-state)" = active ]
-rm -f /tmp/block-wtype /tmp/wtype-continue /tmp/wtype-reached
-
-as_lab press
-as_lab idle-blank
-mkfifo /tmp/wtype-continue
-touch /tmp/block-wtype
-as_lab press &
-press_first_pid=$!
-attempt=0
-while [ ! -e /tmp/wtype-reached ]; do
-    [ "$attempt" -lt 20 ]
-    attempt=$((attempt + 1))
-    sleep 0.05
-done
-as_lab resume &
-resume_second_pid=$!
-printf '%s\n' continue >/tmp/wtype-continue
-wait "$press_first_pid"
-wait "$resume_second_pid"
-[ "$(cat /run/emacsos-ui/power-state)" = active ]
-rm -f /tmp/block-wtype /tmp/wtype-continue /tmp/wtype-reached
-
-# A volume key can produce resume without a power-key press.  Its Sway binding
-# follows with explicit wake, which clears idle origin before a later press.
-as_lab press
-as_lab idle-blank
-as_lab resume
-[ "$(cat /run/emacsos-ui/power-state)" = active ]
+# A deadline from an older dark period cannot suspend a newly blanked screen.
 as_lab wake
 as_lab press
+as_lab suspend "$generation"
+[ ! -e /tmp/doas.log ]
+as_lab resume
 [ "$(cat /run/emacsos-ui/power-state)" = blank ]
+as_lab press
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+
+# Exercise the actual timed reader with a shortened test-only deadline. It
+# fires after manual and idle blanking, re-arms after an irrelevant kernel
+# resume, and cancels on explicit call/SMS wake without lighting the panel.
+kill "$power_pid"
+wait "$power_pid" 2>/dev/null || true
+sed 's/read -r -t 120 /read -r -t 0.4 /' \
+    /source/session-power >/tmp/session-power.fast
+chmod 0755 /tmp/session-power.fast
+su -s /bin/sh emacsos-lab -c \
+    'exec /usr/local/share/emacsos-openrc/process-group /tmp/session-power.fast monitor' &
+power_pid=$!
+as_lab wake
+as_lab press
+sleep 0.1
+as_lab resume
+as_lab idle-blank
+sleep 0.15
+[ ! -e /tmp/doas.log ]
+sleep 0.25
+[ "$(wc -l </tmp/doas.log)" -eq 1 ]
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+sleep 0.4
+[ "$(wc -l </tmp/doas.log)" -ge 2 ]
+as_lab wake
+rm -f /tmp/doas.log
+sleep 0.5
+[ ! -e /tmp/doas.log ]
+as_lab idle-blank
+sleep 0.5
+[ "$(wc -l </tmp/doas.log)" -eq 1 ]
+as_lab press
+rm -f /tmp/doas.log
+kill "$power_pid"
+wait "$power_pid" 2>/dev/null || true
+su -s /bin/sh emacsos-lab -c \
+    'exec /usr/local/share/emacsos-openrc/process-group /usr/local/share/emacsos-openrc/session-power monitor' &
+power_pid=$!
 as_lab wake
 
 mkfifo /tmp/sway-continue
@@ -288,15 +292,6 @@ printf '%s\n' disabled >/tmp/modem/power/wakeup
 [ "$(cat /tmp/power-key/wakeup)" = enabled ]
 [ "$(cat /tmp/axp-power-key/wakeup)" = enabled ]
 [ "$(cat /tmp/modem/power/wakeup)" = enabled ]
-printf '%s\n' 1 >/tmp/external-power/online
-: >/tmp/power/state
-set +e
-/tmp/suspend-root.test >/tmp/root-powered.out 2>&1
-root_powered_status=$?
-set -e
-[ "$root_powered_status" -eq 77 ]
-[ ! -s /tmp/power/state ]
-printf '%s\n' 0 >/tmp/external-power/online
 if /tmp/suspend-root.test unexpected >/tmp/root-arg.out 2>&1; then
     printf '%s\n' 'root suspend helper accepted an argument' >&2
     exit 1

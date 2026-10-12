@@ -301,21 +301,20 @@ grep -F '/usr/bin/setsid "$@" &' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'timeout 180 "$root/session-power suspend"' "$deploy_dir/openrc-session" >/dev/null
+grep -F '"$root/process-group" "$root/session-power" monitor' "$deploy_dir/openrc-session" >/dev/null
+grep -F 'read -r -t 120 event' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'press|idle-blank|resume|wake|suspend)' \
+grep -F 'press|idle-blank|resume|wake|monitor)' \
     "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'suspend) flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
     "$deploy_dir/openrc-session-power" >/dev/null
-grep -F 'external_power_online; then' \
-    "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'expected EG25 modem is absent' "$deploy_dir/openrc-suspend-root" >/dev/null
+grep -F 'bindsym XF86AudioRaiseVolume nop' "$deploy_dir/openrc-sway.config" >/dev/null
+grep -F 'bindsym XF86AudioLowerVolume nop' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'enable_wakeup "$power_key"' "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'enable_wakeup "$axp_power_key"' "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'enable_wakeup "$modem/power/wakeup"' \
-    "$deploy_dir/openrc-suspend-root" >/dev/null
-grep -F 'external_power_online && exit 77' \
     "$deploy_dir/openrc-suspend-root" >/dev/null
 grep -F 'idle-blank) flock -n -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \
@@ -534,9 +533,9 @@ grep -F 'output DSI-1 mode 720x1440@60Hz scale 2' "$deploy_dir/openrc-sway.confi
 grep -F 'input type:touch map_to_output DSI-1' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym Mod1+Tab focus next' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym XF86PowerOff exec $power press' "$deploy_dir/openrc-sway.config" >/dev/null
-grep -F 'bindsym XF86AudioRaiseVolume exec $power wake' \
+grep -F 'bindsym XF86AudioRaiseVolume nop' \
     "$deploy_dir/openrc-sway.config" >/dev/null
-grep -F 'bindsym XF86AudioLowerVolume exec $power wake' \
+grep -F 'bindsym XF86AudioLowerVolume nop' \
     "$deploy_dir/openrc-sway.config" >/dev/null
 if grep -F 'exec $power toggle' "$deploy_dir/openrc-sway.config" >/dev/null; then
     printf '%s\n' 'power key still uses a racy toggle' >&2
