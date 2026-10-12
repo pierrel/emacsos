@@ -1,0 +1,2 @@
+pypdf==6.20.0
+langchain-protocol==0.0.19

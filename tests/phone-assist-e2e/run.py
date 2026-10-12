@@ -15,7 +15,7 @@ import time
 import uuid
 
 
-FILES = ("Dockerfile", "run.py", "services.py", "client.el", "README.md", "test_harness.py")
+FILES = ("Dockerfile", "run.py", "services.py", "client.el", "README.md", "test_harness.py", "requirements.txt")
 SOURCE = "ssh://test@git:2222/repos/domain.git"
 
 

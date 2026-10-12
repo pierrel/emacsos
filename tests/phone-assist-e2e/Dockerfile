@@ -7,8 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R test:test /runtime /state /repos /secrets /home/test/.ssh \
     && ln -s /runtime/workspace /workspace
 COPY assist/pyproject.toml assist/requirements.txt /deps/
+COPY emacsos/tests/phone-assist-e2e/requirements.txt /deps/e2e-constraints.txt
 RUN python -c 'import tomllib; print("\n".join(tomllib.load(open("/deps/pyproject.toml", "rb"))["project"]["dependencies"]))' > /deps/runtime.txt \
-    && pip install --no-cache-dir -r /deps/runtime.txt -c /deps/requirements.txt
+    && pip install --no-cache-dir -r /deps/runtime.txt -c /deps/requirements.txt -c /deps/e2e-constraints.txt
 COPY assist/ /src/assist/
 COPY emacsos/ /src/emacsos/
 RUN mkdir -p /src/assist/logs && chown test:test /src/assist/logs \

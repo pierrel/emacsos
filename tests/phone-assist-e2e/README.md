@@ -8,7 +8,8 @@ python3 tests/phone-assist-e2e/run.py --logs /tmp/phone-assist-e2e-results
 
 Choose a new results directory for each run. Requires Docker, Python 3.10+,
 Git, OpenSSL and OpenSSH on the host. The first build downloads the image's
-system and locked Assist runtime dependencies. Build time is capped at ten
+system dependencies and Assist runtime packages constrained by Assist's
+requirements plus the harness pins in `requirements.txt`. Build time is capped at ten
 minutes, execution at five minutes, and individual client waits at 45 seconds.
 No local model or phone hardware is used. Python optimization (`-O` or
 `PYTHONOPTIMIZE`) is rejected before resources are created because it disables
