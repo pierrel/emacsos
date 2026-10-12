@@ -12,6 +12,27 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_client_multistage_action_uses_remaining_global_budget(self):
+        driver = Driver.__new__(Driver)
+        driver.name = 'synthetic-client'
+        driver.token = 'synthetic-token'
+        driver.deadline = 220
+        timeouts = []
+        def complete(args, **kwargs):
+            timeouts.append(kwargs['timeout'])
+            if kwargs['timeout'] < 60:
+                raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+            return subprocess.CompletedProcess(args, 0, 'E2E_JSON:{}\n', '')
+        with tempfile.TemporaryDirectory() as temporary:
+            driver.args = argparse.Namespace(logs=Path(temporary))
+            with (patch('run.time.monotonic', return_value=100),
+                  patch('run.subprocess.run', complete)):
+                self.assertEqual(driver.client('auth-recovery', 'thread'), {})
+                driver.deadline = 150
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    driver.client('auth-recovery', 'thread')
+        self.assertEqual(timeouts, [120, 50])
+
     def test_auth_recovery_requires_a_new_git_receipt(self):
         repo = Path(__file__).resolve().parents[2]
         expression = """(dolist (fresh '(nil t))

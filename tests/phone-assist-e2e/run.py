@@ -108,6 +108,7 @@ class Driver:
         self.docker("create", "--name", self.name + "-client", "--network", self.fixture["network"],
             "--label", "phone-assist-e2e.owner=" + self.name, "--memory", "1g", "--pids-limit", "128",
             "--cpus", "2", "--user", "0:0", "-e", "ASSIST_E2E_URL=" + self.fixture["container_url"],
+            "-e", "NO_PROXY=*", "-e", "no_proxy=*",
             self.image, "sh", "-c", "set -e; chown -R 1000:1000 /secrets; touch /runtime/credentials-ready; "
             "exec setpriv --reuid=1000 --regid=1000 --init-groups sleep " + str(RUN_SECONDS))
         for name, source in self.fixture["credentials"].items():
@@ -134,7 +135,7 @@ class Driver:
     def client(self, action, tid="", text=""):
         expression = "(phone-e2e-main " + " ".join(json.dumps(x) for x in (action, tid, text)) + ")"
         output = self.execute("client", "emacs", "-Q", "--batch", "-L", "/src/emacsos",
-            "-l", "/src/emacsos/tests/phone-assist-e2e/client.el", "--eval", expression, timeout=50)
+            "-l", "/src/emacsos/tests/phone-assist-e2e/client.el", "--eval", expression, timeout=RUN_SECONDS)
         line = next((l[9:] for l in output.splitlines() if l.startswith("E2E_JSON:")), None)
         if line is None:
             raise RuntimeError("No Emacs receipt: " + output[-1000:])

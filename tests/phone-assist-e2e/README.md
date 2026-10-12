@@ -14,7 +14,9 @@ python tests/phone-assist-e2e/run.py --fixture /tmp/assist-fixture-new/fixture.j
 ```
 
 Run the client promptly after the smoke. Its 1200-second total budget includes
-the build; its owned container stays alive for that full budget. The paired
+the build; its owned container stays alive for that full budget. Emacs action
+subprocesses use the remaining total budget, while individual event waits keep
+their 45-second limits. Private fixture-control requests bypass inherited proxies. The paired
 1800-second fixture lifetime leaves time for the smoke and client startup.
 
 The driver builds only an Emacs/Git/SSH client image and joins the fixture's exact
