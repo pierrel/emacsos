@@ -1,0 +1,20 @@
+#+title: Canonical name for newly created Assist threads (2026-10-11)
+
+* Observed gap
+
+The queue-model creation callback saved the accepted thread identity and Run
+but did not rename its =*assist New thread*= buffer. The legacy callback did
+rename to an opaque-ID placeholder. Canonical snapshot rendering displayed the
+server title inside the buffer but left the Emacs buffer name unchanged.
+
+* Narrow correction
+
+Only a new-thread buffer with its provisional name or legacy placeholder
+starts following canonical snapshot titles. Rendering first validates the
+snapshot's thread identity and bounded, single-line title and repository
+label. It then renames that same buffer using the existing catalog label plus
+the opaque thread ID. Later canonical title changes update its name. Draft,
+queue, observer, markers, and buffer identity remain in place. Buffers outside
+this title-following mode are not renamed; a later manual rename of a following
+buffer is replaced by its next canonical title update. No request or new
+buffer is created.
