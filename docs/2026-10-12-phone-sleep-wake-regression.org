@@ -6,9 +6,10 @@
 The screen-off deadline now belongs to one supervised session worker, rather
 than the seat-idle timer. After either manual or automatic blanking it waits
 120 seconds and requests deep suspend. Charging does not bypass the deadline.
-Repeated idle callbacks and generic seat resume leave the panel dark. Only the
+Repeated idle callbacks and generic seat resume leave the panel dark. In normal operation the
 existing call/SMS display-wake path and deliberate power-button press restore
-it. Volume bindings consume the key without requesting display wake.
+it. Interrupted-state recovery and failed blanking retain their active-panel
+recovery path. Volume bindings consume the key without requesting display wake.
 
 A monotonically increasing transition generation fences old deadlines. The
 worker retries after 120 seconds if a kernel return or failed suspend leaves
@@ -47,7 +48,7 @@ All live commands and deployment belong to Root. First recharge the phone and
 restore access. Before changing anything, take one bounded read-only snapshot:
 
 #+begin_src sh
-ssh -o ConnectTimeout=6 "$PINEPHONE_HOST" 'timeout 15 sh -s' <<'PHONE'
+timeout -s TERM -k 2 25 ssh -o ConnectTimeout=6 "$PINEPHONE_HOST" 'timeout 15 sh -s' <<'PHONE'
 sha256sum /usr/local/share/emacsos-openrc/session \
   /usr/local/share/emacsos-openrc/session-power \
   /usr/local/share/emacsos-openrc/sway.config \
@@ -113,10 +114,11 @@ power correction.
 
 The =2026-09-02 hands-on power result and automatic-idle design= section in
 [[file:2026-08-31-pinephone-emacsos-session.org][the session record]] describes the former
-180-second seat-idle suspend deadline and idle-origin marker. The new timer is
-120 seconds from screen-off, independent of seat activity, and needs no marker.
-The =Live validation, 2026-09-03= section in
+180-second seat-idle suspend deadline. The new timer is 120 seconds from
+screen-off, independent of seat activity.
+The =Objective= and =Live validation, 2026-09-03= sections in
 [[file:2026-09-03-pinephone-assist-parity.org][the parity record]] described the earlier
-unattended development configuration. Suspend authority is included in the
+unattended development configuration and its idle-origin marker. The new
+timer needs no marker. Suspend authority is included in the
 current source; charging no longer exempts screen-off suspend. Historical live
 results remain historical evidence, not validation of this change.
