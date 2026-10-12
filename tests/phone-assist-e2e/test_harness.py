@@ -7,11 +7,21 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_timeout_does_not_report_a_recovered_transient_error(self):
+        driver = Driver.__new__(Driver)
+        driver.deadline = 10
+        predicate = Mock(side_effect=[RuntimeError('transient connection refusal'), False])
+        with (patch('run.time.monotonic', side_effect=[0, .1, .2, 1]),
+              patch('run.time.sleep')):
+            with self.assertRaisesRegex(TimeoutError, 'restart barrier: condition not reached'):
+                driver.wait('restart barrier', predicate, seconds=1)
+        self.assertEqual(predicate.call_count, 2)
+
     def test_successful_client_wait_predicate_is_not_repeated(self):
         repo = Path(__file__).resolve().parents[2]
         expression = """(let ((calls 0))

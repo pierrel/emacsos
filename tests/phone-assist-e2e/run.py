@@ -55,6 +55,7 @@ class Driver:
         while time.monotonic() < deadline:
             try:
                 value = predicate()
+                last = None
                 if value:
                     return value
             except RuntimeError as error:
