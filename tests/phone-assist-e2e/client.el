@@ -11,11 +11,11 @@
 
 (defun phone-e2e-wait (predicate)
   "Wait at most 45 seconds for PREDICATE while processing actual client events."
-  (let ((deadline (+ (float-time) 45)))
-    (while (and (not (funcall predicate)) (< (float-time) deadline))
+  (let ((deadline (+ (float-time) 45)) finished)
+    (while (and (not (setq finished (funcall predicate))) (< (float-time) deadline))
       (accept-process-output nil 0.05)
       (set-buffer (window-buffer (selected-window))))
-    (unless (funcall predicate)
+    (unless finished
       (error "E2E client deadline: stage=%s buffer=%s snapshot=%s requests=%s git-process=%s queue=%s"
              phone-e2e-stage (buffer-name) (and emacsos-assist-web--snapshot t)
              (length emacsos-assist-web--requests) emacsos-assist-web-git--process
@@ -57,10 +57,16 @@
     (let ((denied-epoch emacsos-assist-web--auth-epoch))
       (phone-e2e-wait (lambda () (not emacsos-assist-web--requests)))
       (copy-file "/secrets/token" emacsos-assist-web-token-file t)
-      (emacsos-assist-web-refresh-thread)
-      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--requests)
-                                     (not emacsos-assist-web--denied))))
-      `((auth_denied_seen . t) (auth_initial_epoch . ,initial-epoch)
+      (let ((old-snapshot emacsos-assist-web--snapshot))
+        (call-interactively #'emacsos-assist-web-refresh-thread)
+        (phone-e2e-wait
+         (lambda () (and (not (eq old-snapshot emacsos-assist-web--snapshot))
+                         (not emacsos-assist-web--requests)
+                         (not emacsos-assist-web--denied)
+                         (not emacsos-assist-web-git--process)
+                         (not emacsos-assist-web-git--unavailable)))))
+      `((auth_denied_seen . t) (canonical_refreshed . t)
+        (auth_initial_epoch . ,initial-epoch)
         (auth_denied_epoch . ,denied-epoch)
         (same_buffer . ,(eq buffer (current-buffer)))))))
 
@@ -84,10 +90,15 @@
       (setq phone-e2e-stage "release-exact-model-hold")
       (phone-e2e-wait
        (lambda ()
-         (zerop (call-process
-                 "python" nil nil nil "-c"
+         (let ((tid emacsos-assist-web--thread-id))
+           (with-temp-buffer
+             (let ((status (call-process
+                 "python" nil '(t t) nil "-c"
                  "import json,os,ssl,sys,urllib.request; from pathlib import Path; h={'Authorization':'Bearer '+Path('/secrets/token').read_text().strip(),'Content-Type':'application/json'}; c=ssl.create_default_context(cafile='/secrets/ca.crt'); u=os.environ['ASSIST_E2E_URL']; v=urllib.request.urlopen(urllib.request.Request(u+'/__e2e/state/'+sys.argv[1],headers=h),context=c,timeout=5); sys.exit(1) if 'Hold observer' not in json.load(v)['holds'] else None; r=urllib.request.urlopen(urllib.request.Request(u+'/__e2e/release',data=json.dumps({'text':'Hold observer'}).encode(),headers=h),context=c,timeout=5); r.close()"
-                 emacsos-assist-web--thread-id))))
+                 tid)))
+               (when (and (not (zerop status)) (> (buffer-size) 0))
+                 (error "Fixture hold release failed: %s" (buffer-string)))
+               (zerop status))))))
       (setq phone-e2e-stage "wait-exact-run-success")
       (phone-e2e-wait
        (lambda () (equal (alist-get 'status (phone-e2e-request

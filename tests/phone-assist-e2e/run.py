@@ -220,6 +220,7 @@ class Driver:
         self.passed("private Git configuration failure and recovery")
 
         recovered = self.client("auth-recovery", tid)
+        assert recovered["canonical_refreshed"]
         assert recovered["auth_denied_seen"] and recovered["same_buffer"] and not recovered["denied"]
         assert recovered["auth_denied_epoch"] > recovered["auth_initial_epoch"]
         self.passed("canonical authentication denial and recovery")

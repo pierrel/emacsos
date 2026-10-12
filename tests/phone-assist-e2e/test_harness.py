@@ -1,6 +1,7 @@
-"""Keep the assertion-based client driver fail-closed and cleanup independent of logs."""
+"""Regressions for client wait completion, assertion admission and exact cleanup."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,17 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_successful_client_wait_predicate_is_not_repeated(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(let ((calls 0))
+          (phone-e2e-wait (lambda () (= (cl-incf calls) 1)))
+          (unless (= calls 1) (error "successful predicate repeated")))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_optimized_runner_refuses_before_creating_resources(self):
         with tempfile.TemporaryDirectory() as temporary:
             logs = Path(temporary) / 'logs'

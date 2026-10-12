@@ -35,6 +35,7 @@ The nine sequential scenarios use a fresh synthetic Git-backed thread:
    and require refresh recovery.
 6. In one resident buffer, replace its token, Refresh, require canonical denial
    and an increased auth epoch; restore the token and Refresh the same buffer.
+   Require a newly rendered canonical snapshot and recovered Git state.
 7. In one resident buffer, send `Hold observer`, close the entry's actual SSE
    process and await its production sentinel's accepted-unobserved state. Release
    inference, require exact Run GET success, then interactive Refresh with result
