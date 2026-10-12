@@ -1650,6 +1650,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--recovery-action-start nil
   "Start marker for the one visible action that restores a retained source draft.")
 (defvar-local emacsos-assist-web--thread-id nil)
+(defvar-local emacsos-assist-web--canonical-buffer-name-p nil
+  "Non-nil when this buffer follows canonical thread titles.")
 (defvar-local emacsos-assist-web--draft-repository nil)
 (defvar-local emacsos-assist-web--draft-harness nil)
 (defvar-local emacsos-assist-web--run-id nil)
@@ -3800,10 +3802,15 @@ of it, together with the oldest pagination cursor already reached."
      (alist-get 'messages snapshot)
      emacsos-assist-web--max-rendered-messages
      emacsos-assist-web--max-rendered-transcript-bytes)
-    (let ((thread (alist-get 'thread snapshot))
-          (presentation-bytes
-           (cl-loop for message in (alist-get 'messages snapshot)
-                    sum (string-bytes (alist-get 'text message)))))
+    (let* ((thread (alist-get 'thread snapshot))
+           (thread-label
+            (emacsos-assist-web--thread-label
+             `((description . ,(alist-get 'description thread))
+               (repo_label . ,(alist-get
+                               'repo_label (alist-get 'workspace thread))))))
+           (presentation-bytes
+            (cl-loop for message in (alist-get 'messages snapshot)
+                     sum (string-bytes (alist-get 'text message)))))
       (let ((returned-id
              (emacsos-assist-web--require-id (alist-get 'id thread))))
         (when (and emacsos-assist-web--thread-id
@@ -3812,6 +3819,14 @@ of it, together with the oldest pagination cursor already reached."
         (setq emacsos-assist-web--thread-id returned-id))
       (setq emacsos-assist-web--snapshot snapshot
             emacsos-assist-web--pending-rendered-p nil)
+      (when (or emacsos-assist-web--canonical-buffer-name-p
+                (equal (buffer-name) "*assist New thread*")
+                (equal (buffer-name)
+                       (format "*assist Thread <%s>*"
+                               emacsos-assist-web--thread-id)))
+        (setq emacsos-assist-web--canonical-buffer-name-p t)
+        (rename-buffer
+         (format "%s <%s>" thread-label emacsos-assist-web--thread-id) t))
       (emacsos-assist-web-git--sync-keys)
       (emacsos-assist-web--set-workspace-directory)
       (erase-buffer)
@@ -3824,13 +3839,7 @@ of it, together with the oldest pagination cursor already reached."
               (plist-get entry :assistant-end) nil))
       (setq emacsos-assist-web--recovery-action-marker nil)
       (let ((transcript-start (point)))
-        (insert (format "%s%s\n"
-                        (emacsos-assist-web--thread-label
-                         `((description . ,(alist-get 'description thread))
-                           (repo_label . ,(alist-get
-                                           'repo_label
-                                           (alist-get 'workspace thread)))))
-                        (if stale " [cached]" "")))
+        (insert (format "%s%s\n" thread-label (if stale " [cached]" "")))
         (setq emacsos-assist-web--status-start (copy-marker (point) nil))
         (insert (format "[%s%s]" (or emacsos-assist-web--stream-status
                                      (alist-get 'status thread))

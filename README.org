@@ -477,6 +477,10 @@ to that list.  The list renders the validated local catalog immediately,
 refreshes it asynchronously, and exposes visible refresh or retry rows.  Each
 two-line row opens its exact thread with mouse-1 or RET.  Both entry points
 share the same complete thread, repository, and harness catalog.
+In the entry-owned queue flow, a new thread keeps its draft buffer when its
+first Run is accepted. Once the canonical title arrives, that same buffer
+adopts it and follows later title updates without losing its draft or queued
+message.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second

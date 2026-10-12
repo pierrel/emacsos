@@ -1256,6 +1256,54 @@
           (should (string-match-p "\\[cached\\]" (buffer-string))))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
+(ert-deftest test-assist-web-created-thread-follows-canonical-title-in-place ()
+  "An accepted New thread buffer takes its canonical title without replacement."
+  (should-not (get-buffer "*assist New thread*"))
+  (let ((buffer (get-buffer-create "*assist New thread*"))
+        (emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (emacsos-assist-web-mode)
+          (emacsos-assist-web--write-prompt)
+          (insert "next draft")
+          (let ((entry (emacsos-assist-web--entry "queued" 'queued "key-next"))
+                (snapshot (copy-tree test-assist-web--snapshot)))
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--queue (list entry)
+                        emacsos-assist-web--queue-model-p t)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                       (lambda () t)))
+              (emacsos-assist-web--render snapshot)
+              (should (eq (emacsos-assist-web--thread-buffer "thread-1") buffer))
+              (should (equal (buffer-name buffer)
+                             "*assist Thread - Assist* <thread-1>"))
+              (should (equal (emacsos-assist-web--input) "next draft"))
+              (should (eq (car emacsos-assist-web--queue) entry))
+              (setf (alist-get 'description (alist-get 'thread snapshot))
+                    "Nutrition title")
+              (emacsos-assist-web--render snapshot)
+              (should (equal (buffer-name buffer)
+                             "*assist Nutrition title - Assist* <thread-1>"))
+              (should (equal (emacsos-assist-web--input) "next draft"))
+              (should (eq (car emacsos-assist-web--queue) entry))
+              (let ((wrong (copy-tree snapshot)))
+                (setf (alist-get 'id (alist-get 'thread wrong)) "thread-other")
+                (should-error (emacsos-assist-web--render wrong))
+                (should (equal (buffer-name buffer)
+                               "*assist Nutrition title - Assist* <thread-1>")))
+              (should-not (get-buffer "*assist New thread*")))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest test-assist-web-canonical-title-does-not-rename-unrelated-buffers ()
+  "Canonical rendering leaves buffers outside title-following mode alone."
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((name (buffer-name)))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                 (lambda () t)))
+        (emacsos-assist-web--render (copy-tree test-assist-web--snapshot)))
+      (should (equal (buffer-name) name)))))
+
 (ert-deftest test-assist-web-reopened-incomplete-message-recreates-assistant-markers ()
   "A resumed accepted Run renders live deltas after its canonical user turn."
   (with-temp-buffer
