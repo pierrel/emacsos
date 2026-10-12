@@ -2857,6 +2857,33 @@
           (should-not (member '("POST" "threads/thread-1/open") requests))))
 )))
 
+(ert-deftest test-assist-web-settled-refresh-ack-carries-the-rendered-revision ()
+  "The read receipt echoes the revision of the snapshot we rendered, so the
+server clears only flags for a view that is still current."
+  (let (requests callback)
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'revision (alist-get 'thread snapshot)) "rev-abc")
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path payload cb &rest _)
+                     (push (list method path payload) requests)
+                     (setq callback cb)))
+                  ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'emacsos-assist-web--git-note-safely)
+                   (lambda (&rest _) nil)))
+          (emacsos-assist-web-refresh-thread)
+          (funcall callback snapshot nil)
+          (let ((ack (cl-find-if
+                       (lambda (r) (equal (nth 1 r) "threads/thread-1/open"))
+                       requests)))
+            (should ack)
+            (should (equal (nth 0 ack) "POST"))
+            (should (equal (nth 2 ack) '((revision . "rev-abc"))))))))))
+
 (ert-deftest test-assist-web-reopening-thread-preserves-live-buffer-state ()
   (let* ((thread '((id . "thread-1") (description . "Thread")
                    (repo_label . "Assist") (status . "running")))

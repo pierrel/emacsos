@@ -3779,16 +3779,22 @@ of it, together with the oldest pagination cursor already reached."
               (alist-get 'next_before result) nil))
       result)))
 
-(defun emacsos-assist-web--ack-thread-read (tid)
+(defun emacsos-assist-web--ack-thread-read (tid revision)
   "Send TID's read receipt to the dedicated open endpoint.
 Fire-and-forget: the snapshot GET is read-only (clients also use it for auth
 probes and busy-check polls), so the receipt goes to POST /open. A failed
 ack only defers the flag clear and must never disturb the render that
-triggered it."
+triggered it.
+
+REVISION is the revision of the settled snapshot we actually rendered; the
+server clears the unseen/urgent flags only if the thread's current revision
+still matches, so a newer response that arrives after we rendered can no
+longer be wiped by our (now stale) receipt. When REVISION is nil (a pre-token
+client) the body is empty and the server keeps the historical clear."
   (condition-case nil
       (emacsos-assist-web--request
        "POST" (format "threads/%s/open" (emacsos-assist-web--require-id tid))
-       nil #'ignore)
+       (when revision `((revision . ,revision))) #'ignore)
     (error nil)))
 
 (defun emacsos-assist-web--render (snapshot &optional stale)
@@ -4688,7 +4694,16 @@ VERIFIED-START-EPOCH fences later Run access denial."
                                                               (alist-get 'thread value))
                                                    emacsos-assist-web--settled-snapshot-statuses))
                                          (emacsos-assist-web--ack-thread-read
-                                          emacsos-assist-web--thread-id)))
+                                          emacsos-assist-web--thread-id
+                                          ;; Echo the revision of the settled
+                                          ;; snapshot we just rendered, so the
+                                          ;; server clears only flags for a view
+                                          ;; that is still current (a newer
+                                          ;; response arriving after we rendered
+                                          ;; bumps the revision and keeps its
+                                          ;; unread flag alive).
+                                          (alist-get 'revision
+                                                     (alist-get 'thread value)))))
                                      (unless (or retiring cached)
                                        (emacsos-assist-web--git-note-safely
                                         value nil git-auth-start-epoch
