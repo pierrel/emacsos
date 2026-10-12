@@ -1184,9 +1184,6 @@ An auth-only GET leaves exact Run outcome uncertain."
               (condition-case nil
                   (emacsos-assist-web--update-lifecycle-headers)
                 ((error quit) nil)))))))
-    (dolist (item (copy-sequence emacsos-assist-web-git--feedback-windows))
-      (when (window-live-p (car item))
-        (emacsos-assist-web-git--clear-feedback (car item))))
     (emacsos-assist-web--update-lifecycle-headers))))
 
 
@@ -7064,7 +7061,8 @@ The start epoch proves freshness after any earlier definitive thread denial."
   "Refresh exact queue state first, or verify a legacy Run before chat history.
 COMPLETED-RUN-ID, VERIFIED-OUTCOME, and VERIFIED-START-EPOCH come only from
 an exact Run GET; the epoch fences later Run access denial.  EXPLICIT is the
-user's Refresh action and may claim a validated dormant same-thread receipt."
+user's Refresh action and may claim a validated dormant same-thread receipt
+or recheck the exact Run behind an owned observer."
   (interactive (list nil nil nil nil t))
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
@@ -7102,8 +7100,21 @@ user's Refresh action and may claim a validated dormant same-thread receipt."
             ;; still belong to the entry-owned stream, never legacy rendering.
             (if emacsos-assist-web--manual-recovery-active
                 (message "Run active; observing; result will appear here")
-              (unless (emacsos-assist-web--retry-busy-check)
-                (message "Run active; observing; result will appear here"))))
+              (if explicit
+                  (let* ((entry emacsos-assist-web--stream-entry)
+                         (epoch (plist-get entry :epoch)))
+                    (emacsos-assist-web--entry-observation-interrupted
+                     entry epoch "Run rechecking exact status")
+                    (when (and (not emacsos-assist-web--stream-entry)
+                               (not emacsos-assist-web--reconcile-recovery-paused)
+                               (eq entry (emacsos-assist-web--queue-entry
+                                          (plist-get entry :key)))
+                               (eq (emacsos-assist-web--entry-state entry)
+                                   'accepted-unobserved)
+                               (plist-get entry :requires-reobserve))
+                      (emacsos-assist-web--reobserve-entry entry)))
+                (unless (emacsos-assist-web--retry-busy-check)
+                  (message "Run active; observing; result will appear here")))))
            ((and head (memq (emacsos-assist-web--entry-state head)
                             '(acceptance-unknown retryable-rejected)))
             (emacsos-assist-web--start-post head))
