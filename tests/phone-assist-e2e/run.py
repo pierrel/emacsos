@@ -99,9 +99,12 @@ class Driver:
             "files": {str(p.relative_to(context)): hashlib.sha256(p.read_bytes()).hexdigest()
                       for p in sorted(context.rglob("*")) if p.is_file()}}, indent=2))
         with (self.args.logs / "build.log").open("w") as log:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Client driver deadline exceeded")
             build = subprocess.run(["docker", "build", "-t", self.image, "-f",
                 str(context / "tests/phone-assist-e2e/Dockerfile"), str(context)],
-                stdout=log, stderr=log, timeout=600)
+                stdout=log, stderr=log, timeout=min(600, remaining))
         if build.returncode:
             raise RuntimeError("Client image build failed; see build.log")
         self.created = True

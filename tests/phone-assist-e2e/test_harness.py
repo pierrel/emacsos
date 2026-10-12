@@ -1,4 +1,4 @@
-"""Regressions for client wait completion, assertion admission and exact cleanup."""
+"""Regressions for client budgets, wait completion, assertion admission and exact cleanup."""
 import argparse
 import json
 import os
@@ -12,6 +12,32 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_build_uses_remaining_global_budget_and_refuses_after_expiry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'token').write_text('synthetic-token')
+            fixture = root / 'fixture.json'
+            fixture.write_text(json.dumps({'credentials': {'token': str(root / 'token')}}))
+            for remaining in [700, 100, 0]:
+                with self.subTest(remaining=remaining):
+                    driver = Driver(argparse.Namespace(fixture=fixture,
+                        logs=root / ('logs-' + str(remaining)), emacsos_source=root))
+                    driver.deadline = remaining
+                    driver.verify_fixture = Mock()
+                    driver.stage = Mock()
+                    driver.command = Mock(return_value='synthetic-head')
+                    with (patch('run.time.monotonic', return_value=0),
+                          patch('run.subprocess.run', side_effect=subprocess.TimeoutExpired('build', 1)) as build):
+                        if remaining > 0:
+                            with self.assertRaises(subprocess.TimeoutExpired):
+                                driver.bootstrap(root)
+                            self.assertEqual(build.call_args.kwargs['timeout'], min(600, remaining))
+                        else:
+                            with self.assertRaisesRegex(TimeoutError, 'driver deadline exceeded'):
+                                driver.bootstrap(root)
+                            build.assert_not_called()
+                    self.assertFalse(driver.created)
+
     def test_client_multistage_action_uses_remaining_global_budget(self):
         driver = Driver.__new__(Driver)
         driver.name = 'synthetic-client'
