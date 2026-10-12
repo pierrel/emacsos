@@ -520,6 +520,10 @@ that an operator must repair observation; it never retries automatically.  The
 current closure corrections are [[file:docs/2026-09-09-conversation-observation-closure-amendment.org][the observation closure amendment]],
 [[file:docs/2026-09-09-conversation-deletion-closure-amendment.org][the deleted-thread closure amendment]],
 and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the stream-batching amendment]].
+If an accepted Run still appears to be streaming after it has finished,
+explicit =Refresh= stops that view's observer and checks the exact Run before
+reconciling or opening a new stream. It preserves the draft and never resubmits
+the message.
 
 * Project Structure
 
