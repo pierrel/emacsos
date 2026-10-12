@@ -1,0 +1,133 @@
+#+TITLE: Phone wake admission remains blocked
+#+DATE: 2026-10-12
+
+* Known blocker
+
+Copilot round 1 on PR 69 identified a real HIGH wake-admission race in
+=44bedcac03a2d0b3591c412d400c131c126ca273=. The display owner holds
+=power-state.lock= across the privileged suspend helper. An explicit =wake=
+or =press= cannot advance the transition generation while that lock is held.
+If its hardware event completed before the helper reads =wakeup_count=, the
+sample already includes the event. The counter write can succeed and the
+phone can sleep with the userspace wake callback waiting behind the lock.
+This is an in-scope blocker, including though the locking order was inherited.
+PR 69 must not be deployed or merged in this state. The phone remains unchanged.
+
+* Deterministic offline reproduction
+
+A bounded isolated Alpine container reproduced the ordering using the actual
+session-power and privileged suspend helper from =44bedcac=. The fixture
+substitutes sysfs paths with ordinary files; it does not exercise kernel PM.
+Two test-only barriers pause the root helper before counter sampling and after
+its real =mem= write. A root-owned Unix socket fixture invokes the root helper
+for the service-user client, preserving the parent's actual display lock.
+
+The controller starts suspend for the current blank generation, waits for the
+before-sample barrier, increments the fixture counter from 41 to 42 to represent
+an already completed IRQ, and launches an explicit wake. The actual flock
+wrapper signals that wake reached lock acquisition. A separate nonblocking
+flock proves the display lock is held. The controller releases counter sampling
+and observes =mem= while the generation and panel state remain blank and the
+wake process remains alive. Releasing the after-write barrier simulates kernel
+return; only then can wake acquire the display lock and restore active state.
+
+The reproduction succeeded. It demonstrates userspace ordering, not an actual
+phone IRQ, suspend, battery result or driver lifetime. Ordinary fixture files
+cannot validate the kernel's later-event rejection behavior.
+
+Local reproducible artifact: =/tmp/phone-power-admission-repro.sh=, SHA256
+=e1bbabb9ee2d5ff0c86d9dbcc7e31c2542a76d4573cb21c3a342dc1f36e9ec24=.
+Run with =timeout -s TERM -k 2 45 sh /tmp/phone-power-admission-repro.sh=.
+Output: =/tmp/phone-power-admission-repro.log=. The script also exercises the
+existing power regression setup; its expected earlier suspend-failure probe
+prints =suspend failed (1)= before the two reproduction result lines.
+
+* Required contract before implementing a fix
+
+A userspace marker rechecked immediately before =mem= still leaves a window
+between the check and write. It cannot fence an earlier hardware event whose
+callback is delayed. A retry or shorter window does not satisfy this effort.
+
+Linux provides kernel wake-source activation through =wake_lock= and
+=wake_unlock= when =CONFIG_PM_WAKELOCKS= is enabled. A fixed privileged wake
+wrapper could activate a source before waiting for the display lock and hold
+it until the explicit transition finishes. This needs a bounded interruptible
+counter read to avoid deadlock with the source holder, and distinct source
+ownership or serialized wrappers to prevent premature release on overlapping
+requests. Cleanup must release only owned sources after old processes stop.
+No such mechanism is implemented here; the actual phone capability is unknown.
+
+That guard would protect a request only after kernel activation succeeds.
+Protecting an earlier hardware event throughout delayed ModemManager/Emacs
+callback delivery additionally requires a verified driver wake-source lifetime
+or acknowledgment contract. A sysfs interface's presence alone cannot prove it.
+The kernel ABI describes the counter and wake-source boundaries:
+[[https://github.com/torvalds/linux/blob/v6.13/Documentation/ABI/testing/sysfs-power][Linux 6.13 sysfs power ABI]].
+
+* Bounded Root-only capability and driver snapshot
+
+The phone is discharged and unreachable. Root owns every live command and must
+preserve the existing running composition. After charging and restoring access,
+add this read-only snapshot to the original diagnostic recipe. Read protected
+paths through Root's existing privilege; do not interpret service-user access
+checks as absence of a kernel feature. Do not write any power interface yet.
+
+#+begin_src sh
+timeout -s TERM -k 2 25 ssh -o ConnectTimeout=6 "$PINEPHONE_HOST" 'timeout 15 sh -s' <<'PHONE'
+uname -a
+for path in /sys/power/wake_lock /sys/power/wake_unlock; do
+  if [ -e "$path" ]; then
+    stat -c '%n %a %u:%g' "$path"
+  else
+    printf '%s absent\n' "$path"
+  fi
+done
+if [ -r /proc/config.gz ]; then
+  zcat /proc/config.gz | sed -n '/CONFIG_PM_WAKELOCKS/p;/CONFIG_PM_SLEEP/p'
+else
+  printf '%s\n' '/proc/config.gz unavailable to this reader'
+fi
+for device in /sys/devices/platform/gpio-keys \
+  /sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek \
+  /sys/devices/platform/soc/1c1b000.usb/usb1/1-1 \
+  /sys/devices/platform/soc/1c1b000.usb/usb1/1-1/1-1:*; do
+  [ -d "$device" ] || continue
+  printf '%s: ' "$device"
+  readlink -f "$device/driver" || true
+done
+if [ -r /sys/kernel/debug/wakeup_sources ]; then
+  head -n 80 /sys/kernel/debug/wakeup_sources
+fi
+PHONE
+#+end_src
+
+Use the installed kernel version/config and identified driver source to establish
+what retains a hardware wake until userspace handles it. Then design the smallest
+supported construction and add failing-then-passing admission regressions before
+deployment. Boundary coverage must include activation before sampling, between
+sample and acceptance, after the final userspace check, overlapping requests and
+failed display transitions. Hardware delivery remains a separate live criterion.
+
+* Review and handoff
+
+The software acceptance is reopened. Copilot review =5495587943=, comment
+=4252001160=, remains unresolved. Independent security review confirms that a
+userspace-only handshake is insufficient and that actual kernel/driver evidence
+is indispensable. Existing offline pass counts stand for their narrower tested
+behavior; they do not override this reproduced admission defect.
+
+No runtime change, deployment, merge, phone command or model/GPU run occurred
+in this follow-up. The same Implementer retains the effort. Resume when Root
+supplies the capability/driver evidence; the required fix is not deferred out
+of scope.
+
+* Historical supersessions
+
+The =Checks and review= section of
+[[file:2026-10-12-phone-sleep-wake-regression.org][the screen-off regression record]] reported
+no new blocking software defect. Copilot and this reproduction establish an
+in-scope HIGH blocker regardless of its inherited origin. Its =Root diagnostic
+and acceptance recipe= section, step 5, described the admission window as
+unproven; the userspace lock ordering is now reproduced. The new read-only
+snapshot adds the kernel capability and driver contract needed before a sound
+fix. Earlier test results and all other historical live limits remain intact.
