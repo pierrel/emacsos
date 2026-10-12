@@ -51,13 +51,15 @@ output and may block producers until the user returns to live output."
   "Tap bindings for the phone terminal's History/Live control.")
 
 (defun emacsos-pinephone-vterm-history-label ()
-  "Return the phone terminal control with its current output state."
-  (propertize (if vterm-copy-mode " Live | Output paused " " History ")
-              'local-map emacsos-pinephone-vterm-history-header-map
-              'mouse-face 'mode-line-highlight
-              'help-echo (if vterm-copy-mode
-                             "Resume terminal output"
-                           "Browse history; terminal output pauses")))
+  "Return a 40-pixel phone control with its current output state."
+  (let ((edge (propertize " " 'display '(space :width (20) :height (40)))))
+    (propertize (concat edge (if vterm-copy-mode "Live | Output paused" "History")
+                        edge)
+                'local-map emacsos-pinephone-vterm-history-header-map
+                'mouse-face 'mode-line-highlight
+                'help-echo (if vterm-copy-mode
+                               "Resume terminal output"
+                             "Browse history; terminal output pauses"))))
 
 (define-minor-mode emacsos-pinephone-vterm-history-mode
   "Enable phone history controls without changing desktop vterm maps."
