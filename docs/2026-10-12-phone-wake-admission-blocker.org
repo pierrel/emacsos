@@ -10,7 +10,7 @@ or =press= cannot advance the transition generation while that lock is held.
 If its hardware event completed before the helper reads =wakeup_count=, the
 sample already includes the event. The counter write can succeed and the
 phone can sleep with the userspace wake callback waiting behind the lock.
-This is an in-scope blocker, including though the locking order was inherited.
+This is an in-scope blocker, even though the locking order was inherited.
 PR 69 must not be deployed or merged in this state. The phone remains unchanged.
 
 * Deterministic offline reproduction
