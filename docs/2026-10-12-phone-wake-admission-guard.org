@@ -1,0 +1,140 @@
+#+TITLE: Kernel guard for explicit phone wake admission
+#+DATE: 2026-10-12
+
+* Result and limits
+
+The successor to =e2fdfec= protects each accepted explicit =wake= or =press=
+request with a private kernel wake source before it waits for the display
+lock. A ready eventfd registered with =EPOLLWAKEUP= holds that source. Fixed
+inherited descriptors follow the unprivileged display action and descendants;
+their final close releases it even after TERM or KILL. Requests own distinct
+kernel objects, so one request cannot release another's guard. There is no
+named wake-lock registry, shared reference count or cleanup daemon.
+
+The root helper keeps its no-argument suspend action and gains only exact
+=wake= and =press= guard actions. The service-user entry points enter this fixed
+helper before display locking; its guarded child checks the inherited kernel
+registration and pending event. Missing capability or missing descriptors
+rejects the action. Both counter reads are bounded and interruptible: timeout
+returns 75 so a guarded wake waiting for the display lock can proceed. The
+reader closes its copy of the root lock descriptor because BusyBox timeout's
+watchdog can otherwise retain that lock after a fast read has returned.
+
+Root's actual USB identity probe found the EG25 at =usb2/2-1=, VID/PID
+=2c7c:0125=. The former =usb1/1-1= path is stale on this phone and would fail
+suspend preflight. The fixed path now matches that observed device; identity
+checks remain mandatory. This follow-up does not change wake-source policy.
+
+This fences requests after successful kernel guard activation. It does not
+prove uninterrupted protection from an earlier IRQ through delayed input,
+ModemManager or Emacs callback delivery. Exclusive automatic CPU wake sources,
+real boundary delivery and battery duration remain live acceptance criteria.
+No deployment, merge, phone command or model/GPU run occurred in this Implementer
+follow-up. Root owns live diagnostics and any later composed deployment.
+
+* Device contract evidence
+
+Root captured the running phone at =2026-10-13 03:30 UTC=: Linux 6.13.8,
+=deep= selected, =CONFIG_PM_SLEEP=y=, =CONFIG_PM_WAKELOCKS=y=, and root effective
+=CAP_BLOCK_SUSPEND=. A bounded temporary guard diagnostic then verified the
+actual kernel accepted =EPOLLWAKEUP= and the installed =su= preserved the
+pending eventfd and epoll descriptors through the switch to service UID 104.
+The process exited and released its temporary source without changing settings.
+
+Local evidence:
+- =/tmp/root-phone-online-kernel-probe-20261013.log=
+- =/tmp/root-phone-online-kernel-driver-20261013.log=
+- =/tmp/root-phone-eg25-package-probe-20261013.log=
+- =/tmp/root-phone-eg25-selected-config-20261013.log=
+- =/tmp/root-phone-wake-fd-contract-result-20261013.log=
+
+The installed package reports =eg25-manager-0.5.2-r0= while its binary reports
+0.5.1. The selected device compatibility is =pine64,pinephone-1.2=; its packaged
+configuration sends physical RI pulses for calls/SMS and disables other RI URCs.
+That is configuration evidence, not proof that a hardware source remains active
+until the userspace guard. The source snapshot shows several enabled USB,
+charger, battery, RTC and GPIO wake sources; it does not prove call/SMS-only CPU
+wake. Preserve those facts until targeted live evidence identifies the initiating
+source. Do not disable unknown sources from this result.
+
+The inspected Linux 6.13 implementation creates the per-registration source
+and activates it for an already-readable eventfd; registration removal releases
+it. It silently strips =EPOLLWAKEUP= without the required capability, which is
+why capability and inherited-registration checks are part of the fixed path:
+[[https://github.com/torvalds/linux/blob/v6.13/fs/eventpoll.c][Linux 6.13 eventpoll implementation]].
+
+* Regression coverage
+
+The existing isolated Alpine power test now invokes the actual privileged
+helper through a fixture-only root broker. Narrow container capabilities allow
+real =EPOLLWAKEUP= and inspection of service-user descriptors. Guard creation,
+=su=, inherited descriptors, display locking and lifecycle are real. Sway/wtype
+operations and doas transport are fixture substitutes; the sysfs counter/state
+handshake is modeled because ordinary files cannot reject writes when a kernel
+source activates. No sleep is attempted on the host kernel.
+
+Deterministic barriers cover a queued explicit wake before counter sampling,
+between sampling and counter acceptance, and between acceptance and =mem=.
+Each requires no accepted sleep write, eventual active display and no remaining
+guard. The before-sample case forces the counter read to wait behind a real
+active guard; the production timeout must release the display lock. A counter
+value of 42 represents the earlier event already counted, rather than relying
+on a later event to rescue admission.
+
+Overlap coverage blocks two requests, kills the first display owner while its
+descendant still holds the descriptors, and requires both independent sources
+to remain protected. After that descendant exits, exactly the second source
+remains; after the second request completes, neither remains. A failed display
+transition must also release its source. Internal wake without inherited guard
+proof must be rejected. Existing manual/idle timers, stale generations, generic
+resume, retries and interrupted-state recovery remain covered. Charging behavior
+remains part of live acceptance.
+
+The same fixture on unchanged =e2fdfec= fails with =explicit wake was lost at
+admission phase before-read=. The fixed source passes all three boundaries,
+overlap, parent-death and failure cleanup. Logs:
+=/tmp/phone-power-admission-baseline.log= and
+=/tmp/phone-power-admission-fixed.log=. This is software ordering evidence, not
+real call/SMS IRQ delivery or a hardware suspend result.
+
+* Checks and review
+
+=make test-pinephone-scripts= passed: installer/update rollback, payload hashes,
+boot-mode policy, call/network/Wi-Fi/device helpers, the complete power regression,
+and all 78 bootstrap ERT tests. Shell syntax, embedded Python syntax and diff
+checks passed. Independent security/concurrency/error review found no required
+correction. Independent correctness/design review also found no required code
+change. The separate documentation pass corrected fixture and charging-coverage
+claims and the description of previously unknown kernel capability.
+
+The earlier full Elisp result was 731/822; all 91 failures reproduced on untouched
+base =4b0625=, which had one additional order-dependent failure. Elisp source has
+not changed in this follow-up; no unrelated repairs were made. Server/model tests
+are outside this shell-only change and the assigned prohibition on model runs.
+
+* Root live acceptance
+
+Preserve the running keyboard, rendering, Nutrition and rename composition.
+Compare final composed hashes before any deployment. The earlier screen-off
+acceptance recipe still applies: manual/automatic/charging deadlines, deliberate
+power wake, call and SMS with Pierre present, another blank/suspend cycle, and a
+bounded untouched battery interval.
+
+At admission boundaries, distinguish hardware IRQ/source activation from input
+or ModemManager delivery and from guard activation. A source enabled flag, a
+successful ordinary wake, or a finite pulse cannot establish an acknowledgment
+contract. Use exact installed kernel/patch and device-tree identities, then
+bounded boundary traces or another verified contract to establish the earlier
+handoff. If a wake is missed before guard activation, retain that as an in-scope
+blocker rather than adding a timeout or retry to reduce its probability.
+
+* Historical supersessions
+
+The =Known blocker= and =Required contract before implementing a fix= sections of
+[[file:2026-10-12-phone-wake-admission-blocker.org][the admission blocker record]] described the
+reproduced lock ordering and missing kernel capability evidence. Actual phone evidence
+now verifies the kernel/privilege/descriptor contract, and this successor fences
+accepted requests with kernel-owned FD lifetime. Its =Review and handoff= section
+is superseded for software readiness only after this successor's checks and
+independent review converge. The earlier hardware-to-callback limitation remains
+unresolved; the original reproduction and historical test results stay intact.

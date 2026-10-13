@@ -26,7 +26,7 @@ trap 'exit 1' HUP INT TERM
 
 [ "$#" -ge 1 ] || fail 'an action is required'
 case $1 in
-    press|idle-blank|resume|wake|monitor)
+    press|idle-blank|resume|wake|monitor|guarded-press|guarded-wake)
         [ "$#" -eq 1 ] || fail 'arguments are not accepted' ;;
     suspend)
         [ "$#" -eq 2 ] || fail 'a blank generation is required'
@@ -35,6 +35,21 @@ case $1 in
 esac
 
 [ "$(id -un)" = emacsos-lab ] || fail 'wrong service user'
+case $1 in
+    press|wake)
+        # Activate kernel protection before waiting for the display lock.
+        exec doas -n /usr/local/sbin/emacsos-openrc-suspend "$1"
+        ;;
+    guarded-press|guarded-wake)
+        registration=$(sed -n 's/^tfd: *10 *events: *\([0-9a-f]*\).*/\1/p' \
+            "/proc/$$/fdinfo/11")
+        [ -n "$registration" ] &&
+            [ "$((0x$registration & 0x20000000))" -ne 0 ] &&
+            grep -E '^eventfd-count: *1$' "/proc/$$/fdinfo/10" >/dev/null ||
+            fail 'kernel wake guard is absent'
+        set -- "${1#guarded-}"
+        ;;
+esac
 [ -d "$runtime" ] && [ ! -L "$runtime" ] || fail 'invalid runtime directory'
 [ "$(stat -c '%U:%G:%a:%F' "$runtime")" = \
     'emacsos-lab:emacsos-lab:700:directory' ] || fail 'unsafe runtime directory'

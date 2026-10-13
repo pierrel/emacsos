@@ -304,8 +304,6 @@ grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-sessio
 grep -F '"$root/process-group" "$root/session-power" monitor' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'read -r -t 120 event' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'press|idle-blank|resume|wake|monitor)' \
-    "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'suspend) flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
     "$deploy_dir/openrc-session-power" >/dev/null

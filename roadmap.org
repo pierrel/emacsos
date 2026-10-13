@@ -92,12 +92,13 @@ so it is rejected for this experiment.  The active v25.06/OpenRC/6.13.8 image
 has passed a multi-hour plugged run with Sway, PGTK Emacs, wvkbd, handset audio,
 Firefox, on-demand Waydroid, repeated DPMS, and intentional UI failure recovery.
 Pierre's first unplugged hands-on run, physical display-off/wake, and an
-RTC-driven deep suspend passed with the same Sway and Emacs processes.  The session blanks after 60 seconds idle and uses a supervised timer to request
+RTC-driven deep suspend passed with the same Sway and Emacs processes.  The current candidate blanks after 60 seconds idle and uses a supervised timer to request
 deep suspend after 120 seconds screen-off, including a power-button blank and
 while charging. Seat activity leaves the panel dark; incoming calls/SMS and the
-power button use explicit wake paths. The root helper and its fixed UI suspend
-privilege are included. Live validation of this timer, exclusive automatic wake
-sources and battery drain remains pending while the phone is unavailable. Four
+power button use kernel-guarded explicit wake paths. The root helper admits
+suspend through a bounded counter handshake and uses the observed EG25 USB path.
+Live validation of this timer, hardware-to-callback delivery, exclusive automatic
+wake sources and battery drain remains pending. Four
 plugged automatic RTC-wake cycles passed under the former suspend policy.  The
 three post-fix captures were clean, including a 23-minute-33-second unreachable
 interval between kernel suspend entry and RTC wake, followed by visible Firefox
