@@ -123,8 +123,8 @@ def main():
     os.setresgid(user.pw_gid, user.pw_gid, user.pw_gid)
     os.setresuid(user.pw_uid, user.pw_uid, user.pw_uid)
     os.environ.update(HOME=user.pw_dir, XDG_RUNTIME_DIR=str(RUNTIME))
-    # Opening the FIFO after setup/drop makes the session's first bounded
-    # transition write the existing readiness handshake.
+    # Opening after setup/drop releases the session's bounded writer-open
+    # readiness barrier before the supervisor's initial wake.
     fifo = os.open(RUNTIME / 'power-events', os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW)
     if not stat.S_ISFIFO(os.fstat(fifo).st_mode):
         fail('power event pipe is absent')

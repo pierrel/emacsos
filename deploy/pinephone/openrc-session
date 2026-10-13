@@ -223,6 +223,9 @@ fi
 mkfifo -m 0600 "$runtime/power-events"
 "$root/process-group" "$root/session-power" monitor &
 power_pid=$!
+# The reader opens only after trusted input registration and privilege drop.
+timeout -s TERM -k 1 3 sh -c ': >"$1"' sh "$runtime/power-events" ||
+    fail 'power monitor did not become ready'
 "$root/session-power" wake
 "$root/process-group" /usr/bin/swayidle -w \
     timeout 60 "$root/session-power idle-blank" \
