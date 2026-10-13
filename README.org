@@ -393,6 +393,45 @@ This fixture makes no requests; repeat keys, refresh and local-file checks
 on a real thread after deployment.  ERT verifies properties and marker
 contracts; visual font selection and touch readability require the live UI.
 
+Complete =type: file= render fences use the current thread's existing local
+checkout, without fetching. PNG is the inline image format supported by the
+Assist render protocol; graphical Emacs displays bounded PNGs scaled to the
+window. Other available files open through the same safe local-file command.
+Fallback image links, including SVG and oversized PNGs, open as literal text.
+Compressed links retain their stored bytes without automatic decompression.
+Already visited image or compressed files stay untouched; use Find file for
+those existing buffers.
+=/workspace/=, =/user/= and relative paths resolve
+inside this thread; symlinks, traversal and Git internals in any letter case are refused. The
+server's persistent =/tmp/= scratch is absent from local Git checkouts and
+shows an unavailable-local-file fallback. Use Git Refresh for unsynced worktree
+files. Maps remain readable render-fence source.
+
+Complete pipe tables with a Markdown separator row become explicit table
+objects. Open one to see aligned fixed-pitch columns in an isolated view.
+Separator rows may omit the trailing pipe; short data rows get empty cells.
+The fixed header provides 40-pixel touch controls for Back, Left and Right; arrow keys scroll
+horizontally and =C-c b= returns. Conversation prose stays wrapped and copied,
+stored and unsent text stays unchanged. The table view is a snapshot, so reopen
+it after a conversation refresh. Back releases the temporary table buffer even if the source conversation was closed.
+Ordinary Org tables retain their existing
+Org behavior.
+
+Presentation retains the 256 KiB source budget. Local linked files are limited
+to 1 MiB. Inline PNGs share an aggregate
+1 MiB byte and 4,194,304-pixel allowance per buffer; repeated paths reuse one
+image across all messages within a presentation pass. The same aggregate
+allowance bounds attempted
+reads and decodes across a complete redraw, including invalid PNGs. PNG dimensions are at most 4096 per side and
+4,194,304 pixels. Larger or unsupported images remain file links. Oversized
+aligned table output falls back to its literal source in the table view.
+
+An offline native specimen is in
+=previews/conversation-rendering/preview.el=. Run it in a fresh isolated Emacs
+with =emacs -Q -L . -l previews/conversation-rendering/preview.el= and check both
+a narrow phone-sized frame and a desktop window. It creates disposable local
+fixtures only; it never contacts Assist or runs Git.
+
 The Org styling is independently implemented from the supplied example by
 [[https://zzamboni.org/post/beautifying-org-mode-in-emacs/][Diego Zamboni]]; the linked sources state no explicit code license.
 
