@@ -183,7 +183,8 @@ case $1 in
         suspend_status=$?
         set -e
         case $suspend_status in
-            0|75) exit 0 ;;
+            # External power skips deep sleep and keeps the panel dark.
+            0|75|77) exit 0 ;;
             *)
                 printf 'emacsos-session-power: suspend failed (%s)\n' \
                     "$suspend_status" >&2

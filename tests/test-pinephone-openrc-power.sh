@@ -30,6 +30,7 @@ sed -e 's|^power=/sys/power$|power=/tmp/power|' \
     -e 's|^power_key=.*$|power_key=/tmp/power-key/wakeup|' \
     -e 's|^axp_power_key=.*$|axp_power_key=/tmp/axp-power-key/wakeup|' \
     -e 's|^modem=.*$|modem=/tmp/modem|' \
+    -e 's|/sys/class/power_supply|/tmp/power-supplies|g' \
     /source/suspend-root >/tmp/suspend-root.test
 chmod 0755 /tmp/suspend-root.test
 ln -s /usr/local/bin/python3 /usr/bin/python3
@@ -83,7 +84,7 @@ def serve(client):
         for level, kind, value in ancillary:
             assert (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
             fds.frombytes(value)
-        if not action and not Path('/tmp/admission-phase').exists():
+        if not action and not Path('/tmp/admission-phase').exists() and not Path('/tmp/power-policy-test').exists():
             with open('/tmp/doas.log', 'a') as log:
                 log.write('/usr/local/sbin/emacsos-openrc-suspend\n')
             result = {'code': int(Path('/tmp/suspend-status').read_text()), 'stdout': '', 'stderr': ''}
@@ -101,6 +102,10 @@ def serve(client):
             fds = array.array('i')
             stdout, stderr = process.communicate()
             result = {'code': process.returncode, 'stdout': stdout or '', 'stderr': stderr or ''}
+            if not action and Path('/tmp/power-policy-test').exists():
+                import time
+                with open('/tmp/power-policy-attempts', 'a') as log:
+                    log.write(json.dumps({'code': process.returncode, 'at': time.clock_gettime(time.CLOCK_BOOTTIME)}) + '\n')
         client.sendall(json.dumps(result).encode())
     finally:
         for fd in fds:
@@ -219,6 +224,24 @@ os.execv('/usr/local/share/emacsos-openrc/session-power',['session-power','suspe
 ADMIT
 install -d -m 0755 /tmp/external-power
 printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 0 >/tmp/external-power/present
+install -d -m 0755 /tmp/external-power/power /tmp/power-supplies/axp20x-battery
+ln -s /tmp/external-power /tmp/power-supplies/axp20x-usb
+printf '%s\n' USB >/tmp/external-power/type
+printf '%s\n' disabled >/tmp/external-power/power/wakeup
+printf '%s\n' Battery >/tmp/power-supplies/axp20x-battery/type
+printf '%s\n' 1 >/tmp/power-supplies/axp20x-battery/online
+printf '%s\n' Discharging >/tmp/power-supplies/axp20x-battery/status
+install -d -m 0755 /tmp/power /tmp/power-key /tmp/axp-power-key /tmp/modem/power
+printf '%s\n' 's2idle [deep]' >/tmp/power/mem_sleep
+printf '%s\n' 1 >/tmp/power/sync_on_suspend
+printf '%s\n' 41 >/tmp/power/wakeup_count
+: >/tmp/power/state
+printf '%s\n' disabled >/tmp/power-key/wakeup
+printf '%s\n' disabled >/tmp/axp-power-key/wakeup
+printf '%s\n' 2c7c >/tmp/modem/idVendor
+printf '%s\n' 0125 >/tmp/modem/idProduct
+printf '%s\n' disabled >/tmp/modem/power/wakeup
 
 mkfifo -m 0600 /run/emacsos-ui/power-events
 chown emacsos-lab:emacsos-lab /run/emacsos-ui/power-events
@@ -335,6 +358,111 @@ sleep 0.5
 [ "$(wc -l </tmp/doas.log)" -eq 1 ]
 as_lab press
 rm -f /tmp/doas.log
+
+# External-power policy uses the REAL root helper, including its inherited
+# guard objects. The usual no-argument status stub is disabled for these cases.
+wait_policy_attempt() {
+    attempt=0
+    while [ ! -f /tmp/power-policy-attempts ]; do
+        [ "$attempt" -lt 100 ]; attempt=$((attempt + 1)); sleep 0.02
+    done
+}
+policy_code() {
+    python3 -c 'import json; print(json.loads(open("/tmp/power-policy-attempts").readline())["code"])'
+}
+touch /tmp/power-policy-test
+for status in Full Discharging; do
+    printf '%s\n' "$status" >/tmp/power-supplies/axp20x-battery/status
+    printf '%s\n' 1 >/tmp/external-power/online
+printf '%s\n' 1 >/tmp/external-power/present
+    as_lab wake
+    rm -f /tmp/power-policy-attempts
+    : >/tmp/power/state
+    as_lab idle-blank
+    generation=$(cat /run/emacsos-ui/power-generation)
+    wait_policy_attempt
+    if [ "$(policy_code)" -ne 77 ]; then
+        printf 'Powered %s battery expected skip77; got%s, state=%s\n' \
+            "$status" "$(policy_code)" "$(cat /tmp/power/state)" >&2
+        exit 1
+    fi
+    [ ! -s /tmp/power/state ]
+    [ "$(cat /run/emacsos-ui/power-state)" = blank ]
+    [ "$(cat /run/emacsos-ui/power-generation)" = "$generation" ]
+done
+printf '%s\n' 'Powered blank stays dark and awake for Full/Discharging battery: OK'
+as_lab wake
+printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 1 >/tmp/external-power/present
+rm -f /tmp/power-policy-attempts
+: >/tmp/power/state
+as_lab press
+wait_policy_attempt
+[ "$(policy_code)" -eq 77 ]
+[ ! -s /tmp/power/state ]
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+printf '%s\n' 'USB present before ONLINE also exempts deep sleep: OK'
+
+
+as_lab wake
+printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 0 >/tmp/external-power/present
+rm -f /tmp/power-policy-attempts
+: >/tmp/power/state
+as_lab press
+sleep 0.1
+printf '%s\n' 1 >/tmp/external-power/online
+printf '%s\n' 1 >/tmp/external-power/present
+wait_policy_attempt
+[ "$(policy_code)" -eq 77 ]
+[ ! -s /tmp/power/state ]
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+printf '%s\n' 'Plug during pending screen-off deadline vetoes sleep: OK'
+
+# The powered attempt already elapsed; unplug uses the same armed retry and
+# does not require another blank event or change its generation.
+generation=$(cat /run/emacsos-ui/power-generation)
+first_attempt=$(python3 -c 'import json; print(json.loads(open("/tmp/power-policy-attempts").readline())["at"])')
+sleep 0.1
+rm -f /tmp/power-policy-attempts
+printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 0 >/tmp/external-power/present
+sleep 0.15
+[ ! -e /tmp/power-policy-attempts ]
+wait_policy_attempt
+[ "$(policy_code)" -eq 0 ]
+[ "$(cat /tmp/power/state)" = mem ]
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+[ "$(cat /run/emacsos-ui/power-generation)" = "$generation" ]
+python3 - "$first_attempt" <<'CADENCE'
+import json,sys
+second=json.loads(open('/tmp/power-policy-attempts').readline())['at']
+assert .35 <= second-float(sys.argv[1]) < 1.5, 'powered attempt changed retry cadence'
+CADENCE
+printf '%s\n' 'Unplug already-dark phone resumes the armed retry: OK'
+
+as_lab wake
+printf '%s\n' 1 >/tmp/external-power/online
+printf '%s\n' 1 >/tmp/external-power/present
+rm -f /tmp/power-policy-attempts
+: >/tmp/power/state
+as_lab idle-blank
+blank_started=$(python3 -c 'import time;print(time.clock_gettime(time.CLOCK_BOOTTIME))')
+sleep 0.2
+printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 0 >/tmp/external-power/present
+wait_policy_attempt
+[ "$(policy_code)" -eq 0 ]
+[ "$(cat /tmp/power/state)" = mem ]
+python3 - "$blank_started" <<'DEADLINE'
+import json,sys
+attempt=json.loads(open('/tmp/power-policy-attempts').readline())['at']
+assert .25 <= attempt-float(sys.argv[1]) < .58, 'unplug restarted the original blank deadline'
+DEADLINE
+as_lab wake
+rm -f /tmp/power-policy-test /tmp/power-policy-attempts
+printf '%s\n' 'Unplug before deadline keeps its original remaining time: OK'
+
 if [ "$queue_guard" -eq 1 ]; then
     kill -STOP "$power_pid"
     as_lab press
@@ -445,16 +573,6 @@ kill "$extra_wayland_pid"
 wait "$extra_wayland_pid" 2>/dev/null || true
 rm -f /run/emacsos-ui/wayland-extra
 
-install -d -m 0755 /tmp/power /tmp/power-key /tmp/axp-power-key /tmp/modem/power
-printf '%s\n' 's2idle [deep]' >/tmp/power/mem_sleep
-printf '%s\n' 1 >/tmp/power/sync_on_suspend
-printf '%s\n' 41 >/tmp/power/wakeup_count
-: >/tmp/power/state
-printf '%s\n' disabled >/tmp/power-key/wakeup
-printf '%s\n' disabled >/tmp/axp-power-key/wakeup
-printf '%s\n' 2c7c >/tmp/modem/idVendor
-printf '%s\n' 0125 >/tmp/modem/idProduct
-printf '%s\n' disabled >/tmp/modem/power/wakeup
 if [ "$queue_guard" -eq 1 ]; then /tmp/suspend-root.test guarded-suspend; else /tmp/suspend-root.test; fi
 [ "$(cat /tmp/power/state)" = mem ]
 [ "$(cat /tmp/power-key/wakeup)" = enabled ]
@@ -526,10 +644,11 @@ elif operation == 'read':
         time.sleep(0.01)
     print(Path('/tmp/power/wakeup_count').read_text().strip())
 elif operation == 'accept':
-    if sources():
+    if sources() or Path('/tmp/power/wakeup_count').read_text().strip() != sys.argv[2]:
         sys.exit(1)
+    Path('/tmp/accepted-wakeup-count').write_text(sys.argv[2])
 elif operation == 'submit':
-    if sources():
+    if sources() or Path('/tmp/power/wakeup_count').read_text().strip() != Path('/tmp/accepted-wakeup-count').read_text():
         sys.exit(1)
     Path('/tmp/power/state').write_text('mem\n')
 else:
@@ -612,6 +731,36 @@ for phase in before-read before-accept before-mem; do
     rm -f /tmp/admission-phase /tmp/admission-reached \
         /tmp/admission-wake-at-lock /tmp/admission-continue
     printf 'Kernel-guarded admission %s: OK\n' "$phase"
+done
+
+# A plug during admission vetoes sleep even if the first presence check read
+# offline. A later completed USB IRQ must invalidate the accepted counter.
+for phase in before-accept before-mem; do
+    as_lab wake
+    printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 0 >/tmp/external-power/present
+    as_lab press
+    : >/tmp/power/state
+    printf '%s\n' 42 >/tmp/power/wakeup_count
+    printf '%s\n' "$phase" >/tmp/admission-phase
+    mkfifo /tmp/admission-continue
+    generation=$(cat /run/emacsos-ui/power-generation)
+    as_lab suspend "$generation" &
+    plug_suspend_pid=$!
+    wait_file /tmp/admission-reached
+    printf '%s\n' 1 >/tmp/external-power/online
+printf '%s\n' 1 >/tmp/external-power/present
+    # Before-mem is AFTER the second presence check. Model its completed IRQ
+    # counter event; the kernel fence, not another timing check, must reject it.
+    [ "$phase" != before-mem ] || printf '%s\n' 43 >/tmp/power/wakeup_count
+    printf '%s\n' continue >/tmp/admission-continue
+    wait "$plug_suspend_pid"
+    [ ! -s /tmp/power/state ]
+    [ "$(cat /run/emacsos-ui/power-state)" = blank ]
+    printf '%s\n' 0 >/tmp/external-power/online
+printf '%s\n' 0 >/tmp/external-power/present
+    rm -f /tmp/admission-phase /tmp/admission-reached /tmp/admission-continue
+    printf 'Plugged admission %s: OK\n' "$phase"
 done
 
 # The IRQ has already advanced the PM count but userspace has not read its

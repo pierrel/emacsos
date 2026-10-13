@@ -10,6 +10,7 @@ power=/sys/power
 power_key=/sys/devices/platform/gpio-keys/power/wakeup
 axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
 modem=/sys/devices/platform/soc/1c1b000.usb/usb2/2-1
+external_power=/sys/class/power_supply/axp20x-usb/online
 lock=/run/emacsos-openrc-suspend.lock
 
 fail() {
@@ -25,6 +26,19 @@ enable_wakeup() {
     printf '%s\n' enabled >"$wakeup" || fail "could not enable: $wakeup"
     [ "$(sed -n '1p' "$wakeup")" = enabled ] ||
         fail "wakeup source is disabled: $wakeup"
+}
+
+external_power_present() {
+    for presence in "$external_power" "${external_power%/online}/present"; do
+        [ -f "$presence" ] && [ ! -L "$presence" ] ||
+            fail "external power state is absent: $presence"
+        case $(sed -n '1p' "$presence") in
+            0) ;;
+            1) return 0 ;;
+            *) fail "invalid external power state: $presence" ;;
+        esac
+    done
+    return 1
 }
 
 trap 'exit 1' HUP INT TERM
@@ -72,6 +86,7 @@ GUARD
         ;;
     *) fail 'arguments are not accepted' ;;
 esac
+external_power_present && exit 77
 [ -d "$power" ] && [ ! -L "$power" ] || fail 'unsafe power interface'
 grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
     fail 'deep suspend is not selected'
@@ -89,6 +104,7 @@ grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
 enable_wakeup "$power_key"
 enable_wakeup "$axp_power_key"
 enable_wakeup "$modem/power/wakeup"
+enable_wakeup "${external_power%/online}/power/wakeup"
 
 : >"$lock"
 chown root:root "$lock"
@@ -105,6 +121,9 @@ esac
 # display lock. Timeout releases that lock; a later kernel wake event rejects the
 # transition. Exit 75 so the display owner treats it as a normal wake race.
 printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
+# A plug during counter sampling must still veto this admission. Later USB
+# IRQs participate in the kernel wakeup-count handshake.
+external_power_present && exit 77
 if ! printf '%s\n' mem >"$power/state"; then
     new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
     [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75

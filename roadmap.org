@@ -93,8 +93,10 @@ has passed a multi-hour plugged run with Sway, PGTK Emacs, wvkbd, handset audio,
 Firefox, on-demand Waydroid, repeated DPMS, and intentional UI failure recovery.
 Pierre's first unplugged hands-on run, physical display-off/wake, and an
 RTC-driven deep suspend passed with the same Sway and Emacs processes.  The current candidate blanks after 60 seconds idle and uses a supervised timer to request
-deep suspend after 120 seconds screen-off, including a power-button blank and
-while charging. Seat activity leaves the panel dark; incoming calls/SMS and the
+deep suspend after 120 seconds screen-off on battery, including a power-button blank. External USB power exempts deep autosuspend even when the battery
+reports Full or Discharging; ordinary display blanking still applies. A dark
+generation keeps its existing 120-second retry cadence while powered. Seat
+activity leaves the panel dark; incoming calls/SMS and the
 power button use guarded wake paths. The same worker now owns private kernel-guarded
 power-key and ring-indicator input queues before screen-off, so pending hardware
 input blocks suspend before delayed callbacks run. The root admission owner retains
