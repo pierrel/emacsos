@@ -204,6 +204,16 @@ shell:
 ASSIST_MODEL_URL=http://localhost:8000/v1 make smoke
 #+end_src
 
+** Isolated Assist Web lifecycle E2E
+
+From Assist, start the standalone fixture with
+=python3 tests/e2e/start.py --logs /tmp/assist-fixture-new --seconds 1800=,
+then run =python3 tests/phone-assist-e2e/run.py --fixture /tmp/assist-fixture-new/fixture.json --logs /tmp/phone-assist-e2e-results=.
+The actual Assist Web Emacs client joins that fixture through HTTPS, SSE and
+Git/SSH. Assist uses its existing Docker sandbox backend with deterministic
+inference. See [[file:tests/phone-assist-e2e/README.md][startup and coverage]] for the private daemon, synthetic assets,
+privileged-container access, bounds and limitations.
+
 * Desktop Assist only
 
 =assist-desktop.el= loads the existing Assist Web client into ordinary Emacs.
@@ -516,6 +526,10 @@ to that list.  The list renders the validated local catalog immediately,
 refreshes it asynchronously, and exposes visible refresh or retry rows.  Each
 two-line row opens its exact thread with mouse-1 or RET.  Both entry points
 share the same complete thread, repository, and harness catalog.
+In the entry-owned queue flow, a new thread keeps its draft buffer when its
+first Run is accepted. Once the canonical title arrives, that same buffer
+adopts it and follows later title updates without losing its draft or queued
+message.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second
@@ -559,6 +573,10 @@ that an operator must repair observation; it never retries automatically.  The
 current closure corrections are [[file:docs/2026-09-09-conversation-observation-closure-amendment.org][the observation closure amendment]],
 [[file:docs/2026-09-09-conversation-deletion-closure-amendment.org][the deleted-thread closure amendment]],
 and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the stream-batching amendment]].
+If an accepted Run still appears to be streaming after it has finished,
+explicit =Refresh= stops that view's observer and checks the exact Run before
+reconciling or opening a new stream. It preserves the draft and never resubmits
+the message.
 
 * Project Structure
 
