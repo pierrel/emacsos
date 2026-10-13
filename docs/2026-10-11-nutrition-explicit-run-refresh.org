@@ -1,0 +1,24 @@
+#+title: Explicit Refresh for a stalled Assist Run observer (2026-10-11)
+
+* Observed failure
+
+An exact Run had durably succeeded and a fresh authenticated event stream
+reached its terminal event, but the phone's original admitted stream still
+owned the queue. Explicit Refresh only said that observation was active.
+The cause of the original stream stall is not established; this correction
+does not assume a transport or parser fault.
+
+* Narrow recovery
+
+When the user explicitly refreshes a queue entry whose SSE still owns the
+buffer, first use the existing entry-owned interruption path. It fences the
+old generation, saves the stopped receipt, closes that process and releases
+its observer slot. Only after successful preservation, use the existing
+exact-Run recheck. A terminal Run follows the normal canonical
+reconciliation; a still-running Run may attach a new stream. A failed local
+save retains the stronger recovery hold. Repeated Refresh while the exact
+GET is in flight does not send a second request.
+
+This never resubmits the message, treats a stale SSE as terminal proof,
+changes the user's Git checkout, or starts a background watchdog. Late
+callbacks from the old stream remain fenced by entry identity and epoch.

@@ -1184,9 +1184,6 @@ An auth-only GET leaves exact Run outcome uncertain."
               (condition-case nil
                   (emacsos-assist-web--update-lifecycle-headers)
                 ((error quit) nil)))))))
-    (dolist (item (copy-sequence emacsos-assist-web-git--feedback-windows))
-      (when (window-live-p (car item))
-        (emacsos-assist-web-git--clear-feedback (car item))))
     (emacsos-assist-web--update-lifecycle-headers))))
 
 
@@ -1653,6 +1650,8 @@ The value is nil, `current', `cached', `refresh-failed', or
 (defvar-local emacsos-assist-web--recovery-action-start nil
   "Start marker for the one visible action that restores a retained source draft.")
 (defvar-local emacsos-assist-web--thread-id nil)
+(defvar-local emacsos-assist-web--canonical-buffer-name-p nil
+  "Non-nil when this buffer follows canonical thread titles.")
 (defvar-local emacsos-assist-web--draft-repository nil)
 (defvar-local emacsos-assist-web--draft-harness nil)
 (defvar-local emacsos-assist-web--run-id nil)
@@ -3803,10 +3802,15 @@ of it, together with the oldest pagination cursor already reached."
      (alist-get 'messages snapshot)
      emacsos-assist-web--max-rendered-messages
      emacsos-assist-web--max-rendered-transcript-bytes)
-    (let ((thread (alist-get 'thread snapshot))
-          (presentation-bytes
-           (cl-loop for message in (alist-get 'messages snapshot)
-                    sum (string-bytes (alist-get 'text message)))))
+    (let* ((thread (alist-get 'thread snapshot))
+           (thread-label
+            (emacsos-assist-web--thread-label
+             `((description . ,(alist-get 'description thread))
+               (repo_label . ,(alist-get
+                               'repo_label (alist-get 'workspace thread))))))
+           (presentation-bytes
+            (cl-loop for message in (alist-get 'messages snapshot)
+                     sum (string-bytes (alist-get 'text message)))))
       (let ((returned-id
              (emacsos-assist-web--require-id (alist-get 'id thread))))
         (when (and emacsos-assist-web--thread-id
@@ -3815,6 +3819,14 @@ of it, together with the oldest pagination cursor already reached."
         (setq emacsos-assist-web--thread-id returned-id))
       (setq emacsos-assist-web--snapshot snapshot
             emacsos-assist-web--pending-rendered-p nil)
+      (when (or emacsos-assist-web--canonical-buffer-name-p
+                (equal (buffer-name) "*assist New thread*")
+                (equal (buffer-name)
+                       (format "*assist Thread <%s>*"
+                               emacsos-assist-web--thread-id)))
+        (setq emacsos-assist-web--canonical-buffer-name-p t)
+        (rename-buffer
+         (format "%s <%s>" thread-label emacsos-assist-web--thread-id) t))
       (emacsos-assist-web-git--sync-keys)
       (emacsos-assist-web--set-workspace-directory)
       (erase-buffer)
@@ -3827,13 +3839,7 @@ of it, together with the oldest pagination cursor already reached."
               (plist-get entry :assistant-end) nil))
       (setq emacsos-assist-web--recovery-action-marker nil)
       (let ((transcript-start (point)))
-        (insert (format "%s%s\n"
-                        (emacsos-assist-web--thread-label
-                         `((description . ,(alist-get 'description thread))
-                           (repo_label . ,(alist-get
-                                           'repo_label
-                                           (alist-get 'workspace thread)))))
-                        (if stale " [cached]" "")))
+        (insert (format "%s%s\n" thread-label (if stale " [cached]" "")))
         (setq emacsos-assist-web--status-start (copy-marker (point) nil))
         (insert (format "[%s%s]" (or emacsos-assist-web--stream-status
                                      (alist-get 'status thread))
@@ -7064,7 +7070,8 @@ The start epoch proves freshness after any earlier definitive thread denial."
   "Refresh exact queue state first, or verify a legacy Run before chat history.
 COMPLETED-RUN-ID, VERIFIED-OUTCOME, and VERIFIED-START-EPOCH come only from
 an exact Run GET; the epoch fences later Run access denial.  EXPLICIT is the
-user's Refresh action and may claim a validated dormant same-thread receipt."
+user's Refresh action and may claim a validated dormant same-thread receipt
+or recheck the exact Run behind an owned observer."
   (interactive (list nil nil nil nil t))
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
@@ -7102,8 +7109,21 @@ user's Refresh action and may claim a validated dormant same-thread receipt."
             ;; still belong to the entry-owned stream, never legacy rendering.
             (if emacsos-assist-web--manual-recovery-active
                 (message "Run active; observing; result will appear here")
-              (unless (emacsos-assist-web--retry-busy-check)
-                (message "Run active; observing; result will appear here"))))
+              (if explicit
+                  (let* ((entry emacsos-assist-web--stream-entry)
+                         (epoch (plist-get entry :epoch)))
+                    (emacsos-assist-web--entry-observation-interrupted
+                     entry epoch "Run rechecking exact status")
+                    (when (and (not emacsos-assist-web--stream-entry)
+                               (not emacsos-assist-web--reconcile-recovery-paused)
+                               (eq entry (emacsos-assist-web--queue-entry
+                                          (plist-get entry :key)))
+                               (eq (emacsos-assist-web--entry-state entry)
+                                   'accepted-unobserved)
+                               (plist-get entry :requires-reobserve))
+                      (emacsos-assist-web--reobserve-entry entry)))
+                (unless (emacsos-assist-web--retry-busy-check)
+                  (message "Run active; observing; result will appear here")))))
            ((and head (memq (emacsos-assist-web--entry-state head)
                             '(acceptance-unknown retryable-rejected)))
             (emacsos-assist-web--start-post head))
