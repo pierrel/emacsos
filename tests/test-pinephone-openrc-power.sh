@@ -9,9 +9,12 @@ source_dir=${POWER_TEST_SOURCE_DIR:-$repo_dir/deploy/pinephone}
 docker run --rm --network none --cap-add BLOCK_SUSPEND --cap-add SYS_PTRACE -i \
     -v "$source_dir/openrc-session-power:/source/session-power:ro" \
     -v "$source_dir/openrc-suspend-root:/source/suspend-root:ro" \
+    -v "$repo_dir/deploy/pinephone/openrc-power-monitor:/source/power-monitor:ro" \
     -v "$source_dir/openrc-process-group:/source/process-group:ro" \
     python:3.13-alpine /bin/sh -s <<'CONTAINER'
 set -eu
+queue_guard=0
+grep -F 'power-monitor handoff' /source/suspend-root >/dev/null && queue_guard=1
 
 addgroup -S emacsos-lab
 adduser -S -D -H -h /var/lib/emacsos-lab -s /sbin/nologin \
@@ -46,38 +49,62 @@ printf '%s\n' \
     'done' \
     'exec "$@"' >/usr/bin/timeout
 chmod 0755 /usr/bin/timeout
+rm -f /usr/bin/logger
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" >>/tmp/root-error.log' >/usr/bin/logger
+chmod 0755 /usr/bin/logger
 cat >/usr/bin/doas <<'CLIENT'
 #!/usr/bin/python3
-import json, socket, sys
+import array, json, os, socket, sys
 assert sys.argv[1:3] == ['-n', '/usr/local/sbin/emacsos-openrc-suspend']
-assert sys.argv[3:] in ([], ['wake'], ['press'])
+assert sys.argv[3:] in ([], ['wake'], ['press'], ['monitor'])
 sock = socket.socket(socket.AF_UNIX)
 sock.connect('/tmp/root-helper.sock')
-sock.sendall(json.dumps(sys.argv[3:]).encode())
+fds = array.array('i', [0, 1, 2]) if not sys.argv[3:] else array.array('i')
+sock.sendmsg([json.dumps(sys.argv[3:]).encode()],
+             [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)] if fds else [])
 sock.shutdown(socket.SHUT_WR)
 result = json.loads(sock.makefile().read())
-sys.stdout.write(result['stdout'])
-sys.stderr.write(result['stderr'])
+if sys.argv[3:]:
+    sys.stdout.write(result['stdout'])
+    sys.stderr.write(result['stderr'])
 sys.exit(result['code'])
 CLIENT
 chmod 0755 /usr/bin/doas
 cat >/tmp/root-helper.py <<'BROKER'
-import json, os, socket, subprocess, threading
+import array, json, os, socket, subprocess, threading
 from pathlib import Path
 
 def serve(client):
+    fds = array.array('i')
     try:
-        action = json.loads(client.recv(128))
-        assert action in ([], ['wake'], ['press'])
+        data, ancillary, _, _ = client.recvmsg(128, socket.CMSG_SPACE(3 * fds.itemsize))
+        action = json.loads(data)
+        assert action in ([], ['wake'], ['press'], ['monitor'])
+        for level, kind, value in ancillary:
+            assert (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
+            fds.frombytes(value)
         if not action and not Path('/tmp/admission-phase').exists():
             with open('/tmp/doas.log', 'a') as log:
                 log.write('/usr/local/sbin/emacsos-openrc-suspend\n')
             result = {'code': int(Path('/tmp/suspend-status').read_text()), 'stdout': '', 'stderr': ''}
         else:
-            process = subprocess.run(['/tmp/suspend-root.test', *action], capture_output=True, text=True)
-            result = {'code': process.returncode, 'stdout': process.stdout, 'stderr': process.stderr}
+            if action:
+                process = subprocess.Popen(['/tmp/suspend-root.test', *action],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            else:
+                assert len(fds) == 3
+                process = subprocess.Popen(['/tmp/suspend-root.test'],
+                                           stdin=fds[0], stdout=fds[1], stderr=fds[2])
+            # Once spawned only the actual owners retain the epoll/input FDs.
+            for fd in fds:
+                os.close(fd)
+            fds = array.array('i')
+            stdout, stderr = process.communicate()
+            result = {'code': process.returncode, 'stdout': stdout or '', 'stderr': stderr or ''}
         client.sendall(json.dumps(result).encode())
     finally:
+        for fd in fds:
+            os.close(fd)
         client.close()
 server = socket.socket(socket.AF_UNIX)
 server.bind('/tmp/root-helper.sock')
@@ -129,17 +156,77 @@ while [ ! -S /tmp/root-helper.sock ] ||
 done
 
 as_lab() {
-    su -s /bin/sh emacsos-lab -c \
-        "/usr/local/share/emacsos-openrc/session-power $*"
+    if [ "$1" = suspend ] && [ "$queue_guard" -eq 1 ]; then
+        python3 /tmp/admit-as-lab.py "$power_pid" "$2"
+    else
+        su -s /bin/sh emacsos-lab -c \
+            "/usr/local/share/emacsos-openrc/session-power $*"
+    fi
 }
 
+
+python3 - <<'MONITOR_FIXTURE'
+from pathlib import Path
+p = Path('/usr/local/share/emacsos-openrc/power-monitor')
+s = Path('/source/power-monitor').read_text()
+a = s.index('def verify_input('); b = s.index('\ndef verify_guard()', a)
+s = s[:a] + "def verify_input(fd, name, key):\n    assert stat.S_ISFIFO(os.fstat(fd).st_mode)\n\n" + s[b:]
+a = s.index('    found = set()'); b = s.index('    os.dup2(guard.fileno(), 4', a)
+s = s[:a] + "    for fd in INPUTS:\n        source = os.open('/tmp/wake-input-' + str(fd), os.O_RDWR | os.O_NONBLOCK)\n        os.dup2(source, fd, inheritable=True)\n        os.close(source)\n        guard.register(fd, select.EPOLLIN | WAKEUP)\n" + s[b:]
+s = s.replace("SUSPEND = '/usr/local/sbin/emacsos-openrc-suspend'", "SUSPEND = '/tmp/suspend-root.test'")
+s = s.replace('    verify_guard()\n    user =', "    verify_guard()\n    import array, socket\n    sock = socket.socket(socket.AF_UNIX)\n    sock.connect('/tmp/monitor-fds.sock')\n    sock.sendmsg([str(os.getpid()).encode()], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [3, 4, 5]))])\n    sock.close()\n    user =")
+p.write_text(s); p.chmod(0o755)
+MONITOR_FIXTURE
+mkfifo /tmp/wake-input-3 /tmp/wake-input-5
+cat >/tmp/monitor-fds.py <<'KEEPER'
+import array, json, os, socket, subprocess, threading
+fds = {}; lock = threading.Lock()
+def serve(client):
+    data, ancillary, _, _ = client.recvmsg(128, socket.CMSG_SPACE(12))
+    with lock:
+        if ancillary:
+            received = array.array('i'); received.frombytes(ancillary[0][2])
+            fds[int(data)] = received
+        else:
+            pid, action = json.loads(data)
+            if action == 'release':
+                for fd in fds.pop(pid): os.close(fd)
+            else:
+                source = fds[pid]
+                client.sendmsg([b'fds'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, source)])
+    client.close()
+sock=socket.socket(socket.AF_UNIX); sock.bind('/tmp/monitor-fds.sock'); sock.listen()
+while True:
+    client,_=sock.accept(); threading.Thread(target=serve,args=(client,),daemon=True).start()
+KEEPER
+python3 /tmp/monitor-fds.py &
+keeper_pid=$!
+cat >/tmp/admit-as-lab.py <<'ADMIT'
+import array, fcntl, json, os, pwd, socket, subprocess, sys
+pid = int(sys.argv[1]); sock=socket.socket(socket.AF_UNIX); sock.connect('/tmp/monitor-fds.sock')
+sock.sendall(json.dumps([pid, 'get']).encode())
+_, ancillary, _, _ = sock.recvmsg(16, socket.CMSG_SPACE(12)); sock.close()
+fds=array.array('i'); fds.frombytes(ancillary[0][2])
+# Preserve fixed slots while avoiding collisions in received descriptor IDs.
+copies=[fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 16) for fd in fds]
+for fd in fds: os.close(fd)
+for source,target in zip(copies,(3,4,5)): os.dup2(source,target,inheritable=True)
+for fd in copies:
+    if fd not in (3,4,5): os.close(fd)
+user=pwd.getpwnam('emacsos-lab'); os.initgroups(user.pw_name,user.pw_gid)
+os.setresgid(user.pw_gid,user.pw_gid,user.pw_gid); os.setresuid(user.pw_uid,user.pw_uid,user.pw_uid)
+os.execv('/usr/local/share/emacsos-openrc/session-power',['session-power','suspend',sys.argv[2]])
+ADMIT
 install -d -m 0755 /tmp/external-power
 printf '%s\n' 0 >/tmp/external-power/online
 
 mkfifo -m 0600 /run/emacsos-ui/power-events
 chown emacsos-lab:emacsos-lab /run/emacsos-ui/power-events
-su -s /bin/sh emacsos-lab -c \
-    'exec /usr/local/share/emacsos-openrc/process-group /usr/local/share/emacsos-openrc/session-power monitor' &
+if [ "$queue_guard" -eq 1 ]; then
+    python3 /usr/local/share/emacsos-openrc/power-monitor monitor &
+else
+    su -s /bin/sh emacsos-lab -c 'exec /usr/local/share/emacsos-openrc/session-power monitor' &
+fi
 power_pid=$!
 trap 'kill "$socket_pid" "$power_pid" "$broker_pid" 2>/dev/null || true' EXIT
 as_lab wake
@@ -217,11 +304,15 @@ as_lab press
 # resume, and cancels on explicit call/SMS wake without lighting the panel.
 kill "$power_pid"
 wait "$power_pid" 2>/dev/null || true
-sed 's/read -r -t 120 /read -r -t 0.4 /' \
-    /source/session-power >/tmp/session-power.fast
-chmod 0755 /tmp/session-power.fast
-su -s /bin/sh emacsos-lab -c \
-    'exec /usr/local/share/emacsos-openrc/process-group /tmp/session-power.fast monitor' &
+if [ "$queue_guard" -eq 1 ]; then
+    sed 's/DELAY = 120/DELAY = 0.4/' \
+        /usr/local/share/emacsos-openrc/power-monitor >/tmp/power-monitor.fast
+    python3 /tmp/power-monitor.fast monitor &
+else
+    sed 's/read -r -t 120 /read -r -t 0.4 /' /source/session-power >/tmp/session-power.fast
+    chmod 0755 /tmp/session-power.fast
+    su -s /bin/sh emacsos-lab -c 'exec /tmp/session-power.fast monitor' &
+fi
 power_pid=$!
 as_lab wake
 as_lab press
@@ -244,12 +335,48 @@ sleep 0.5
 [ "$(wc -l </tmp/doas.log)" -eq 1 ]
 as_lab press
 rm -f /tmp/doas.log
-kill "$power_pid"
+if [ "$queue_guard" -eq 1 ]; then
+    kill -STOP "$power_pid"
+    as_lab press
+    sleep 0.5
+    [ ! -e /tmp/doas.log ]
+    kill -CONT "$power_pid"
+    attempt=0
+    while [ ! -e /tmp/doas.log ]; do
+        [ "$attempt" -lt 10 ]; attempt=$((attempt + 1)); sleep 0.02
+    done
+    as_lab wake
+    rm -f /tmp/doas.log
+    printf '%s\n' 'Delayed FIFO consumption preserves screen-off deadline: OK'
+    printf '%s\n' 1 >/tmp/suspend-status
+    as_lab press
+    if wait "$power_pid"; then
+        printf '%s\n' 'permanent suspend failure left monitor successful' >&2
+        exit 1
+    fi
+    [ "$(cat /run/emacsos-ui/power-state)" = blank ]
+    printf '%s\n' 0 >/tmp/suspend-status
+    printf '%s\n' 'Permanent admission failure exits the worker: OK'
+fi
+kill "$power_pid" 2>/dev/null || true
 wait "$power_pid" 2>/dev/null || true
-su -s /bin/sh emacsos-lab -c \
-    'exec /usr/local/share/emacsos-openrc/process-group /usr/local/share/emacsos-openrc/session-power monitor' &
+if [ "$queue_guard" -eq 1 ]; then
+    python3 /usr/local/share/emacsos-openrc/power-monitor monitor &
+else
+    su -s /bin/sh emacsos-lab -c 'exec /usr/local/share/emacsos-openrc/session-power monitor' &
+fi
 power_pid=$!
 as_lab wake
+if [ "$queue_guard" -eq 1 ]; then
+    python3 - "$power_pid" <<'DROP'
+from pathlib import Path
+import sys
+fields=dict(line.split(':',1) for line in Path('/proc/'+sys.argv[1]+'/status').read_text().splitlines() if ':' in line)
+assert len(set(fields['Uid'].split())) == 1 and int(fields['Uid'].split()[0]) != 0
+assert len(set(fields['Gid'].split())) == 1 and int(fields['Gid'].split()[0]) != 0
+assert all(int(fields[name],16)==0 for name in ('CapEff','CapPrm','CapAmb'))
+DROP
+fi
 
 mkfifo /tmp/sway-continue
 touch /tmp/block-sway
@@ -328,7 +455,7 @@ printf '%s\n' disabled >/tmp/axp-power-key/wakeup
 printf '%s\n' 2c7c >/tmp/modem/idVendor
 printf '%s\n' 0125 >/tmp/modem/idProduct
 printf '%s\n' disabled >/tmp/modem/power/wakeup
-/tmp/suspend-root.test
+if [ "$queue_guard" -eq 1 ]; then /tmp/suspend-root.test guarded-suspend; else /tmp/suspend-root.test; fi
 [ "$(cat /tmp/power/state)" = mem ]
 [ "$(cat /tmp/power-key/wakeup)" = enabled ]
 [ "$(cat /tmp/axp-power-key/wakeup)" = enabled ]
@@ -339,18 +466,21 @@ if /tmp/suspend-root.test unexpected >/tmp/root-arg.out 2>&1; then
 fi
 grep -F 'unknown guarded action' /tmp/root-arg.out >/dev/null
 printf '%s\n' dead >/tmp/modem/idProduct
-if /tmp/suspend-root.test >/tmp/root-modem.out 2>&1; then
+root_action=
+[ "$queue_guard" -ne 1 ] || root_action=guarded-suspend
+if /tmp/suspend-root.test $root_action >/tmp/root-modem.out 2>&1; then
     printf '%s\n' 'root suspend helper accepted an unexpected modem' >&2
     exit 1
 fi
 grep -F 'expected EG25 modem is absent' /tmp/root-modem.out >/dev/null
+grep -F 'emacsos-openrc-suspend expected EG25 modem is absent' /tmp/root-error.log >/dev/null
 
 # Exercise admission with real kernel guard FDs, helper code and display locks.
 # Sway/wtype and doas transport are fixtures. The PM counter/state handshake is
 # modeled because ordinary files cannot reject writes on kernel wake events.
 printf '%s\n' 0125 >/tmp/modem/idProduct
 cat >/tmp/kernel-pm-model.py <<'MODEL'
-import os, re, sys, time
+import array, fcntl, os, re, sys, time
 from pathlib import Path
 
 def sources():
@@ -365,6 +495,25 @@ def sources():
         if (watch and int(watch[1], 16) & (1 << 29)
                 and re.search(r'eventfd-count:\s*1\s*$', event, re.M)):
             active.add(re.search(r'eventfd-id:\s*(\d+)', event)[1])
+    # Real EPOLLWAKEUP registrations on fixture input queues. FIONREAD
+    # observes queued packets without consuming the worker's private input.
+    for info in Path('/proc').glob('[0-9]*/fdinfo/4'):
+        try:
+            registration = info.read_text()
+            for target in (3, 5):
+                watch = re.search(r'tfd:\s*' + str(target) + r'\s+events:\s*([0-9a-f]+)', registration)
+                if not watch or not int(watch[1], 16) & (1 << 29):
+                    continue
+                fd = os.open(str(info.parent.parent / 'fd' / str(target)), os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    pending = array.array('i', [0])
+                    fcntl.ioctl(fd, 0x541b, pending, True)
+                    if pending[0]:
+                        active.add('input-' + str(os.fstat(fd).st_ino))
+                finally:
+                    os.close(fd)
+        except OSError:
+            continue
     return active
 
 operation = sys.argv[1]
@@ -404,7 +553,7 @@ s = s.replace('wakeup_count=$(', 'admission_barrier before-read\nwakeup_count=$(
 bounded = "wakeup_count=$(timeout -s TERM -k 1 2 sed" in s
 read = '/usr/bin/python3 /tmp/kernel-pm-model.py read /tmp/power/wakeup_count'
 if bounded:
-    read = 'timeout -s TERM -k 1 2 ' + read + ' 9>&-'
+    read = 'timeout -s TERM -k 1 2 ' + read + ' 3>&- 4>&- 5>&- 9>&-'
 s = re.sub(r'^wakeup_count=.*$', 'wakeup_count=$(' + read + ') || exit 75', s, flags=re.M)
 s = re.sub(r'^printf .* >"\$power/wakeup_count" \|\| exit 75$',
            'admission_barrier before-accept\n/usr/bin/python3 /tmp/kernel-pm-model.py accept "$wakeup_count" || exit 75',
@@ -464,6 +613,136 @@ for phase in before-read before-accept before-mem; do
         /tmp/admission-wake-at-lock /tmp/admission-continue
     printf 'Kernel-guarded admission %s: OK\n' "$phase"
 done
+
+# The IRQ has already advanced the PM count but userspace has not read its
+# packet. Freeze the actual worker before enqueue, rather than racing a wake
+# callback against admission. A private queue must reject admission by itself.
+as_lab wake
+as_lab press
+: >/tmp/power/state
+printf '%s\n' 42 >/tmp/power/wakeup_count
+printf '%s\n' before-read >/tmp/admission-phase
+mkfifo /tmp/admission-continue
+kill -STOP "$power_pid"
+python3 - <<'IRQ'
+import os, struct
+fd=os.open('/tmp/wake-input-5', os.O_RDWR | os.O_NONBLOCK)
+os.write(fd, struct.pack('@llHHi', 0, 0, 1, 143, 1)); os.close(fd)
+IRQ
+generation=$(cat /run/emacsos-ui/power-generation)
+as_lab suspend "$generation" &
+queued_suspend_pid=$!
+wait_file /tmp/admission-reached
+printf '%s\n' continue >/tmp/admission-continue
+wait "$queued_suspend_pid"
+if [ -s /tmp/power/state ]; then
+    printf '%s\n' 'queued hardware wake was lost before callback activation' >&2
+    exit 1
+fi
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+kill -CONT "$power_pid"
+attempt=0
+while [ "$(cat /run/emacsos-ui/power-state)" != active ]; do
+    [ "$attempt" -lt 100 ]; attempt=$((attempt + 1)); sleep 0.02
+done
+rm -f /tmp/admission-phase /tmp/admission-reached /tmp/admission-continue
+printf '%s\n' 'Queued hardware wake before callback activation: OK'
+
+# Native release/repeat packets do not wake, while overflow recovers safely.
+as_lab press
+python3 - <<'PACKETS'
+import os,struct
+fd=os.open('/tmp/wake-input-5',os.O_RDWR|os.O_NONBLOCK)
+os.write(fd,b''.join(struct.pack('@llHHi',0,0,1,143,value) for value in (0,2)))
+os.close(fd)
+PACKETS
+sleep 0.1
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+python3 - <<'PACKETS'
+import os,struct
+fd=os.open('/tmp/wake-input-3',os.O_RDWR|os.O_NONBLOCK)
+os.write(fd,b''.join(struct.pack('@llHHi',0,0,*event) for event in ((0,3,0),(1,116,1),(0,0,0))))
+os.close(fd)
+PACKETS
+attempt=0
+while [ "$(cat /run/emacsos-ui/power-state)" != active ]; do
+    [ "$attempt" -lt 100 ]; attempt=$((attempt + 1)); sleep 0.02
+done
+# Freeze before both inputs arrive so they form one batch; RI wins after press.
+kill -STOP "$power_pid"
+python3 - <<'PACKETS'
+import os,struct
+for fdno,key in ((3,116),(5,143)):
+    fd=os.open('/tmp/wake-input-'+str(fdno),os.O_RDWR|os.O_NONBLOCK)
+    os.write(fd,struct.pack('@llHHi',0,0,1,key,1));os.close(fd)
+PACKETS
+start_lines=$(wc -l </tmp/swaymsg.log)
+kill -CONT "$power_pid"
+attempt=0
+while [ "$(wc -l </tmp/swaymsg.log)" -lt "$((start_lines + 4))" ] ||
+      [ "$(cat /run/emacsos-ui/power-state)" != active ]; do
+    [ "$attempt" -lt 100 ]; attempt=$((attempt + 1)); sleep 0.02
+done
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+printf '%s\n' 'Typed input, overflow recovery and simultaneous power/RI order: OK'
+
+# A replacement open of the same fixture inode is a different client. The
+# root handoff must reject it through MOD, even though fdinfo inode matches.
+python3 - "$power_pid" <<'REPLACEMENT'
+import array, json, os, socket, subprocess, sys
+sock=socket.socket(socket.AF_UNIX);sock.connect('/tmp/monitor-fds.sock')
+sock.sendall(json.dumps([int(sys.argv[1]),'get']).encode())
+_,anc,_,_=sock.recvmsg(16,socket.CMSG_SPACE(12));sock.close()
+fds=array.array('i');fds.frombytes(anc[0][2])
+replacement=os.open('/tmp/wake-input-3',os.O_RDWR|os.O_NONBLOCK)
+result=subprocess.run(['/usr/bin/python3','-I','/usr/local/share/emacsos-openrc/power-monitor','handoff'],
+                      stdin=fds[1],stdout=replacement,stderr=fds[2])
+assert result.returncode != 0, 'different input client passed the handoff'
+for fd in [*fds,replacement]:os.close(fd)
+REPLACEMENT
+printf '%s\n' 'Same-inode replacement wake client rejected: OK'
+
+# Retain pending input in the actual root admission owner after every lab
+# owner and the fixture keeper have closed their references.
+as_lab wake
+as_lab press
+: >/tmp/power/state
+printf '%s\n' before-read >/tmp/admission-phase
+mkfifo /tmp/admission-continue
+kill -STOP "$power_pid"
+python3 - <<'IRQ'
+import os, struct
+fd=os.open('/tmp/wake-input-5', os.O_RDWR | os.O_NONBLOCK)
+os.write(fd, struct.pack('@llHHi', 0, 0, 1, 143, 1)); os.close(fd)
+IRQ
+generation=$(cat /run/emacsos-ui/power-generation)
+as_lab suspend "$generation" &
+queued_suspend_pid=$!
+wait_file /tmp/admission-reached
+python3 - "$power_pid" <<'RELEASE'
+import json,socket,sys
+s=socket.socket(socket.AF_UNIX);s.connect('/tmp/monitor-fds.sock')
+s.sendall(json.dumps([int(sys.argv[1]),'release']).encode());s.recv(1);s.close()
+RELEASE
+kill -KILL "$power_pid"
+wait "$power_pid" 2>/dev/null || true
+[ -n "$(python3 /tmp/kernel-pm-model.py sources)" ]
+printf '%s\n' continue >/tmp/admission-continue
+wait "$queued_suspend_pid"
+[ ! -s /tmp/power/state ]
+[ -z "$(python3 /tmp/kernel-pm-model.py sources)" ]
+rm -f /tmp/admission-phase /tmp/admission-reached /tmp/admission-continue
+# evdev discards an unread client queue when its last owner closes. Drain the
+# persistent FIFO endpoint so the next fixture client starts equally empty.
+python3 - <<'DRAIN'
+import os
+fd=os.open('/tmp/wake-input-5', os.O_RDWR | os.O_NONBLOCK)
+os.read(fd,4096);os.close(fd)
+DRAIN
+python3 /usr/local/share/emacsos-openrc/power-monitor monitor &
+power_pid=$!
+as_lab wake
+printf '%s\n' 'Root admission retains queued input after worker KILL: OK'
 
 # Two requests own independent objects. KILL of the first display owner must
 # not drop its descendant's guard or the second request's guard. Their final

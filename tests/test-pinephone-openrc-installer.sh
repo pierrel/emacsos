@@ -25,7 +25,7 @@ adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-process-group emacsos-wvkbd-launch \
+    openrc-session openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \

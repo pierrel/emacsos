@@ -114,6 +114,7 @@ ui_enabled() {
 
 check_service() {
     check_root_file /etc/init.d/emacsos-ui 755
+    check_root_file /usr/local/share/emacsos-openrc/power-monitor 755
     check_root_file /usr/local/sbin/emacsos-openrc-suspend 755
     check_root_file /usr/local/sbin/emacsos-openrc-wifi-connect 755
     check_root_file /usr/local/sbin/emacsos-openrc-device 755
@@ -128,6 +129,7 @@ check_service() {
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args wake' \
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args press' \
+            'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args monitor' \
             'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-call' \
             'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
             'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \

@@ -13,6 +13,7 @@ modem=/sys/devices/platform/soc/1c1b000.usb/usb2/2-1
 lock=/run/emacsos-openrc-suspend.lock
 
 fail() {
+    /usr/bin/logger -t emacsos-openrc-suspend "$1" || true
     printf 'emacsos-openrc-suspend: %s\n' "$1" >&2
     exit 1
 }
@@ -30,9 +31,19 @@ trap 'exit 1' HUP INT TERM
 
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
 case $# in
-    0) ;;
+    0)
+        exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor handoff
+        ;;
     1)
-        case $1 in wake|press) ;; *) fail 'unknown guarded action' ;; esac
+        case $1 in
+            monitor)
+                exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor monitor
+                ;;
+            guarded-suspend) ;;
+            wake|press) ;;
+            *) fail 'unknown guarded action' ;;
+        esac
+        if [ "$1" != guarded-suspend ]; then
         # A ready eventfd registered with EPOLLWAKEUP holds a private kernel
         # source. Both descriptors follow the fixed action and its descendants;
         # their last close releases protection, including after TERM or KILL.
@@ -57,6 +68,7 @@ guard.close()
 os.execv('/bin/su', ['su', '-s', '/bin/sh', 'emacsos-lab', '-c',
                     'exec /usr/local/share/emacsos-openrc/session-power guarded-' + sys.argv[1]])
 GUARD
+        fi
         ;;
     *) fail 'arguments are not accepted' ;;
 esac
@@ -84,17 +96,17 @@ chmod 0600 "$lock"
 exec 9>"$lock"
 flock -n -x 9 || fail 'suspend is already in progress'
 
-wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 9>&-) || exit 75
+wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
 case $wakeup_count in
     ''|*[!0-9]*) fail 'invalid wakeup counter' ;;
 esac
 
-# A guarded request blocks the bounded counter read while it waits for the
+# Queued hardware input or a guarded request blocks the bounded counter read while it waits for the
 # display lock. Timeout releases that lock; a later kernel wake event rejects the
 # transition. Exit 75 so the display owner treats it as a normal wake race.
 printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
 if ! printf '%s\n' mem >"$power/state"; then
-    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 9>&-) || exit 75
+    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
     [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75
     exit 1
 fi

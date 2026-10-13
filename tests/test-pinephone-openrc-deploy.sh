@@ -38,7 +38,7 @@ for script in openrc-session openrc-session-power openrc-suspend-root \
     emacsos-ui.initd waydroid-container-wrapper; do
     sh -n "$deploy_dir/$script"
 done
-for script in openrc-sms-root openrc-wifi-connect-root; do
+for script in openrc-sms-root openrc-wifi-connect-root openrc-power-monitor; do
     python3 -I -c 'compile(open(__import__("sys").argv[1], encoding="utf-8").read(), __import__("sys").argv[1], "exec")' \
         "$deploy_dir/$script"
 done
@@ -50,7 +50,7 @@ done
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
-    openrc-session-power openrc-process-group emacsos-wvkbd-launch \
+    openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root \
     openrc-device-root openrc-doas.conf openrc-chat-url openrc-assist-web-url \
@@ -89,7 +89,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 48 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 49 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -168,6 +168,7 @@ openrc-doas.conf
 openrc-emacs-server.nft
 openrc-init.el
 openrc-network-root
+openrc-power-monitor
 openrc-process-group
 openrc-session
 openrc-session-power
@@ -302,7 +303,7 @@ grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
 grep -F '"$root/process-group" "$root/session-power" monitor' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'read -r -t 120 event' "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'DELAY = 120' "$deploy_dir/openrc-power-monitor" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'suspend) flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
@@ -336,7 +337,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 48 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 49 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
@@ -530,7 +531,7 @@ grep -F "expected=\$(printf '%s\\n' python3 /usr/bin/waydroid show-full-ui)" \
 grep -F 'output DSI-1 mode 720x1440@60Hz scale 2' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'input type:touch map_to_output DSI-1' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym Mod1+Tab focus next' "$deploy_dir/openrc-sway.config" >/dev/null
-grep -F 'bindsym XF86PowerOff exec $power press' "$deploy_dir/openrc-sway.config" >/dev/null
+grep -F 'bindsym XF86PowerOff nop' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym XF86AudioRaiseVolume nop' \
     "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym XF86AudioLowerVolume nop' \
