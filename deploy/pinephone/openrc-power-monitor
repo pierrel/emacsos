@@ -1,0 +1,205 @@
+#!/usr/bin/python3
+"""Keep trusted wake input protected through the screen-off timer and actions."""
+
+import fcntl
+import math
+import os
+from pathlib import Path
+import pwd
+import re
+import select
+import stat
+import struct
+import subprocess
+import sys
+import syslog
+import time
+
+POWER = '/usr/local/share/emacsos-openrc/session-power'
+SUSPEND = '/usr/local/sbin/emacsos-openrc-suspend'
+RUNTIME = Path('/run/emacsos-ui')
+INPUTS = {3: ('axp20x-pek', 116), 5: ('gpio-keys', 143)}
+WAKEUP = 1 << 29
+DELAY = 120
+EVENT = struct.Struct('@llHHi')
+
+
+def fail(message):
+    syslog.syslog(syslog.LOG_ERR, 'emacsos-power-monitor: ' + message)
+    raise SystemExit(1)
+
+
+def verify_input(fd, name, key):
+    source = os.fstat(fd)
+    if not stat.S_ISCHR(source.st_mode) or os.major(source.st_rdev) != 13:
+        fail('wake input is not an input device')
+    actual = fcntl.ioctl(fd, 0x81004506, bytes(256)).split(b'\0', 1)[0].decode()
+    keys = int.from_bytes(fcntl.ioctl(fd, 0x80604521, bytes(96)), 'little')
+    if actual != name or keys != 1 << key:
+        fail('wake input identity does not match')
+    parent = (Path('/sys/dev/char') / f'13:{os.minor(source.st_rdev)}' / 'device/device').resolve()
+    expected = (Path('/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek')
+                if fd == 3 else Path('/sys/devices/platform/gpio-keys'))
+    if parent != expected or (parent / 'driver').resolve().name != name:
+        fail('wake input driver binding does not match')
+    if fd == 5:
+        node = parent / 'of_node/ring-indicator'
+        if (node.joinpath('label').read_bytes() != b'Ring Indicator\0'
+                or node.joinpath('linux,code').read_bytes() != bytes.fromhex('0000008f')
+                or not node.joinpath('wakeup-source').is_file()):
+            fail('ring indicator hardware binding does not match')
+
+
+def verify_guard():
+    registration = Path('/proc/self/fdinfo/4').read_text()
+    for fd in INPUTS:
+        match = re.search(r'tfd:\s*' + str(fd) + r'\s+events:\s*([0-9a-f]+).*?ino:([0-9a-f]+)', registration)
+        if (not match or not int(match[1], 16) & WAKEUP
+                or int(match[2], 16) != os.fstat(fd).st_ino):
+            fail('wake queue guard is absent')
+
+
+def require_capability():
+    capabilities = next(line.split()[1] for line in Path('/proc/self/status').read_text().splitlines()
+                        if line.startswith('CapEff:'))
+    if not int(capabilities, 16) & (1 << 36):
+        fail('CAP_BLOCK_SUSPEND is absent')
+
+
+def now():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+def main():
+    if os.geteuid() != 0 or len(sys.argv) != 2:
+        fail('fixed root entry is required')
+    if sys.argv[1] == 'handoff':
+        # doas closes descriptors above stderr. These three standard slots
+        # carry the same epoll and input objects into the admission owner.
+        os.dup2(0, 4, inheritable=True)
+        os.dup2(1, 3, inheritable=True)
+        os.dup2(2, 5, inheritable=True)
+        null = os.open('/dev/null', os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        os.close(null)
+        for fd, (name, key) in INPUTS.items():
+            verify_input(fd, name, key)
+        verify_guard()
+        require_capability()
+        # MOD requires the same open file description, not just its inode.
+        # Retain the wrapper through exec: fromfd owns descriptor 4.
+        guard = select.epoll.fromfd(4)
+        for fd in INPUTS:
+            guard.modify(fd, select.EPOLLIN | WAKEUP)
+        os.execv(SUSPEND, [SUSPEND, 'guarded-suspend'])
+    if sys.argv[1] != 'monitor':
+        fail('unknown action')
+    require_capability()
+    for fd in (3, 4, 5):
+        os.dup2(0, fd, inheritable=False)
+    guard = select.epoll()
+    found = set()
+    for name_file in Path('/sys/class/input').glob('event*/device/name'):
+        name = name_file.read_text().strip()
+        for fd, (expected, key) in INPUTS.items():
+            if name != expected:
+                continue
+            if fd in found:
+                fail('ambiguous wake input')
+            source = os.open('/dev/input/' + name_file.parents[1].name,
+                             os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            os.dup2(source, fd, inheritable=True)
+            os.close(source)
+            verify_input(fd, expected, key)
+            guard.register(fd, select.EPOLLIN | WAKEUP)
+            found.add(fd)
+    if found != set(INPUTS):
+        fail('required wake input is absent')
+    os.dup2(guard.fileno(), 4, inheritable=True)
+    verify_guard()
+    user = pwd.getpwnam('emacsos-lab')
+    os.initgroups(user.pw_name, user.pw_gid)
+    os.setresgid(user.pw_gid, user.pw_gid, user.pw_gid)
+    os.setresuid(user.pw_uid, user.pw_uid, user.pw_uid)
+    os.environ.update(HOME=user.pw_dir, XDG_RUNTIME_DIR=str(RUNTIME))
+    # Opening after setup/drop releases the session's bounded writer-open
+    # readiness barrier before the supervisor's initial wake.
+    fifo = os.open(RUNTIME / 'power-events', os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW)
+    if not stat.S_ISFIFO(os.fstat(fifo).st_mode):
+        fail('power event pipe is absent')
+    guard.register(fifo, select.EPOLLIN)
+    generation = 0
+    deadline = None
+    buffer = b''
+    resync = set()
+    ready = []
+    while True:
+        if not ready:
+            wait = -1 if deadline is None else max(0, deadline - now())
+            ready = guard.poll(wait, 8)
+        presses = 0
+        wake = False
+        for fd, flags in ready:
+            if flags & (select.EPOLLHUP | select.EPOLLERR):
+                fail('power source disappeared')
+            if fd not in INPUTS:
+                continue
+            data = os.read(fd, EVENT.size * 64)
+            if not data or len(data) % EVENT.size:
+                fail('invalid input packet')
+            for _, _, kind, code, value in EVENT.iter_unpack(data):
+                if kind == 0 and code == 3:  # SYN_DROPPED: history is not recoverable.
+                    resync.add(fd)
+                    wake = True
+                elif fd in resync:
+                    if kind == 0 and code == 0:
+                        resync.remove(fd)
+                elif kind == 1 and code == INPUTS[fd][1] and value == 1:
+                    if fd == 3:
+                        presses += 1
+                    else:
+                        wake = True
+        # Ring-indicator or overflow wake wins after a simultaneous blank toggle.
+        for _ in range(presses):
+            subprocess.run([POWER, 'press'], check=True)
+        if wake:
+            subprocess.run([POWER, 'wake'], check=True)
+        try:
+            data = os.read(fifo, 4096)
+        except BlockingIOError:
+            data = b''
+        buffer += data
+        frames = buffer.split(b'\n')
+        buffer = frames.pop()
+        if len(buffer) > 128:
+            fail('invalid power event frame')
+        for frame in frames:
+            if frame == b'active':
+                deadline = None
+            else:
+                action, number, started = frame.decode('ascii').split(':')
+                if action != 'blank':
+                    fail('invalid power event')
+                number = int(number)
+                if number > generation:
+                    generation = number
+                    started = float(started)
+                    if not math.isfinite(started) or started < 0:
+                        fail('invalid screen-off timestamp')
+                    deadline = started + DELAY
+        # A new poll releases the completed processing guard. Ready input/FIFO
+        # is reconciled before admission; queued input still guards in-kernel.
+        ready = guard.poll(0, 8)
+        if not ready and deadline is not None and now() >= deadline:
+            result = subprocess.run([POWER, 'suspend', str(generation)], pass_fds=(3, 4, 5))
+            if result.returncode not in (0, 75):
+                fail('suspend admission failed')
+            deadline = now() + DELAY
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        fail(str(error))

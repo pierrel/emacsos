@@ -50,6 +50,7 @@ test-pinephone-scripts:
 	tests/test-pinephone-openrc-wifi-connect.sh
 	tests/test-pinephone-openrc-device.sh
 	tests/test-pinephone-openrc-power.sh
+	python3 tests/test-pinephone-openrc-power-startup.py
 	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
 
 pinephone-openrc-install: test-pinephone-scripts

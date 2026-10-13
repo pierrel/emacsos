@@ -1,0 +1,108 @@
+#+TITLE: Keep the phone awake on external USB power
+#+DATE: 2026-10-13
+
+* Corrected policy
+
+Pierre corrected the sleep policy: external power must exempt automatic deep
+suspend. Normal display blanking remains allowed. On battery, the existing
+worker requests deep suspend 120 seconds after confirmed screen-off. This
+successor retains the private wake-input queues, fixed root descriptor handoff,
+independent explicit callback guards and pre-initial-wake readiness barrier.
+
+The root admission helper checks only the observed =axp20x-usb= supply. Either
+=online=1 or =present=1 skips deep suspend with status 77; both validated values
+must be zero before admission. Battery =online= and battery charging status are
+not the external-power signal. Root's actual read-only evidence showed USB
+=online=1 while the battery also reported =online=1 and =Discharging=. A full
+battery and a plugged battery that is discharging must both remain exempt:
+=/tmp/root-phone-external-power-evidence-20261013.json=.
+
+The service-user action treats 77 as a normal skip, leaving the panel dark.
+The timer keeps its existing blank generation and deadline. A plug before the
+deadline vetoes its attempt. Unplug before that deadline uses the remaining
+original time. Once a powered attempt has been skipped, the already armed
+120-second retry remains: unplug while dark can wait up to 120 seconds for that
+retry, without another blank event or a deadline reset. Calls/SMS and deliberate
+power-button wake retain their existing guarded actions while plugged.
+
+* Admission construction
+
+The helper checks USB presence before preflight and again after counter
+acceptance, before =mem=. It enables and verifies the existing USB supply wake
+source before an offline admission. The exact matching kernel's USB plug IRQ
+calls =power_supply_changed=, whose kernel source stays active through its work
+and advances the wake counter. A plug after the final userspace presence read
+therefore belongs to the standard counter/IRQ admission fence.
+
+The additional =present= check is necessary. The driver reads =online= from
+VBUS_USED and polls for changes; a plug IRQ may already have completed while
+VBUS_PRESENT is one and VBUS_USED is still zero. ONLINE-only checks would leave
+a later USED transition unfenced. Requiring absent USB presence ties eligibility
+to the physical plug/removal event instead. Exact published source:
+[[https://codeberg.org/megi/linux/src/tag/orange-pi-6.13-20250323-0155/drivers/power/supply/axp20x_usb_power.c][AXP USB supply]],
+[[https://codeberg.org/megi/linux/src/tag/orange-pi-6.13-20250323-0155/drivers/power/supply/power_supply_core.c][power supply wake source]].
+
+Root's later wake-flag probe timed out and produced no result. This record does
+not claim a fresh observed enabled flag from that attempt. Actual deployment
+must verify the fixed presence properties and wake source; the helper also
+validates the flag after enabling it. Missing or malformed presence state fails
+closed. No battery-status heuristic, generic supply scan, new worker, timer or
+privilege grant was added.
+
+* Regression coverage
+
+The change adds a fixed USB supply fixture to the existing isolated power
+harness.
+Its fake battery remains ONLINE=1. Power-policy timer cases invoke the actual
+root helper and same-object descriptor handoff; the ordinary status stub is
+disabled for those cases. USB-connected Full and Discharging cases require
+status 77, no accepted =mem= and an unchanged dark generation. PRESENT=1 with
+ONLINE=0 must also skip. Plug during a pending deadline must veto sleep. After
+unplug while already dark, the existing retry must eventually admit without
+changing the generation; unplug before expiry must retain the original deadline.
+
+A deterministic plug after counter sampling must be rejected by the second
+presence check. A plug after that check changes the modeled kernel counter and
+must reject the accepted count even after its IRQ source has finished. The model
+covers software ordering and the standard counter contract; it does not replace
+physical charger/suspend validation. Existing callback/input-queue, lifetime,
+startup readiness and error cases continue to run.
+
+* Checks and review
+
+The full =make test-pinephone-scripts= run passed: payload/installer rollback,
+boot policy, helpers, the corrected power cases, startup readiness cases and
+78/78 bootstrap ERT. Shell/Python syntax and diff checks passed. The same power
+fixture on unchanged =c8a81fd= failed with =Powered Full battery expected skip77;
+got0, state=mem=. The corrected helper passes that case and the remaining power
+policy and prior guard regressions.
+
+Two affected local review rounds fixed one IMPORTANT defect: ONLINE-only checks
+could miss the later USED transition. The PRESENT gate closes it by construction.
+NIT findings corrected the late-plug test comment and fixture description. Both
+independent reviewers converged; the separate documentation pass aligned the
+policy, evidence limits and historical supersessions. No finding was rejected.
+These checks establish software readiness, not physical completion.
+
+* Delivery and remaining acceptance
+
+The old prepared startup-only composition was withdrawn by Root without being
+deployed. The earlier =82a03cc= composition is still the recorded partial live
+result. This charging-plus-startup successor needs Root composition and guarded
+redeployment, preserving the current keyboard, rendering, Nutrition and rename
+behavior. This Implementer ran no phone command, deployment or merge flow.
+
+Physical call/SMS boundary delivery, effective RI categories, unsolicited wake
+sources and measured battery behavior remain open. Charging acceptance now
+requires no automatic deep suspend while connected, including a full battery,
+with ordinary screen blanking preserved. No whole-goal completion is claimed.
+
+* Historical supersessions
+
+The =Result and remaining acceptance= section of
+[[file:2026-10-12-phone-wake-input-queues.org][the private input queue record]] described automatic deep suspend while charging.
+Pierre's correction replaces that policy with the fixed external-power exemption.
+The =Delivery and physical limits= section of
+[[file:2026-10-12-phone-power-monitor-readiness.org][the startup readiness record]] treated charging deadlines as remaining acceptance;
+the charging criterion now requires staying awake on external power. Its startup
+fix, predecessor cutover facts and other physical limits remain historical facts.

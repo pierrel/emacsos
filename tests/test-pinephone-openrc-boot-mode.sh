@@ -52,6 +52,7 @@ install -d -o root -g root -m 0750 /etc/doas.d
 install -o root -g root -m 0755 /dev/null /usr/local/share/emacsos-openrc/session
 install -o root -g root -m 0755 /dev/null \
     /usr/local/share/emacsos-openrc/process-group
+install -o root -g root -m 0755 /dev/null /usr/local/share/emacsos-openrc/power-monitor
 install -o root -g root -m 0755 /dev/null /etc/init.d/emacsos-ui
 install -o root -g root -m 0600 /source/openrc-doas.conf \
     /etc/doas.d/95-emacsos-ui.conf

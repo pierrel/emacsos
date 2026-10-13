@@ -1,0 +1,141 @@
+#+TITLE: Private hardware input queues guard phone sleep admission
+#+DATE: 2026-10-12
+
+* Result and remaining acceptance
+
+This successor closes the software gap before explicit wake callbacks activate
+in =1098645=. The existing supervised power worker now opens private evdev
+clients for the observed axp221-pek power-key input and GPIO ring indicator, registers
+both with kernel-accepted =EPOLLWAKEUP= before the first display transition,
+and permanently drops root before handling input, session events and the timer.
+Sway's power binding is =nop=; the worker handles deliberate power presses once.
+No additional production daemon, named wake registry or PID ownership record
+is introduced. The fixed root helper adds the exact =monitor= grant;
+its internal =guarded-suspend= entry is not granted to the service account.
+
+The screen-off transition publishes its generation and boot-time timestamp.
+The worker requests deep suspend 120 seconds after that timestamp, including
+manual blanking and charging. Delayed FIFO consumption cannot restart the
+120 seconds. Normal seat resume cannot light the display. A successful return or a
+normal admission race retries after 120 seconds if still dark; unexpected
+handoff/preflight failure exits the supervised worker and retains its exact
+cause in local syslog. Whole-session failure recovery remains exceptional.
+
+Software acceptance passes, including a failing unchanged predecessor. This
+is not a deployment or hardware acceptance result. Root must preserve the
+current live keyboard/rendering/Nutrition/rename composition. Effective modem
+RI categories remain unverified: desired packaged settings select call/SMS RI
+and disable other URCs, but the existing ModemManager owner's read-only query
+returned =Core.Unauthorized= because debug mode is required. No UART bypass,
+service restart or modem-setting change was attempted. Exclusive automatic CPU
+wake sources, real call/SMS boundary delivery, charging deadlines and battery
+duration remain live gates. Keep the original HIGH unresolved until its full
+acceptance is supported; no merge or goal completion is claimed.
+
+* Kernel and ownership construction
+
+Root observed =linux-postmarketos-allwinner-6.13.8_git20250323-r0=. The matching
+published v25.06 package builds megi tag =orange-pi-6.13-20250323-0155=; its listed
+patches do not alter the inspected input, IRQ, evdev or eventpoll mechanisms:
+[[https://gitlab.postmarketos.org/postmarketOS/pmaports/-/blob/v25.06/device/community/linux-postmarketos-allwinner/APKBUILD][published kernel package]].
+
+The GPIO driver calls =pm_stay_awake= before debounce, delivers =input_sync=
+synchronously through evdev/epoll, then relaxes its driver source. The private
+level-triggered watch holds queued input and keeps processing protection until
+the next poll. The =axp221-pek= child handler also delivers =input_sync= synchronously.
+The physical PMIC is AXP803 in the matching device tree, with an IRQ_TYPE_LEVEL_LOW
+parent interrupt. Its ordinary IRQ request uses ONESHOT/SHARED without NO_SUSPEND;
+the explicit IRQF_TRIGGER_LOW assignment in the C driver is AXP288-only.
+Suspend arms and synchronizes that wake IRQ before its final pending-source
+check; a later armed IRQ aborts admission. The AXP288-only resume discard path
+does not apply to this AXP803 phone. Exact primary source:
+[[https://codeberg.org/megi/linux/src/tag/orange-pi-6.13-20250323-0155/drivers/input/keyboard/gpio_keys.c][GPIO input]],
+[[https://codeberg.org/megi/linux/src/tag/orange-pi-6.13-20250323-0155/drivers/input/misc/axp20x-pek.c][AXP input]],
+[[https://codeberg.org/megi/linux/src/tag/orange-pi-6.13-20250323-0155/kernel/irq/pm.c][IRQ PM]],
+[[https://codeberg.org/megi/linux/src/tag/orange-pi-6.13-20250323-0155/fs/eventpoll.c][eventpoll]].
+
+The worker validates input character-device identity, the full key bitmap,
+fixed driver parent and the observed RI device-tree label/key/wakeup property.
+It reads only those two trusted wake queues, never the other keyboard/touch
+inputs and never grabs either device. Native press events authorize fixed
+=press= or =wake= actions; release/repeat do not. Overflow forces safe display
+wake and resynchronization. Ring/overflow wake follows a simultaneous power
+press. Each checked action and subsequent FIFO reconciliation complete before
+the next poll releases processing protection.
+
+The timer's synchronous child inherits the same power-key, epoll and RI objects
+in descriptors 3/4/5. OpenDoas closes nonstandard descriptors, so only the fixed
+no-argument admission call carries these objects in standard descriptors.
+The fixed root Python handoff restores 3/4/5 before replacing stdio, verifies
+accepted wake flags/capability, and uses =EPOLL_CTL_MOD= to prove the actual
+watched open file descriptions. Inode equality alone is insufficient for evdev
+clients. MOD rejects a different client and preserves the existing accepted
+wake source. Its owning Python wrapper remains alive through the fixed exec.
+
+The root admission body owns those objects through count acceptance and =mem=,
+even if all service-user owners die. Both bounded counter readers close their
+copies of descriptors 3/4/5/9 so the BusyBox watchdog cannot retain input guards
+or the root lock after a fast return. Final kernel-object closure releases the
+private sources, without a cleanup daemon. Preflight errors go to fixed local
+syslog because standard descriptors no longer provide an error channel.
+
+Root's bounded read-only probe on the actual phone passed the production
+96-byte ioctl, fixed parent/driver and RI DT validation for both inputs:
+=/tmp/root-phone-wake-input-identity-result-20261013.log=. It consumed no input
+events and changed no settings, display or PM state.
+
+* Regression evidence and limits
+
+The isolated Alpine fixture uses real kernel EPOLLWAKEUP, native input packets,
+actual privilege drop, descriptor transfer, helper code, display locks and
+action acknowledgment. Hardware devices become fixed FIFO endpoints; the
+counter/state interface is modeled rather than suspending the host. Fixture
+SCM transfer preserves the same objects across its privilege broker. Its keeper
+is explicitly released before the worker-death assertion.
+
+The unchanged =1098645= worker fails the same fixture with =queued hardware wake
+was lost before callback activation=. The IRQ count is already 42, the actual
+worker is stopped before receiving its packet, and no explicit callback guard
+exists yet. The candidate rejects admission while that packet remains queued,
+then restores the display after the worker resumes. A different open of the
+same input inode must fail handoff. Pending input must still reject admission
+after worker KILL and all fixture keeper references close; final root return
+must release it. Existing before-read/before-accept/before-mem callback cases,
+overlap, parent death, failed-action cleanup, manual/idle deadlines, stale
+generations and seat-resume rejection also pass.
+
+The PM model observes queued FIFO bytes, not the processing guard after the
+worker has read them. Continuous read-to-ack protection is established by the
+exact kernel source and action-before-next-poll ordering, not by that model.
+Actual call/SMS category and physical suspend claims cannot be inferred from
+these software tests. Logs are in =/tmp/phone-hardware-guard-*=.
+
+* Checks and review
+
+The final =make test-pinephone-scripts= run passed on the target-aligned tree:
+installer/update rollback, payload hashes, boot policy, all helper/power tests
+and 78/78 bootstrap ERT tests. Shell/Python syntax and diff checks passed.
+The merge base is Root's current target =73c4dd4=. Its unrelated Assist UI and
+harness changes came from that target; this effort's reviewed power bytes did
+not change during alignment. Public payload hashes and both manifest pins were
+regenerated for the imported target content. Previously offered commits remain
+unchanged in history.
+
+Three local rounds covered prototype, integrated changes and narrow final
+verification. IMPORTANT findings fixed status propagation, physical device and
+open-client identity, hidden root error causes and exact privilege-policy order.
+NIT findings fixed comment/source wording, packet-test synchronization and fixture
+descriptor/lifecycle/logger setup. No finding was rejected and no known software
+blocker remains. The original external HIGH remains open for successor review
+and complete acceptance. Prior full Elisp failures were reproduced on the
+untouched base; no Elisp, server/model or GPU work was added here.
+
+* Historical supersessions
+
+The =Result and limits=, =Regression coverage= and =Root live acceptance=
+sections of [[file:2026-10-12-phone-wake-admission-guard.org][the explicit callback guard record]] stopped at successful
+callback guard activation. Private hardware queues now cover the earlier
+kernel-to-userspace interval and root ownership retains them through admission.
+Its historical callback tests and hardware limits remain intact. This successor
+adds the source construction and precursor regression; it does not supersede
+physical acceptance with software evidence.
