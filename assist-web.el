@@ -4192,12 +4192,13 @@ a settled thread still shows its state.  The tokens are fixed literals never
 interpolated from untrusted thread text, so they stay font-safe and pass the
 list's display-isolation checks.
 
-Unmerged is a TRI-STATE on the wire: \"yes\" (a git check ran, dirty),
-\"no\" (checked, confirmed clean), or \"unknown\" (not checked — a stronger
-pill is already present).  Only \"yes\" is unmerged; \"no\" and \"unknown\"
-fall through to the raw stage.  Legacy servers (before the assist PR lands)
-send a JSON bool, which parses to t/nil, so t is accepted too across the
-two-PR transition window."
+Unmerged is a BOOL or NIL on the wire: the server runs the git check only when
+no stronger pill (a live busy stage, error, urgent, or an unread reply) is
+already present. true means checked and dirty, false means checked and clean,
+and nil means not checked (masked by a stronger pill, or the check could not
+run). Only true draws the unmerged pill; false and nil fall through to the raw
+stage. A legacy server (before the assist PR lands) may send the tri-state
+string yes, which is accepted too across the two-PR transition window."
   (let ((status (alist-get 'status thread))
         (unmerged (alist-get 'unmerged thread)))
     (cond

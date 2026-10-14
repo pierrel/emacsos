@@ -3629,16 +3629,17 @@ server clears only flags for a view that is still current."
          (plain '((id . "plain") (description . "Plain")
                   (search_description . "plain")
                   (repo_label . "R") (status . "ready")))
-         ;; The unmerged wire field is a tri-state STRING ("yes"/"no"/"unknown"),
-         ;; not a bool; the projection must carry it verbatim.
+         ;; The unmerged wire field is a BOOL or NIL on the new wire
+         ;; (true = checked dirty, false/nil = checked clean or not checked);
+         ;; the projection must carry it verbatim.
          (dirty `((id . "dirty") (description . "Dirty")
                   (search_description . "dirty")
-                  (repo_label . "R") (status . "ready") (unmerged . "yes")))
+                  (repo_label . "R") (status . "ready") (unmerged . t)))
          (catalog (emacsos-assist-web--require-catalog
                    (test-assist-web--wire-catalog (list busy new plain dirty) nil nil))))
     ;; The projection keeps the three state fields as nil when the wire object
     ;; omits them, so absent fields degrade to false rather than erroring — and
-    ;; carries a present tri-state unmerged string unchanged.
+    ;; carries a present unmerged bool unchanged.
     (should
      (equal (alist-get 'threads catalog)
             '(((id . "busy") (description . "Busy") (search_description . "busy")
@@ -3654,7 +3655,7 @@ server clears only flags for a view that is still current."
               ((id . "dirty") (description . "Dirty")
                (search_description . "dirty")
                (repo_label . "R") (status . "ready")
-               (unread . nil) (urgent . nil) (unmerged . "yes")))))))
+               (unread . nil) (urgent . nil) (unmerged . t)))))))
 
 (ert-deftest test-assist-web-state-pill-matches-web-precedence ()
   (let ((busy "🔄")
@@ -3681,7 +3682,9 @@ server clears only flags for a view that is still current."
     (should (equal (emacsos-assist-web--state-pill
                     `((status . "ready") (unmerged . t)))
                    unmerged))
-    ;; Unmerged is a tri-state string on the new wire: only "yes" is unmerged.
+    ;; Unmerged is a bool on the new wire (t/true = dirty). A legacy server may
+    ;; still send the tri-state string "yes", which is accepted across the
+    ;; two-PR transition window.
     (should (equal (emacsos-assist-web--state-pill
                     `((status . "ready") (unmerged . "yes")))
                    unmerged))
