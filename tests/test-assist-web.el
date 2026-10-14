@@ -2814,7 +2814,8 @@
 
 (ert-deftest test-assist-web-settled-refresh-reacks-the-thread-read ()
   "A settled refresh re-sends the read receipt to the dedicated open endpoint."
-  (let (requests callback)
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        requests callback)
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id "thread-1")
@@ -2835,7 +2836,8 @@
 
 (ert-deftest test-assist-web-busy-refresh-does-not-reack-the-thread-read ()
   "A busy refresh renders no settled view and must not re-send the receipt."
-  (let (requests callback)
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        requests callback)
     (let ((busy-snapshot
            '((thread . ((id . "thread-1") (status . "processing")))
              (messages . nil))))
@@ -2860,7 +2862,8 @@
 (ert-deftest test-assist-web-settled-refresh-ack-carries-the-rendered-revision ()
   "The read receipt echoes the revision of the snapshot we rendered, so the
 server clears only flags for a view that is still current."
-  (let (requests callback)
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        requests callback)
     (let ((snapshot (copy-tree test-assist-web--snapshot)))
       (setf (alist-get 'revision (alist-get 'thread snapshot)) "rev-abc")
       (with-temp-buffer
