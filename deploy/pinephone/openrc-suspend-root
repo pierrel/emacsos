@@ -1,5 +1,5 @@
 #!/bin/sh
-# Enter deep suspend only after arming the PinePhone's required wake sources.
+# Guard explicit display transitions and admit PinePhone deep suspend.
 
 set -eu
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
@@ -9,11 +9,12 @@ umask 077
 power=/sys/power
 power_key=/sys/devices/platform/gpio-keys/power/wakeup
 axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
-modem=/sys/devices/platform/soc/1c1b000.usb/usb1/1-1
-external_power=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp20x-usb-power-supply/power_supply/axp20x-usb/online
+modem=/sys/devices/platform/soc/1c1b000.usb/usb2/2-1
+external_power=/sys/class/power_supply/axp20x-usb/online
 lock=/run/emacsos-openrc-suspend.lock
 
 fail() {
+    /usr/bin/logger -t emacsos-openrc-suspend "$1" || true
     printf 'emacsos-openrc-suspend: %s\n' "$1" >&2
     exit 1
 }
@@ -27,20 +28,65 @@ enable_wakeup() {
         fail "wakeup source is disabled: $wakeup"
 }
 
-external_power_online() {
-    [ -f "$external_power" ] && [ ! -L "$external_power" ] ||
-        fail "external power state is absent: $external_power"
-    case $(sed -n '1p' "$external_power") in
-        0) return 1 ;;
-        1) return 0 ;;
-        *) fail "invalid external power state: $external_power" ;;
-    esac
+external_power_present() {
+    for presence in "$external_power" "${external_power%/online}/present"; do
+        [ -f "$presence" ] && [ ! -L "$presence" ] ||
+            fail "external power state is absent: $presence"
+        case $(sed -n '1p' "$presence") in
+            0) ;;
+            1) return 0 ;;
+            *) fail "invalid external power state: $presence" ;;
+        esac
+    done
+    return 1
 }
 
 trap 'exit 1' HUP INT TERM
 
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
-[ "$#" -eq 0 ] || fail 'arguments are not accepted'
+case $# in
+    0)
+        exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor handoff
+        ;;
+    1)
+        case $1 in
+            monitor)
+                exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor monitor
+                ;;
+            guarded-suspend) ;;
+            wake|press) ;;
+            *) fail 'unknown guarded action' ;;
+        esac
+        if [ "$1" != guarded-suspend ]; then
+        # A ready eventfd registered with EPOLLWAKEUP holds a private kernel
+        # source. Both descriptors follow the fixed action and its descendants;
+        # their last close releases protection, including after TERM or KILL.
+        exec /usr/bin/python3 -I - "$1" <<'GUARD'
+import os
+import select
+import sys
+
+with open('/proc/self/status', encoding='ascii') as status:
+    capabilities = next(line.split()[1] for line in status if line.startswith('CapEff:'))
+if not int(capabilities, 16) & (1 << 36):
+    sys.exit('emacsos-openrc-suspend: CAP_BLOCK_SUSPEND is absent')
+os.dup2(0, 10, inheritable=False)
+os.dup2(0, 11, inheritable=False)
+event = os.eventfd(1, os.EFD_CLOEXEC)
+os.dup2(event, 10, inheritable=True)
+os.close(event)
+guard = select.epoll()
+guard.register(10, select.EPOLLIN | (1 << 29))
+os.dup2(guard.fileno(), 11, inheritable=True)
+guard.close()
+os.execv('/bin/su', ['su', '-s', '/bin/sh', 'emacsos-lab', '-c',
+                    'exec /usr/local/share/emacsos-openrc/session-power guarded-' + sys.argv[1]])
+GUARD
+        fi
+        ;;
+    *) fail 'arguments are not accepted' ;;
+esac
+external_power_present && exit 77
 [ -d "$power" ] && [ ! -L "$power" ] || fail 'unsafe power interface'
 grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
     fail 'deep suspend is not selected'
@@ -58,7 +104,7 @@ grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
 enable_wakeup "$power_key"
 enable_wakeup "$axp_power_key"
 enable_wakeup "$modem/power/wakeup"
-external_power_online && exit 77
+enable_wakeup "${external_power%/online}/power/wakeup"
 
 : >"$lock"
 chown root:root "$lock"
@@ -66,16 +112,20 @@ chmod 0600 "$lock"
 exec 9>"$lock"
 flock -n -x 9 || fail 'suspend is already in progress'
 
-wakeup_count=$(sed -n '1p' "$power/wakeup_count")
+wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
 case $wakeup_count in
     ''|*[!0-9]*) fail 'invalid wakeup counter' ;;
 esac
 
-# A wake event between the read and either write makes the kernel reject the
+# Queued hardware input or a guarded request blocks the bounded counter read while it waits for the
+# display lock. Timeout releases that lock; a later kernel wake event rejects the
 # transition. Exit 75 so the display owner treats it as a normal wake race.
 printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
+# A plug during counter sampling must still veto this admission. Later USB
+# IRQs participate in the kernel wakeup-count handshake.
+external_power_present && exit 77
 if ! printf '%s\n' mem >"$power/state"; then
-    new_wakeup_count=$(sed -n '1p' "$power/wakeup_count") || exit 1
+    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
     [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75
     exit 1
 fi
