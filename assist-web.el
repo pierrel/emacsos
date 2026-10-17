@@ -3624,8 +3624,9 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
     (setq emacsos-assist-web--prompt-marker (copy-marker before nil))
     (insert emacsos-assist-web--prompt)
     (set-marker-insertion-type emacsos-assist-web--prompt-marker t)
+    ;; A prompt field keeps ordinary line motion out of the protected prefix.
     (add-text-properties before (point)
-                         '(read-only t front-sticky t rear-nonsticky t))
+                         '(read-only t field prompt front-sticky t rear-nonsticky t))
     (setq emacsos-assist-web--input-marker (copy-marker (point) nil))))
 
 (defun emacsos-assist-web--anchor-at (position)

@@ -25,6 +25,63 @@
            ,@body)
        (delete-directory emacsos-assist-web-cache-directory t))))
 
+(ert-deftest interaction-input-bol-kill-and-yank-preserve-prompt ()
+  (dolist (desktop '(nil t))
+    (interaction-test--thread
+      (let ((emacsos-desktop-assist-mode desktop)
+            (kill-ring nil) (kill-ring-yank-pointer nil)
+            (interprogram-cut-function nil) (interprogram-paste-function nil))
+        ;; Batch Emacs has no display positions for `kill-visual-line'.
+        (visual-line-mode -1)
+        (save-window-excursion
+          (switch-to-buffer (current-buffer))
+          (goto-char (point-max)) (insert "editable draft")
+          (let* ((start (emacsos-assist-web--prompt-start))
+                 (protected (buffer-substring (point-min) start)))
+            (execute-kbd-macro (kbd "C-a C-k"))
+            (should (= (point) start))
+            (should (equal (emacsos-assist-web--input) ""))
+            (should (equal (current-kill 0 t) "editable draft"))
+            (should (equal-including-properties
+                     (buffer-substring (point-min) start) protected))
+            (should-error (delete-char -1) :type 'text-read-only)
+            (goto-char (point-max))
+            (execute-kbd-macro (kbd "C-y"))
+            (should (equal (emacsos-assist-web--input) "editable draft"))))))))
+
+(ert-deftest interaction-input-bol-empty-and-refreshed-draft ()
+  (interaction-test--thread
+    (visual-line-mode -1)
+    (goto-char (point-max))
+    (call-interactively (key-binding (kbd "C-a")))
+    (should (= (point) (emacsos-assist-web--prompt-start)))
+    (insert "kept across refresh")
+    (emacsos-assist-web--render interaction-test--snapshot)
+    (goto-char (point-max))
+    (call-interactively (key-binding (kbd "C-a")))
+    (should (= (point) (emacsos-assist-web--prompt-start)))
+    (should (equal (emacsos-assist-web--input) "kept across refresh"))))
+
+(ert-deftest interaction-input-bol-retains-multiline-prefix-and-transcript-motion ()
+  (interaction-test--thread
+    (visual-line-mode -1)
+    (goto-char (point-max)) (insert "first\nsecond\nthird")
+    (let ((start (emacsos-assist-web--prompt-start)))
+      (goto-char (+ start 9))
+      (call-interactively (key-binding (kbd "C-a")))
+      (should (= (point) (+ start 6)))
+      (goto-char (+ start 3))
+      (let ((current-prefix-arg 2))
+        (call-interactively (key-binding (kbd "C-a"))))
+      (should (= (point) (+ start 6)))
+      (let ((current-prefix-arg 0))
+        (call-interactively (key-binding (kbd "C-a"))))
+      (should (= (point) start))
+      (goto-char (point-min))
+      (forward-char 3)
+      (call-interactively (key-binding (kbd "C-a")))
+      (should (= (point) (point-min))))))
+
 (ert-deftest interaction-keys-and-context-refresh ()
   (let ((emacsos-desktop-assist-mode t))
    (with-temp-buffer
