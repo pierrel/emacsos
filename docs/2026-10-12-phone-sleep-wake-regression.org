@@ -1,0 +1,124 @@
+#+TITLE: Phone screen-off suspend and wake regression
+#+DATE: 2026-10-12
+
+* Outcome and limits
+
+The screen-off deadline now belongs to one supervised session worker, rather
+than the seat-idle timer. After either manual or automatic blanking it waits
+120 seconds and requests deep suspend. Charging does not bypass the deadline.
+Repeated idle callbacks and generic seat resume leave the panel dark. In normal operation the
+existing call/SMS display-wake path and deliberate power-button press restore
+it. Interrupted-state recovery and failed blanking retain their active-panel
+recovery path. Volume bindings consume the key without requesting display wake.
+
+A monotonically increasing transition generation fences old deadlines. The
+worker retries after 120 seconds if a kernel return or failed suspend leaves
+the same generation dark; explicit wake cancels that generation. The session
+owns its process group and checks worker health alongside swayidle. The root
+helper retains its fixed no-argument interface and required wake sources.
+
+This is offline evidence, not proof of exclusive kernel wake sources, physical
+wake or corrected battery duration. The phone is discharged and Root's bounded
+connection attempt timed out. No live phone or model/GPU command ran here.
+The root helper enables required modem/power-key sources; it does not yet prove
+that other kernel sources cannot wake the CPU. Do not disable unidentified
+sources from this offline result.
+
+* Checks and review
+
+- =make test-pinephone-scripts=: passed, including actual timer-worker execution,
+  installer/update rollback, payload integrity and 78 bootstrap ERT tests.
+- Targeted bootstrap/call/SMS ERT: 78/78 passed.
+- Final power and package checks passed after documentation corrections and a
+  regression asserting that suspend failure does not illuminate the panel.
+- =make test-elisp=: 731/822 passed; all 91 failures also occurred in an archived
+  untouched =4b0625= base. That base had 92 failures, including one additional
+  order-dependent call test. No candidate-only failure. Logs:
+  =/tmp/phone-power-elisp.log= and =/tmp/phone-power-base-elisp.log=.
+- Independent correctness/concurrency review and focused security/lifecycle
+  review found no new blocking software defect. A separate documentation pass
+  corrected the timer retry comment and current roadmap power description.
+- Server tests and model smoke were not run: no server or wire change, and the
+  assigned scope excludes model runs. Phone script tests cover the changed boot
+  entry point; real device verification remains mandatory.
+
+* Root diagnostic and acceptance recipe
+
+All live commands and deployment belong to Root. First recharge the phone and
+restore access. Before changing anything, take one bounded read-only snapshot:
+
+#+begin_src sh
+timeout -s TERM -k 2 25 ssh -o ConnectTimeout=6 "$PINEPHONE_HOST" 'timeout 15 sh -s' <<'PHONE'
+sha256sum /usr/local/share/emacsos-openrc/session \
+  /usr/local/share/emacsos-openrc/session-power \
+  /usr/local/share/emacsos-openrc/sway.config \
+  /usr/local/sbin/emacsos-openrc-suspend /etc/doas.d/95-emacsos-ui.conf
+for path in /run/emacsos-ui/power-state /run/emacsos-ui/power-generation \
+  /sys/power/mem_sleep /sys/power/sync_on_suspend /sys/power/wakeup_count \
+  /sys/power/pm_wakeup_irq /sys/class/rtc/rtc0/wakealarm; do
+  if [ -r "$path" ]; then printf '%s: ' "$path"; cat "$path"; fi
+done
+timeout 8 find /sys/devices -path '*/power/wakeup' -type f -exec sh -c \
+  '[ "$(cat "$1")" != enabled ] || printf "%s\n" "$1"' sh '{}' \;
+if [ -r /sys/kernel/debug/wakeup_sources ]; then
+  head -n 80 /sys/kernel/debug/wakeup_sources
+fi
+dmesg | tail -n 200 | sed -n '/PM: suspend/p;/PM: resume/p;/wakeup/p;/Wakeup/p'
+PHONE
+#+end_src
+
+Read =wakeup_sources= with Root's existing privilege if unavailable; do not
+install tooling or alter wake configuration merely to complete the snapshot.
+Compare installed hashes with Root's actual composed payload, preserving all
+other live features. Record charging state and battery capacity/current.
+
+After deploying the checked composition, stop remote activity and observe:
+
+1. Unplugged, manually blank the display. Record screen-off and deep-suspend
+   timestamps; require approximately 120 seconds between them. Repeat with
+   automatic 60-second idle blanking, then while charging. Volume input and
+   generic seat resume must not light the panel or move the blank deadline.
+2. Observe an untouched dark interval. If the CPU resumes unexpectedly, collect
+   the wake IRQ/source-counter delta and filtered kernel records after a
+   deliberate wake. Distinguish CPU wake from display illumination. A still-dark
+   generation must retry suspend; this is not evidence of exclusive wake sources.
+3. From deep suspend, deliberately press the power button. Require kernel resume,
+   usable panel/touch, then another successful blank/suspend cycle.
+4. With Pierre present, send an incoming SMS and separately an incoming call
+   while deeply suspended. Require kernel resume, visible received SMS/ringing
+   UI, normal delivery/answer/hangup, and clean modem/network recovery. Afterward
+   blank again and require the next 120-second suspend.
+5. Repeat call, SMS and manual power wake near the 120-second admission boundary,
+   including just before and during suspend entry. Require no missed event or
+   phone stranded asleep with a queued wake. Kernel wakeup-count fencing starts
+   only when the helper samples it; the inherited display lock held across the
+   root helper does not independently prove that every earlier wake request is
+   fenced. Investigate a reproduced miss within this effort before acceptance.
+6. Run a bounded unplugged untouched battery interval. Record duration/capacity
+   change, suspend-entry/exit count and absence of unsolicited panel wake. Root
+   and Pierre decide acceptance from measured battery and live behavior.
+
+Keep an agreed deliberate power-button recovery path. An RTC alarm used for a
+bounded diagnostic is a temporary test escape; clear/verify it afterward and do
+not count its wake as production call/SMS-only acceptance.
+
+* Deferred observations
+
+The unrelated Elisp failures remain with their existing code owners; this change
+has no candidate-only failure and must not silently expand into Assist UI work.
+The exact initiating unsolicited kernel wake source is unknown until the device
+returns. Root owns evidence capture; this effort retains any resulting in-scope
+power correction.
+
+* Historical supersessions
+
+The =2026-09-02 hands-on power result and automatic-idle design= section in
+[[file:2026-08-31-pinephone-emacsos-session.org][the session record]] describes the former
+180-second seat-idle suspend deadline. The new timer is 120 seconds from
+screen-off, independent of seat activity.
+The =Objective= and =Live validation, 2026-09-03= sections in
+[[file:2026-09-03-pinephone-assist-parity.org][the parity record]] described the earlier
+unattended development configuration and its idle-origin marker. The new
+timer needs no marker. Suspend authority is included in the
+current source; charging no longer exempts screen-off suspend. Historical live
+results remain historical evidence, not validation of this change.

@@ -1,0 +1,63 @@
+#+TITLE: Wait for guarded input before the initial supervisor wake
+#+DATE: 2026-10-12
+
+* Startup correction
+
+Copilot R3 on =328e4d7= found a real startup race. The asynchronous worker opens
+its FIFO only after trusted input registration and permanent privilege drop,
+but the initial =wake= changed the display before its eventual transition write
+blocked on that FIFO. That handshake was too late to establish registration
+before the supervisor's initial =session-power wake=. A power/ring input during setup could be
+lost. The fix opens the existing FIFO for writing, with a bounded timeout,
+before invoking initial wake. The open releases only after the monitor reader
+exists. No new readiness file, event type, actor or ownership mechanism is added.
+Missing readiness fails startup within the bound before that initial wake.
+Sway and Emacs already run earlier in startup; this barrier precedes the
+supervisor's explicit power action, not all display activity during boot.
+The worker's comment now describes this pre-wake barrier.
+
+A deterministic test executes the actual contiguous startup block from
+=openrc-session=. Narrow process-group/power fixtures pause monitor setup before
+its FIFO reader opens. The unchanged =328e4d7= block fails with =initial display
+changed before monitor registration=. The successor must show no display action
+while setup is paused, then finish successfully after release. A second case
+never releases setup: startup must fail within five seconds and must not change
+the display. The fixture owns and closes its process group, including children
+after parent exit. This test does not claim a full UI boot or physical event.
+
+* Delivery and physical limits
+
+Root already deployed and published the =82a03cc= composition containing
+=328e4d7= as a partial live result. Its 26 installed hashes matched; actual
+worker PID 29635 was UID 104 with no effective capability and fd4 retained
+EPOLLWAKEUP registrations for tfd3/event0 and tfd5/event2. These are real kernel
+registration and privilege-drop facts. Root explicitly did not call that
+partial result final readiness. The successor requires Root redeployment and
+preserves all other current features. This Implementer ran no phone command,
+deployment or merge flow.
+
+The earlier IRQ-to-queue construction and owner-lifetime tests remain valid.
+Effective RI call/SMS-only configuration, physical boundary delivery, exclusive
+automatic CPU wake sources, charging deadlines and battery duration remain open.
+The original external HIGH remains unresolved for complete acceptance.
+
+* Checks and review
+
+The actual startup block from unchanged =328e4d7= fails the new regression;
+both delayed and missing readiness pass on the successor. The required
+=make test-pinephone-scripts= run passes all scripts, installation/update
+rollback, helper/power cases, the new startup cases and 78/78 bootstrap ERT.
+The final comment-only payload seal also passes the packaging check. Shell,
+Python and diff checks pass. Two existing independent reviewers found no code
+finding in the affected startup path; the separate documentation pass narrowed
+its claim to the supervisor's initial wake. No finding was rejected. This is
+one affected review round plus wording verification, not new physical evidence.
+
+* Historical supersessions
+
+The =Result and remaining acceptance= and =Checks and review= sections of
+[[file:2026-10-12-phone-wake-input-queues.org][the private input queue record]] claimed input registration before the supervisor's initial
+=session-power wake= and no known software blocker. R3 exposed that startup gap;
+the bounded FIFO writer-open now establishes the claimed order. The earlier
+queue/admission proof and regression results remain historical facts. This
+successor does not replace physical acceptance with a startup fixture.
