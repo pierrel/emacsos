@@ -9,6 +9,36 @@
   '(:tid "thread-1" :repo-key "aaaaaaaaaaaaaaaaaaaa"
     :branch "assist/thread" :status "ready"))
 
+(ert-deftest test-assist-web-git-phone-header-keeps-both-touch-actions-visible ()
+  "Narrow phone headers put Status and Merge before variable Run text."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 40))
+              ((symbol-function 'emacsos-assist-web-git--thread-header)
+               (lambda () "Git branch and long published commit")))
+      (dolist (run '(nil "Run active [?] "))
+        (cl-letf (((symbol-function 'emacsos-assist-web--lifecycle-header)
+                   (lambda () run)))
+          (let* ((header (emacsos-assist-web--thread-header))
+                 (merge (string-match "\\[Merge\\]" header)))
+            (should (string-match "\\[Status\\]" header))
+            (should merge)
+            (should (<= (string-width (substring header 0 (+ merge 7))) 40))))))))
+
+(ert-deftest test-assist-web-git-pending-merge-keeps-outcome-buffer ()
+  "Do not lose the in-flight POST callback by killing its status buffer."
+  (let ((view (generate-new-buffer " *assist-git-pending-view*")))
+    (unwind-protect
+        (with-current-buffer view
+          (special-mode)
+          (add-hook 'kill-buffer-query-functions
+                    #'emacsos-assist-web-git--status-may-kill-p nil t)
+          (setq-local emacsos-assist-web-git--status-pending t)
+          (should-not (kill-buffer view))
+          (should (buffer-live-p view))
+          (setq emacsos-assist-web-git--status-pending nil)
+          (should (kill-buffer view)))
+      (when (buffer-live-p view) (kill-buffer view)))))
+
 (ert-deftest test-assist-web-git-helper-uses-desktop-python-path ()
   "Find Python in Emacs exec-path, including a graphical desktop install."
   (with-temp-buffer
@@ -24,6 +54,158 @@
         (setq emacsos-assist-web-git--epoch 1)
         (emacsos-assist-web-git--enqueue test-assist-web-git--metadata)
         (should (equal command (list "/tools/python3" emacsos-assist-web-git-helper)))))))
+
+(ert-deftest test-assist-web-git-status-shows-factual-mismatch-and-stale-state ()
+  (with-temp-buffer
+    (special-mode)
+    (setq-local emacsos-assist-web-git--status-server
+                '((branch . "assist/server")
+                  (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                  (state . "available") (observed_at . "2026-10-18T15:00:00+00:00")))
+    (setq-local emacsos-assist-web-git--status-local
+                '((branch . "other")
+                  (local_oid . "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                  (observed_at . "2026-10-18T15:00:01+00:00")))
+    (setq-local emacsos-assist-web-git--status-fresh t)
+    (emacsos-assist-web-git--status-render)
+    (should (string-match-p "different branch or commit" (buffer-string)))
+    (should (string-match-p "Local observation: at .*may now be stale" (buffer-string)))
+    (should (string-match-p "Unsaved buffers, staged, uncommitted, untracked"
+                            (buffer-string)))
+    (setq-local emacsos-assist-web-git--status-fresh nil)
+    (emacsos-assist-web-git--status-render)
+    (should (string-match-p "stale/unavailable" (buffer-string)))
+    (should-not (string-match-p "Confirm SERVER Merge" (buffer-string)))))
+
+(ert-deftest test-assist-web-git-local-probe-failure-still-observes-server ()
+  (let ((source (generate-new-buffer " *assist-git-probe-source*"))
+        (view (generate-new-buffer " *assist-git-probe-view*"))
+        requested)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                        emacsos-assist-web--denied nil))
+          (with-current-buffer view
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity
+                        '("thread-1" . "aaaaaaaaaaaaaaaaaaaa"))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--status-inspect-local)
+                       (lambda (&rest _) (error "Python unavailable")))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _body callback &rest _)
+                         (setq requested (list method path))
+                         (funcall callback nil '(:kind transport)))))
+              (emacsos-assist-web-git--status-refresh))
+            (should (equal requested '("GET" "threads/thread-1/git")))
+            (should (eq emacsos-assist-web-git--status-local-state 'unavailable))
+            (should (string-match-p "Local observation: unavailable" (buffer-string)))))
+      (kill-buffer view)
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-git-unrelated-tap-disarms-and-pending-blocks-refresh ()
+  (let ((source (generate-new-buffer " *assist-git-arm-source*"))
+        (view (generate-new-buffer " *assist-git-arm-view*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                        emacsos-assist-web--denied nil))
+          (with-current-buffer view
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity
+                        '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
+                        emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-server
+                        '((branch . "assist/server") (state . "available")
+                          (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+            (emacsos-assist-web-git--status-arm)
+            (let ((this-command 'mouse-drag-region)
+                  (last-input-event '(down-mouse-1)))
+              (cl-letf (((symbol-function 'emacsos-assist-web-git--confirm-target-p)
+                         (lambda () t)))
+                (emacsos-assist-web-git--merge-pre-command)))
+            (should emacsos-assist-web-git--status-armed)
+            (let ((this-command 'push-button))
+              (goto-char (point-min))
+              (emacsos-assist-web-git--merge-pre-command))
+            (should-not emacsos-assist-web-git--status-armed)
+            (should-not (string-match-p "Confirm SERVER" (buffer-string)))
+            (setq emacsos-assist-web-git--status-pending t)
+            (should-error (emacsos-assist-web-git--status-refresh) :type 'user-error)))
+      (emacsos-assist-web-git--disarm-status)
+      (kill-buffer view)
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-git-merge-uses-server-target-not-local-head ()
+  (let ((source (generate-new-buffer " *assist-git-source*"))
+        (view (generate-new-buffer " *assist-git-view*"))
+        request
+        (remote-outcome "merged")
+        (remote-status 200))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                        emacsos-assist-web--denied nil))
+          (with-current-buffer view
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity
+                        '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
+                        emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-server
+                        '((thread_id . "thread-1")
+                          (repo_key . "aaaaaaaaaaaaaaaaaaaa")
+                          (branch . "assist/server")
+                          (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                          (state . "available"))
+                        emacsos-assist-web-git--status-local
+                        '((branch . "other")
+                          (local_oid . "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path body callback &optional headers &rest _)
+                         (setq request (list method path body headers))
+                         (funcall callback `((http_status . ,remote-status)
+                                             (outcome . ,remote-outcome)) nil))))
+              (emacsos-assist-web-git--status-arm)
+              (should (string-match-p "Confirm SERVER Merge & Push" (buffer-string)))
+              (should (= (point) (point-min)))
+              (should (< (string-match "Unsaved buffers" (buffer-string))
+                         (string-match "Confirm SERVER" (buffer-string))))
+              (emacsos-assist-web-git--status-confirm))
+            (should (equal request
+                           '("POST" "threads/thread-1/merge" nil
+                             (("X-Assist-Expected-Commit" . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))))
+            (should (string-match-p "succeeded" (buffer-string)))
+            (setq remote-outcome "stale"
+                  remote-status 409
+                  emacsos-assist-web-git--status-fresh t)
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _body callback &rest _)
+                         (funcall callback `((http_status . ,remote-status)
+                                             (outcome . ,remote-outcome)) nil))))
+              (emacsos-assist-web-git--status-arm)
+              (emacsos-assist-web-git--status-confirm))
+            (should (string-match-p "commit changed" (buffer-string)))
+            (setq remote-outcome "merged"
+                  remote-status 500
+                  emacsos-assist-web-git--status-fresh t)
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _body callback &rest _)
+                         (funcall callback `((http_status . ,remote-status)
+                                             (outcome . ,remote-outcome)) nil))))
+              (emacsos-assist-web-git--status-arm)
+              (emacsos-assist-web-git--status-confirm))
+            (should-not (string-match-p "succeeded" (buffer-string)))))
+      (emacsos-assist-web-git--disarm-status)
+      (kill-buffer view)
+      (kill-buffer source))))
 
 (ert-deftest test-assist-web-git-canonical-thread-keys-preserve-file-opener ()
   (with-temp-buffer

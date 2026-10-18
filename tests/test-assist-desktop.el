@@ -34,6 +34,8 @@
             (dolist (binding '(("l" . emacsos-assist-web-show-thread-list)
                                ("t" . emacsos-assist-web-open-thread)
                                ("n" . emacsos-assist-web-new-thread)
+                               ("h" . emacsos-assist-web-git-status)
+                               ("m" . emacsos-assist-web-git-merge)
                                ("r" . emacsos-assist-web-refresh-threads)))
               (should (eq (key-binding (kbd (concat "C-c a " (car binding))))
                           (cdr binding))))

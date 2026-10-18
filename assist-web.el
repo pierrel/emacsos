@@ -751,11 +751,22 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 (defun emacsos-assist-web--thread-header ()
   "Compose independent Run and Git actions, keeping both visible on the phone."
   (let* ((run (emacsos-assist-web--lifecycle-header))
-         (label (and run (string-remove-suffix " [?] " run))))
-    (if (not run) (emacsos-assist-web-git--thread-header)
+         (label (and run (string-remove-suffix " [?] " run)))
+         (status-link (emacsos-assist-web--padded-action
+                       "Status" #'emacsos-assist-web-git-status))
+         (merge-link (emacsos-assist-web--padded-action
+                      "Merge" #'emacsos-assist-web-git-merge))
+         (actions (concat status-link merge-link))
+         (remaining (max 0 (- (window-body-width) (string-width actions)))))
+    (if (not run)
+        (concat actions
+                (truncate-string-to-width
+                 (emacsos-assist-web-git--thread-header) remaining))
       (concat
-       (truncate-string-to-width label (max 8 (- (min 40 (window-body-width)) 19)))
+       actions
        (emacsos-assist-web--details-link)
+       (truncate-string-to-width label
+                                 (max 0 (- remaining 4)))
        (propertize " [Git]" 'mouse-face 'highlight
                    'help-echo (emacsos-assist-web-git--thread-header)
                    'local-map (let ((map (make-sparse-keymap)))
