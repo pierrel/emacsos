@@ -787,6 +787,7 @@ Scrolling and button navigation may reveal the visible confirm target."
     (let ((view (get-buffer-create (format "*Assist Git %s*" tid))))
       (with-current-buffer view
         (unless (derived-mode-p 'special-mode) (special-mode))
+        (use-local-map (copy-keymap (current-local-map)))
         (local-set-key (kbd "TAB") #'forward-button)
         (local-set-key (kbd "<backtab>") #'backward-button)
         (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--status-cancel-local nil t)

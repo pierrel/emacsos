@@ -224,9 +224,12 @@
       (kill-buffer source))))
 
 (ert-deftest test-assist-web-git-open-status-binds-tab-navigation ()
-  "The real status view binds TAB before confirmation can be armed."
+  "Status TAB navigation does not alter unrelated special-mode buffers."
   (let ((source (generate-new-buffer " *assist-git-tab-source*"))
-        (view nil))
+        (view nil)
+        (ordinary (generate-new-buffer " *assist-git-ordinary-special*"))
+        (original-tab (lookup-key special-mode-map (kbd "TAB")))
+        (original-backtab (lookup-key special-mode-map (kbd "<backtab>"))))
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -242,8 +245,16 @@
           (should view)
           (with-current-buffer view
             (should (eq (key-binding (kbd "TAB")) #'forward-button))
-            (should (eq (key-binding (kbd "<backtab>")) #'backward-button))))
+            (should (eq (key-binding (kbd "<backtab>")) #'backward-button))
+            (should-not (eq (current-local-map) special-mode-map)))
+          (with-current-buffer ordinary
+            (special-mode)
+            (should (equal (lookup-key (current-local-map) (kbd "TAB"))
+                           original-tab))
+            (should (equal (lookup-key (current-local-map) (kbd "<backtab>"))
+                           original-backtab))))
       (when (buffer-live-p view) (kill-buffer view))
+      (kill-buffer ordinary)
       (kill-buffer source))))
 
 (ert-deftest test-assist-web-git-disarm-keeps-other-button-target ()
