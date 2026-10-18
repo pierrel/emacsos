@@ -3608,7 +3608,7 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
     (and start (buffer-substring-no-properties start (point-max)))))
 
 (defun emacsos-assist-web--replace-input (text)
-  "Replace this buffer's editable prompt with TEXT without firing draft hooks."
+  "Replace editable input after the prompt with TEXT without firing draft hooks."
   (when-let ((start (emacsos-assist-web--prompt-start)))
     (let ((inhibit-read-only t)
           (inhibit-modification-hooks t))
@@ -3617,15 +3617,16 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
       (insert text))))
 
 (defun emacsos-assist-web--write-prompt ()
-  "Append the one editable prompt after a rendered transcript."
+  "Append the protected prompt prefix and start editable input."
   (let ((before (point)))
     ;; Install before the prompt itself, then follow later status/action
     ;; insertions at that boundary rather than deleting their entry on Send.
     (setq emacsos-assist-web--prompt-marker (copy-marker before nil))
     (insert emacsos-assist-web--prompt)
     (set-marker-insertion-type emacsos-assist-web--prompt-marker t)
+    ;; A prompt field keeps ordinary line motion out of the protected prefix.
     (add-text-properties before (point)
-                         '(read-only t front-sticky t rear-nonsticky t))
+                         '(read-only t field prompt front-sticky t rear-nonsticky t))
     (setq emacsos-assist-web--input-marker (copy-marker (point) nil))))
 
 (defun emacsos-assist-web--anchor-at (position)
