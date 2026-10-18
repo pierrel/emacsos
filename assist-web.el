@@ -42,6 +42,8 @@
   (emacsos-assist-web--update-lifecycle-headers))
 
 (defvar-local emacsos-assist-web--auth-epoch 0)
+(defvar emacsos-assist-web--current-canonical-get-owner nil
+  "Request-start owner dynamically bound around a canonical GET callback.")
 
 (defvar-local emacsos-assist-web--thread-denial-floor 0
   "Last definitive thread denial epoch superseding earlier exact Run reads.")
@@ -112,6 +114,8 @@ An observed thread denial survives closing every view until reauthorization."
           (nconc record (list :approval-generation 0)))
         (unless (plist-member record :approval-pending)
           (nconc record (list :approval-pending nil)))
+        (unless (plist-member record :git-request-order)
+          (nconc record (list :git-request-order 0 :git-auth-floor 0)))
         (setf (plist-get record :buffers)
               (seq-filter #'buffer-live-p (plist-get record :buffers)))
         (dolist (buffer (buffer-list))
@@ -126,7 +130,8 @@ An observed thread denial survives closing every view until reauthorization."
           (setq record nil)))
       (when (and create (not record))
         (setq record (list :buffers nil :stops nil :denial nil :approval-generation 0
-                           :approval-pending nil))
+                           :approval-pending nil :git-request-order 0
+                           :git-auth-floor 0))
         (puthash tid record emacsos-assist-web--thread-safety)
         (dolist (buffer (buffer-list))
           (when (and (buffer-live-p buffer)
@@ -749,34 +754,16 @@ A shared stop may outlive its original buffer pending exact durable recovery."
      (t nil))))
 
 (defun emacsos-assist-web--thread-header ()
-  "Compose independent Run and Git actions, keeping both visible on the phone."
+  "Keep Run and Git Status/Merge actions reachable on the phone."
   (let* ((run (emacsos-assist-web--lifecycle-header))
-         (label (and run (string-remove-suffix " [?] " run)))
          (status-link (emacsos-assist-web--padded-action
                        "Status" #'emacsos-assist-web-git-status))
          (merge-link (emacsos-assist-web--padded-action
                       "Merge" #'emacsos-assist-web-git-merge))
          (actions (concat status-link merge-link))
          (remaining (max 0 (- (window-body-width) (string-width actions)))))
-    (if (not run)
-        (concat actions
-                (truncate-string-to-width
-                 (emacsos-assist-web-git--thread-header) remaining))
-      (concat
-       actions
-       (emacsos-assist-web--details-link)
-       (truncate-string-to-width label
-                                 (max 0 (- remaining 4)))
-       (propertize " [Git]" 'mouse-face 'highlight
-                   'help-echo (emacsos-assist-web-git--thread-header)
-                   'local-map (let ((map (make-sparse-keymap)))
-                                (define-key map [header-line mouse-1]
-                                  (if emacsos-assist-web-git--workspace-choices
-                                      #'emacsos-assist-web-git-choose-workspace
-                                    #'emacsos-assist-web-git-refresh))
-                                map))
-       (emacsos-assist-web--details-link
-        #'emacsos-assist-web-git-thread-details)))))
+    (concat actions
+            (when run (truncate-string-to-width run remaining)))))
 
 (defvar-local emacsos-assist-web--display-details-thread nil)
 
@@ -1168,34 +1155,36 @@ Only a resident queue entry or accepted legacy receipt may claim the gate."
 
 
 (defun emacsos-assist-web--canonical-authorized (start-epoch)
-  "Clear thread denial after validated canonical GET begun at START-EPOCH.
+  "Record validated canonical GET begun at START-EPOCH and clear denial.
 An auth-only GET leaves exact Run outcome uncertain."
-  (when (and (or emacsos-assist-web--denied
-                 (plist-get (emacsos-assist-web--thread-safety-record
-                             emacsos-assist-web--thread-id) :denial))
-             (eql start-epoch emacsos-assist-web--auth-epoch))
-    (let ((thread-denial (or (eq emacsos-assist-web--denied t)
-                            (plist-get (emacsos-assist-web--thread-safety-record
-                                        emacsos-assist-web--thread-id) :denial)))
-          (tid emacsos-assist-web--thread-id))
-    (setq emacsos-assist-web--denied nil
-          emacsos-assist-web--thread-denial-status nil
-          emacsos-assist-web--run-recheck-needed nil)
-    (when thread-denial
-      (when-let ((record (emacsos-assist-web--thread-safety-record tid)))
-        (setf (plist-get record :denial) nil))
-      (dolist (buffer (buffer-list))
-        (unless (eq buffer (current-buffer))
-          (with-current-buffer buffer
-            (when (and (derived-mode-p 'emacsos-assist-web-mode)
-                       (equal emacsos-assist-web--thread-id tid)
-                       (eq emacsos-assist-web--denied t))
-              (setq emacsos-assist-web--denied nil
-                    emacsos-assist-web--thread-denial-status nil)
-              (condition-case nil
-                  (emacsos-assist-web--update-lifecycle-headers)
-                ((error quit) nil)))))))
-    (emacsos-assist-web--update-lifecycle-headers))))
+  (when (eql start-epoch emacsos-assist-web--auth-epoch)
+    (let* ((tid emacsos-assist-web--thread-id)
+           (record (emacsos-assist-web--thread-safety-record tid))
+           (thread-denial (or (eq emacsos-assist-web--denied t)
+                              (plist-get record :denial))))
+      (when (and record emacsos-assist-web--current-canonical-get-owner
+                 (eq record (car emacsos-assist-web--current-canonical-get-owner)))
+        (setf (plist-get record :git-auth-floor)
+              (max (plist-get record :git-auth-floor)
+                   (cdr emacsos-assist-web--current-canonical-get-owner))))
+      (when (or emacsos-assist-web--denied (plist-get record :denial))
+        (setq emacsos-assist-web--denied nil
+              emacsos-assist-web--thread-denial-status nil
+              emacsos-assist-web--run-recheck-needed nil)
+        (when thread-denial
+          (when record (setf (plist-get record :denial) nil))
+          (dolist (buffer (buffer-list))
+            (unless (eq buffer (current-buffer))
+              (with-current-buffer buffer
+                (when (and (derived-mode-p 'emacsos-assist-web-mode)
+                           (equal emacsos-assist-web--thread-id tid)
+                           (eq emacsos-assist-web--denied t))
+                  (setq emacsos-assist-web--denied nil
+                        emacsos-assist-web--thread-denial-status nil)
+                  (condition-case nil
+                      (emacsos-assist-web--update-lifecycle-headers)
+                    ((error quit) nil)))))))
+        (emacsos-assist-web--update-lifecycle-headers)))))
 
 
 (defun emacsos-assist-web--run-status-confirmed (tid run-id start-epoch)
@@ -2561,24 +2550,33 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
                     emacsos-assist-web--legacy-terminal-generation))))))
 
 (defun emacsos-assist-web--http-access-status
-    (origin method path status &optional early-failure run-owner request-tid)
+    (origin method path status &optional early-failure run-owner request-tid git-get-owner)
   "Classify ORIGIN's thread, approval or Run GET access failure.
-METHOD and PATH identify the exact endpoint.  STATUS is read before JSON
+METHOD and PATH identify the exact endpoint, including the thread Git GET.
+STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
 classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
 REQUEST-TID is the trusted origin thread captured before an async T GET; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
+GIT-GET-OWNER binds a Git GET to shared thread request-start order. A
+definitive denial wins unless a later-started canonical GET validated access.
 Return non-nil when the access notification completed or the exact Run
 status is safely ignored as stale; nil permits a bounded later retry."
   (when (and (equal method "GET")
              (or (memq status '(401 403 404)) early-failure)
-             (stringp path))
+             (stringp path)
+             (or (not git-get-owner)
+                 (when-let ((record (emacsos-assist-web--thread-safety-record
+                                     request-tid)))
+                   (and (eq (car git-get-owner) record)
+                        (> (cdr git-get-owner)
+                           (plist-get record :git-auth-floor))))))
     (condition-case nil
         (let ((thread-get (string-match
                            (if (memq status '(401 403 404))
-                               "\\`threads/\\([^/]+\\)\\(?:/approval\\)?\\'"
+                               "\\`threads/\\([^/]+\\)\\(?:/approval\\|/git\\)?\\'"
                              "\\`threads/\\([^/]+\\)\\'") path))
               (tid nil)
               (run-id nil))
@@ -2644,12 +2642,24 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
 GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
 error instead of the legacy string.  A Git probe's nondiagnostic failure
 does not downgrade a separate chat-accepted Git observation."
-  (let ((run-owner (emacsos-assist-web--run-http-owner method path))
+  (let* ((run-owner (emacsos-assist-web--run-http-owner method path))
         (request-tid (and (equal method "GET") emacsos-assist-web--thread-id))
         (canonical-thread-get
          (and (equal method "GET")
               emacsos-assist-web--thread-id
               (equal path (concat "threads/" emacsos-assist-web--thread-id))))
+        (git-thread-get
+         (and git-typed-error (equal method "GET") request-tid
+              (equal path (concat "threads/" request-tid "/git"))))
+        (git-access-record
+         (when (or canonical-thread-get git-thread-get)
+           (emacsos-assist-web--thread-safety-record request-tid t)))
+        (request-order
+         (when git-access-record
+           (cl-incf (plist-get git-access-record :git-request-order))))
+        (git-get-owner (when git-thread-get (cons git-access-record request-order)))
+        (canonical-get-owner
+         (when canonical-thread-get (cons git-access-record request-order)))
         token token-error)
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
@@ -2713,7 +2723,7 @@ does not downgrade a separate chat-accepted Git observation."
                              (condition-case nil
                                  (emacsos-assist-web--http-access-status
                                   origin method path status (not git-typed-error)
-                                  run-owner request-tid)
+                                  run-owner request-tid git-get-owner)
                                ((error quit) nil)))
                        (when (and (not git-failure-notified)
                                   canonical-thread-get
@@ -2728,11 +2738,13 @@ does not downgrade a separate chat-accepted Git observation."
                      (when (timerp timer) (cancel-timer timer))
                      (setq emacsos-assist-web--requests
 			   (delq response emacsos-assist-web--requests))
-                     (funcall callback value
-                              (if (and git-typed-error problem)
-                                  (emacsos-assist-web--git-request-error
-                                   status (or kind 'transport) detail)
-                                problem))))))
+                     (let ((emacsos-assist-web--current-canonical-get-owner
+                            canonical-get-owner))
+                       (funcall callback value
+                                (if (and git-typed-error problem)
+                                    (emacsos-assist-web--git-request-error
+                                     status (or kind 'transport) detail)
+                                  problem)))))))
             (condition-case error
 		(progn
                   (setq url (emacsos-assist-web--endpoint path))
@@ -2758,7 +2770,7 @@ does not downgrade a separate chat-accepted Git observation."
                                            (condition-case nil
                                                (emacsos-assist-web--http-access-status
                                                 origin method path status nil
-                                                run-owner request-tid)
+                                                run-owner request-tid git-get-owner)
                                              ((error quit) nil)))))
 			       (if (plist-get transport-status :error)
 				   (setq problem "Assist Web connection unavailable")
@@ -2827,7 +2839,7 @@ does not downgrade a separate chat-accepted Git observation."
                                   (emacsos-assist-web--http-access-status
                                    origin method path observed-http-status
                                    (not git-typed-error) run-owner
-                                   request-tid)))
+                                   request-tid git-get-owner)))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
@@ -2843,7 +2855,7 @@ does not downgrade a separate chat-accepted Git observation."
                                     (or git-failure-notified
                                         (emacsos-assist-web--http-access-status
                                          origin method path status nil run-owner
-                                         request-tid)))
+                                         request-tid git-get-owner)))
                             ;; A non-denial status is parsed later.  It is
                             ;; not evidence that malformed JSON or transport
                             ;; failure proves thread access denial.

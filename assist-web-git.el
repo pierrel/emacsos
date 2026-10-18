@@ -410,19 +410,29 @@ MANUAL permits a repeated status reminder."
   (remove-hook 'pre-command-hook #'emacsos-assist-web-git--merge-pre-command))
 
 (defun emacsos-assist-web-git--merge-pre-command ()
-  "Cancel confirmation on another command or another buffer."
+  "Cancel confirmation on unrelated input or another buffer.
+Scrolling and button navigation may reveal the visible confirm target."
   (when (and emacsos-assist-web-git--armed-status-buffer
              (or (not (eq (current-buffer) emacsos-assist-web-git--armed-status-buffer))
                  (not (or (eq this-command 'emacsos-assist-web-git-merge)
+                          (memq this-command '(scroll-up-command scroll-down-command
+                                               scroll-up-line scroll-down-line
+                                               pixel-scroll-precision mwheel-scroll
+                                               forward-button backward-button
+                                               next-line previous-line))
                           (and (memq this-command '(push-button mouse-1))
                                (emacsos-assist-web-git--confirm-target-p))
                           (and (eq this-command 'mouse-drag-region)
                                (eq (car-safe last-input-event) 'down-mouse-1)
                                (emacsos-assist-web-git--confirm-target-p))))))
-    (emacsos-assist-web-git--disarm-status)))
+    (let ((view emacsos-assist-web-git--armed-status-buffer)
+          (position (point)))
+      (emacsos-assist-web-git--disarm-status)
+      (when (eq (current-buffer) view)
+        (goto-char (min position (point-max)))))))
 
 (defun emacsos-assist-web-git--confirm-target-p ()
-  "Whether this command activates the armed view's exact confirm button."
+  "Whether this command targets the armed view's exact confirm button."
   (let* ((event last-input-event)
          (mouse (mouse-event-p event))
          (position (if mouse (posn-point (event-end event)) (point)))
@@ -455,6 +465,22 @@ MANUAL permits a repeated status reminder."
                 (equal (plist-get emacsos-assist-web-git--metadata :repo-key)
                        (cdr identity)))))))
 
+(defun emacsos-assist-web-git--status-refresh-checkout (_button)
+  "Refresh this status view's original local checkout, without merging."
+  (unless (emacsos-assist-web-git--status-valid-source-p)
+    (user-error "Open an authorized canonical Assist thread first"))
+  (when emacsos-assist-web-git--status-pending
+    (user-error "Wait for the server Merge & Push result"))
+  (with-current-buffer emacsos-assist-web-git--status-source
+    (emacsos-assist-web-git-refresh)))
+
+(defun emacsos-assist-web-git--status-details (_button)
+  "Show Git details for this status view's original canonical thread."
+  (unless (emacsos-assist-web-git--status-valid-source-p)
+    (user-error "Open an authorized canonical Assist thread first"))
+  (with-current-buffer emacsos-assist-web-git--status-source
+    (emacsos-assist-web-git-thread-details)))
+
 (defun emacsos-assist-web-git--status-render ()
   "Render a touch-readable factual Git view without altering local work."
   (let ((inhibit-read-only t)
@@ -464,15 +490,6 @@ MANUAL permits a repeated status reminder."
     (insert "Assist Git status\n\n")
     (when emacsos-assist-web-git--status-outcome
       (insert emacsos-assist-web-git--status-outcome "\n\n"))
-    (when emacsos-assist-web-git--status-armed
-      (insert (format "Confirm branch: %s\nConfirm commit: %s\n"
-                      (alist-get 'branch server)
-                      (alist-get 'published_revision server)))
-      (insert emacsos-assist-web-git--merge-warning)
-      (insert-text-button "  Confirm SERVER Merge & Push  "
-                          'follow-link t
-                          'action #'emacsos-assist-web-git--status-action)
-      (insert "\n\n"))
     (insert (format "Server branch: %s\n"
                     (or (alist-get 'branch server) "unavailable")))
     (insert (format "Published commit: %s\n"
@@ -512,9 +529,26 @@ MANUAL permits a repeated status reminder."
     (unless emacsos-assist-web-git--status-pending
       (insert-text-button "Refresh facts"
                           'follow-link t
-                          'action (lambda (_) (emacsos-assist-web-git--status-refresh))))
-    (unless emacsos-assist-web-git--status-armed
-      (insert "\n\n" emacsos-assist-web-git--merge-warning)
+                          'action (lambda (_) (emacsos-assist-web-git--status-refresh)))
+      (insert "  ")
+      (insert-text-button "Refresh checkout"
+                          'follow-link t
+                          'action #'emacsos-assist-web-git--status-refresh-checkout))
+    (insert "  ")
+    (insert-text-button "Git details"
+                        'follow-link t
+                        'action #'emacsos-assist-web-git--status-details)
+    (insert "\n\n")
+    (if emacsos-assist-web-git--status-armed
+        (progn
+          (insert (format "Confirm branch: %s\nConfirm commit: %s\n"
+                          (alist-get 'branch server)
+                          (alist-get 'published_revision server)))
+          (insert emacsos-assist-web-git--merge-warning)
+          (insert-text-button "  Confirm SERVER Merge & Push  "
+                              'follow-link t
+                              'action #'emacsos-assist-web-git--status-action))
+      (insert emacsos-assist-web-git--merge-warning)
       (when (and emacsos-assist-web-git--status-fresh
                  (equal (alist-get 'state server) "available")
                  (not emacsos-assist-web-git--status-pending))
@@ -536,11 +570,14 @@ MANUAL permits a repeated status reminder."
                 (alist-get 'published_revision emacsos-assist-web-git--status-server))
           emacsos-assist-web-git--armed-status-buffer (current-buffer))
     (add-hook 'pre-command-hook #'emacsos-assist-web-git--merge-pre-command)
-    (emacsos-assist-web-git--status-render)))
+    (emacsos-assist-web-git--status-render)
+    (search-forward "Confirm branch:" nil t)
+    (beginning-of-line)
+    (when-let ((window (get-buffer-window (current-buffer) t)))
+      (set-window-start window (point)))))
 
 (defun emacsos-assist-web-git--status-confirm ()
   "Submit the displayed published commit to the server Merge and Push."
-  (interactive)
   (let ((identity emacsos-assist-web-git--status-identity)
         (server emacsos-assist-web-git--status-server)
         (source emacsos-assist-web-git--status-source)
@@ -673,6 +710,8 @@ MANUAL permits a repeated status reminder."
   (let ((generation emacsos-assist-web-git--status-generation)
         (identity emacsos-assist-web-git--status-identity)
         (source emacsos-assist-web-git--status-source)
+        (auth-epoch (with-current-buffer emacsos-assist-web-git--status-source
+                      emacsos-assist-web--auth-epoch))
         (view (current-buffer))
         (metadata (with-current-buffer emacsos-assist-web-git--status-source
                     emacsos-assist-web-git--metadata)))
@@ -695,7 +734,16 @@ MANUAL permits a repeated status reminder."
            (with-current-buffer view
              (when (and (= generation emacsos-assist-web-git--status-generation)
                         (equal identity emacsos-assist-web-git--status-identity))
-               (let ((valid (and (not error)
+               (if (not (and (emacsos-assist-web-git--status-valid-source-p)
+                             (with-current-buffer source
+                               (eql auth-epoch emacsos-assist-web--auth-epoch))))
+                   (progn
+                     (setq emacsos-assist-web-git--status-fresh nil
+                           emacsos-assist-web-git--status-arm-after-refresh nil
+                           emacsos-assist-web-git--status-error
+                           "Thread authorization changed; reopen before using Git facts")
+                     (emacsos-assist-web-git--status-render))
+                 (let ((valid (and (not error)
                                  (consp value) (proper-list-p value)
                                  (cl-every #'consp value)
                                  (equal (alist-get 'thread_id value) (car identity))
@@ -720,7 +768,8 @@ MANUAL permits a repeated status reminder."
                        (setq emacsos-assist-web-git--status-arm-after-refresh nil)
                        (emacsos-assist-web-git--status-arm))
                    (setq emacsos-assist-web-git--status-arm-after-refresh nil)
-                   (emacsos-assist-web-git--status-render)))))))))))
+                   (emacsos-assist-web-git--status-render))))))))
+       nil nil nil nil t))))
 
 (defun emacsos-assist-web-git--open-status (&optional merge)
   "Open the thread's factual Git view; MERGE also arms its visible warning."
@@ -738,6 +787,8 @@ MANUAL permits a repeated status reminder."
     (let ((view (get-buffer-create (format "*Assist Git %s*" tid))))
       (with-current-buffer view
         (unless (derived-mode-p 'special-mode) (special-mode))
+        (local-set-key (kbd "TAB") #'forward-button)
+        (local-set-key (kbd "<backtab>") #'backward-button)
         (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--status-cancel-local nil t)
         (add-hook 'kill-buffer-query-functions
                   #'emacsos-assist-web-git--status-may-kill-p nil t)
@@ -763,7 +814,13 @@ MANUAL permits a repeated status reminder."
   (interactive)
   (if (and (eq (current-buffer) emacsos-assist-web-git--armed-status-buffer)
            emacsos-assist-web-git--status-armed)
-      (emacsos-assist-web-git--status-confirm)
+      (progn
+        (emacsos-assist-web-git--status-render)
+        (search-forward "Confirm branch:" nil t)
+        (beginning-of-line)
+        (when-let ((window (get-buffer-window (current-buffer) t)))
+          (set-window-start window (point)))
+        (message "Tap the visible Confirm SERVER Merge & Push button"))
     (emacsos-assist-web-git--open-status t)))
 
 (provide 'assist-web-git)
