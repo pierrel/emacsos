@@ -3646,7 +3646,7 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
             (setq tail (cdr tail))))))))
 
 (defun emacsos-assist-web--preserve-input-undo (function &rest arguments)
-  "Run presentation FUNCTION with ARGUMENTS outside editable-input undo.
+  "Run FUNCTION with ARGUMENTS, excluding presentation edits from input undo.
 Retain and rebase native undo when the input survives unchanged.  An internal
 input replacement starts a new compose history; rejected operations that roll
 back their input retain the original history at the outermost boundary."
