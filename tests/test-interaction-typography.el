@@ -123,6 +123,51 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
       (should (equal (emacsos-assist-web--input) "one\ntwo"))
       (should (get-text-property (1- (emacsos-assist-web--prompt-start)) 'read-only)))))
 
+(ert-deftest interaction-undo-shifts-only-long-apply-coordinates ()
+  (interaction-test--editing
+    (setq buffer-undo-list '((apply ignore 11 12 identity)
+                             (apply 0 11 12 ignore)))
+    (emacsos-assist-web--shift-input-undo 5)
+    (should (equal buffer-undo-list '((apply ignore 11 12 identity)
+                                      (apply 0 16 17 ignore))))))
+
+(ert-deftest interaction-recovery-adoption-preserves-destination-undo ()
+  (interaction-test--editing
+    (let ((destination (current-buffer))
+          (source (generate-new-buffer " *interaction-adoption*")))
+      (goto-char (point-max)) (insert "destination draft") (undo-boundary)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--draft-id "new-thread"
+                    emacsos-assist-web--draft-repository "repo"
+                    emacsos-assist-web--draft-harness "harness")
+              (emacsos-assist-web--write-prompt)
+              (let ((entry (emacsos-assist-web--entry
+                            "source sent" 'accepted-unobserved
+                            "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+                (setf (plist-get entry :run-id) "run-source")
+                (emacsos-assist-web--write-cache
+                 "drafts/new-thread.json"
+                 `((text . "") (thread_id . "thread-1")
+                   (repo_key . "repo") (harness . "harness")
+                   (queue . ,(list (emacsos-assist-web--entry-cache-value entry))))))
+              (cl-letf (((symbol-function 'emacsos-assist-web--start-next-observation)
+                         #'ignore)
+                        ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
+                         #'ignore)
+                        ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore))
+                (emacsos-assist-web--restore-draft)))
+            (should-not (buffer-live-p source))
+            (with-current-buffer destination
+              (should (equal (emacsos-assist-web--input) "destination draft"))
+              (interaction-test--native-undo #'undo)
+              (should (equal (emacsos-assist-web--input) ""))
+              (should (equal (plist-get (car emacsos-assist-web--queue) :text)
+                             "source sent"))))
+        (when (buffer-live-p source) (kill-buffer source))))))
+
 (ert-deftest interaction-regional-undo-retains-native-pending-ownership ()
   (interaction-test--editing
     (goto-char (point-max))

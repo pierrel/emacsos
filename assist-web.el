@@ -3638,7 +3638,7 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
               (push equivalent work))
             (setcar tail
                     (pcase (car tail)
-                      (`(apply ,delta ,(and start (pred integerp))
+                      (`(apply ,(and delta (pred integerp)) ,(and start (pred integerp))
                                ,(and end (pred integerp)) ,function . ,arguments)
                        `(apply ,delta ,(+ start shift) ,(+ end shift)
                                ,function ,@arguments))
@@ -3656,18 +3656,21 @@ back their input retain the original history at the outermost boundary."
     (let ((emacsos-assist-web--undo-output-buffer (current-buffer))
           (start (emacsos-assist-web--prompt-start))
           (input (emacsos-assist-web--input))
-          (disabled (eq buffer-undo-list t)))
+          (undo buffer-undo-list))
+      (setq buffer-undo-list t)
       (unwind-protect
-          (let ((buffer-undo-list t))
-            (apply function arguments))
-        (if (and start (emacsos-assist-web--prompt-start)
-                 (equal input (emacsos-assist-web--input)))
-            (emacsos-assist-web--shift-input-undo
-             (- (emacsos-assist-web--prompt-start) start))
-          (setq buffer-undo-list (and disabled t)
-                emacsos-assist-web--pending-input-undo nil
-                emacsos-assist-web--input-history-id nil
-                emacsos-assist-web--input-history-draft nil))))))
+          (apply function arguments)
+        (when (buffer-live-p emacsos-assist-web--undo-output-buffer)
+          (with-current-buffer emacsos-assist-web--undo-output-buffer
+            (setq buffer-undo-list undo)
+            (if (and start (emacsos-assist-web--prompt-start)
+                     (equal input (emacsos-assist-web--input)))
+                (emacsos-assist-web--shift-input-undo
+                 (- (emacsos-assist-web--prompt-start) start))
+              (setq buffer-undo-list (and (eq undo t) t)
+                    emacsos-assist-web--pending-input-undo nil
+                    emacsos-assist-web--input-history-id nil
+                    emacsos-assist-web--input-history-draft nil))))))))
 
 (defun emacsos-assist-web--input-history-move (count)
   "Recall COUNT older canonical user messages; negative COUNT moves newer."
@@ -3821,7 +3824,7 @@ back their input retain the original history at the outermost boundary."
                (point-max))))))
 
 (defun emacsos-assist-web--capture-render-state ()
-  "Capture point and the one displayed phone window before a redraw."
+  "Capture point, mark, and the one displayed phone window before a redraw."
   (when (and (markerp emacsos-assist-web--input-marker)
              (marker-buffer emacsos-assist-web--input-marker))
     (let ((window (get-buffer-window (current-buffer))))
@@ -3837,7 +3840,7 @@ back their input retain the original history at the outermost boundary."
                                 (window-start window)))))))
 
 (defun emacsos-assist-web--restore-render-state (state)
-  "Restore logical point and phone viewport from STATE after a redraw."
+  "Restore logical point, mark, and phone viewport from STATE after a redraw."
   (if (not state)
       (goto-char (point-max))
     (let ((window (plist-get state :window)))
@@ -7539,6 +7542,9 @@ ACCEPTED-RUN-ID is its already validated Run identity."
       (let ((failure
              (catch 'emacsos-assist-web--adoption-failed
                (with-current-buffer destination
+                 ;; Compare input only after the destination markers are restored.
+                 (emacsos-assist-web--preserve-input-undo
+                  (lambda ()
         (let* ((destination-thread-id emacsos-assist-web--thread-id)
                (destination-queue emacsos-assist-web--queue)
                (destination-queue-model-p emacsos-assist-web--queue-model-p)
@@ -7667,7 +7673,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                   emacsos-assist-web--stream-entry nil)
             ;; Do not let the killed source re-save the now-retired draft.
             (remove-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed t)
-            nil))))))
+            nil))))))))
         (if failure
             ;; SOURCE remains the durable accepted owner.  Its exact Run is
             ;; refreshed by its recovery path; do not start a second callback here.
