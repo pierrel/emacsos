@@ -86,6 +86,9 @@ the generic =phone-install= target does not define them.
 | =C-c C-o= | Open the HTTP(S) object in canonical Assist, ordinary, or file-backed chat |
 | =C-c C-l= | Load older canonical history |
 | =C-c C-f= | Forget a file-backed conversation |
+| =C-/=, =C-x u= | Undo editable Assist input, including across transcript refresh |
+| =M-p=, =M-n= | Recall older/newer loaded user inputs; return to the unfinished draft |
+| =M-g i= | Imenu index of loaded canonical Assist messages |
 | =C-c b= | Previous message in canonical Assist |
 | =C-c f= | Next message, ending at editable input in canonical Assist |
 | =C-x C-f= | Ordinary file prompt, checkout or home, file/directory locals disabled |

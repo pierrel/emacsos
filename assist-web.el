@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'imenu)
 (require 'chat)
 (require 'assist-web-git)
 (require 'json)
@@ -3607,6 +3608,132 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
   (let ((start (emacsos-assist-web--prompt-start)))
     (and start (buffer-substring-no-properties start (point-max)))))
 
+(defvar emacsos-assist-web--undo-output-buffer nil
+  "Buffer whose outer presentation update owns undo rebasing.")
+(defvar-local emacsos-assist-web--pending-input-undo nil
+  "Native pending undo spine captured after this buffer's undo command.")
+(defvar-local emacsos-assist-web--input-history-id nil
+  "Canonical user message currently recalled, or nil at the present draft.")
+(defvar-local emacsos-assist-web--input-history-draft nil
+  "Unfinished input retained while browsing canonical input history.")
+
+(defun emacsos-assist-web--remember-input-undo ()
+  "Remember ownership of native undo, including a detached regional spine."
+  (setq emacsos-assist-web--pending-input-undo
+        (and (eq this-command 'undo) pending-undo-list)))
+
+(defun emacsos-assist-web--shift-input-undo (shift)
+  "Translate native undo positions by SHIFT, retaining shared list identities."
+  (unless (zerop shift)
+    (let ((work (list buffer-undo-list)) (seen (make-hash-table :test 'eq)))
+      (when (and (consp emacsos-assist-web--pending-input-undo)
+                 (eq emacsos-assist-web--pending-input-undo pending-undo-list))
+        (push pending-undo-list work))
+      (while work
+        (let ((tail (pop work)))
+          (while (and (consp tail) (not (gethash tail seen)))
+            (puthash tail t seen)
+            ;; Native redo links use these exact spines as hash keys/values.
+            (when-let ((equivalent (gethash tail undo-equiv-table)))
+              (push equivalent work))
+            (setcar tail
+                    (pcase (car tail)
+                      (`(apply ,delta ,(and start (pred integerp))
+                               ,(and end (pred integerp)) ,function . ,arguments)
+                       `(apply ,delta ,(+ start shift) ,(+ end shift)
+                               ,function ,@arguments))
+                      (entry (undo-adjust-elt entry (list (cons 0 (- shift)))))))
+            (setq tail (cdr tail))))))))
+
+(defun emacsos-assist-web--preserve-input-undo (function &rest arguments)
+  "Run presentation FUNCTION with ARGUMENTS outside editable-input undo.
+Retain and rebase native undo when the input survives unchanged.  An internal
+input replacement starts a new compose history; rejected operations that roll
+back their input retain the original history at the outermost boundary."
+  (if (or (not (derived-mode-p 'emacsos-assist-web-mode))
+          (eq emacsos-assist-web--undo-output-buffer (current-buffer)))
+      (apply function arguments)
+    (let ((emacsos-assist-web--undo-output-buffer (current-buffer))
+          (start (emacsos-assist-web--prompt-start))
+          (input (emacsos-assist-web--input))
+          (disabled (eq buffer-undo-list t)))
+      (unwind-protect
+          (let ((buffer-undo-list t))
+            (apply function arguments))
+        (if (and start (emacsos-assist-web--prompt-start)
+                 (equal input (emacsos-assist-web--input)))
+            (emacsos-assist-web--shift-input-undo
+             (- (emacsos-assist-web--prompt-start) start))
+          (setq buffer-undo-list (and disabled t)
+                emacsos-assist-web--pending-input-undo nil
+                emacsos-assist-web--input-history-id nil
+                emacsos-assist-web--input-history-draft nil))))))
+
+(defun emacsos-assist-web--input-history-move (count)
+  "Recall COUNT older canonical user messages; negative COUNT moves newer."
+  (unless (zerop count)
+    (let* ((start (or (emacsos-assist-web--prompt-start)
+                      (user-error "No editable Assist input")))
+           (messages (reverse
+                      (seq-filter (lambda (message)
+                                    (equal (alist-get 'role message) "user"))
+                                  (alist-get 'messages emacsos-assist-web--snapshot))))
+           (position (and emacsos-assist-web--input-history-id
+                          (cl-position emacsos-assist-web--input-history-id messages
+                                       :key (lambda (message) (alist-get 'id message))
+                                       :test #'equal)))
+           (target (+ (or position
+                          (if (and emacsos-assist-web--input-history-id (< count 0))
+                              0 -1)) count)))
+      (unless (<= -1 target (1- (length messages)))
+        (user-error (if (> count 0) "No earlier loaded input" "No newer input")))
+      ;; Claim/recovery checks must precede both text and history-state changes.
+      (emacsos-assist-web--protect-unclaimed-draft)
+      (let* ((draft (if emacsos-assist-web--input-history-id
+                        emacsos-assist-web--input-history-draft
+                      (emacsos-assist-web--input)))
+             (message (and (>= target 0) (nth target messages)))
+             (text (if message (alist-get 'text message) draft)))
+        (undo-boundary)
+        (atomic-change-group
+          (goto-char start)
+          (delete-region start (point-max))
+          (insert text))
+        (undo-boundary)
+        (setq emacsos-assist-web--input-history-id (alist-get 'id message)
+              emacsos-assist-web--input-history-draft (and message draft))))))
+
+(defun emacsos-assist-web-previous-input (count)
+  "Recall COUNT older loaded user messages, preserving the unfinished draft."
+  (interactive "p")
+  (emacsos-assist-web--input-history-move count))
+
+(defun emacsos-assist-web-next-input (count)
+  "Recall COUNT newer inputs, returning to the unfinished draft at the present."
+  (interactive "p")
+  (emacsos-assist-web--input-history-move (- count)))
+
+(defun emacsos-assist-web--imenu-index ()
+  "Index loaded canonical messages by role and short text at current positions."
+  (let ((position (point-min)) (starts (make-hash-table :test 'equal))
+        (ordinal 0) index)
+    (while (< position (point-max))
+      (when-let ((id (get-text-property position 'emacsos-assist-web-message-id)))
+        (unless (gethash id starts) (puthash id position starts)))
+      (setq position (next-single-property-change
+                      position 'emacsos-assist-web-message-id nil (point-max))))
+    (dolist (message (alist-get 'messages emacsos-assist-web--snapshot))
+      (when-let ((start (gethash (alist-get 'id message) starts)))
+        (push (cons (format "%d %s: %s" (cl-incf ordinal)
+                            (alist-get 'role message)
+                            (truncate-string-to-width
+                             (replace-regexp-in-string
+                              "[[:space:]]+" " " (alist-get 'text message))
+                             60 nil nil "…"))
+                    (copy-marker start))
+              index)))
+    (nreverse index)))
+
 (defun emacsos-assist-web--replace-input (text)
   "Replace editable input after the prompt with TEXT without firing draft hooks."
   (when-let ((start (emacsos-assist-web--prompt-start)))
@@ -3699,6 +3826,8 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
              (marker-buffer emacsos-assist-web--input-marker))
     (let ((window (get-buffer-window (current-buffer))))
       (list :point (emacsos-assist-web--anchor-at (point))
+            :mark (and (mark t) (emacsos-assist-web--anchor-at (mark t)))
+            :mark-active mark-active
             :window window
             :window-point (and window
                                (emacsos-assist-web--anchor-at
@@ -3712,6 +3841,9 @@ SAVED-IDENTITY reuses a still-present choice without prompting."
   (if (not state)
       (goto-char (point-max))
     (let ((window (plist-get state :window)))
+      (when (plist-get state :mark)
+        (set-mark (emacsos-assist-web--resolve-anchor (plist-get state :mark)))
+        (setq mark-active (plist-get state :mark-active)))
       (when (and window (window-live-p window)
                  (eq (window-buffer window) (current-buffer)))
         (set-window-point
@@ -3819,7 +3951,8 @@ of it, together with the oldest pagination cursor already reached."
           (error "Assist Web snapshot identity does not match this buffer"))
         (setq emacsos-assist-web--thread-id returned-id))
       (setq emacsos-assist-web--snapshot snapshot
-            emacsos-assist-web--pending-rendered-p nil)
+            emacsos-assist-web--pending-rendered-p nil
+            imenu--index-alist nil)
       (when (or emacsos-assist-web--canonical-buffer-name-p
                 (equal (buffer-name) "*assist New thread*")
                 (equal (buffer-name)
@@ -5175,6 +5308,7 @@ ordinary interactive `find-file' prompt and navigation."
   "Major mode for a canonical Assist Web thread or unsent local draft."
   (emacsos-assist-web--set-workspace-directory)
   (emacsos--chat-enable-presentation)
+  (setq-local imenu-create-index-function #'emacsos-assist-web--imenu-index)
   (emacsos-conversation-install-actions
    '((send . emacsos-assist-web-send)
      (abort . emacsos-assist-web-abort)
@@ -5185,8 +5319,14 @@ ordinary interactive `find-file' prompt and navigation."
   (add-hook 'after-change-functions #'emacsos-assist-web--after-change nil t)
   (add-hook 'before-change-functions #'emacsos-assist-web--protect-unclaimed-draft nil t)
   (add-hook 'post-command-hook #'emacsos-assist-web-git--sync-keys nil t)
+  (add-hook 'post-command-hook #'emacsos-assist-web--remember-input-undo nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
+
+(define-key emacsos-assist-web-mode-map (kbd "M-p")
+            #'emacsos-assist-web-previous-input)
+(define-key emacsos-assist-web-mode-map (kbd "M-n")
+            #'emacsos-assist-web-next-input)
 
 (define-key emacsos-assist-web-mode-map (kbd "C-x C-f")
             #'emacsos-assist-web-find-file)
@@ -8259,6 +8399,26 @@ ACCEPTED-RUN-ID is its already validated Run identity."
   (visual-line-mode 1)
   (setq-local truncate-lines nil word-wrap t)
   (add-hook 'pre-command-hook #'emacsos-assist-web--approval-disarm nil t))
+
+;; These are presentation/restore boundaries, including complete rollback paths.
+;; Nested writers share the outer input comparison and native undo transaction.
+(dolist (function '(emacsos-assist-web--render
+                    emacsos-conversation-replace-marked
+                    emacsos-assist-web--write-prompt
+                    emacsos-assist-web--replace-input
+                    emacsos-assist-web--restore-draft
+                    emacsos-assist-web--append-pending
+                    emacsos-assist-web--entry-append-pending
+                    emacsos-assist-web--entry-insert-before
+                    emacsos-assist-web--entry-add-action
+                    emacsos-assist-web--clear-action-range
+                    emacsos-assist-web--render-recovery-draft-action
+                    emacsos-assist-web--rerender-queue
+                    emacsos-assist-web--discard-entry-render
+                    emacsos-assist-web--entry-remove-render
+                    emacsos-assist-web--restore-recovery-draft
+                    emacsos-assist-web--enqueue-text))
+  (advice-add function :around #'emacsos-assist-web--preserve-input-undo))
 
 (provide 'assist-web)
 ;;; assist-web.el ends here

@@ -366,7 +366,12 @@ Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
 thread, and =C-c a r= refreshes the catalog from any buffer.  =C-c a g=
 refreshes a canonical thread and Git view, or the catalog in a draft or elsewhere;
-=C-c a d= opens the thread's Magit diff or status.  Unrelated user
+=C-c a d= opens the thread's Magit diff or status.  In a thread,
+=M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
+you return to the present.  Recall never sends a message.  Ordinary undo and
+redo affect input edits across transcript refreshes; accepting input into the
+submission queue starts a new undo history.  =M-g i= opens the standard Imenu
+index of loaded messages, while =C-c b/f= retain their message-boundary motion.  Unrelated user
 bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
 these global shortcuts and expose previous bindings.  The list also uses =g=
 to refresh, =RET= or mouse-1 to open a thread, and its local =C-c a n= shortcut.
