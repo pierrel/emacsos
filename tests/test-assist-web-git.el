@@ -457,6 +457,26 @@
               (emacsos-assist-web-git--status-arm)
               (emacsos-assist-web-git--status-confirm))
             (should (string-match-p "commit changed" (buffer-string)))
+            (setq emacsos-assist-web-git--status-fresh t)
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                       (lambda () "token"))
+                      ((symbol-function 'emacsos-assist-web--trustfiles)
+                       (lambda () nil))
+                      ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                      ((symbol-function 'url-retrieve)
+                       (lambda (_url callback &rest _)
+                         (let ((response (generate-new-buffer " *git-merge-conflict*")))
+                           (with-current-buffer response
+                             (insert "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\n\r\n")
+                             (setq-local url-http-response-status 409
+                                         url-http-content-type "application/json"
+                                         url-http-end-of-headers (copy-marker (point)))
+                             (insert "{\"outcome\":\"conflict\"}")
+                             (funcall callback '(:error (error http 409))))
+                           response))))
+              (emacsos-assist-web-git--status-arm)
+              (emacsos-assist-web-git--status-confirm))
+            (should (string-match-p "Server merge conflicted" (buffer-string)))
             (setq remote-outcome "merged"
                   remote-status 500
                   emacsos-assist-web-git--status-fresh t)

@@ -383,7 +383,9 @@ Save, commit and push any
 local work you want included before confirming: unsaved, staged, uncommitted,
 untracked and locally committed-but-unpushed changes are excluded. A failed
 status request labels any prior observation stale; an unconfirmed POST outcome
-is never retried automatically. Unrelated user
+is never retried automatically. Complete server conflict, busy, and stale
+responses are shown distinctly; a transport failure remains unconfirmed.
+Unrelated user
 bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
 these global shortcuts and expose previous bindings.  The list also uses =g=
 to refresh, =RET= or mouse-1 to open a thread, and its local =C-c a n= shortcut.

@@ -2275,8 +2275,8 @@ Only an optional UTF-8 charset parameter may follow the exact subtype."
     (buffer &optional allow-status array-type object-type)
   "Return BUFFER's JSON value or signal a useful local error.
 When ALLOW-STATUS is non-nil, require an integer HTTP status and a top-level
-object, retaining that status as `http_status' so the submission adapter can
-classify a bounded structured refusal without exposing its detail.  ARRAY-TYPE
+object, retaining that status as `http_status' so callers can classify a
+bounded structured response.  ARRAY-TYPE
 defaults to `list' and OBJECT-TYPE defaults to `alist'."
   (with-current-buffer buffer
     (let ((status url-http-response-status)
@@ -2772,7 +2772,13 @@ does not downgrade a separate chat-accepted Git observation."
                                                 origin method path status nil
                                                 run-owner request-tid git-get-owner)
                                              ((error quit) nil)))))
-			       (if (plist-get transport-status :error)
+		       ;; url-http marks complete 4xx/5xx responses as errors.
+		       (if (and (plist-get transport-status :error)
+                                (not (and allow-status
+                                          (integerp status)
+                                          (<= 400 status 599)
+                                          (equal (plist-get transport-status :error)
+                                                 (list 'error 'http status)))))
 				   (setq problem "Assist Web connection unavailable")
 				 (condition-case parse-error
 				     (setq value
