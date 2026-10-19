@@ -18,7 +18,7 @@ generic =phone-install= target does not define them.
 | Hide or show the keyboard | =emacsos-pinephone-toggle-keyboard= |
 | Restart the supervised phone UI | =emacsos-pinephone-restart-ui-session= |
 
-Use =Alt+Tab= to move between full-screen applications.  Return to ordinary
+Use =Alt+Tab= to move between applications.  Return to ordinary
 chat with =M-x emacsos--chat-show-top-buffer=.
 
 * Chat and messages
@@ -179,7 +179,7 @@ alternate-screen history.
 |---------+--------|
 | Power button | Blank the display; press again to wake |
 | Volume button | Wake the display |
-| =Alt+Tab= | Move to the next full-screen application |
+| =Alt+Tab= | Move to the next application |
 
 When the custom modifier-swipe keyboard is active, swipe upward from a character
 for =Control+character= and downward for =Meta+character=.
