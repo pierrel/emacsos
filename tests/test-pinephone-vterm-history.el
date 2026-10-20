@@ -51,7 +51,7 @@
                     (vterm-copy-mode-done nil)
                     (should-not vterm-copy-mode)
                     (should (eq (current-local-map) terminal-map))
-                    (should (eq (key-binding (kbd "C-c S-d"))
+                    (should (eq (key-binding [3 68])
                                 #'dtach-shell-reconnect))
                     (should (equal (reverse keys) '("<stop>" "<start>")))
                     (should (equal vterm-mode-map shared-map)))

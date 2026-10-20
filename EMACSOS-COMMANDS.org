@@ -166,7 +166,7 @@ ordinary chat, editing, and Assist buffers have no separate Emacs control pane.
 | Save | =M-x save-buffer= |
 | Undo | =M-x undo= |
 | Open or choose a persistent terminal | =M-x dtach-shell= or =C-c d= |
-| Reconnect the current persistent terminal | =M-x dtach-shell-reconnect= or =C-c S-d= |
+| Reconnect the current persistent terminal | =M-x dtach-shell-reconnect= or =C-c D= |
 
 On PinePhone, tap =History= above a terminal or drag its text to enter
 native vterm copy mode.  =Live= resumes terminal output.  The header shows
