@@ -12,6 +12,40 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_stopped_approval_uses_visible_header_when_snapshot_is_still_ready(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--snapshot '((thread . ((status . "ready")))))
+          (let ((entry (emacsos-assist-web--entry "Synthetic approval:send_email"
+                                                'accepted-unobserved "synthetic-key")))
+            (setf (plist-get entry :run-id) "run-original"
+                  (plist-get entry :approval-stopped) t
+                  (plist-get entry :requires-reobserve) t)
+            (setq emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web--stopped-reobserve (list :kind 'approval :entry entry))
+            (cl-letf (((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+                      ((symbol-function 'emacsos-assist-web-send) #'ignore)
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore)
+                      ((symbol-function 'phone-e2e-wait)
+                       (lambda (predicate) (unless (funcall predicate) (error "Unmet condition"))))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _body _callback &rest _)
+                         (unless (and (equal method "GET")
+                                      (equal path "threads/thread-1/approvals")
+                                      (eq entry (emacsos-assist-web--queue-head))
+                                      (equal (plist-get entry :run-id) "run-original"))
+                           (error "Discovery lost its original Run or exact request"))
+                         (throw 'discovered t))))
+              (unless (catch 'discovered (phone-e2e-approval "send_email") nil)
+                (error "Visible approval action did not request the collection"))))))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_build_uses_remaining_global_budget_and_refuses_after_expiry(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

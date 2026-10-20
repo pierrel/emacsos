@@ -127,7 +127,7 @@
 
 (defun phone-e2e-approval (kind)
   "Review and confirm KIND through the production shared client with real HTTP."
-  (let ((source (current-buffer)) preview text original-run)
+  (let ((source (current-buffer)) preview text original-run discovery)
     (when (member kind '("send_email" "email_archive" "email_delete"))
       (emacsos-assist-web--replace-input (concat "Synthetic approval:" kind))
       (emacsos-assist-web-send)
@@ -140,7 +140,17 @@
       (unless (equal (alist-get 'status (alist-get 'thread emacsos-assist-web--snapshot)) "ready")
         (error "Independent approval fixture did not reach ready Run state")))
     (emacsos-assist-web--replace-input "Synthetic unsent draft")
-    (button-activate (phone-e2e-button (lambda (label) (equal label "Review pending action"))))
+    (if (emacsos-assist-web--approval-stopped-p)
+        (let* ((header (emacsos-assist-web--thread-header))
+               (position (string-match "\\[Review\\]" header))
+               (map (and position (get-text-property position 'local-map header)))
+               (command (and map (lookup-key map [header-line mouse-1]))))
+          (unless (commandp command)
+            (error "Stopped Run has no visible Review header action"))
+          (setq discovery "header-review")
+          (call-interactively command))
+      (setq discovery "thread-review")
+      (button-activate (phone-e2e-button (lambda (label) (equal label "Review pending action")))))
     (phone-e2e-wait
      (lambda () (and (setq preview (get-buffer (format "*assist Approval %s*"
                                                       (buffer-local-value 'emacsos-assist-web--thread-id source))))
@@ -178,7 +188,7 @@
     (unless (equal (emacsos-assist-web--input) "Synthetic unsent draft")
       (error "Approval lost the unsent draft"))
     `((approval_kind . ,kind) (approval_preview . ,text)
-      (two_taps . t) (draft_preserved . t) (discovery_used . t)
+      (two_taps . t) (draft_preserved . t) (discovery_used . t) (discovery_control . ,discovery)
       (original_run . ,original-run) (original_run_reconciled . ,(and original-run t)))))
 
 (defun phone-e2e-main (action tid text)

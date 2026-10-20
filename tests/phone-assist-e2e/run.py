@@ -311,6 +311,8 @@ class Driver:
                 receipt = self.client(surface, tid, kind)
                 assert receipt["approval_kind"] == kind
                 assert receipt["two_taps"] and receipt["draft_preserved"] and receipt["discovery_used"]
+                assert receipt["discovery_control"] == ("header-review" if kind in {
+                    "send_email", "email_archive", "email_delete"} else "thread-review")
                 if kind in {"send_email", "email_archive", "email_delete"}:
                     assert receipt["original_run"] and receipt["original_run_reconciled"]
                 if setup and "run_id" in setup:
