@@ -526,6 +526,9 @@ hour, until revoked or thread deletion, or decline. An active grant offers
 =Revoke access=. Region downloads show the recorded region, known/unknown size and
 geocoder rebuild warning; importing, ready and failed results have no approval
 controls. A fresh region proposal receives its own review.
+Pending non-mail cards require the complete advertised decision set before the
+client displays controls; incomplete, duplicated or state-incompatible sets fail
+validation rather than gaining an action from the renderer.
 
 Every decision uses two taps; another action or window disarms confirmation.
 Tokens bind the exact displayed proposal and scope. An in-flight decision fences

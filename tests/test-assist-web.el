@@ -8896,5 +8896,64 @@
       (when (buffer-live-p preview) (kill-buffer preview))
       (kill-buffer source))))
 
+(defconst test-assist-web--reply-approval
+  '((kind . "send_reply") (token . "01234567890123456789012345678901")
+    (state . "pending") (sender . "+15555550100")
+    (action . ((name . "send_reply") (args . ((text . "Complete synthetic reply\nFinal line")))))
+    (decisions . ("approve" "edit" "reject"))))
+
+(defconst test-assist-web--download-approval
+  '((kind . "geo_download") (token . "01234567890123456789012345678901")
+    (state . "pending") (slug . "test/exact-region") (display_name . "Synthetic region")
+    (size_bytes . 1200) (warning . "Import rebuilds the geocoder; requests pause during replacement.")
+    (decisions . ("approve" "reject"))))
+
+(ert-deftest test-assist-web-approval-pending-requires-complete-advertised-decisions ()
+  (dolist (fixture (list test-assist-web--egress-approval test-assist-web--reply-approval
+                         test-assist-web--download-approval))
+    (let ((complete (alist-get 'decisions fixture)))
+      (dolist (partial (list nil (list (car complete)) (make-list (length complete) (car complete))))
+        (let ((proposal (copy-tree fixture)))
+          (setf (alist-get 'decisions proposal) partial)
+          (should-error (emacsos-assist-web--require-approval
+                         `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1"))))
+      (let ((proposal (copy-tree fixture)))
+        (setf (alist-get 'decisions proposal) (reverse (copy-sequence complete)))
+        (should (emacsos-assist-web--require-approval
+                 `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1")))))
+  (let ((proposal (copy-tree test-assist-web--egress-approval)))
+    (setf (alist-get 'decisions proposal) '("revoke"))
+    (should-error (emacsos-assist-web--require-approval
+                   `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1"))))
+
+(ert-deftest test-assist-web-approval-reply-renders-complete-recipient-and-text ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval))
+    (emacsos-assist-web--require-approval
+     `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p (regexp-quote "Reply to: +15555550100\n\nComplete synthetic reply\nFinal line")
+                            (buffer-string)))
+    (should (test-assist-web--approval-button "Approve and send"))
+    (should (test-assist-web--approval-button "Edit reply"))
+    (should (test-assist-web--approval-button "Reject"))))
+
+(ert-deftest test-assist-web-approval-download-renders-exact-region-size-and-warning ()
+  (dolist (size '(1200 nil))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--download-approval))
+      (setf (alist-get 'size_bytes emacsos-assist-web--approval) size)
+      (emacsos-assist-web--require-approval
+       `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+      (emacsos-assist-web--render-approval)
+      (dolist (text (list "Download: Synthetic region" "Region: test/exact-region"
+                         (if size "Size: 1200 bytes" "Size unknown")
+                         (alist-get 'warning emacsos-assist-web--approval)))
+        (should (string-match-p (regexp-quote text) (buffer-string))))
+      (should (test-assist-web--approval-button "Approve download"))
+      (should (test-assist-web--approval-button "Decline")))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

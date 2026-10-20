@@ -81,7 +81,12 @@ Run and deliberately retains the preceding canonical snapshot until completion.
 Discovery waits for the initial canonical GET to settle instead of treating a
 cached snapshot as the fresh response. Fresh independent requests use the
 rendered thread review button. Receipts name which visible control was activated.
-Every flow preserves an unsent draft. Before seeding an independent network or
+Before either confirmation tap, the client compares the rendered preview with
+fixture expectations: complete mail headers/body, SMS recipient/text, exact
+network destination/reason/scope choices, or region identity/size/rebuild warning.
+Fresh network and region identities come from fixture setup, not the preview
+being checked. Missing or wrong fields fail before submission; receipts mark
+successful field verification. Every flow preserves an unsent draft. Before seeding an independent network or
 download request, the driver requires a free real queue, no active/pending Runs,
 and canonical ready status. A network acknowledgment is followed through its
 new main continuation to success before the next scenario proceeds. The client

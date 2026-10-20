@@ -135,8 +135,9 @@ class Driver:
         return json.loads(self.docker("exec", "--user", "1000:1000", "-i", self.name + "-client",
             "python", "-c", script, input=json.dumps({"method": method, "path": path, "body": body})))
 
-    def client(self, action, tid="", text=""):
-        expression = "(phone-e2e-main " + " ".join(json.dumps(x) for x in (action, tid, text)) + ")"
+    def client(self, action, tid="", text="", expected=None):
+        values = (action, tid, text, json.dumps(expected))
+        expression = "(phone-e2e-main " + " ".join(json.dumps(x) for x in values) + ")"
         output = self.execute("client", "emacs", "-Q", "--batch", "-L", "/src/emacsos",
             "-l", "/src/emacsos/tests/phone-assist-e2e/client.el", "--eval", expression, timeout=RUN_SECONDS)
         line = next((l[9:] for l in output.splitlines() if l.startswith("E2E_JSON:")), None)
@@ -331,8 +332,19 @@ class Driver:
                         p["kind"] == kind and p["state"] == "pending"
                         for p in self.api("GET", "/api/v1/phone/threads/" + tid + "/approvals")["proposals"]))
                 prior_runs = {run["id"] for run in self.state(tid)["runs"]} if kind == "egress" else None
-                receipt = self.client(surface, tid, kind)
+                if kind == "send_email":
+                    expected = ['From: Synthetic assistant <assistant@example.test>\n', 'To: reader@example.test\n',
+                                'Cc: oversight@example.test\n', 'Subject: Synthetic review\n', '\n\nComplete synthetic body\n\n']
+                elif kind in {"email_archive", "email_delete"}:
+                    expected = ['Id: synthetic-message\n', 'From: sender@example.test\n', 'To: reader@example.test\n',
+                                'Date: 2026-10-20\n', 'Subject: Synthetic message\n', '\n\nComplete synthetic mailbox body\n\n']
+                elif kind == "send_reply":
+                    expected = ['Reply to: +15555550100\n\nComplete synthetic SMS reply\n\n']
+                else:
+                    expected = setup['expected_preview']
+                receipt = self.client(surface, tid, kind, expected)
                 assert receipt["approval_kind"] == kind
+                assert receipt["preview_fields_verified"]
                 assert receipt["two_taps"] and receipt["draft_preserved"] and receipt["discovery_used"]
                 assert receipt["discovery_control"] == ("header-review" if kind in {
                     "send_email", "email_archive", "email_delete"} else "thread-review")

@@ -12,6 +12,42 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_incomplete_preview_fails_before_confirmation(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(progn (dolist (case '(("send_reply" "Reply to: +15555550100" "Complete synthetic SMS reply")
+                                        ("geo_download" "Region: test/wrong-region" "Region: test/exact-region")))
+          (let ((source (generate-new-buffer " *fixture-preview-source*"))
+                (preview (get-buffer-create "*assist Approval thread-1*")) (taps 0))
+            (unwind-protect
+                (progn
+                  (with-current-buffer preview
+                    (setq-local emacsos-assist-web--approval `((kind . ,(car case))))
+                    (insert (cadr case)))
+                  (with-current-buffer source
+                    (emacsos-assist-web-mode)
+                    (setq emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web--snapshot '((thread . ((status . "ready")))))
+                    (insert-text-button "Review pending action" 'action (lambda (_) nil))
+                    (cl-letf (((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+                              ((symbol-function 'phone-e2e-wait)
+                               (lambda (predicate) (unless (funcall predicate) (error "Unmet condition"))))
+                              ((symbol-function 'emacsos-assist-web--submit-approval)
+                               (lambda (&rest _) (cl-incf taps))))
+                      (unless (condition-case problem
+                                  (progn (phone-e2e-approval (car case) (list (caddr case))) nil)
+                                (error (string-match-p "Approval preview missing fixture field"
+                                                       (error-message-string problem))))
+                        (error "Incomplete preview did not fail at field verification"))
+                      (unless (= taps 0) (error "Incomplete preview submitted a decision")))))
+              (kill-buffer preview) (kill-buffer source))))
+          (phone-e2e-require-preview "Reply to: +15555550100\\nComplete synthetic SMS reply"
+                                     '("Reply to: +15555550100" "Complete synthetic SMS reply")))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_independent_setup_waits_for_real_run_and_queue_quiescence(self):
         driver = Driver.__new__(Driver)
         observations = [
