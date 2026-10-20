@@ -507,25 +507,45 @@ nonterminal Run state, but it ends this finite live-text observation. Its exact
 status check exposes the compact =Review= header action without discarding the accepted
 Run receipt or saved draft. After a decision, the same logical Run handle follows
 the approval resume and reconciles its completed canonical snapshot.
-Tap =Review= in a stopped Run header or =Review pending action= in its snapshot to fetch a complete scrollable preview. Outbound email
-shows From, To, fixed Cc, subject and body; =Edit email= changes To, subject and body
-and returns to review before sending. Email archive and Trash proposals show the
-exact affected messages, their bodies and =Open email= links. An unavailable
-complete email preview offers rejection only. Approve/send and reject use two taps;
-another action or window disarms confirmation. Tokens bind decisions to the displayed proposal.
-An in-flight decision blocks another submission across preview refreshes and recreated
-views until its acknowledgment settles. The editor uses the same canonical body text
-as the preview, with CRLF normalized to LF.
-After an unconfirmed decision, refresh to inspect server state before acting again.
+Tap =Review= in a stopped Run header or =Review pending action= in a canonical
+snapshot to fetch all supported proposals. Network and region-download requests
+are discoverable even when the ordinary Run is ready. =Approvals and results=
+keeps retained independent results accessible. Several requests open one native
+chooser; phone and desktop use this same client code.
+
+Outbound Email shows From, To, fixed Cc, subject and body; =Edit email= returns to
+complete review before sending. Archive and recoverable Trash show exact messages,
+bodies and =Open email= links. An unavailable complete mailbox preview permits
+rejection only; an oversized outbound preview explicitly points to Assist Web
+while leaving independent requests visible.
+
+SMS reply review shows the exact recipient and full draft, with approve/edit/reject.
+The reply editor returns to review; edits must fit 65536 UTF-8 bytes. Network review
+shows the exact host/port, labels the agent's reasons as unverified, and offers one
+hour, until revoked or thread deletion, or decline. An active grant offers
+=Revoke access=. Region downloads show the recorded region, known/unknown size and
+geocoder rebuild warning; importing, ready and failed results have no approval
+controls. A fresh region proposal receives its own review.
+
+Every decision uses two taps; another action or window disarms confirmation.
+Tokens bind the exact displayed proposal and scope. An in-flight decision fences
+peer previews until acknowledgment settles. Replies and Email keep accepted Run
+receipts; independent service acknowledgments carry their own exact kind/token
+and actual status instead of inventing a Run. A failed or unconfirmed POST hides
+controls until explicit refresh, without automatically repeating the effect.
+Refresh can close a disappeared proposal even if it was selected from a chooser
+while the request was in flight. Access denials fence all peers and close previews;
+an old callback cannot reopen them.
+
+The Email editor and preview share canonical body text with CRLF normalized to LF.
 Oversized edits stay in the editor: To allows 320 characters, subject 998 UTF-8
 bytes and body 65536 UTF-8 bytes; the encoded request is capped at 512 KiB.
-An accepted decision rechecks its stopped Run owners even if another view
-refreshed the preview while the decision was in flight.
-Approval previews are fetched afresh and are not stored in the local snapshot cache.
-Headers remain single-line; bodies wrap and scroll. An empty fresh preview closes
-the old approval buffer and removes its decision controls.
-An approval access denial fences all thread peers and closes the old preview;
-an earlier response cannot reopen it.
+An accepted decision rechecks stopped Run owners even if another view refreshed
+the preview while the decision was in flight. Previews are fetched afresh and
+are not stored in the local snapshot cache. Headers remain single-line; bodies
+wrap and scroll. New request kinds reuse the existing server owners, without
+an independent desktop implementation or client-owned approval authority.
+
 If Assist confirms that the thread was deleted while an observer is open, the
 client retains visible partial text and the next draft, clears the accepted
 retry identity, and starts the next submission as a new thread.  If the durable

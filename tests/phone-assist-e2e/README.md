@@ -68,3 +68,17 @@ credentials. SIGINT/SIGTERM or a failed scenario still perform bounded cleanup.
 Assertions must remain enabled; optimized Python refuses before any resources.
 The source-only build images remain cached. Run fast driver regressions with
 `make test-phone-assist-e2e-harness`; the normal `make test-elisp` includes them.
+
+## HITL-only panel
+
+Add `--hitl-only` to the existing driver command to run the shared approval panel
+instead of the nine Git/reset scenarios. Both normal phone loading and the actual
+`assist-desktop.el` loader exercise the same production client functions. Every
+supported kind is reviewed through its visible canonical discovery action and
+confirmed with two taps. Mail flows retain and reconcile their original stopped
+Run, and every flow preserves an unsent draft. Independent network/download
+requests must be visible with ordinary Run status ready. The server fixture uses
+fresh synthetic requests and records fake effects; no real user data, provider
+operation or network grant is used. Exact receipts are saved with the normal
+client results. This panel is protocol/lifecycle evidence, not model, sandbox
+security or physical-device acceptance.

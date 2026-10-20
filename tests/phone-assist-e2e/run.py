@@ -296,6 +296,34 @@ class Driver:
         (self.args.logs / "terminal-sandbox-census.json").write_text(json.dumps(census, indent=2))
         self.passed("live child completion wakes queued parent user before exactly one handoff")
 
+    def hitl_scenarios(self):
+        """Explicit capability flows; provider effects and fixture inference are synthetic."""
+        result = self.client("new", text="Initialize synthetic approval thread")
+        tid = result["thread_id"]
+        for surface in ("approval", "approval-desktop"):
+            for kind in ("send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download"):
+                setup = None
+                if kind in {"send_reply", "egress", "geo_download"}:
+                    setup = self.api("POST", "/__e2e/approval/" + tid, {"kind": kind})
+                    self.wait("pending " + kind, lambda: any(
+                        p["kind"] == kind and p["state"] == "pending"
+                        for p in self.api("GET", "/api/v1/phone/threads/" + tid + "/approvals")["proposals"]))
+                receipt = self.client(surface, tid, kind)
+                assert receipt["approval_kind"] == kind
+                assert receipt["two_taps"] and receipt["draft_preserved"] and receipt["discovery_used"]
+                if kind in {"send_email", "email_archive", "email_delete"}:
+                    assert receipt["original_run"] and receipt["original_run_reconciled"]
+                if setup and "run_id" in setup:
+                    self.wait("completed approval " + kind, lambda: any(
+                        run["work_id"] == next(r["work_id"] for r in self.state(tid)["runs"]
+                                                if r["id"] == setup["run_id"])
+                        and run["status"] == "success" for run in self.state(tid)["runs"]))
+                self.passed(surface + ": " + kind + " complete preview, two taps and draft preservation")
+        effects = self.state(tid)["synthetic_effects"]
+        for kind in ("send_email", "email_archive", "email_delete", "send_reply", "geo_download"):
+            assert sum(effect["kind"] == kind for effect in effects) == 2
+        self.passed("all fake external effects occurred once per reviewed proposal")
+
     def cleanup(self):
         if not self.created:
             return
@@ -330,6 +358,7 @@ def main():
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--emacsos-source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--logs", type=Path, required=True)
+    parser.add_argument("--hitl-only", action="store_true", help="Run the shared phone/desktop HITL capability panel")
     args = parser.parse_args()
     def interrupted(signum, frame):
         raise KeyboardInterrupt("Client interrupted; cleaning up its container")
@@ -338,7 +367,10 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix=driver.name + "-") as name:
             driver.bootstrap(Path(name))
-            driver.scenarios()
+            if args.hitl_only:
+                driver.hitl_scenarios()
+            else:
+                driver.scenarios()
     finally:
         try:
             driver.cleanup()

@@ -8377,6 +8377,7 @@
 (ert-deftest test-assist-web-approval-http-denial-fences-preview-and-old-callback ()
   "Malformed approval denials latch every peer before an old callback can return."
   (dolist (status '(401 403 404))
+   (dolist (path '("approval" "approvals"))
     (let ((source (generate-new-buffer " *approval denial source*"))
           (peer (generate-new-buffer " *approval denial peer*"))
           (preview (get-buffer-create "*assist Approval thread-1*"))
@@ -8414,7 +8415,7 @@
                            response))))
               (with-current-buffer source
                 (emacsos-assist-web--request
-                 "GET" "threads/thread-1/approval" nil (lambda (&rest _) nil))))
+                 "GET" (format "threads/thread-1/%s" path) nil (lambda (&rest _) nil))))
             (dolist (buffer (list source peer))
               (with-current-buffer buffer
                 (should emacsos-assist-web--denied)
@@ -8426,7 +8427,7 @@
                        (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
             (should-not (get-buffer "*assist Approval thread-1*")))
         (dolist (buffer (list preview peer source))
-          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+          (when (buffer-live-p buffer) (kill-buffer buffer))))))))
 
 (ert-deftest test-assist-web-canonical-reauthorization-clears-thread-denial ()
   "Canonical authorization clears a denied thread and its live peers."
@@ -8786,6 +8787,114 @@
               (should (test-assist-web--approval-button "Refresh proposal"))))
         (when (buffer-live-p preview) (kill-buffer preview))
         (kill-buffer source)))))
+
+(defconst test-assist-web--egress-approval
+  '((kind . "egress") (token . "01234567890123456789012345678901")
+    (state . "pending") (host . "docs.example.test") (port . 443)
+    (task . "Read synthetic documentation") (main_task . "")
+    (lifetime . "") (decisions . ("hour" "always" "decline"))))
+
+(ert-deftest test-assist-web-parity-approval-ready-thread-discovery ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'approval_count (alist-get 'thread snapshot)) 1)
+      (emacsos-assist-web--render snapshot)
+      (should (test-assist-web--approval-button "Review pending action")))))
+
+(ert-deftest test-assist-web-parity-approval-egress-scope-and-two-taps ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "parity-egress"
+          emacsos-assist-web--approval (copy-tree test-assist-web--egress-approval))
+    (should (emacsos-assist-web--require-approval
+             `((thread_id . "parity-egress") (proposal . ,emacsos-assist-web--approval)) "parity-egress"))
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "docs.example.test:443" (buffer-string)))
+    (should (string-match-p "For this thread only" (buffer-string)))
+    (let ((button (test-assist-web--approval-button "Allow for 1 hour")) decisions)
+      (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                 (lambda (decision) (push decision decisions))))
+        (button-activate button)
+        (should-not decisions)
+        (button-activate button)
+        (should (equal decisions '("hour")))))))
+
+(ert-deftest test-assist-web-parity-approval-all-kinds-share-one-chooser ()
+  (let ((source (generate-new-buffer " *parity-source*")) preview)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "parity-list"))
+          (emacsos-assist-web--approval-choose
+           source "parity-list" (list (copy-tree test-assist-web--egress-approval)
+                                     (copy-tree test-assist-web--email-approval)))
+          (setq preview (current-buffer))
+          (should (string-match-p "egress: docs.example.test" (buffer-string)))
+          (should (string-match-p "send_email: Email" (buffer-string)))
+          (button-activate (test-assist-web--approval-button "egress: docs.example.test [pending]"))
+          (should (test-assist-web--approval-button "Allow for this thread")))
+      (when (buffer-live-p preview) (kill-buffer preview))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-parity-approval-result-does-not-offer-grants ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--egress-approval))
+    (setf (alist-get 'state emacsos-assist-web--approval) "declined"
+          (alist-get 'decisions emacsos-assist-web--approval) nil)
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "State: declined" (buffer-string)))
+    (should-not (test-assist-web--approval-button "Allow for 1 hour"))
+    (should-not (test-assist-web--approval-button "Decline"))))
+
+(ert-deftest test-assist-web-parity-approval-non-run-ack-is-exact ()
+  (let ((proposal test-assist-web--egress-approval))
+    (should (emacsos-assist-web--approval-ack-p
+             `((thread_id . "thread-1") (kind . "egress")
+               (token . ,(alist-get 'token proposal)) (status . "approved")) "thread-1" proposal))
+    (should-not (emacsos-assist-web--approval-ack-p
+                 '((thread_id . "thread-1") (run_id . "forged") (status . "approved"))
+                 "thread-1" proposal))
+    (should-not (emacsos-assist-web--approval-ack-p
+                 '((thread_id . "thread-1") (kind . "egress") (token . "other") (status . "approved"))
+                 "thread-1" proposal))))
+
+(ert-deftest test-assist-web-parity-approval-invalid-summary-preserves-draft ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--render (copy-tree test-assist-web--snapshot))
+    (emacsos-assist-web--replace-input "Unsent draft")
+    (let ((before (buffer-string))
+          (snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'approval_count (alist-get 'thread snapshot)) "1"
+            (alist-get 'approval_results (alist-get 'thread snapshot)) t)
+      (should-error (emacsos-assist-web--render snapshot))
+      (should (equal (buffer-string) before))
+      (should (equal (emacsos-assist-web--input) "Unsent draft")))))
+
+(ert-deftest test-assist-web-parity-approval-empty-refresh-closes-selected-chooser ()
+  (let ((source (generate-new-buffer " *parity-empty-source*")) preview callback
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "parity-empty"))
+          (emacsos-assist-web--approval-choose
+           source "parity-empty" (list test-assist-web--egress-approval test-assist-web--email-approval))
+          (setq preview (current-buffer))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+            (emacsos-assist-web-review-approval source)
+            (with-current-buffer preview
+              (button-activate (test-assist-web--approval-button "egress: docs.example.test [pending]")))
+            (funcall callback '((thread_id . "parity-empty") (proposals . nil)) nil)
+            (should-not (buffer-live-p preview))))
+      (when (buffer-live-p preview) (kill-buffer preview))
+      (kill-buffer source))))
 
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here
