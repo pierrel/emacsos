@@ -80,7 +80,7 @@ the generic =phone-install= target does not define them.
 
 | Key | Action |
 |-----+--------|
-| =C-<return>= | Send from every chat |
+| =C-<return>= | Send from every chat; canonical Assist sends its draft from anywhere in the thread |
 | =C-c C-r= | Refresh canonical Assist, SMS, or file-backed chat |
 | =C-c C-k= | Abort or detach canonical Assist, ordinary, or file-backed chat |
 | =C-c C-o= | Open the HTTP(S) object in canonical Assist, ordinary, or file-backed chat |

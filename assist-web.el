@@ -4028,6 +4028,11 @@ of it, together with the oldest pagination cursor already reached."
                message-start (point)
                `(emacsos-assist-web-message-id ,(alist-get 'id message)
                  rear-nonsticky t)))))
+        (when (equal (alist-get 'status thread) "error")
+          (insert (propertize
+                   (concat "Thread error: "
+                           (or (alist-get 'error thread) "Run failed.") "\n\n")
+                   'face 'error)))
         (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t))
         (emacsos-assist-web--write-prompt)

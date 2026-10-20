@@ -377,7 +377,9 @@ the =C-c a= global shortcuts and expose previous bindings.  The list also uses =
 to refresh, =RET= or mouse-1 to open a thread, and its local =C-c a n= shortcut.
 =M-x emacsos-desktop-assist= opens the same list.  =M-x emacsos-assist-web-new-thread=
 selects a repository and harness and opens a local draft.  Type after the final => = prompt in a thread/draft;
-=RET= inserts a newline and =C-RET= sends.  =C-c C-r= refreshes the thread,
+=RET= inserts a newline and =C-RET= sends the draft from anywhere in the
+thread, including above the prompt.  Canonical thread errors also appear before
+the prompt, below earlier replies.  =C-c C-r= refreshes the thread,
 =C-c C-l= loads older messages, and =C-c C-k= aborts/detaches with the client's
 existing canonical outcome checks.  Loading the file alone makes no request;
 the entry command refreshes the catalog.
