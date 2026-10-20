@@ -105,11 +105,20 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
     (setq last-command this-command)))
 
 (ert-deftest interaction-control-enter-submits-draft-from-transcript-and-prompt ()
-  (dolist (location '(transcript prompt input))
+  "C-enter appends the draft without splitting or relabeling an old reply."
+  (dolist (location '(mid-bot transcript prompt input))
     (interaction-test--editing
-      (let ((emacsos--assist-active-surface nil) requests)
+      (let* ((emacsos--assist-active-surface nil)
+             (tail (marker-position emacsos-assist-web--prompt-marker))
+             (transcript (buffer-substring (point-min) tail))
+             (old-bot (alist-get 'text (cadr (alist-get 'messages interaction-test--snapshot))))
+             requests)
         (goto-char (point-max)) (insert "send this draft")
         (goto-char (pcase location
+                     ('mid-bot
+                      (goto-char (point-min))
+                      (search-forward old-bot)
+                      (- (point) (/ (length old-bot) 2)))
                      ('transcript (point-min))
                      ('prompt (1- (emacsos-assist-web--prompt-start)))
                      ('input (+ 3 (emacsos-assist-web--prompt-start)))))
@@ -121,8 +130,24 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
         (should (equal requests '(("POST" "threads/thread-1/messages"
                                  ((message . "send this draft"))))))
         (should (equal (emacsos-assist-web--input) ""))
-        (should (equal (plist-get (car emacsos-assist-web--queue) :text)
-                       "send this draft"))))))
+        (let ((entry (car emacsos-assist-web--queue)))
+          (should (equal-including-properties
+                   (buffer-substring (point-min) tail) transcript))
+          (should (= (marker-position (plist-get entry :user-start)) tail))
+          (should-not (get-text-property tail 'emacsos-assist-web-message-id))
+          (should (equal (plist-get entry :text) "send this draft"))
+          (should (< (plist-get entry :user-start) (plist-get entry :assistant-start)))
+          (should (<= (plist-get entry :assistant-end)
+                      (marker-position emacsos-assist-web--prompt-marker)))
+          (emacsos-assist-web--entry-reset-assistant entry 1)
+          (emacsos-assist-web--entry-append-rendered-delta entry "new streamed reply")
+          (should (equal-including-properties
+                   (buffer-substring (point-min) tail) transcript))
+          (should (equal (buffer-substring-no-properties
+                          (plist-get entry :assistant-start) (plist-get entry :assistant-end))
+                         "new streamed reply"))
+          (should (<= (plist-get entry :assistant-end)
+                      (marker-position emacsos-assist-web--prompt-marker))))))))
 
 (ert-deftest interaction-accepted-run-failure-is-visible-beside-draft ()
   (interaction-test--editing

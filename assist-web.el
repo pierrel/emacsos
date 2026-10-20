@@ -5570,7 +5570,7 @@ nonowner cannot rewrite that image through passive kill or idle saves."
         (emacsos-assist-web--entry-set-assistant-status entry status)))))
 
 (defun emacsos-assist-web--entry-append-pending (entry)
-  "Render ENTRY with fresh markers while preserving the editable draft tail."
+  "Append ENTRY at the prompt with fresh markers, preserving the draft tail."
   (let* ((input-start (emacsos-assist-web--prompt-start))
          (draft (emacsos-assist-web--input))
          (input-offset (and input-start (>= (point) input-start)
@@ -5580,7 +5580,7 @@ nonowner cannot rewrite that image through passive kill or idle saves."
          (inhibit-read-only t))
     (when prompt-start
       (delete-region prompt-start (point-max))
-      (emacsos-assist-web--entry-insert-before entry (point))
+      (emacsos-assist-web--entry-insert-before entry prompt-start)
       (goto-char (point-max))
       (emacsos-assist-web--write-prompt)
       (when (and draft (not (equal draft (plist-get entry :text)))) (insert draft))
