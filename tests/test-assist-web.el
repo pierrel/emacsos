@@ -8955,5 +8955,121 @@
       (should (test-assist-web--approval-button "Approve download"))
       (should (test-assist-web--approval-button "Decline")))))
 
+
+(ert-deftest test-assist-web-approval-uncertain-post-invalidates-chooser-and-older-get ()
+  (dolist (get-first '(nil t))
+    (let ((source (generate-new-buffer " *uncertain chooser source*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          get post posts)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path payload callback &rest _)
+                         (if (equal method "GET") (setq get callback)
+                           (push payload posts) (setq post callback))))
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+              (emacsos-assist-web-review-approval source)
+              (funcall get `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--reply-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "approve"))
+              (emacsos-assist-web-review-approval source)
+              (let ((old-get get)
+                    (collection `((thread_id . "thread-1")
+                                  (proposals . ,(list test-assist-web--reply-approval
+                                                      test-assist-web--egress-approval)))))
+                (when get-first (funcall old-get collection nil))
+                (funcall post nil "synthetic timeout")
+                (unless get-first (funcall old-get collection nil))
+                (with-current-buffer "*assist Approval thread-1*"
+                  (should (string-match-p "Decision not confirmed" (buffer-string)))
+                  (should-not (test-assist-web--approval-button "send_reply: +15555550100 [pending]"))
+                  (should-not (test-assist-web--approval-button "Approve and send")))
+                (should (= (length posts) 1))
+                ;; Only a read started after the uncertain result can restore controls.
+                (emacsos-assist-web-review-approval source)
+                (funcall get collection nil)
+                (with-current-buffer "*assist Approval thread-1*"
+                  (button-activate (test-assist-web--approval-button "send_reply: +15555550100 [pending]"))
+                  (let ((button (test-assist-web--approval-button "Approve and send")))
+                    (button-activate button)
+                    (should (= (length posts) 1))
+                    (button-activate button)
+                    (should (= (length posts) 2)))))))
+        (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+        (kill-buffer source)))))
+
+(ert-deftest test-assist-web-approval-reply-editor-reviews-before-exact-second-tap ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "reply-editor"
+          emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval))
+    (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)) posts)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path payload _callback &rest _)
+                   (push (list method path payload) posts))))
+        (emacsos-assist-web--edit-reply)
+        (widget-value-set (car widget-field-list) "Edited reply\r\nFinal line")
+        (goto-char (point-min))
+        (search-forward "Review edited reply")
+        (widget-apply (widget-at (1- (point))) :notify nil)
+        (should buffer-read-only)
+        (should (equal emacsos-assist-web--approval-edited '((text . "Edited reply\nFinal line"))))
+        (should (string-match-p "Edited reply\nFinal line" (buffer-string)))
+        (should-not posts)
+        (let ((button (test-assist-web--approval-button "Send edited reply")))
+          (button-activate button)
+          (should-not posts)
+          (button-activate button))
+        (should (equal posts
+                       `(("POST" "threads/reply-editor/approval"
+                          ((kind . "send_reply") (token . ,(alist-get 'token test-assist-web--reply-approval))
+                           (decision . "edit") (text . "Edited reply\nFinal line"))))))))))
+
+(ert-deftest test-assist-web-approval-reply-editor-cancel-keeps-reviewed-text ()
+  (dolist (prior '(nil "Previously reviewed edit"))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--thread-id "reply-cancel"
+            emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval)
+            emacsos-assist-web--approval-edited (and prior `((text . ,prior))))
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (ert-fail "Cancelling an edit submitted a request"))))
+          (emacsos-assist-web--edit-reply)
+          (widget-value-set (car widget-field-list) "Discard this edit")
+          (goto-char (point-min))
+          (search-forward "Cancel edit")
+          (widget-apply (widget-at (1- (point))) :notify nil)
+          (should buffer-read-only)
+          (should (equal emacsos-assist-web--approval-edited (and prior `((text . ,prior)))))
+          (should (string-match-p (regexp-quote (or prior "Complete synthetic reply\nFinal line"))
+                                  (buffer-string)))
+          (should-not (string-match-p "Discard this edit" (buffer-string))))))))
+
+(ert-deftest test-assist-web-approval-reply-editor-enforces-utf8-boundary ()
+  (dolist (value (list (make-string 65536 ?a) (make-string 32768 ?é)
+                       (make-string 65537 ?a) (make-string 32769 ?é) "   " "bad\0text"))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--thread-id "reply-size"
+            emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval))
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+        (emacsos-assist-web--edit-reply)
+        (let ((field (car widget-field-list)))
+          (widget-value-set field value)
+          (goto-char (point-min))
+          (search-forward "Review edited reply")
+          (widget-apply (widget-at (1- (point))) :notify nil)
+          (if (= (string-bytes value) 65536)
+              (progn (should buffer-read-only)
+                     (should (equal (alist-get 'text emacsos-assist-web--approval-edited) value)))
+            (should-not buffer-read-only)
+            (should-not emacsos-assist-web--approval-edited)
+            (should (equal (widget-value field) value))))))))
+
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here

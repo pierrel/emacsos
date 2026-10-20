@@ -8474,11 +8474,14 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                (kill-buffer preview)))
            (message "Approval decision accepted")))
         (t
+         (when (eq record (emacsos-assist-web--thread-safety-record tid))
+           (cl-incf (plist-get record :approval-generation)))
          (let ((preview (or (get-buffer (format "*assist Approval %s*" tid)) buffer)))
            (when (buffer-live-p preview)
             (with-current-buffer preview
-             (when (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
-                        (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval)))
+             (when (or (null emacsos-assist-web--approval)
+                       (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
+                            (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval))))
                    ;; The request may have been accepted. A fresh server preview
                    ;; is required before exposing any decision buttons again.
                    (let ((inhibit-read-only t))
