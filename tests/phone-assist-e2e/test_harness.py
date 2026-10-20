@@ -12,6 +12,43 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_approval_waits_for_pending_canonical_refresh_over_cached_ready(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (let* ((cached '((thread . ((id . "thread-1") (description . "Synthetic")
+                                     (status . "ready") (workspace . ((repo_label . "Fixture")))))
+                           (messages . nil)))
+                 (fresh (copy-tree cached)))
+            (setf (alist-get 'status (alist-get 'thread fresh)) "awaiting_approval"
+                  (alist-get 'approval_count (alist-get 'thread fresh)) 1)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+                      ((symbol-function 'phone-e2e-wait)
+                       (lambda (predicate)
+                         (unless (funcall predicate)
+                           (setq emacsos-assist-web--requests nil)
+                           (emacsos-assist-web--render fresh)
+                           (unless (funcall predicate) (error "Unmet refresh condition")))))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _body _callback &rest _)
+                         (unless (and (equal method "GET")
+                                      (equal path "threads/thread-1/approvals")
+                                      (equal (alist-get 'status (alist-get 'thread
+                                                        emacsos-assist-web--snapshot)) "awaiting_approval"))
+                           (error "Discovery preceded the canonical refresh"))
+                         (throw 'discovered t))))
+              (emacsos-assist-web--render cached t)
+              (setq emacsos-assist-web--requests '(pending-canonical-get))
+              (unless (catch 'discovered (phone-e2e-approval "send_reply") nil)
+                (error "Fresh visible control did not request approvals")))))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_stopped_approval_uses_visible_header_when_snapshot_is_still_ready(self):
         repo = Path(__file__).resolve().parents[2]
         expression = """(with-temp-buffer

@@ -78,7 +78,8 @@ supported kind is reviewed through its visible canonical discovery action and
 confirmed with two taps. Mail flows retain and reconcile their original stopped
 Run using the actual header's Review action: Refresh checks that exact stopped
 Run and deliberately retains the preceding canonical snapshot until completion.
-Fresh independent requests use the rendered thread review button. Receipts name
+Discovery waits for the initial canonical GET to settle instead of treating a
+cached snapshot as the fresh response. Fresh independent requests use the rendered thread review button. Receipts name
 which visible control was activated. Every flow preserves an unsent draft. Independent network/download
 requests must be visible with ordinary Run status ready. The server fixture uses
 fresh synthetic requests and records fake effects; no real user data, provider

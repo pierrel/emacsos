@@ -128,6 +128,8 @@
 (defun phone-e2e-approval (kind)
   "Review and confirm KIND through the production shared client with real HTTP."
   (let ((source (current-buffer)) preview text original-run discovery)
+    (phone-e2e-wait (lambda () (and emacsos-assist-web--snapshot
+                                   (not emacsos-assist-web--requests))))
     (when (member kind '("send_email" "email_archive" "email_delete"))
       (emacsos-assist-web--replace-input (concat "Synthetic approval:" kind))
       (emacsos-assist-web-send)
