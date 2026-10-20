@@ -1,0 +1,16 @@
+#+title: Client Git status after thread-access denial
+#+date: 2026-10-20
+
+* Result
+
+A canonical thread-access denial invalidates and rerenders every status view
+attached to that source thread, even when its server and local probes already
+completed. The existing view immediately shows stale server facts and no merge
+action. Confirmation already refuses a stale authorization; this also makes
+the visible state truthful without another user action.
+
+* Historical supersessions
+
+- =docs/2026-10-20-client-git-merge-review-corrections.org=, "Result":
+  authorization-bound facts are now visibly invalidated on a later canonical
+  denial, not only when a callback or confirmation rerenders the status view.

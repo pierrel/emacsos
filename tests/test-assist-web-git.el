@@ -764,6 +764,51 @@
       (when (buffer-live-p view) (kill-buffer view))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest test-assist-web-git-completed-view-rerenders-on-later-denial ()
+  "A later canonical denial removes fresh controls from an existing Git view."
+  (let ((source (generate-new-buffer " *assist-git-denial-source*"))
+        (view (generate-new-buffer " *assist-git-denial-view*"))
+        (tid "thread-status-denial-r4")
+        (repo "aaaaaaaaaaaaaaaaaaaa")
+        completed)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id tid
+                        emacsos-assist-web-git--metadata
+                        `(:tid ,tid :repo-key ,repo :branch "assist/server" :status "ready")
+                        emacsos-assist-web--denied nil))
+          (with-current-buffer view
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity (cons tid repo))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--status-inspect-local)
+                       (lambda (_view _generation _metadata callback)
+                         (funcall callback t)))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _body callback &rest _)
+                         (funcall callback
+                                  `((thread_id . ,tid) (repo_key . ,repo)
+                                    (branch . "assist/server")
+                                    (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                    (state . "available")
+                                    (observed_at . "2026-10-20T14:00:00Z")) nil))))
+              (emacsos-assist-web-git--status-refresh
+               (lambda (server local) (setq completed (list server local)))))
+            (should (equal completed '(t t)))
+            (should (string-match-p "Server observation: fresh" (buffer-string)))
+            (should (string-match-p "  SERVER Merge & Push  " (buffer-string))))
+          (with-current-buffer source
+            (emacsos-assist-web--canonical-denied 403))
+          (with-current-buffer view
+            (should-not emacsos-assist-web-git--status-fresh)
+            (should (string-match-p "Server observation: stale/unavailable"
+                                    (buffer-string)))
+            (should-not (string-match-p "  SERVER Merge & Push  "
+                                        (buffer-string)))))
+      (when (buffer-live-p view) (kill-buffer view))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
 (ert-deftest test-assist-web-git-denial-terminalizes-post-merge-refresh ()
   "An async access denial clears the refresh slot and reports interruption."
   (let ((source (generate-new-buffer " *assist-git-denied-refresh-source*"))

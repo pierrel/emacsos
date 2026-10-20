@@ -199,14 +199,23 @@ This is a query only; it never fetches, edits or creates a checkout."
     (or changed retry-after-denial)))
 
 (defun emacsos-assist-web-git--invalidate (reason)
-  "Cancel the old Git request and mark it unavailable for REASON."
+  "Cancel this thread's Git request and show REASON in attached status views."
   (cl-incf emacsos-assist-web-git--epoch)
   (emacsos-assist-web-git--stop-merge-refresh)
   (when (eq emacsos-assist-web--denied t)
     (setq emacsos-assist-web-git--retry-after-denial t))
   (emacsos-assist-web-git--cancel)
   (setq emacsos-assist-web-git--unavailable reason)
-  (emacsos-assist-web-git--update-headers))
+  (emacsos-assist-web-git--update-headers)
+  (let ((source (current-buffer)))
+    (dolist (view (buffer-list))
+      (when (and (eq (buffer-local-value 'emacsos-assist-web-git--status-source view)
+                     source)
+                 (buffer-local-value 'emacsos-assist-web-git--status-identity view))
+        (with-current-buffer view
+          (setq emacsos-assist-web-git--status-fresh nil
+                emacsos-assist-web-git--status-error reason)
+          (emacsos-assist-web-git--status-render))))))
 
 (defun emacsos-assist-web-git--gate-reason (&optional _remote-view)
   "Return a bounded current Git unavailability reason, if any."

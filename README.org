@@ -395,7 +395,8 @@ facts so the next =C-c a d= uses the updated main comparison. The minibuffer
 reports merge and refresh progress; a blocked local checkout stays visibly
 incomplete rather than claiming a successful fast-forward.
 Reauthorization invalidates previously observed server Git facts; refresh them
-before another Merge & Push confirmation.
+before another Merge & Push confirmation. A later thread-access denial also
+rerenders an already-open Git status view as stale and removes its merge action.
 Unrelated user
 bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
 these global shortcuts and expose previous bindings.  The list also uses =g=
