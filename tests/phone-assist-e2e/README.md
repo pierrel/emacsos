@@ -96,3 +96,5 @@ fresh synthetic requests and records fake effects; no real user data, provider
 operation or network grant is used. Exact receipts are saved with the normal
 client results. This panel is protocol/lifecycle evidence, not model, sandbox
 security or physical-device acceptance.
+The final effect census waits for the fake executor to record both surfaces'
+effects, then retains the exact two-per-kind assertions so duplicates still fail.

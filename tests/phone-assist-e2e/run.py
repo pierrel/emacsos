@@ -358,8 +358,14 @@ class Driver:
                 if kind == "egress":
                     self.wait_egress_resolution(tid, prior_runs)
                 self.passed(surface + ": " + kind + " complete preview, two taps and draft preservation")
-        effects = self.state(tid)["synthetic_effects"]
-        for kind in ("send_email", "email_archive", "email_delete", "send_reply", "geo_download"):
+        kinds = ("send_email", "email_archive", "email_delete", "send_reply", "geo_download")
+
+        def effects_complete():
+            effects = self.state(tid)["synthetic_effects"]
+            return effects if all(sum(e["kind"] == kind for e in effects) >= 2 for kind in kinds) else None
+
+        effects = self.wait("all reviewed synthetic effects recorded", effects_complete)
+        for kind in kinds:
             assert sum(effect["kind"] == kind for effect in effects) == 2
         self.passed("all fake external effects occurred once per reviewed proposal")
 

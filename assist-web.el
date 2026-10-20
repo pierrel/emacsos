@@ -8004,6 +8004,11 @@ ACCEPTED-RUN-ID is its already validated Run identity."
         (error "Invalid Assist approval response"))
       (pcase kind
         ("send_reply"
+         (setq proposal (copy-tree proposal))
+         (let ((args (alist-get 'args (alist-get 'action proposal))))
+           (when (stringp (alist-get 'text args))
+             (setf (alist-get 'text args)
+                   (emacsos-assist-web--canonical-message-text (alist-get 'text args)))))
          (unless (and (emacsos-conversation-valid-text-p (alist-get 'sender proposal))
                       (equal (alist-get 'name (alist-get 'action proposal)) "send_reply")
                       (emacsos-assist-web--valid-message-text-p
@@ -8464,14 +8469,12 @@ ACCEPTED-RUN-ID is its already validated Run identity."
              (unless (memq source owners)
                (emacsos-assist-web-refresh-thread source)))
            (let ((preview (or (get-buffer (format "*assist Approval %s*" tid)) buffer)))
-             (when (and (buffer-live-p preview)
-                      (equal (alist-get 'kind proposal)
-                             (alist-get 'kind (buffer-local-value
-                                              'emacsos-assist-web--approval preview)))
-                      (equal (alist-get 'token proposal)
-                             (alist-get 'token (buffer-local-value
-                                               'emacsos-assist-web--approval preview))))
-               (kill-buffer preview)))
+             (when (buffer-live-p preview)
+               (with-current-buffer preview
+                 (when (or (null emacsos-assist-web--approval)
+                           (and (equal (alist-get 'kind proposal) (alist-get 'kind emacsos-assist-web--approval))
+                                (equal (alist-get 'token proposal) (alist-get 'token emacsos-assist-web--approval))))
+                   (kill-buffer preview)))))
            (message "Approval decision accepted")))
         (t
          (when (eq record (emacsos-assist-web--thread-safety-record tid))

@@ -520,6 +520,9 @@ rejection only; an oversized outbound preview explicitly points to Assist Web
 while leaving independent requests visible.
 
 SMS reply review shows the exact recipient and full draft, with approve/edit/reject.
+Incoming CRLF and CR line endings normalize for preview and editing while retaining
+the server's review token. Acknowledged decisions close their matching card or an
+unselected chooser; a genuinely different selected peer remains visible.
 The reply editor returns to review; edits must fit 65536 UTF-8 bytes. Network review
 shows the exact host/port, labels the agent's reasons as unverified, and offers one
 hour, until revoked or thread deletion, or decline. An active grant offers

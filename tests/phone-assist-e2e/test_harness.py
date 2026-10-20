@@ -12,6 +12,55 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_final_effect_census_awaits_executor_and_refuses_duplicates(self):
+        expected = [effect for kind in ('send_email', 'email_archive', 'email_delete',
+                                        'send_reply', 'geo_download')
+                    for effect in [{'kind': kind}, {'kind': kind}]]
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                driver = Driver.__new__(Driver)
+                flows, censuses = [], []
+                pending = []
+
+                def client(action, _tid='', kind='', _expected=None, **kwargs):
+                    if action == 'new':
+                        return {'thread_id': 'thread-1'}
+                    flows.append((action, kind))
+                    return {'approval_kind': kind, 'preview_fields_verified': True,
+                            'two_taps': True, 'draft_preserved': True, 'discovery_used': True,
+                            'discovery_control': 'header-review' if kind in {
+                                'send_email', 'email_archive', 'email_delete'} else 'thread-review',
+                            'original_run': 'original', 'original_run_reconciled': True}
+
+                def api(method, _path, body=None):
+                    if method == 'POST':
+                        pending[:] = [body['kind']]
+                        return {'expected_preview': ['synthetic fixture field']}
+                    return {'proposals': [{'kind': pending[0], 'state': 'pending'}]}
+
+                def state(_tid):
+                    effects = []
+                    if len(flows) == 12:
+                        censuses.append(True)
+                        effects = expected[:-1] if len(censuses) == 1 else (
+                            expected + ([{'kind': 'send_reply'}] if duplicate else []))
+                    return {'runs': [], 'synthetic_effects': effects}
+
+                def wait(_description, predicate):
+                    result = predicate()
+                    return result if result else predicate()
+
+                driver.client, driver.api, driver.state, driver.wait = client, api, state, wait
+                driver.wait_ready = driver.wait_egress_resolution = Mock()
+                driver.passed = Mock()
+                if duplicate:
+                    with self.assertRaises(AssertionError):
+                        driver.hitl_scenarios()
+                else:
+                    driver.hitl_scenarios()
+                self.assertEqual(len(flows), 12)
+                self.assertEqual(len(censuses), 2)
+
     def test_incomplete_preview_fails_before_confirmation(self):
         repo = Path(__file__).resolve().parents[2]
         expression = """(progn (dolist (case '(("send_reply" "Reply to: +15555550100" "Complete synthetic SMS reply")
