@@ -79,9 +79,14 @@ confirmed with two taps. Mail flows retain and reconcile their original stopped
 Run using the actual header's Review action: Refresh checks that exact stopped
 Run and deliberately retains the preceding canonical snapshot until completion.
 Discovery waits for the initial canonical GET to settle instead of treating a
-cached snapshot as the fresh response. Fresh independent requests use the rendered thread review button. Receipts name
-which visible control was activated. Every flow preserves an unsent draft. Independent network/download
-requests must be visible with ordinary Run status ready. The server fixture uses
+cached snapshot as the fresh response. Fresh independent requests use the
+rendered thread review button. Receipts name which visible control was activated.
+Every flow preserves an unsent draft. Before seeding an independent network or
+download request, the driver requires a free real queue, no active/pending Runs,
+and canonical ready status. A network acknowledgment is followed through its
+new main continuation to success before the next scenario proceeds. The client
+still independently asserts ready status when reviewing network/download cards.
+The server fixture uses
 fresh synthetic requests and records fake effects; no real user data, provider
 operation or network grant is used. Exact receipts are saved with the normal
 client results. This panel is protocol/lifecycle evidence, not model, sandbox

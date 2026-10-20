@@ -12,6 +12,43 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_independent_setup_waits_for_real_run_and_queue_quiescence(self):
+        driver = Driver.__new__(Driver)
+        observations = [
+            {"queue_holder": "thread-1", "runs": [{"status": "success"}]},
+            {"queue_holder": None, "runs": [{"status": "pending"}]},
+            {"queue_holder": None, "runs": [{"status": "running"}]},
+            {"queue_holder": None, "runs": [{"status": "success"}]},
+            {"queue_holder": None, "runs": [{"status": "awaiting_approval"}, {"status": "success"}]},
+        ]
+        driver.state = Mock(side_effect=observations)
+        driver.api = Mock(side_effect=[{"thread": {"status": stage}}
+                                      for stage in ["ready", "ready", "ready", "starting_sandbox", "ready"]])
+
+        def wait(_description, predicate):
+            for _ in observations[:-1]:
+                self.assertIsNone(predicate())
+            return predicate()
+
+        driver.wait = wait
+        self.assertEqual(driver.wait_ready("thread-1"), observations[-1])
+
+    def test_egress_ack_waits_for_new_main_resolution_not_an_old_success(self):
+        driver = Driver.__new__(Driver)
+        old = {"id": "old", "origin": "system", "status": "success"}
+        done = {"id": "new", "origin": "system", "status": "success"}
+        driver.state = Mock(side_effect=[{"runs": [old]},
+            {"runs": [old, {**done, "status": "pending"}]},
+            {"runs": [old, {**done, "status": "running"}]}, {"runs": [old, done]}])
+
+        def wait(_description, predicate):
+            for _ in range(3):
+                self.assertIsNone(predicate())
+            return predicate()
+
+        driver.wait = wait
+        self.assertEqual(driver.wait_egress_resolution("thread-1", {"old"}), done)
+
     def test_approval_waits_for_pending_canonical_refresh_over_cached_ready(self):
         repo = Path(__file__).resolve().parents[2]
         expression = """(with-temp-buffer

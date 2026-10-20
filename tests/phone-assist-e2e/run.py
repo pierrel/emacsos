@@ -153,6 +153,26 @@ class Driver:
         (self.args.logs / "state-last.json").write_text(self.scrub(json.dumps(result, indent=2)))
         return result
 
+    def wait_ready(self, tid):
+        """Observe real Run and queue quiescence before independent proposal setup."""
+        def ready():
+            observed = self.state(tid)
+            thread = self.api("GET", "/api/v1/phone/threads/" + tid)["thread"]
+            return (observed if thread["status"] == "ready"
+                    and observed["queue_holder"] is None
+                    and not any(run["status"] in {"pending", "running", "revocation_pending"}
+                                for run in observed["runs"]) else None)
+        return self.wait("ordinary Run and queue idle before independent approval", ready)
+
+    def wait_egress_resolution(self, tid, prior_runs):
+        """Require the acknowledged grant's actual main continuation to finish."""
+        def completed():
+            fresh = [run for run in self.state(tid)["runs"]
+                     if run["id"] not in prior_runs and run["origin"] == "system"]
+            assert len(fresh) <= 1, "An egress decision created duplicate main continuations"
+            return fresh[0] if fresh and fresh[0]["status"] == "success" else None
+        return self.wait("egress main continuation completed", completed)
+
     def git(self, checkout, *args):
         return self.execute("client", "git", "-C", checkout, *args).strip()
 
@@ -303,11 +323,14 @@ class Driver:
         for surface in ("approval", "approval-desktop"):
             for kind in ("send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download"):
                 setup = None
+                if kind in {"egress", "geo_download"}:
+                    self.wait_ready(tid)
                 if kind in {"send_reply", "egress", "geo_download"}:
                     setup = self.api("POST", "/__e2e/approval/" + tid, {"kind": kind})
                     self.wait("pending " + kind, lambda: any(
                         p["kind"] == kind and p["state"] == "pending"
                         for p in self.api("GET", "/api/v1/phone/threads/" + tid + "/approvals")["proposals"]))
+                prior_runs = {run["id"] for run in self.state(tid)["runs"]} if kind == "egress" else None
                 receipt = self.client(surface, tid, kind)
                 assert receipt["approval_kind"] == kind
                 assert receipt["two_taps"] and receipt["draft_preserved"] and receipt["discovery_used"]
@@ -320,6 +343,8 @@ class Driver:
                         run["work_id"] == next(r["work_id"] for r in self.state(tid)["runs"]
                                                 if r["id"] == setup["run_id"])
                         and run["status"] == "success" for run in self.state(tid)["runs"]))
+                if kind == "egress":
+                    self.wait_egress_resolution(tid, prior_runs)
                 self.passed(surface + ": " + kind + " complete preview, two taps and draft preservation")
         effects = self.state(tid)["synthetic_effects"]
         for kind in ("send_email", "email_archive", "email_delete", "send_reply", "geo_download"):
