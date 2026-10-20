@@ -33,6 +33,27 @@
                 (should (eq (lookup-key map [header-line mouse-1])
                             #'emacsos-assist-web-review-approval))))))))))
 
+(ert-deftest test-assist-web-git-phone-header-keeps-recovery-details-touchable ()
+  "Narrow headers retain the original Run-details link in recovery states."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 40)))
+      (dolist (state '(source-adoption other-owner))
+        (cl-letf (((symbol-function 'emacsos-assist-web--shared-recovery-state)
+                   (lambda () state)))
+          (let* ((header (emacsos-assist-web--thread-header))
+                 (details (string-match (regexp-quote "[?]") header))
+                 (map (and details
+                           (get-text-property details 'local-map header))))
+            (should (string-match-p "\\[Status\\]" header))
+            (should (string-match-p "\\[Merge\\]" header))
+            (should (<= (string-width header) 40))
+            (should details)
+            (should (eq (lookup-key map [header-line mouse-1])
+                        #'emacsos-assist-web-status-details))
+            (should (eq (get-text-property details 'mouse-face header)
+                        'highlight))
+            (should (get-text-property (1- details) 'display header))))))))
+
 (ert-deftest test-assist-web-git-pending-merge-keeps-outcome-buffer ()
   "Do not lose the in-flight POST callback by killing its status buffer."
   (let ((view (generate-new-buffer " *assist-git-pending-view*")))

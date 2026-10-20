@@ -381,6 +381,8 @@ action pattern. On the phone, the thread header's
 =Status= and =Merge= touch actions open those same views. The status view also
 offers =Refresh checkout= and =Git details= touch controls; narrow headers keep
 the current Run action available rather than clipping it behind extra Git controls.
+Long recovery labels shorten first, keeping the original clickable Run-details
+=[?]= action and its command in a 40-column header.
 Save, commit and push any
 local work you want included before confirming: unsaved, staged, uncommitted,
 untracked and locally committed-but-unpushed changes are excluded. A failed

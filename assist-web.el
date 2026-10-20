@@ -754,7 +754,7 @@ A shared stop may outlive its original buffer pending exact durable recovery."
      (t nil))))
 
 (defun emacsos-assist-web--thread-header ()
-  "Keep Run and Git Status/Merge actions reachable on the phone."
+  "Keep Run details and Git Status/Merge actions reachable on the phone."
   (let* ((run (emacsos-assist-web--lifecycle-header))
          (status-link (emacsos-assist-web--padded-action
                        "Status" #'emacsos-assist-web-git-status))
@@ -763,7 +763,17 @@ A shared stop may outlive its original buffer pending exact durable recovery."
          (actions (concat status-link merge-link))
          (remaining (max 0 (- (window-body-width) (string-width actions)))))
     (concat actions
-            (when run (truncate-string-to-width run remaining)))))
+            (when run
+              (let* ((details (emacsos-assist-web--details-link))
+                     (detail-start (and (>= remaining (string-width details))
+                                        (string-suffix-p details run)
+                                        (- (length run) (length details)))))
+                (if detail-start
+                    (concat (truncate-string-to-width
+                             (substring run 0 detail-start)
+                             (- remaining (string-width details)))
+                            (substring run detail-start))
+                  (truncate-string-to-width run remaining)))))))
 
 (defvar-local emacsos-assist-web--display-details-thread nil)
 
