@@ -371,20 +371,27 @@ refreshes a canonical thread and Git view, or the catalog in a draft or elsewher
 server's freshly observed published branch/commit alongside the actual local
 checkout branch or detached HEAD/commit, without fetching or modifying files.
 Both observation times are shown; local facts may become stale after inspection.
-=C-c a m= opens a warning and explicit confirmation for the SERVER's Merge &
-Push action, conditional on the displayed published commit still being the
-server's fetched tip; it does not merge local work. On the phone, the thread header's
+=C-c a m= asks for native minibuffer confirmation of the SERVER's exact
+published branch and commit after fetching fresh facts. The prompt warns that
+local work is excluded; scrolling the status view cannot cancel confirmation.
+The merge remains conditional on that published commit still being the
+server's fetched tip, and it does not merge local work. This Git action uses
+minibuffer confirmation at Pierre's request, unlike the usual phone two-tap
+action pattern. On the phone, the thread header's
 =Status= and =Merge= touch actions open those same views. The status view also
 offers =Refresh checkout= and =Git details= touch controls; narrow headers keep
 the current Run action available rather than clipping it behind extra Git controls.
-After the warning opens, scroll or TAB to the visible Confirm button; pressing
-=C-c a m= again only redisplays the warning and does not submit the merge.
 Save, commit and push any
 local work you want included before confirming: unsaved, staged, uncommitted,
 untracked and locally committed-but-unpushed changes are excluded. A failed
 status request labels any prior observation stale; an unconfirmed POST outcome
 is never retried automatically. Complete server conflict, busy, and stale
 responses are shown distinctly; a transport failure remains unconfirmed.
+After a verified merge, the client refreshes the originating thread, fetches
+the normal checkout (including published main), and observes fresh server Git
+facts so the next =C-c a d= uses the updated main comparison. The minibuffer
+reports merge and refresh progress; a blocked local checkout stays visibly
+incomplete rather than claiming a successful fast-forward.
 Unrelated user
 bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
 these global shortcuts and expose previous bindings.  The list also uses =g=
