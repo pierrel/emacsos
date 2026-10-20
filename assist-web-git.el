@@ -72,7 +72,6 @@
 
 (defvar emacsos-assist-web-git-thread-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c d") #'emacsos-assist-web-git-diff)
     (define-key map (kbd "C-c g") #'emacsos-assist-web-git-refresh)
     (define-key map (kbd "C-c ?") #'emacsos-assist-web-details)
     map))

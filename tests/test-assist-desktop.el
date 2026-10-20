@@ -151,7 +151,8 @@
     (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
     (emacsos-assist-web-git--sync-keys)
     (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-find-file))
-    (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
+    (should-not (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
+    (should (eq (key-binding (kbd "C-c a d")) #'emacsos-assist-web-git-diff))
     (should (eq (key-binding (kbd "C-c g")) #'emacsos-assist-web-git-refresh))))
 
 (provide 'test-assist-desktop)

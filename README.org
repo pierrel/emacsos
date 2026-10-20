@@ -220,7 +220,7 @@ privileged-container access, bounds and limitations.
 It does not load the phone OS, modem, keyboard, theme or server startup.
 Use Emacs 29 or newer with GnuTLS and native JSON support, Python 3.10+,
 Git, Make and OpenSSH.  Install Magit in your normal Emacs with
-=M-x package-install RET magit RET= for =C-c d= diffs.  No Python server or
+=M-x package-install RET magit RET= for =C-c a d= diffs.  No Python server or
 local model is needed on the laptop.
 
 On macOS with Homebrew:
@@ -422,7 +422,7 @@ or creating a checkout.  =emacsos-assist-web-find-file= provides the same bounda
 for an explicit file path; ordinary desktop file opening outside Assist is unchanged.
 =C-c b= and =C-c f= move between messages; forward navigation ends at the
 editable compose input and never sends the draft.  The existing =C-c g=
-explicitly refreshes Git, and =C-c d= opens the Magit =origin/main...HEAD= diff
+explicitly refreshes Git, and =C-c a d= opens the Magit =origin/main...HEAD= diff
 when clean or Magit status when current local edits exist.  =C-c ?= shows thread
 details and workspace location; use ordinary Emacs buffer navigation to return
 from file or Magit views.  Git keys become

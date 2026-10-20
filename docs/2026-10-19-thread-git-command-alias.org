@@ -1,0 +1,16 @@
+#+TITLE: Thread Git diff command binding
+#+DATE: 2026-10-19
+
+* Current binding
+Thread Git diff remains available as =C-c a d= on desktop and phone. The
+thread-local =C-c d= Git alias was removed so it does not shadow the phone's
+terminal binding or other context-specific commands. No Git fetching, diff
+calculation, or server contract changed in this correction.
+
+* Historical supersessions
+This document supersedes only the =C-c d= command-binding statements in
+=2026-09-24-thread-git-mirror.org= (=Implemented at this checkpoint= and
+=Open decisions and nonconformance=), =2026-09-26-thread-git-full-client.org=
+(=Contract=), =2026-09-27-thread-git-local-browsing.org= (=Contract=), and
+=2026-10-01-thread-git-workspaces.org= (=Current contract=). Their other
+point-in-time findings remain unchanged.

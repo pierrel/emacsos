@@ -500,7 +500,9 @@
       (setq-local emacsos-assist-web-git--fallback-file-opener nil)
       (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
       (emacsos-assist-web-git--sync-keys)
-      (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
+      (should-not (lookup-key emacsos-assist-web-git-thread-mode-map
+                              (kbd "C-c d")))
+      (should-not (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
       (should (eq (key-binding (kbd "C-c g")) #'emacsos-assist-web-git-refresh))
       (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-git-find-file))
       (setq-local emacsos-assist-web--thread-id nil)
@@ -525,7 +527,8 @@
           (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
           (emacsos-assist-web-git--sync-keys)
           (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-find-file))
-          (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))))
+          (should-not (eq (key-binding (kbd "C-c d"))
+                          #'emacsos-assist-web-git-diff))))
 
 (ert-deftest test-assist-web-git-later-composed-opener-survives-id-loss ()
   (with-temp-buffer
