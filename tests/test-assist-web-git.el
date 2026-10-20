@@ -65,26 +65,40 @@
         (should (equal command (list "/tools/python3" emacsos-assist-web-git-helper)))))))
 
 (ert-deftest test-assist-web-git-status-shows-factual-mismatch-and-stale-state ()
-  (with-temp-buffer
-    (special-mode)
-    (setq-local emacsos-assist-web-git--status-server
-                '((branch . "assist/server")
-                  (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                  (state . "available") (observed_at . "2026-10-18T15:00:00+00:00")))
-    (setq-local emacsos-assist-web-git--status-local
-                '((branch . "other")
-                  (local_oid . "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                  (observed_at . "2026-10-18T15:00:01+00:00")))
-    (setq-local emacsos-assist-web-git--status-fresh t)
-    (emacsos-assist-web-git--status-render)
-    (should (string-match-p "different branch or commit" (buffer-string)))
-    (should (string-match-p "Local observation: at .*may now be stale" (buffer-string)))
-    (should (string-match-p "Unsaved, staged, uncommitted, untracked"
-                            (buffer-string)))
-    (setq-local emacsos-assist-web-git--status-fresh nil)
-    (emacsos-assist-web-git--status-render)
-    (should (string-match-p "stale/unavailable" (buffer-string)))
-    (should-not (string-match-p "Confirm SERVER Merge" (buffer-string)))))
+  (let ((source (generate-new-buffer " *assist-git-display-source*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata))
+          (with-temp-buffer
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity
+                        '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
+                        emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-server
+                        '((branch . "assist/server")
+                          (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                          (state . "available") (observed_at . "2026-10-18T15:00:00+00:00"))
+                        emacsos-assist-web-git--status-local
+                        '((branch . "other")
+                          (local_oid . "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                          (observed_at . "2026-10-18T15:00:01+00:00")))
+            (emacsos-assist-web-git--status-render)
+            (should (string-match-p "different branch or commit" (buffer-string)))
+            (should (string-match-p "Local observation: at .*may now be stale" (buffer-string)))
+            (should (string-match-p "Unsaved, staged, uncommitted, untracked"
+                                    (buffer-string)))
+            (with-current-buffer source
+              (cl-incf emacsos-assist-web--auth-epoch))
+            (emacsos-assist-web-git--status-render)
+            (should (string-match-p "stale/unavailable" (buffer-string)))
+            (should-not (string-match-p "different branch or commit" (buffer-string)))
+            (should-not (string-match-p "SERVER Merge & Push  " (buffer-string)))))
+      (kill-buffer source))))
 
 (ert-deftest test-assist-web-git-status-keeps-checkout-and-help-touch-controls ()
   "Compact headers lead to reachable checkout refresh and Git details."
@@ -162,6 +176,8 @@
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
                         emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
                         emacsos-assist-web-git--status-server
                         '((branch . "assist/server") (state . "available")
                           (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
@@ -198,6 +214,8 @@
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
                         emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
                         emacsos-assist-web-git--status-server
                         '((branch . "assist/server") (state . "available")
                           (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
@@ -304,6 +322,8 @@
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
                         emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
                         emacsos-assist-web-git--status-server
                         '((branch . "assist/server") (state . "available")
                           (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
@@ -337,6 +357,8 @@
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
                         emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
                         emacsos-assist-web-git--status-server
                         '((branch . "assist/server") (state . "available")
                           (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
@@ -349,6 +371,44 @@
                        (lambda (&rest _) (setq submitted t))))
               (should-error (emacsos-assist-web-git--status-confirm) :type 'user-error))
             (should-not submitted)))
+      (when (buffer-live-p view) (kill-buffer view))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-git-reauthorization-requires-new-facts-before-prompt ()
+  "A later reauthorization does not revive facts from the old auth epoch."
+  (let ((source (generate-new-buffer " *assist-git-reauth-source*"))
+        (view (generate-new-buffer " *assist-git-reauth-view*"))
+        prompted submitted)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                        emacsos-assist-web--denied nil))
+          (with-current-buffer view
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity
+                        '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
+                        emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
+                        emacsos-assist-web-git--status-server
+                        '((branch . "assist/server") (state . "available")
+                          (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+            (with-current-buffer source
+              (setq emacsos-assist-web--denied t)
+              (cl-incf emacsos-assist-web--auth-epoch)
+              (setq emacsos-assist-web--denied nil))
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (&rest _) (setq prompted t) t))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (setq submitted t))))
+              (should-error (emacsos-assist-web-git--status-confirm) :type 'user-error))
+            (should-not prompted)
+            (should-not submitted)
+            (should-not emacsos-assist-web-git--status-fresh)
+            (should (string-match-p "authorization changed" (buffer-string)))))
       (when (buffer-live-p view) (kill-buffer view))
       (when (buffer-live-p source) (kill-buffer source)))))
 
@@ -482,6 +542,8 @@
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")
                         emacsos-assist-web-git--status-fresh t
+                        emacsos-assist-web-git--status-observation-source source
+                        emacsos-assist-web-git--status-auth-epoch 0
                         emacsos-assist-web-git--status-server
                         '((thread_id . "thread-1")
                           (repo_key . "aaaaaaaaaaaaaaaaaaaa")
@@ -567,7 +629,7 @@
             (setq-local emacsos-assist-web-git--status-source source
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")))
-          (cl-letf (((symbol-function 'emacsos-assist-web-refresh-thread)
+          (cl-letf (((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
                      (lambda (&rest _) (cl-incf thread-refreshes)))
                     ((symbol-function 'emacsos-assist-web-git--enqueue)
                      (lambda (&rest _) (cl-incf fetches)))
@@ -635,6 +697,70 @@
               (should-not result)
               (funcall local-callback nil)
               (should (equal result '(t nil))))))
+      (when (buffer-live-p view) (kill-buffer view))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-git-post-merge-thread-refresh-never-reposts-message ()
+  "Observing a merged thread cannot retry an unrelated rejected submission."
+  (let ((source (generate-new-buffer " *assist-git-rejected-source*"))
+        (view (generate-new-buffer " *assist-git-rejected-view*"))
+        (posts 0) (observations 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--denied nil
+                        emacsos-assist-web--queue '((:state retryable-rejected :key "old"))
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata))
+          (with-current-buffer view (special-mode))
+          (cl-letf (((symbol-function 'emacsos-assist-web--start-post)
+                     (lambda (&rest _) (cl-incf posts)))
+                    ((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
+                     (lambda (&rest _) (cl-incf observations)))
+                    ((symbol-function 'emacsos-assist-web-git--enqueue) #'ignore))
+            (with-current-buffer view
+              (emacsos-assist-web-git--refresh-after-merge source view)))
+          (should (= posts 0))
+          (should (= observations 0)))
+      (when (buffer-live-p view) (kill-buffer view))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest test-assist-web-git-late-local-probe-cannot-revive-denied-facts ()
+  "Authorization changed after the server GET makes late local facts stale."
+  (let ((source (generate-new-buffer " *assist-git-late-auth-source*"))
+        (view (generate-new-buffer " *assist-git-late-auth-view*"))
+        local-callback result)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                        emacsos-assist-web--denied nil))
+          (with-current-buffer view
+            (special-mode)
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity
+                        '("thread-1" . "aaaaaaaaaaaaaaaaaaaa"))
+            (cl-letf (((symbol-function 'emacsos-assist-web-git--status-inspect-local)
+                       (lambda (_view _generation _metadata completed)
+                         (setq local-callback completed)))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _body callback &rest _)
+                         (funcall callback
+                                  '((thread_id . "thread-1")
+                                    (repo_key . "aaaaaaaaaaaaaaaaaaaa")
+                                    (branch . "assist/server")
+                                    (published_revision . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                    (state . "available")
+                                    (observed_at . "2026-10-20T12:00:00Z")) nil))))
+              (emacsos-assist-web-git--status-refresh
+               (lambda (server local) (setq result (list server local))))
+              (should emacsos-assist-web-git--status-fresh)
+              (with-current-buffer source
+                (cl-incf emacsos-assist-web--auth-epoch))
+              (funcall local-callback t)
+              (should (equal result '(nil nil)))
+              (should-not emacsos-assist-web-git--status-fresh))))
       (when (buffer-live-p view) (kill-buffer view))
       (when (buffer-live-p source) (kill-buffer source)))))
 

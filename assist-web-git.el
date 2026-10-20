@@ -9,6 +9,7 @@
 (require 'subr-x)
 
 (declare-function emacsos-assist-web-git--metadata-from-snapshot "assist-web")
+(declare-function emacsos-assist-web--legacy-refresh-thread "assist-web")
 (declare-function emacsos-assist-web--canonical-authorized "assist-web")
 (declare-function emacsos-assist-web--valid-id-p "assist-web")
 (declare-function emacsos-assist-web--thread-header "assist-web")
@@ -59,6 +60,8 @@
 (defvar-local emacsos-assist-web-git--status-identity nil)
 (defvar-local emacsos-assist-web-git--status-server nil)
 (defvar-local emacsos-assist-web-git--status-fresh nil)
+(defvar-local emacsos-assist-web-git--status-observation-source nil)
+(defvar-local emacsos-assist-web-git--status-auth-epoch nil)
 (defvar-local emacsos-assist-web-git--status-local nil)
 (defvar-local emacsos-assist-web-git--status-local-state 'unavailable)
 (defvar-local emacsos-assist-web-git--status-error nil)
@@ -441,6 +444,17 @@ MANUAL permits a repeated status reminder."
                 (equal (plist-get emacsos-assist-web-git--metadata :repo-key)
                        (cdr identity)))))))
 
+(defun emacsos-assist-web-git--status-observation-current-p ()
+  "Whether the displayed Git facts retain their source authorization."
+  (and emacsos-assist-web-git--status-fresh
+       (eq emacsos-assist-web-git--status-observation-source
+           emacsos-assist-web-git--status-source)
+       (integerp emacsos-assist-web-git--status-auth-epoch)
+       (emacsos-assist-web-git--status-valid-source-p)
+       (let ((observed-epoch emacsos-assist-web-git--status-auth-epoch))
+         (with-current-buffer emacsos-assist-web-git--status-source
+           (eql observed-epoch emacsos-assist-web--auth-epoch)))))
+
 (defun emacsos-assist-web-git--status-refresh-checkout (_button)
   "Refresh this status view's original local checkout, without merging."
   (unless (emacsos-assist-web-git--status-valid-source-p)
@@ -461,7 +475,8 @@ MANUAL permits a repeated status reminder."
   "Render a touch-readable factual Git view without altering local work."
   (let ((inhibit-read-only t)
         (server emacsos-assist-web-git--status-server)
-        (local emacsos-assist-web-git--status-local))
+        (local emacsos-assist-web-git--status-local)
+        (fresh (emacsos-assist-web-git--status-observation-current-p)))
     (erase-buffer)
     (insert "Assist Git status\n\n")
     (when emacsos-assist-web-git--status-outcome
@@ -473,7 +488,7 @@ MANUAL permits a repeated status reminder."
                         (if (equal (alist-get 'state server) "unpublished")
                             "unpublished" "unavailable"))))
     (insert (format "Server observation: %s%s\n\n"
-                    (if emacsos-assist-web-git--status-fresh "fresh" "stale/unavailable")
+                    (if fresh "fresh" "stale/unavailable")
                     (if-let ((seen (alist-get 'observed_at server)))
                         (concat " at " seen) "")))
     (insert (format "Local checkout: %s\n"
@@ -491,7 +506,7 @@ MANUAL permits a repeated status reminder."
                       (if (eq emacsos-assist-web-git--status-local-state 'checking)
                           "checking" "unavailable; refresh to retry"))))
     (insert (format "Comparison: %s\n\n"
-                    (if (and emacsos-assist-web-git--status-fresh
+                    (if (and fresh
                              (alist-get 'published_revision server)
                              (alist-get 'local_oid local))
                         (if (and (equal (alist-get 'branch server)
@@ -516,7 +531,7 @@ MANUAL permits a repeated status reminder."
                         'action #'emacsos-assist-web-git--status-details)
     (insert "\n\n")
     (insert emacsos-assist-web-git--merge-warning)
-    (when (and emacsos-assist-web-git--status-fresh
+    (when (and fresh
                (equal (alist-get 'state server) "available")
                (not emacsos-assist-web-git--status-pending))
       (insert-text-button "  SERVER Merge & Push  "
@@ -534,8 +549,13 @@ MANUAL permits a repeated status reminder."
                       (buffer-local-value 'emacsos-assist-web--auth-epoch
                                           emacsos-assist-web-git--status-source)))
         (view (current-buffer)))
-    (unless (and (emacsos-assist-web-git--status-valid-source-p)
-                 emacsos-assist-web-git--status-fresh
+    (when (and emacsos-assist-web-git--status-fresh
+               (not (emacsos-assist-web-git--status-observation-current-p)))
+      (setq emacsos-assist-web-git--status-fresh nil
+            emacsos-assist-web-git--status-error
+            "Thread authorization changed; refresh Git facts")
+      (emacsos-assist-web-git--status-render))
+    (unless (and (emacsos-assist-web-git--status-observation-current-p)
                  (not emacsos-assist-web-git--status-pending)
                  (equal (alist-get 'state server) "available")
                  (stringp (alist-get 'branch server))
@@ -551,8 +571,7 @@ MANUAL permits a repeated status reminder."
           (setq emacsos-assist-web-git--status-outcome "Merge cancelled; nothing submitted")
           (emacsos-assist-web-git--status-render)
           (message "Merge cancelled"))
-      (unless (and (emacsos-assist-web-git--status-valid-source-p)
-                   emacsos-assist-web-git--status-fresh
+      (unless (and (emacsos-assist-web-git--status-observation-current-p)
                    (not emacsos-assist-web-git--status-pending)
                    (equal identity emacsos-assist-web-git--status-identity)
                    (equal server emacsos-assist-web-git--status-server)
@@ -704,8 +723,19 @@ or report failure immediately if authorization changes."
                   (when (and completed local-finished server-finished)
                     (let ((callback completed))
                       (setq completed nil)
+                      (when (and server-valid
+                                 (or (/= generation emacsos-assist-web-git--status-generation)
+                                     (not (eq source emacsos-assist-web-git--status-source))
+                                     (not (emacsos-assist-web-git--status-observation-current-p))))
+                        (setq server-valid nil local-valid nil
+                              emacsos-assist-web-git--status-fresh nil
+                              emacsos-assist-web-git--status-error
+                              "Thread authorization changed; refresh Git facts")
+                        (emacsos-assist-web-git--status-render))
                       (funcall callback server-valid local-valid))))))
     (setq emacsos-assist-web-git--status-fresh nil
+          emacsos-assist-web-git--status-observation-source nil
+          emacsos-assist-web-git--status-auth-epoch nil
           emacsos-assist-web-git--status-local nil
           emacsos-assist-web-git--status-local-state 'checking
           emacsos-assist-web-git--status-error nil)
@@ -761,7 +791,10 @@ or report failure immediately if authorization changes."
                  (setq emacsos-assist-web-git--status-fresh valid
                        emacsos-assist-web-git--status-error
                        (unless valid "Server Git facts unavailable; prior observation is stale"))
-                 (when valid (setq emacsos-assist-web-git--status-server value))
+                 (when valid
+                   (setq emacsos-assist-web-git--status-server value
+                         emacsos-assist-web-git--status-observation-source source
+                         emacsos-assist-web-git--status-auth-epoch auth-epoch))
                  (setq server-finished t server-valid (and valid t))
                  (let ((prompt (and valid
                                     emacsos-assist-web-git--status-prompt-after-refresh
@@ -796,8 +829,8 @@ CHECKOUT-COMPLETE says whether the local checkout reached its thread tip."
      (message "%s" emacsos-assist-web-git--status-outcome))))
 
 (defun emacsos-assist-web-git--refresh-after-merge (source view)
-  "Refresh SOURCE's thread and checkout after its verified server merge.
-VIEW receives the final refresh outcome."
+  "Refresh SOURCE's checkout after its verified server merge.
+Observe its thread only when no message is queued; VIEW receives the outcome."
   (message "Refreshing…")
   (if (not (buffer-live-p source))
       (progn
@@ -809,7 +842,10 @@ VIEW receives the final refresh outcome."
       (setq emacsos-assist-web-git--post-merge-view view)
       (condition-case nil
           (progn
-            (emacsos-assist-web-refresh-thread source)
+            ;; Legacy rendering cannot preserve a resident queue.  Leave it
+            ;; untouched; the public Refresh command may POST its head.
+            (unless (emacsos-assist-web--queue-head)
+              (emacsos-assist-web--legacy-refresh-thread source))
             (unless (and (not (eq emacsos-assist-web--denied t))
                          (plist-get emacsos-assist-web-git--metadata :branch))
               (error "Git checkout refresh unavailable"))
