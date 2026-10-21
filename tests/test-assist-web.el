@@ -617,6 +617,39 @@
     (should-not forwarded)
     (should (equal rejected "Assist Web encoded responses are not accepted"))))
 
+(ert-deftest test-assist-web-asset-request-304-does-not-expand-url-disk-cache ()
+  "A real stock 304 decoder must preserve the private cache's empty validator."
+  (let ((emacsos-assist-web--requests nil)
+        (response (generate-new-buffer " *asset-stock304*")) process result failure
+        (etag (concat "\"" (make-string 64 ?a) "\"")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token) (lambda () "token"))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'url-cache-extract)
+                   (lambda (&rest _) (ert-fail "Unowned URL disk cache read")))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (_url callback &rest _)
+                     (setq process (make-pipe-process :name "asset-stock304" :buffer response
+                                                       :noquery t :filter #'url-http-generic-filter))
+                     (test-assist-web--initialize-url-http-response response process)
+                     (with-current-buffer response
+                       (setq-local url-callback-function callback url-callback-arguments '(nil)))
+                     response)))
+          (emacsos-assist-web--request
+           "GET" "threads/asset-thread/assets?path=%2Ftmp%2Fchart.png" nil
+           (lambda (value problem) (setq result value failure problem))
+           nil nil nil nil nil t)
+          (funcall (process-filter process) process
+                   (concat "HTTP/1.1 304 Not Modified\r\nETag: " etag "\r\n\r\n"))
+          (should-not failure)
+          (should (= (plist-get result :status) 304))
+          (should (equal (plist-get result :etag) etag))
+          (should (equal (plist-get result :data) ""))
+          ;; The scoped filter binding must leave unrelated URL users alone.
+          (should-error (url-cache-extract "outside") :type 'ert-test-failed))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p response) (kill-buffer response)))))
+
 (ert-deftest test-assist-web-json-request-disables-redirects-and-encoding ()
   (let ((emacsos-assist-web--requests nil)
         (response (generate-new-buffer " *assist-web-request*"))

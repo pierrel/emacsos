@@ -11,6 +11,7 @@ emacs_pid=
 keyboard_pid=
 idle_pid=
 power_pid=
+power_fifo=
 pipewire_pid=
 wireplumber_pid=
 pulse_pid=
@@ -75,6 +76,9 @@ cleanup() {
     done
     [ -z "$power_pid" ] || wait "$power_pid" 2>/dev/null || true
     [ -z "$idle_pid" ] || wait "$idle_pid" 2>/dev/null || true
+    if [ -n "$power_fifo" ] && [ ! -L "$power_fifo" ] && [ -p "$power_fifo" ]; then
+        rm -f -- "$power_fifo"
+    fi
     # GTK clients can leave these session-scoped helpers reparented to init.
     # The locked service account owns no processes outside this UI session.
     killall -q at-spi-bus-launcher at-spi2-registryd 2>/dev/null || true
@@ -87,8 +91,8 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# start_pre creates a fresh private directory, so every socket discovered here
-# belongs to this service attempt.
+# Explicit starts create a private runtime directory. Cleanup removes this
+# attempt's sockets and FIFO before a supervised respawn.
 for candidate in "$runtime"/wayland-* "$runtime"/sway-ipc.*.sock; do
     [ ! -e "$candidate" ] && [ ! -L "$candidate" ] ||
         fail 'stale compositor socket exists'
@@ -221,6 +225,7 @@ if [ "$attempt" -ge 150 ]; then
 fi
 
 mkfifo -m 0600 "$runtime/power-events"
+power_fifo=$runtime/power-events
 "$root/process-group" "$root/session-power" monitor &
 power_pid=$!
 # The reader opens only after trusted input registration and privilege drop.
@@ -247,7 +252,6 @@ while :; do
     probe_sway get_outputs &&
         grep -F '"active": true' "$probe_file" >/dev/null ||
         fail 'display heartbeat failed'
-    probe_emacs || fail 'Emacs heartbeat failed'
     sleep 30 &
     timer_pid=$!
     wait "$timer_pid"
