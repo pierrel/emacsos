@@ -1,0 +1,26 @@
+#+title: Factual client Git status and server Merge and Push
+#+date: 2026-10-18
+
+* Contract
+
+=C-c a h= shows a fresh authenticated server-published thread branch and
+commit beside the actual local checkout branch or detached HEAD and commit.
+Each side shows its observation time; local facts are explicitly last observed
+and may already be stale.
+The local probe is bounded and read-only: no fetch, checkout, status index
+refresh or filesystem mutation. An unsuccessful server observation leaves old
+facts visibly stale rather than implying they are current.
+
+=C-c a m= opens the same view with an explicit warning and confirmation for
+the server's existing Merge and Push action. Phone touch actions =Status= and =Merge=
+in the thread header expose the same functions without entering a prefix on
+the T9 keyboard. The warning states that unsaved, staged, uncommitted,
+untracked, and locally committed-but-unpushed work is excluded. The local
+branch never chooses the server target or blocks the operation. No client
+merge, push, stash, rebase, branch switch, or repair occurs.
+Confirmation conditions the server action on that displayed published commit;
+a changed server tip requires a new observation and confirmation.
+
+The POST result is shown in a persistent view. A known conflict or busy result
+is distinct from success; an unknown transport outcome is not retried
+automatically. Root owns phone deployment and repository merge.
