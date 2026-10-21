@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import ctypes
+from datetime import datetime, timezone
 import errno
 import hashlib
 import json
@@ -79,11 +80,16 @@ def desktop_git_file(config: Path, name: str, limit: int = 65536) -> bytes:
 
 def directory(path: Path) -> None:
     """Admit or create only user-owned directories without symlink parents."""
-    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
-        raise Refusal("Git workspace path is not a private directory")
     if not path.exists():
         directory(path.parent)
         path.mkdir(mode=0o700)
+    admit_existing_directory(path)
+
+
+def admit_existing_directory(path: Path) -> None:
+    """Validate an existing private directory without creating it on a race."""
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise Refusal("Git workspace path is not a private directory")
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o022):
@@ -109,7 +115,8 @@ def approved_url(value: object) -> str:
     return value
 
 
-def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
+def configured_source(config: Path, repo_key: str) -> str:
+    """Read the approved repository identity without requiring network credentials."""
     raw = desktop_git_file(config, "assist-git-remotes.json")
     def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         values = {}
@@ -125,7 +132,19 @@ def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
     if (not isinstance(remotes, dict) or len(remotes) > 100
             or any(not isinstance(key, str) or not KEY.fullmatch(key) for key in remotes)):
         raise Refusal("Git repository map is invalid")
-    url = approved_url(remotes.get(repo_key))
+    return approved_url(remotes.get(repo_key))
+
+
+def local_environment() -> dict[str, str]:
+    """Use fixed local Git settings as the base for offline and SSH commands."""
+    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+
+
+def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
+    url = configured_source(config, repo_key)
     key, hosts = config / "assist-git-key", config / "assist-git-known-hosts"
     if (not desktop_git_file(config, key.name, 16384)
             or not desktop_git_file(config, hosts.name)):
@@ -134,11 +153,8 @@ def configuration(config: Path, repo_key: str) -> tuple[str, dict[str, str]]:
            + " -o UserKnownHostsFile=" + shlex.quote(str(hosts))
            + " -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
            + " -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8")
-    environment = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-                   "GIT_ATTR_NOSYSTEM": "1",
-                   "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0",
-                   "GIT_ALLOW_PROTOCOL": "ssh", "GIT_SSH_COMMAND": ssh, "LC_ALL": "C"}
+    environment = local_environment()
+    environment.update(GIT_ALLOW_PROTOCOL="ssh", GIT_SSH_COMMAND=ssh)
     return url, environment
 
 
@@ -375,10 +391,11 @@ def checkout_path(root: Path, repo_key: str, thread_id: str) -> Path:
     return root / repo_key / (thread_id + "-" + identity(repo_key, thread_id))
 
 
-def existing_checkout(path: Path, url: str, environment: dict[str, str]) -> bool:
+def checkout_source_matches(path: Path, url: str, environment: dict[str, str]) -> bool:
+    """Check a local checkout's approved source without sync-only policy gates."""
     if not path.exists() and not path.is_symlink():
         return False
-    directory(path)
+    admit_existing_directory(path)
     metadata = path / ".git"
     if metadata.is_symlink() or not metadata.is_dir():
         raise Refusal("Existing path is not an ordinary Git checkout")
@@ -386,6 +403,12 @@ def existing_checkout(path: Path, url: str, environment: dict[str, str]) -> bool
                   "--get", "remote.origin.url"], environment)
     if actual != url:
         raise Refusal("Existing checkout belongs to another Git remote")
+    return True
+
+
+def existing_checkout(path: Path, url: str, environment: dict[str, str]) -> bool:
+    if not checkout_source_matches(path, url, environment):
+        return False
     verify_checkout_bound(path, environment)
     return True
 
@@ -619,6 +642,46 @@ def sync(request: dict, config: Path | None = None, cache: Path | None = None) -
         os.close(lock)
 
 
+def inspect(request: dict, config: Path | None = None, cache: Path | None = None) -> dict:
+    """Read the actual local HEAD without fetching or changing the checkout."""
+    repo_key, thread_id = request.get("repo_key"), request.get("thread_id")
+    root = Path(request.get("workspace_root", ""))
+    if (not isinstance(repo_key, str) or not isinstance(thread_id, str)
+            or not root.is_absolute() or ".." in root.parts):
+        raise Refusal("Git thread identity is invalid")
+    checkout = checkout_path(root, repo_key, thread_id)
+    if not checkout.exists() and not checkout.is_symlink():
+        old_root = cache or Path.home() / ".cache" / "emacsos" / "assist-git"
+        try:
+            checkout = legacy_checkout(old_root, root, repo_key, thread_id)
+        except Refusal:
+            return {"ok": True, "checkout_path": None, "branch": None,
+                    "local_oid": None, "detached": False,
+                    "observed_at": datetime.now(timezone.utc).isoformat()}
+    source = configured_source(config or Path.home() / ".config" / "emacsos", repo_key)
+    environment = local_environment()
+    if not checkout_source_matches(checkout, source, environment):
+        return {"ok": True, "checkout_path": None, "branch": None,
+                "local_oid": None, "detached": False,
+                "observed_at": datetime.now(timezone.utc).isoformat()}
+    arguments = ["--no-optional-locks", "-C", str(checkout)]
+    branch = git([*arguments, "symbolic-ref", "--quiet", "--short", "HEAD"],
+                 environment, seconds=8, allowed=(0, 1))
+    revision = git([*arguments, "rev-parse", "--verify", "HEAD^{commit}"],
+                   environment, seconds=8)
+    if (not OID.fullmatch(revision) or len(branch.encode()) > 240
+            or any(ord(character) < 32 or ord(character) == 127 for character in branch)):
+        raise Refusal("Local Git HEAD is invalid")
+    if (git([*arguments, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            environment, seconds=8, allowed=(0, 1)) != branch
+            or git([*arguments, "rev-parse", "--verify", "HEAD^{commit}"],
+                   environment, seconds=8) != revision):
+        raise Refusal("Local Git HEAD changed during inspection")
+    return {"ok": True, "checkout_path": str(checkout), "branch": branch or None,
+            "local_oid": revision, "detached": not bool(branch),
+            "observed_at": datetime.now(timezone.utc).isoformat()}
+
+
 def migrate(request: dict, config: Path | None = None,
             cache: Path | None = None) -> dict:
     """Move one explicitly selected bound checkout without touching its contents."""
@@ -668,7 +731,7 @@ def migrate(request: dict, config: Path | None = None,
 
 
 def selected_legacy_root(request: dict) -> Path | None:
-    """Accept one user-owned, non-symlink legacy root from the Emacs setting."""
+    """Validate the configured legacy root path without creating it."""
     value = request.get("legacy_root")
     if value is None:
         return None
@@ -676,7 +739,10 @@ def selected_legacy_root(request: dict) -> Path | None:
             or not Path(value).is_absolute() or ".." in Path(value).parts):
         raise Refusal("Legacy Git route root is invalid")
     root = Path(value)
-    directory(root)
+    if root.is_symlink() or any(parent.is_symlink() for parent in root.parents):
+        raise Refusal("Git workspace path is not a private directory")
+    if root.exists():
+        admit_existing_directory(root)
     return root
 
 
@@ -688,11 +754,14 @@ def main() -> None:
         if len(raw) > 8192:
             raise Refusal("Git request is too large")
         request = json.loads(raw)
-        if not isinstance(request, dict) or request.get("action") not in {"sync", "migrate"}:
+        if not isinstance(request, dict) or request.get("action") not in {"sync", "migrate", "inspect"}:
             raise Refusal("Git action is invalid")
         legacy_root = selected_legacy_root(request)
+        if legacy_root is not None and request["action"] != "inspect":
+            directory(legacy_root)
         response = (sync(request, cache=legacy_root) if request["action"] == "sync"
-                    else migrate(request, cache=legacy_root))
+                    else migrate(request, cache=legacy_root) if request["action"] == "migrate"
+                    else inspect(request, cache=legacy_root))
     except Refusal as error:
         response = {"ok": False, "error": str(error)[:256]}
     except (OSError, ValueError, UnicodeError):

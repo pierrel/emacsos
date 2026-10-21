@@ -1,0 +1,22 @@
+#+title: Client Git merge review corrections
+#+date: 2026-10-20
+
+* Result
+
+Server Git facts are bound to the source thread's authorization epoch. A late
+local probe or later reauthorization cannot make an older observation fresh
+or submit its commit after the confirmation prompt.
+
+A verified merge observes the originating thread only when its message queue
+is empty. A resident queue remains untouched: neither legacy rendering nor
+the public Refresh command may retry an unrelated rejected message. Checkout
+and server Git-facts refresh continue afterward.
+The phone install and update scripts pin the digest of the current Git module
+through their payload manifest.
+
+* Historical supersessions
+
+- =docs/2026-10-20-client-git-merge-confirmation.org=, "Result": its thread
+  refresh is specifically observation-only, and the fresh Git observation is
+  authorization-epoch-bound. Its exact server merge and checkout semantics
+  remain unchanged.
