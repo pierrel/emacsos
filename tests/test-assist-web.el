@@ -674,6 +674,35 @@
           (should (equal trustfiles '("assist-ca" "system-ca"))))
       (when (buffer-live-p response) (kill-buffer response)))))
 
+(ert-deftest test-assist-web-git-http-409-keeps-structured-outcome ()
+  "A url-http error marker does not discard a bounded Git refusal body."
+  (dolist (outcome '("conflict" "busy" "stale"))
+    (let ((emacsos-assist-web--requests nil)
+          result)
+      (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+                 (lambda () "token"))
+                ((symbol-function 'emacsos-assist-web--trustfiles)
+                 (lambda () nil))
+                ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                ((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   (let ((response (generate-new-buffer " *git-409-response*")))
+                     (with-current-buffer response
+                       (insert "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\n\r\n")
+                       (setq-local url-http-response-status 409
+                                   url-http-content-type "application/json"
+                                   url-http-end-of-headers (copy-marker (point)))
+                       (insert (format "{\"outcome\":\"%s\"}" outcome))
+                       (funcall callback '(:error (error http 409))))
+                     response))))
+        (emacsos-assist-web--request
+         "POST" "threads/thread-1/merge" nil
+         (lambda (value problem) (setq result (list value problem)))
+         nil t nil nil t))
+      (should-not (cadr result))
+      (should (equal (alist-get 'http_status (car result)) 409))
+      (should (equal (alist-get 'outcome (car result)) outcome)))))
+
 (ert-deftest test-assist-web-json-callback-kill-hook-cannot-switch-cleanup-target ()
   "A signaling response hook must never make cleanup kill the thread buffer."
   (let ((emacsos-assist-web--requests nil)

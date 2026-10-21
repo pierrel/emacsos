@@ -226,7 +226,7 @@ test-local-deploy-restart:
 
 test-elisp: test-install-local test-phone-assist-e2e-harness
 	python3 -B tests/test-simulation-startup.py
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-dtach-shell.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
 
 .PHONY: test-desktop-assist
 test-desktop-assist: test-install-desktop
@@ -245,7 +245,7 @@ test-assist-web-git:
 	emacs -Q --batch -L . -L tests -l tests/test-assist-web-git.el -f ert-run-tests-batch-and-exit
 
 test-phone-terminal-history:
-	emacs -Q --batch -L /usr/share/emacs/site-lisp -L deploy/pinephone -l tests/test-pinephone-vterm-history.el -f ert-run-tests-batch-and-exit
+	emacs -Q --batch -L /usr/share/emacs/site-lisp -L deploy/pinephone -l tests/test-dtach-shell.el -l tests/test-pinephone-vterm-history.el -f ert-run-tests-batch-and-exit
 
 test-phone-typography:
 	tests/test-phone-typography.sh

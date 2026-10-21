@@ -1,0 +1,22 @@
+#+title: Client Git status review corrections
+#+date: 2026-10-18
+
+* Result
+
+A denied authenticated thread Git GET uses the canonical thread-access fence.
+The request is tied to a shared per-thread request-start order. A definitive
+denial remains authoritative unless a later-started canonical thread GET
+validates access; starting another Git GET is not proof of access. A late
+successful callback cannot make a denied view fresh again.
+
+The narrow phone header retains the Status and Merge actions and the existing
+clickable Run action. Git checkout refresh and Git details are available from
+the Status view, without clipping the Run action. Scrolling and button
+navigation can reach the explicit confirmation, but the Merge shortcut only
+redisplays it; a POST requires tapping that visible Confirm button.
+
+* Historical supersessions
+
+- =docs/2026-10-01-thread-git-workspaces.org=, "Responsibility and
+  verification": its phone-header Git Details action is replaced by the
+  Status-view Git details touch control. The Run action remains in the header.

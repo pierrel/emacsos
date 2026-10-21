@@ -34,6 +34,8 @@
             (dolist (binding '(("l" . emacsos-assist-web-show-thread-list)
                                ("t" . emacsos-assist-web-open-thread)
                                ("n" . emacsos-assist-web-new-thread)
+                               ("h" . emacsos-assist-web-git-status)
+                               ("m" . emacsos-assist-web-git-merge)
                                ("r" . emacsos-assist-web-refresh-threads)))
               (should (eq (key-binding (kbd (concat "C-c a " (car binding))))
                           (cdr binding))))
@@ -149,7 +151,8 @@
     (setq-local emacsos-assist-web--thread-id (make-string 32 ?a))
     (emacsos-assist-web-git--sync-keys)
     (should (eq (key-binding (kbd "C-x C-f")) #'emacsos-assist-web-find-file))
-    (should (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
+    (should-not (eq (key-binding (kbd "C-c d")) #'emacsos-assist-web-git-diff))
+    (should (eq (key-binding (kbd "C-c a d")) #'emacsos-assist-web-git-diff))
     (should (eq (key-binding (kbd "C-c g")) #'emacsos-assist-web-git-refresh))))
 
 (provide 'test-assist-desktop)
