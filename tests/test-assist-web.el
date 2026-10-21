@@ -9058,3 +9058,60 @@ server clears only flags for a view that is still current."
 
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here
+
+(ert-deftest test-assist-web-queue-refresh-acknowledges-rendered-revision ()
+  "Public current-queue Refresh acknowledges exactly the successful settled view."
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        (snapshot (copy-tree test-assist-web--snapshot)) requests rendered)
+    (setf (alist-get 'revision (alist-get 'thread snapshot)) "rendered-revision")
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let ((entry (emacsos-assist-web--entry
+                    "A" 'terminal-unreconciled
+                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+        (setf (plist-get entry :run-id) "run-a"
+              (plist-get entry :verified-outcome) "success")
+        (setq emacsos-assist-web--queue (list entry)))
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                ((symbol-function 'emacsos-assist-web--try-write-cache) (lambda (&rest _) t))
+                ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
+                ((symbol-function 'emacsos-assist-web--render) (lambda (_) (setq rendered t)))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path payload callback &rest _)
+                   (push (list method path payload) requests)
+                   (if (equal method "GET") (funcall callback snapshot nil)
+                     (funcall callback nil nil)))))
+        (emacsos-assist-web-refresh-thread nil nil nil nil t)
+        (should rendered)
+        (should-not emacsos-assist-web--queue)
+        (should (member '("POST" "threads/thread-1/open"
+                         ((revision . "rendered-revision"))) requests))))))
+
+(ert-deftest test-assist-web-read-receipt-transport-fences-definitive-auth-denial ()
+  "Exercise actual request parsing; old-server 404 and transient failures stay benign."
+  (dolist (status '(401 403 404 500))
+    (let ((emacsos-assist-web-api-url "https://assist.invalid/api/v1/phone")
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          (emacsos-assist-web--requests nil) bearer endpoint)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token) (lambda () "token"))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (url callback &rest _)
+                     (setq endpoint url bearer (assoc "Authorization" url-request-extra-headers))
+                     (let ((response (generate-new-buffer " *receipt response*")))
+                       (with-current-buffer response
+                         (setq-local url-http-response-status status
+                                     url-http-content-type "text/plain"
+                                     url-http-end-of-headers (copy-marker (point-min)))
+                         (insert "malformed response")
+                         (funcall callback nil))
+                       response))))
+          (emacsos-assist-web--ack-thread-read "thread-1" "revision"))
+        (should bearer)
+        (should (equal endpoint "https://assist.invalid/api/v1/phone/threads/thread-1/open"))
+        (should (eq (not (null emacsos-assist-web--denied))
+                    (not (null (memq status '(401 403))))))))))

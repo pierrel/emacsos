@@ -383,7 +383,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
         (should (equal (emacsos-assist-web--input) ""))
         (should (string-match-p "Thread error: " (buffer-string)))
         (execute-kbd-macro (kbd "C-<return>"))
-        (should (= (length (seq-filter (lambda (request) (equal (car request) "POST"))
+        (should (= (length (seq-filter (lambda (request) (equal (cadr request) "threads/thread-1/messages"))
                                       requests)) 1))))))
 
 (ert-deftest interaction-canonical-failure-notice-reopens-and-clears-on-recovery ()

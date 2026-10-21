@@ -2573,20 +2573,24 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
 
 (defun emacsos-assist-web--http-access-status
     (origin method path status &optional early-failure run-owner request-tid git-get-owner)
-  "Classify ORIGIN's thread, approval or Run GET access failure.
+  "Classify ORIGIN's thread, approval, Run GET or read-receipt access failure.
 METHOD and PATH identify the exact endpoint, including the thread Git GET.
 STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
 classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
-REQUEST-TID is the trusted origin thread captured before an async T GET; it
+REQUEST-TID is the trusted origin thread captured before an async request; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
 GIT-GET-OWNER binds a Git GET to shared thread request-start order. A
 definitive denial wins unless a later-started canonical GET validated access.
 Return non-nil when the access notification completed or the exact Run
 status is safely ignored as stale; nil permits a bounded later retry."
-  (when (and (equal method "GET")
+  (when (and (or (equal method "GET")
+                 (and (equal method "POST")
+                      (memq status '(401 403))
+                      (stringp path)
+                      (string-match-p "\\`threads/[^/]+/open\\'" path)))
              (or (memq status '(401 403 404)) early-failure)
              (stringp path)
              (or (not git-get-owner)
@@ -2596,7 +2600,9 @@ status is safely ignored as stale; nil permits a bounded later retry."
                         (> (cdr git-get-owner)
                            (plist-get record :git-auth-floor))))))
     (condition-case nil
-        (let ((thread-get (or (and (memq status '(401 403))
+        (let ((thread-get (or (and (equal method "POST")
+                                      (string-match "\\`threads/\\([^/]+\\)/open\\'" path))
+                             (and (memq status '(401 403))
                                       (string-match "\\`threads/\\([^/]+\\)/assets\\(?:\\?.*\\)?\\'" path))
                             (string-match
                            (if (memq status '(401 403 404))
@@ -2864,7 +2870,8 @@ RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
           (if raw-response (+ emacsos-assist-web--asset-max-bytes emacsos-assist-web-max-header-bytes)
             emacsos-assist-web-max-response-bytes))
         (run-owner (emacsos-assist-web--run-http-owner method path))
-        (request-tid (and (equal method "GET") emacsos-assist-web--thread-id))
+        (request-tid (and (member method '("GET" "POST"))
+                          emacsos-assist-web--thread-id))
         (canonical-thread-get
          (and (equal method "GET")
               emacsos-assist-web--thread-id
@@ -4195,22 +4202,26 @@ of it, together with the oldest pagination cursor already reached."
       result)))
 
 (defun emacsos-assist-web--ack-thread-read (tid revision)
-  "Send TID's read receipt to the dedicated open endpoint.
-Fire-and-forget: the snapshot GET is read-only (clients also use it for auth
-probes and busy-check polls), so the receipt goes to POST /open. A failed
-ack only defers the flag clear and must never disturb the render that
-triggered it.
-
-REVISION is the revision of the settled snapshot we actually rendered; the
-server clears the unseen/urgent flags only if the thread's current revision
-still matches, so a newer response that arrives after we rendered can no
-longer be wiped by our (now stale) receipt. When REVISION is nil (a pre-token
-client) the body is empty and the server keeps the historical clear."
+  "Acknowledge TID's rendered snapshot REVISION through POST /open.
+A failed receipt leaves rendering intact.  The server conditionally clears
+notifications only while their read-receipt identity still matches.
+Nil REVISION sends an empty body for legacy unconditional acknowledgment."
   (condition-case nil
       (emacsos-assist-web--request
        "POST" (format "threads/%s/open" (emacsos-assist-web--require-id tid))
        (when revision `((revision . ,revision))) #'ignore)
     (error nil)))
+
+(defun emacsos-assist-web--ack-rendered-thread (snapshot)
+  "Acknowledge a settled SNAPSHOT after successful canonical rendering.
+Dormant stopped buffers remain passive recovery views.  Both ordinary refresh
+and queue reconciliation use this path; cached and failed renders do not."
+  (when (and (not (emacsos-assist-web--dormant-stop-p))
+             (member (alist-get 'status (alist-get 'thread snapshot))
+                     emacsos-assist-web--settled-snapshot-statuses))
+    (emacsos-assist-web--ack-thread-read
+     emacsos-assist-web--thread-id
+     (alist-get 'revision (alist-get 'thread snapshot)))))
 
 (defun emacsos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed."
@@ -4610,21 +4621,11 @@ suppressing a genuine repeated submission."
          40)))
 
 (defun emacsos-assist-web--state-pill (thread)
-  "Return the single status token for THREAD, mirroring the web thread list.
-One emoji per thread, first match wins, in the web's precedence: busy (all
-six live stages) beats error, error beats urgent, urgent beats new (an unseen
-reply), new beats unmerged.  When none matches, the raw stage is returned so
-a settled thread still shows its state.  The tokens are fixed literals never
-interpolated from untrusted thread text, so they stay font-safe and pass the
-list's display-isolation checks.
-
-Unmerged is a BOOL or NIL on the wire: the server runs the git check only when
-no stronger pill (a live busy stage, error, urgent, or an unread reply) is
-already present. true means checked and dirty, false means checked and clean,
-and nil means not checked (masked by a stronger pill, or the check could not
-run). Only true draws the unmerged pill; false and nil fall through to the raw
-stage. A legacy server (before the assist PR lands) may send the tri-state
-string yes, which is accepted too across the two-PR transition window."
+  "Return THREAD's status token using the web list's precedence.
+Busy beats error, urgent, unread, and unmerged, in that order.  Otherwise
+return the raw stage.  Indicator tokens are fixed literals.
+The wire's unmerged field is true, false, or null (unavailable/not checked).
+Only true draws an indicator; legacy string yes is also accepted."
   (let ((status (alist-get 'status thread))
         (unmerged (alist-get 'unmerged thread)))
     (cond
@@ -4817,17 +4818,9 @@ The graphical phone measures proportional text against the same pixel budget."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
-    ;; The read receipt is sent on the settled refresh that follows, not here:
-    ;; the user's open (and each later explicit Refresh) reaches the refresh
-    ;; success, where a rendered settled snapshot re-acks. That is the
-    ;; observable moment the user read it, and the server re-marks the thread
-    ;; unread on every turn completion, so a buffer that stays open across a
-    ;; turn re-acks on its next settled refresh. The snapshot GET itself never
-    ;; clears flags — clients also use it for auth probes and busy-check
-    ;; polls — so the receipt goes to the dedicated open endpoint (see
-    ;; emacsos-assist-web--ack-thread-read).
-    ;; Opening a thread can fetch its branch while cached files remain usable.
-    ;; A later canonical snapshot may select a newer branch and queue a successor.
+    ;; Canonical refresh and queue reconciliation acknowledge only successfully
+    ;; rendered settled snapshots; cached views and read-only probes do not.
+    ;; Opening can fetch the branch while cached files remain usable.
     (with-current-buffer buffer
       (when (and emacsos-assist-web--snapshot
                  (not (emacsos-assist-web-git--gate-reason t)))
@@ -5094,47 +5087,7 @@ VERIFIED-START-EPOCH fences later Run access denial."
                                        (force-mode-line-update t)
                                        (message (if cached "Thread refreshed"
                                                   "Thread refreshed; local cache write failed"))
-                                       ;; Re-ack exactly where the user explicitly
-                                       ;; re-reads a thread: an explicit refresh
-                                       ;; that rendered a settled snapshot. The
-                                       ;; server re-marks a thread unread on every
-                                       ;; turn completion, so a buffer that stays
-                                       ;; open across a turn re-sends its receipt
-                                       ;; the moment the user refreshes it and the
-                                       ;; settled answer is displayed. This is the
-                                       ;; Q1/Q2 case: open a thread, send (or ask
-                                       ;; from the browser), let it settle, refresh
-                                       ;; the phone, and the thread must show read.
-                                       ;; Active snapshots are never displayed here
-                                       ;; (the busy/in-flight branch above skips
-                                       ;; rendering), so only a truly settled view
-                                       ;; re-acks — the same intent-to-view as the
-                                       ;; creation-time ack, extended to reopens.
-                                       ;; Probes (auth recheck, busy-check,
-                                       ;; snapshot GET) never reach this path, so
-                                       ;; they provably never re-ack. A dormant
-                                       ;; buffer (a dead stopped owner awaiting an
-                                       ;; explicit claim) is a passive recovery
-                                       ;; image, not a live user view, so it must
-                                       ;; not ack: an unclaimed stop's refresh
-                                       ;; makes only its exact Run GET and no
-                                       ;; read receipt.
-                                       (when (and (not (emacsos-assist-web--dormant-stop-p))
-                                                  (member
-                                                   (alist-get 'status
-                                                              (alist-get 'thread value))
-                                                   emacsos-assist-web--settled-snapshot-statuses))
-                                         (emacsos-assist-web--ack-thread-read
-                                          emacsos-assist-web--thread-id
-                                          ;; Echo the revision of the settled
-                                          ;; snapshot we just rendered, so the
-                                          ;; server clears only flags for a view
-                                          ;; that is still current (a newer
-                                          ;; response arriving after we rendered
-                                          ;; bumps the revision and keeps its
-                                          ;; unread flag alive).
-                                          (alist-get 'revision
-                                                     (alist-get 'thread value)))))
+                                       (emacsos-assist-web--ack-rendered-thread value))
                                      (unless (or retiring cached)
                                        (emacsos-assist-web--git-note-safely
                                         value nil git-auth-start-epoch
@@ -7358,6 +7311,7 @@ restoration pauses this buffer until restart."
                                (emacsos-assist-web--render value)
                                (emacsos-assist-web--sync-active-surface)
                                (setq emacsos-assist-web--display-recovery nil)
+                               (emacsos-assist-web--ack-rendered-thread value)
                                (message "Thread refreshed"))
                            ((error quit)
                             (setq emacsos-assist-web--display-recovery t

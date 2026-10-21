@@ -171,7 +171,8 @@
                 ((symbol-function 'emacsos-assist-web-git-refresh) #'ignore)
                 ((symbol-function 'url-retrieve)
                  (lambda (url callback &rest _)
-                   (push url calls)
+                   ;; Count file/snapshot GETs; the settled view also sends a read receipt.
+                   (when (equal url-request-method "GET") (push url calls))
                    (if (string-match-p (regexp-quote "/assets?") url)
                        (asset-test--reply callback 200 asset-test--png)
                      (asset-test--reply callback 200 (json-encode snapshot) nil "application/json")))))
@@ -194,7 +195,8 @@
                 ((symbol-function 'emacsos-assist-web-git-refresh) #'ignore)
                 ((symbol-function 'url-retrieve)
                  (lambda (url callback &rest _)
-                   (push url calls)
+                   ;; Count file/snapshot GETs; the settled view also sends a read receipt.
+                   (when (equal url-request-method "GET") (push url calls))
                    (asset-test--reply callback 200 (if bad "invalid" (json-encode snapshot)) nil "application/json"))))
         (emacsos-assist-web-refresh-context)
         (should-not emacsos-assist-web--asset-refresh-pending)
