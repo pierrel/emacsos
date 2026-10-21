@@ -367,7 +367,14 @@ Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
 thread, and =C-c a r= refreshes the catalog from any buffer.  =C-c a g=
 refreshes a canonical thread and Git view, or the catalog in a draft or elsewhere;
-=C-c a d= opens the thread's Magit diff or status. =C-c a h= shows the
+=C-c a d= opens the thread's Magit diff or status.  In a thread,
+=M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
+you return to the present.  Recall never sends a message.  Ordinary undo and
+redo affect input edits across transcript refreshes; accepting input into the
+submission queue starts a new undo history.  =M-g i= opens the standard Imenu
+index of loaded messages, while =C-c b/f= retain their message-boundary motion.
+
+=C-c a h= shows the
 server's freshly observed published branch/commit alongside the actual local
 checkout branch or detached HEAD/commit, without fetching or modifying files.
 Both observation times are shown; local facts may become stale after inspection.
@@ -401,11 +408,13 @@ before another Merge & Push confirmation. A later thread-access denial also
 rerenders an already-open Git status view as stale and removes its merge action.
 Unrelated user
 bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
-these global shortcuts and expose previous bindings.  The list also uses =g=
+the =C-c a= global shortcuts and expose previous bindings.  The list also uses =g=
 to refresh, =RET= or mouse-1 to open a thread, and its local =C-c a n= shortcut.
 =M-x emacsos-desktop-assist= opens the same list.  =M-x emacsos-assist-web-new-thread=
 selects a repository and harness and opens a local draft.  Type after the final => = prompt in a thread/draft;
-=RET= inserts a newline and =C-RET= sends.  =C-c C-r= refreshes the thread,
+=RET= inserts a newline and =C-RET= sends the draft from anywhere in the
+thread, including above the prompt.  Canonical thread errors also appear before
+the prompt, below earlier replies.  =C-c C-r= refreshes the thread,
 =C-c C-l= loads older messages, and =C-c C-k= aborts/detaches with the client's
 existing canonical outcome checks.  Loading the file alone makes no request;
 the entry command refreshes the catalog.

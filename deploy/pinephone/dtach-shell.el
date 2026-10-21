@@ -119,13 +119,13 @@ Wildcard patterns (containing * or ?) are excluded."
 (defun dtach-shell--install-buffer-keybindings ()
   "Install dtach-shell commands in the current dtach-shell buffer.
 
-`C-c d' always opens the host/session prompt.  `C-c S-d' reconnects the
+`C-c d' always opens the host/session prompt.  `C-c D' reconnects the
 current dtach-shell buffer."
   ;; `local-set-key' would modify the shared `vterm-mode-map', affecting
   ;; every vterm buffer.  Copy it first so these bindings are genuinely
   ;; buffer-local.
   (let ((map (copy-keymap (current-local-map))))
-    (define-key map (kbd "C-c S-d") #'dtach-shell-reconnect)
+    (define-key map (kbd "C-c D") #'dtach-shell-reconnect)
     (define-key map (kbd "C-c d") #'dtach-shell)
     (use-local-map map)))
 
@@ -135,7 +135,7 @@ current dtach-shell buffer."
 Versions that used `local-set-key' directly could have installed these
 bindings into `vterm-mode-map'."
   (when (boundp 'vterm-mode-map)
-    (dolist (key '("C-c d" "C-c S-d"))
+    (dolist (key '("C-c d" "C-c D" "C-c S-d"))
       (when (eq (lookup-key vterm-mode-map (kbd key))
                 #'dtach-shell-reconnect)
         (define-key vterm-mode-map (kbd key) nil)))))
@@ -393,7 +393,7 @@ the existing connection is live or disconnected."
     (message "Reconnected to %s/%s" host session)))
 
 (global-set-key (kbd "C-c d") #'dtach-shell)
-(global-set-key (kbd "C-c S-d") #'dtach-shell-reconnect)
+(global-set-key (kbd "C-c D") #'dtach-shell-reconnect)
 
 (provide 'dtach-shell)
 ;;; dtach-shell.el ends here
