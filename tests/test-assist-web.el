@@ -2900,29 +2900,33 @@
                         visible))))))))
 
 (ert-deftest test-assist-web-busy-refresh-does-not-reack-the-thread-read ()
-  "A busy refresh renders no settled view and must not re-send the receipt."
-  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
-        requests callback)
-    (let ((busy-snapshot
-           '((thread . ((id . "thread-1") (status . "processing")))
-             (messages . nil))))
+  "A valid busy snapshot renders without acknowledging in a visible idle buffer."
+  (save-window-excursion
+    (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+          (busy-snapshot (copy-tree test-assist-web--snapshot))
+          requests callback rendered)
+      (setf (alist-get 'status (alist-get 'thread busy-snapshot)) "processing")
       (with-temp-buffer
         (emacsos-assist-web-mode)
         (setq emacsos-assist-web--thread-id "thread-1")
+        (switch-to-buffer (current-buffer))
+        ;; No local observer owns a provisional render, so a busy view may render.
+        (should-not emacsos-assist-web--in-flight)
         (cl-letf (((symbol-function 'emacsos-assist-web--request)
                    (lambda (method path _payload cb &rest _)
                      (push (list method path) requests)
                      (setq callback cb)))
-                  ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--render)
+                   (lambda (value) (setq rendered value)))
                   ((symbol-function 'emacsos-assist-web--try-write-cache)
                    (lambda (&rest _) t))
-                  ((symbol-function 'emacsos-assist-web--git-note-safely)
-                   (lambda (&rest _) nil)))
+                  ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore))
           (emacsos-assist-web-refresh-thread)
           (funcall callback busy-snapshot nil)
+          (should (get-buffer-window (current-buffer) 'visible))
+          (should (eq rendered busy-snapshot))
           (should (member '("GET" "threads/thread-1") requests))
-          (should-not (member '("POST" "threads/thread-1/open") requests))))
-)))
+          (should-not (member '("POST" "threads/thread-1/open") requests)))))))
 
 (ert-deftest test-assist-web-settled-refresh-ack-carries-the-rendered-revision ()
   "The read receipt echoes the revision of the snapshot we rendered, so the
