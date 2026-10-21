@@ -1,0 +1,16 @@
+#+title: Client Git recovery header touch control
+#+date: 2026-10-20
+
+* Result
+
+At a 40-column phone width, Git Status and Merge remain visible while long
+Run recovery labels shorten ahead of their original details link. The trailing
+=[?]= keeps its existing text properties and command, including in source
+adoption and another-view Run recovery states. No recovery action is started
+by rendering the header.
+
+* Historical supersessions
+
+- =docs/2026-10-20-client-git-merge-confirmation.org=, "Result": its narrow
+  header claim now includes preserving the Run-details control for long
+  recovery labels, rather than truncating the whole Run text.

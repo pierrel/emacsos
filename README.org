@@ -115,6 +115,14 @@ emacsclient -f ./server-file -e '(emacsos--chat-show-top-buffer)'               
 
 For an *interactive* session in =*chat*= — scrolling, typing, watching a stream — open a terminal frame over SSH (above) and =C-x b *chat*=. The buffer stays in the phone's (or simulator's) Emacs; you are driving the real session remotely, not a copy. A live buffer can't be moved into a *different* Emacs process; the =-e= calls above are snapshots/commands, and the SSH frame is the way to operate it by hand.
 
+* PinePhone session supervision
+
+Startup waits for the Emacs window and server to become ready. Once running,
+the session watches required processes and the display. A busy Emacs command
+does not trigger a restart; a live but wedged Emacs or broken server socket
+requires manual recovery. Cleanup removes the session-created power-event
+FIFO after its reader groups stop, so supervised restarts can create it again.
+
 * Chat Server
 
 =emacsos-server= (in =server/=) is a small FastAPI process that handles
@@ -220,7 +228,7 @@ privileged-container access, bounds and limitations.
 It does not load the phone OS, modem, keyboard, theme or server startup.
 Use Emacs 29 or newer with GnuTLS and native JSON support, Python 3.10+,
 Git, Make and OpenSSH.  Install Magit in your normal Emacs with
-=M-x package-install RET magit RET= for =C-c d= diffs.  No Python server or
+=M-x package-install RET magit RET= for =C-c a d= diffs.  No Python server or
 local model is needed on the laptop.
 
 On macOS with Homebrew:
@@ -353,8 +361,9 @@ Set up desktop Git separately from the phone:
    read-only check succeeds, use =M-x emacsos-assist-web-git-refresh=.
 
 Thread chat works without Git configuration; file/diff actions report an
-unavailable workspace until Git setup and fetching succeed.  The helper reads
-the private files only when a checkout sync or migration runs.
+unavailable workspace until Git setup and fetching succeed.  Status reads
+the private repository map to identify the approved checkout; checkout sync
+or migration also reads the dedicated key and pinned host file.
 The desktop installer ships code only, not these three credential files.  If
 manual Git refresh names a missing file, provision that file in the desktop
 user's =~/.config/emacsos/= from an approved repository mapping, dedicated key
@@ -366,16 +375,68 @@ Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
 thread, and =C-c a r= refreshes the catalog from any buffer.  =C-c a g=
 refreshes a canonical thread and Git view, or the catalog in a draft or elsewhere;
-=C-c a d= opens the thread's Magit diff or status.  Unrelated user
+=C-c a d= opens the thread's Magit diff or status.  In a thread,
+=M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
+you return to the present.  Recall never sends a message.  Ordinary undo and
+redo affect input edits across transcript refreshes; accepting input into the
+submission queue starts a new undo history.  =M-g i= opens the standard Imenu
+index of loaded messages, while =C-c b/f= retain their message-boundary motion.
+
+=C-c a h= shows the
+server's freshly observed published branch/commit alongside the actual local
+checkout branch or detached HEAD/commit, without fetching or modifying files.
+Both observation times are shown; local facts may become stale after inspection.
+=C-c a m= asks for native minibuffer confirmation of the SERVER's exact
+published branch and commit after fetching fresh facts. The prompt warns that
+local work is excluded; scrolling the status view cannot cancel confirmation.
+The merge remains conditional on that published commit still being the
+server's fetched tip, and it does not merge local work. This Git action uses
+minibuffer confirmation at Pierre's request, unlike the usual phone two-tap
+action pattern. On the phone, the thread header's
+=Status= and =Merge= touch actions open those same views. The status view also
+offers =Refresh checkout= and =Git details= touch controls; narrow headers keep
+the current Run action available rather than clipping it behind extra Git controls.
+Long recovery labels shorten first, keeping the original clickable Run-details
+=[?]= action and its command in a 40-column header.
+Save, commit and push any
+local work you want included before confirming: unsaved, staged, uncommitted,
+untracked and locally committed-but-unpushed changes are excluded. A failed
+status request labels any prior observation stale; an unconfirmed POST outcome
+is never retried automatically. Complete server conflict, busy, and stale
+responses are shown distinctly; a transport failure remains unconfirmed.
+After a verified merge, the client observes the originating thread when no
+message queue is resident; a queued message is left untouched and is never
+retried by the Git action. The client then fetches
+the normal checkout (including published main), and observes fresh server Git
+facts so the next =C-c a d= uses the updated main comparison. The minibuffer
+reports merge and refresh progress; a blocked local checkout stays visibly
+incomplete rather than claiming a successful fast-forward.
+Reauthorization invalidates previously observed server Git facts; refresh them
+before another Merge & Push confirmation. A later thread-access denial also
+rerenders an already-open Git status view as stale and removes its merge action.
+Unrelated user
 bindings remain available; toggle =M-x emacsos-desktop-assist-mode= to disable
-these global shortcuts and expose previous bindings.  The list also uses =g=
+the =C-c a= global shortcuts and expose previous bindings.  The list also uses =g=
 to refresh, =RET= or mouse-1 to open a thread, and its local =C-c a n= shortcut.
 =M-x emacsos-desktop-assist= opens the same list.  =M-x emacsos-assist-web-new-thread=
-selects a repository and harness and opens a local draft.  Type after the final => = prompt in a thread/draft;
-=RET= inserts a newline and =C-RET= sends.  =C-c C-r= refreshes the thread,
+selects a repository and harness and opens a local draft. Type below the final
+separator in a thread/draft; =RET= inserts a newline and =C-RET= sends the draft
+from anywhere in the thread. Canonical thread errors also appear above the
+typing area, below earlier replies. =C-c C-r= refreshes the thread,
 =C-c C-l= loads older messages, and =C-c C-k= aborts/detaches with the client's
 existing canonical outcome checks.  Loading the file alone makes no request;
 the entry command refreshes the catalog.
+
+Assist threads display assistant messages across the full text width. Human
+prose is slightly grayer and visually inset by 20% of the current window;
+wrapped lists and quotes keep their own continuation alignment. Native images,
+file-fence attachments and tables retain the full available width. Thin rules
+separate messages; a double rule introduces the full-width editable typing area.
+Role and input prefixes are hidden visually. Stored and copied characters,
+including those literal prefixes, remain unchanged. Resizing changes wrapping
+and the inset without adding spaces or hard newlines. Existing inline PNGs keep
+the size chosen at presentation; refresh after narrowing a window to fit them
+to its new width, or open the image view and use Fit.
 
 Org, Markdown files and Assist prose share buffer-local typography.  Installed
 Inter is preferred; an explicitly configured =variable-pitch= family wins.
@@ -393,6 +454,74 @@ This fixture makes no requests; repeat keys, refresh and local-file checks
 on a real thread after deployment.  ERT verifies properties and marker
 contracts; visual font selection and touch readability require the live UI.
 
+Complete =type: file= render fences use the current thread's existing local
+checkout or disposable asset cache, without fetching during presentation.
+PNG is the inline image format supported by the
+Assist render protocol; graphical Emacs displays bounded PNGs scaled to the
+window. Opening a valid bounded PNG uses a dedicated native image buffer,
+fitted down to the window, with 40-pixel Back, Fit and 1:1 controls and native
+scrolling/zoom. The image view is a read-only snapshot, leaves existing editable
+file buffers untouched, and Back (or q / C-c b) releases it. No external image app,
+converter or browser is needed. Workspace nonimage files keep their safe local
+opener; other downloaded files use read-only literal snapshots without changed-file
+prompts. SVG, unsupported images and oversized PNGs remain literal file links.
+Compressed links retain their stored bytes without automatic decompression.
+Existing file-visiting buffers stay untouched. For unsupported images or
+compressed files, use Find file for those existing buffers.
+=/workspace/=, =/user/= and relative paths resolve
+inside this thread; symlinks, traversal and Git internals in any letter case are refused. The
+server's persistent =/tmp/= scratch is served through the authenticated asset API.
+Use the existing thread refresh (=C-c a g=) to fetch missing referenced assets or
+revalidate cached bytes. Editable workspace files take precedence and are never
+overwritten by asset downloads. Maps remain readable render-fence source.
+
+Complete pipe tables with a Markdown separator row become explicit table
+objects. Open one to see aligned fixed-pitch columns in an isolated view.
+Separator rows may omit the trailing pipe; short data rows get empty cells.
+The fixed header provides 40-pixel touch controls for Back, Left and Right; arrow keys scroll
+horizontally and =C-c b= returns. Conversation prose stays wrapped and copied,
+stored and unsent text stays unchanged. The table view is a snapshot, so reopen
+it after a conversation refresh. Back releases the temporary table buffer even if the source conversation was closed.
+Ordinary Org tables retain their existing
+Org behavior.
+
+Downloaded files are disposable local cache copies, separate from Git. Only
+refresh requests them; rendering and idle time make no asset requests or retries.
+Refresh checks at most the 16 most-recent unique native file fences, each at most
+1 MiB. Unchanged files use conditional requests; local edits to cached copies
+may be replaced. Failed/interrupted downloads keep an existing complete copy,
+which can display offline. A missing server file remains unavailable; another
+Git fetch cannot supply it. Caches are private to the thread buffer, retain
+logical root namespaces, and disappear when the buffer closes. Save/edit durable
+files in the Git workspace. The server endpoint must be deployed before this
+client; older servers leave uncached assets unavailable.
+
+Presentation retains the 256 KiB source budget. Local linked files are limited
+to 1 MiB. Inline PNGs share an aggregate
+1 MiB encoded-byte allowance and at most 16 distinct images per buffer/pass;
+repeated paths reuse one image across messages. Attempted reads/decodes share
+those bounds, including invalid PNG attempts. Every admitted image is at most
+4096 pixels per side and 4,194,304 source pixels. This permits the actual multiple
+nutrition charts without an older chart consuming the entire pixel allowance.
+The aggregate source-raster admission limit is therefore 64 MP (about 256 MiB RGBA,
+plus native backend/cache overhead); scaling to the window does not remove the
+full-source decode/storage cost. Withdrawn owned images are flushed from native
+caches on redraw/removal/buffer close. Image snapshots flush their displayed
+raster before explicit Fit/1:1 and on close. Native zoom can retain intermediate
+cache variants. This is an admission limit, not an exact process
+memory ceiling. Byte/count/pixel limits still
+produce file links when exceeded. Larger or unsupported images remain file links. Oversized
+aligned table output falls back to its literal source in the table view.
+
+An offline native specimen is in
+=previews/conversation-rendering/preview.el=. Run it in a fresh isolated Emacs
+with =emacs -Q -L . -l previews/conversation-rendering/preview.el= and check both
+a narrow phone-sized frame and a desktop window. It creates disposable local
+fixtures only; it never contacts Assist or runs Git. The Assist stream layout
+specimen is =previews/conversation-stream/preview.el=; load it the same way and
+resize between a 320-pixel phone frame and a desktop window. It includes human
+prose, lists, quotes, a PNG, a file fallback, a table and an editable draft.
+
 The Org styling is independently implemented from the supplied example by
 [[https://zzamboni.org/post/beautifying-org-mode-in-emacs/][Diego Zamboni]]; the linked sources state no explicit code license.
 
@@ -403,7 +532,7 @@ or creating a checkout.  =emacsos-assist-web-find-file= provides the same bounda
 for an explicit file path; ordinary desktop file opening outside Assist is unchanged.
 =C-c b= and =C-c f= move between messages; forward navigation ends at the
 editable compose input and never sends the draft.  The existing =C-c g=
-explicitly refreshes Git, and =C-c d= opens the Magit =origin/main...HEAD= diff
+explicitly refreshes Git, and =C-c a d= opens the Magit =origin/main...HEAD= diff
 when clean or Magit status when current local edits exist.  =C-c ?= shows thread
 details and workspace location; use ordinary Emacs buffer navigation to return
 from file or Magit views.  Git keys become

@@ -73,6 +73,8 @@
   (dolist (binding '(("C-c a l" . emacsos-command-list-threads)
                      ("C-c a t" . emacsos-command-open-thread)
                      ("C-c a n" . emacsos-command-new-thread)
+                     ("C-c a h" . emacsos-assist-web-git-status)
+                     ("C-c a m" . emacsos-assist-web-git-merge)
                      ("C-c a r" . emacsos-assist-web-refresh-threads)
                      ("C-c a f" . emacsos-assist-new-file)
                      ("C-c e c" . emacsos--chat-show-top-buffer)

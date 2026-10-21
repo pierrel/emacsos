@@ -4,6 +4,7 @@ import importlib.util
 import ctypes
 import errno
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -109,10 +110,15 @@ class CheckoutTest(unittest.TestCase):
                        "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0",
                        "GIT_SSH_COMMAND": "ssh -F /dev/null", "LC_ALL": "C"}
         self.real_configuration = helper.configuration
+        self.real_configured_source = helper.configured_source
         self.configured = patch.object(helper, "configuration", return_value=
                                        (str(self.source), environment))
         self.configured.start()
         self.addCleanup(self.configured.stop)
+        self.local_source = patch.object(helper, "configured_source",
+                                         return_value=str(self.source))
+        self.local_source.start()
+        self.addCleanup(self.local_source.stop)
         self.request = {"action": "sync", "workspace_root": str(self.workspaces),
                         "repo_key": "a" * 20, "thread_id": "thread-1",
                         "branch": "assist/thread"}
@@ -142,6 +148,49 @@ class CheckoutTest(unittest.TestCase):
                       + "))")
         subprocess.run(["emacs", "-Q", "--batch", "-L", str(SCRIPT.parent),
                         "--eval", expression], capture_output=True, text=True, check=True)
+
+    def test_read_only_head_inspection_named_detached_wrong_and_missing(self):
+        missing = helper.inspect(self.request)
+        self.assertIsNone(missing["local_oid"])
+        self.assertTrue(missing["observed_at"])
+        checkout = Path(helper.sync(self.request)["checkout_path"])
+        (checkout / "untracked.txt").write_text("keep\n")
+        index = (checkout / ".git" / "index").read_bytes()
+        branch = git("rev-parse", "refs/heads/assist/thread", cwd=checkout)
+        with patch.object(helper, "directory", side_effect=AssertionError("status created a directory")), \
+                patch.object(helper, "configuration", side_effect=AssertionError("status loaded credentials")):
+            named = helper.inspect(self.request)
+        self.assertEqual((named["branch"], named["local_oid"], named["detached"]),
+                         ("assist/thread", branch, False))
+        self.assertTrue(named["observed_at"])
+        self.assertEqual((checkout / ".git" / "index").read_bytes(), index)
+        git("switch", "-c", "other", cwd=checkout)
+        wrong = helper.inspect(self.request)
+        self.assertEqual((wrong["branch"], wrong["local_oid"]), ("other", branch))
+        git("checkout", "--detach", cwd=checkout)
+        detached = helper.inspect(self.request)
+        self.assertEqual((detached["branch"], detached["local_oid"], detached["detached"]),
+                         (None, branch, True))
+        self.assertEqual((checkout / ".git" / "index").read_bytes(), index)
+        self.assertEqual((checkout / "untracked.txt").read_text(), "keep\n")
+
+    def test_inspect_entrypoint_does_not_create_missing_legacy_root(self):
+        legacy = self.workspaces / "missing" / "legacy"
+        request = dict(self.request, action="inspect", legacy_root=str(legacy))
+        stdin = io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+        stdout = io.StringIO()
+        with patch.object(helper.sys, "stdin", stdin), patch.object(helper.sys, "stdout", stdout):
+            helper.main()
+        self.assertTrue(json.loads(stdout.getvalue())["ok"])
+        self.assertFalse(legacy.parent.exists())
+
+    def test_inspect_reports_head_despite_sync_only_filter_policy(self):
+        checkout = Path(helper.sync(self.request)["checkout_path"])
+        tip = git("rev-parse", "HEAD", cwd=checkout)
+        git("config", "filter.spy.process", "/bin/false", cwd=checkout)
+        self.assertEqual(helper.inspect(self.request)["local_oid"], tip)
+        with self.assertRaises(helper.Refusal):
+            helper.sync(self.request)
 
     def test_new_checkout_and_later_phone_push_fast_forward(self):
         first = helper.sync(self.request)
@@ -410,8 +459,9 @@ class CheckoutTest(unittest.TestCase):
         (config / "assist-git-known-hosts").write_text("placeholder")
         for path in config.iterdir():
             os.chmod(path, 0o600)
-        with self.assertRaisesRegex(helper.Refusal, "duplicate"):
-            self.real_configuration(config, key)
+        with patch.object(helper, "configured_source", self.real_configured_source):
+            with self.assertRaisesRegex(helper.Refusal, "duplicate"):
+                self.real_configuration(config, key)
 
     def test_missing_desktop_git_setup_names_only_fixed_files(self):
         config = Path(self.temporary.name) / "desktop-config"
@@ -422,16 +472,17 @@ class CheckoutTest(unittest.TestCase):
             ("assist-git-key", "placeholder"),
             ("assist-git-known-hosts", "placeholder"),
         )
-        for name, content in files:
-            with self.assertRaisesRegex(helper.Refusal,
-                                        "Desktop Git setup is missing " + name) as caught:
-                self.real_configuration(config, key)
-            self.assertNotIn(str(config), str(caught.exception))
-            target = config / name
-            target.write_text(content)
-            os.chmod(target, 0o600)
-        self.assertEqual(self.real_configuration(config, key)[0],
-                         "ssh://git@example.test/repo.git")
+        with patch.object(helper, "configured_source", self.real_configured_source):
+            for name, content in files:
+                with self.assertRaisesRegex(helper.Refusal,
+                                            "Desktop Git setup is missing " + name) as caught:
+                    self.real_configuration(config, key)
+                self.assertNotIn(str(config), str(caught.exception))
+                target = config / name
+                target.write_text(content)
+                os.chmod(target, 0o600)
+            self.assertEqual(self.real_configuration(config, key)[0],
+                             "ssh://git@example.test/repo.git")
 
     def test_missing_desktop_map_reaches_client_as_actionable_refusal(self):
         desktop_home = Path(self.temporary.name) / "desktop-home"

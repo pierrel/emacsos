@@ -1,0 +1,23 @@
+#+title: Client Git merge confirmation and refresh
+#+date: 2026-10-20
+
+* Result
+
+The Merge action asks for native minibuffer confirmation of the freshly
+observed server branch and published commit. The prompt warns that local work
+is excluded. Scrolling or button navigation no longer controls confirmation;
+declining or quitting submits no POST. This Git action uses a minibuffer prompt
+at Pierre's request, as an exception to the phone's usual two-tap action rule.
+
+Only a verified successful server merge starts the originating thread refresh,
+the normal checkout fetch, and a new server Git-facts observation. The fetch
+may fast-forward a clean checkout but preserves local edits. The view reports
+an incomplete checkout or unavailable facts instead of claiming refresh
+success. Unknown POST outcomes remain unconfirmed and are not retried.
+
+* Historical supersessions
+
+- =docs/2026-10-18-client-git-status-review-corrections.org=, "Result":
+  the visible Confirm button and shortcut-redisplay behavior are replaced by
+  native minibuffer confirmation. Its authorization and phone-header findings
+  remain unchanged.

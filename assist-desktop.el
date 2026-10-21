@@ -23,6 +23,8 @@
     (define-key map (kbd "C-c a n") #'emacsos-assist-web-new-thread)
     (define-key map (kbd "C-c a g") #'emacsos-assist-web-refresh-context)
     (define-key map (kbd "C-c a d") #'emacsos-assist-web-git-diff)
+    (define-key map (kbd "C-c a h") #'emacsos-assist-web-git-status)
+    (define-key map (kbd "C-c a m") #'emacsos-assist-web-git-merge)
     (define-key map (kbd "C-c a r") #'emacsos-assist-web-refresh-threads)
     map)
   "Desktop shortcuts for canonical Assist threads.")
