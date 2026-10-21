@@ -29,6 +29,7 @@ fonts and text terminals retain the existing face; no fonts are downloaded."
   :group 'emacsos-typography)
 
 (declare-function emacsos--chat-present-markdown-1 "chat" (beg end))
+(declare-function emacsos--chat-copy-raw "chat" (beg end delete))
 (defvar emacsos--chat-presentation-max-bytes)
 (defvar-local emacsos-typography--cookies nil)
 (defvar-local emacsos-markdown--styled-end nil)
@@ -109,11 +110,13 @@ Return the actual jit-lock coverage so display chunks do not repeat the work."
           (emacsos--chat-present-markdown-1 (point-min) (point-max))
           (setq emacsos-markdown--styled-end (copy-marker (point-max))))
       (when emacsos-markdown--styled-end
+        (emacsos-conversation--flush-images (point-min) emacsos-markdown--styled-end)
         (with-silent-modifications
           (remove-text-properties
            (point-min) emacsos-markdown--styled-end
            '(font-lock-face nil wrap-prefix nil emacsos-conversation-url nil
-             keymap nil mouse-face nil)))
+             keymap nil mouse-face nil display nil emacsos-conversation-object nil
+             emacsos-conversation-file-render nil)))
         (setq emacsos-markdown--styled-end nil)))
     `(jit-lock-bounds ,(point-min) . ,(point-max))))
 
@@ -122,6 +125,7 @@ Return the actual jit-lock coverage so display chunks do not repeat the work."
 Files above the message presentation limit remain ordinary text.  Existing
 Markdown mode associations take precedence over this built-in fallback."
   (require 'chat)
+  (setq-local filter-buffer-substring-function #'emacsos--chat-copy-raw)
   (emacsos-typography-apply)
   (when emacsos-prose-typography
     (jit-lock-register #'emacsos-markdown--fontify)))

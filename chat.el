@@ -14,10 +14,15 @@
 ;; docs/2026-05-17-streaming-responses.org.
 
 (require 'cl-lib)
+(require 'button)
+(require 'face-remap)
+(require 'subr-x)
 (require 'font-lock)
 (require 'emacsos-typography)
 (require 'json)
+(require 'jka-compr)
 (require 'mouse)
+(require 'image-mode)
 (require 'url)
 (require 'url-http)
 
@@ -177,13 +182,43 @@ its buffer.")
 
 (defface emacsos-chat-user-role-face
   '((t :inherit font-lock-keyword-face :weight bold))
-  "Face for the visible `you> ' role label."
+  "Face for the literal `you> ' prefix in labeled chat backends."
   :group 'emacsos)
 
 (defface emacsos-chat-assistant-role-face
   '((t :inherit font-lock-function-name-face :weight bold))
-  "Face for the visible `bot> ' role label."
+  "Face for the literal `bot> ' prefix in labeled chat backends."
   :group 'emacsos)
+
+(defface emacsos-chat-user-message-face
+  '((((class color) (background light)) :foreground "#555555")
+    (((class color) (background dark)) :foreground "#b0b0b0")
+    (t :inherit shadow))
+  "Slightly grayer text for human messages in Assist conversation streams."
+  :group 'emacsos)
+
+(defface emacsos-chat-message-separator-face
+  '((t :inherit shadow :underline t :extend t :height 0.35))
+  "Thin visual boundary between Assist messages."
+  :group 'emacsos)
+
+(defface emacsos-chat-input-separator-face
+  '((t :inherit emacsos-chat-message-separator-face :overline t :height 0.5))
+  "Distinct visual boundary above the full-width Assist typing area."
+  :group 'emacsos)
+
+(defconst emacsos-conversation--human-inset
+  (propertize " " 'display '(space :width (0.2 . text)))
+  "Window-relative visual inset; it adds no source whitespace.")
+
+(defun emacsos-conversation--separator (position &optional input)
+  "Style the existing newline at POSITION as a message or INPUT boundary."
+  (when (eq (char-after position) ?\n)
+    (add-text-properties
+     position (1+ position)
+     `(face ,(if input 'emacsos-chat-input-separator-face
+               'emacsos-chat-message-separator-face)
+            line-prefix nil wrap-prefix nil))))
 
 (defface emacsos-chat-heading-face
   '((t :inherit variable-pitch :weight bold :height 1.15))
@@ -224,10 +259,11 @@ its buffer.")
               filter-buffer-substring-function #'emacsos--chat-copy-raw))
 
 (defun emacsos-conversation-activate-or-newline ()
-  "Open a literal HTTP(S) object at point, otherwise insert an ordinary newline."
+  "Open a native conversation object at point, otherwise insert a newline."
   (interactive)
   (let ((url (get-text-property (point) 'emacsos-conversation-url)))
-    (if (emacsos-conversation--safe-url-p url)
+    (if (or (get-text-property (point) 'emacsos-conversation-object)
+            (emacsos-conversation--safe-url-p url))
         (emacsos-conversation--open-object)
       (newline))))
 
@@ -247,13 +283,41 @@ its buffer.")
   "Keymap on validated, backend-owned native conversation objects.")
 
 (defun emacsos-conversation--open-object (&optional event)
-  "Open the validated native object at point, or explain that none is present."
+  "Open the native object at point after validating its current local target."
   (interactive (list last-input-event))
   (when (mouse-event-p event) (mouse-set-point event))
-  (let ((url (get-text-property (point) 'emacsos-conversation-url)))
-    (if (emacsos-conversation--safe-url-p url)
-        (browse-url url)
-      (message "No HTTP(S) object at point"))))
+  (let ((object (get-text-property (point) 'emacsos-conversation-object))
+        (url (get-text-property (point) 'emacsos-conversation-url)))
+    (pcase object
+      (`(table ,source) (emacsos-conversation--table-view source))
+      (`(file ,path ,lines)
+       (condition-case problem
+           (if-let ((file (emacsos-conversation--local-file path)))
+               (progn
+                 (when (> (file-attribute-size (file-attributes file)) (* 1024 1024))
+                   (user-error "File exceeds 1 MiB link-view limit; use Find file"))
+                 (unless (when-let ((image (condition-case nil (emacsos-conversation--png file) (error nil))))
+                           (emacsos-conversation--image-view image))
+                   (let* ((image-regexp (concat (image-file-name-regexp) "\\|\\.svgz\\'"))
+                          (auto-mode-alist (cons (cons image-regexp #'fundamental-mode) auto-mode-alist))
+                          (magic-mode-alist nil) (magic-fallback-mode-alist nil)
+                          (jka-compr-inhibit t))
+                     (if (and (fboundp 'emacsos-assist-web--asset-local-file)
+                              (equal file (emacsos-assist-web--asset-local-file path)))
+			 (emacsos-assist-web--asset-view-file file)
+                       (when (and (find-buffer-visiting file)
+                                  (or (string-match-p image-regexp file)
+                                      (jka-compr-get-compression-info file)))
+			 (user-error "Image or compressed file already open; use Find file"))
+                       (emacsos-assist-web-find-file file))))
+                 (when (and (stringp lines) (string-match "\\`\\([0-9]+\\)" lines))
+                   (goto-char (point-min))
+                   (forward-line (1- (min 1000000 (string-to-number (match-string 1 lines)))))))
+             (message "File unavailable locally; refresh this thread"))
+         (error (message "%s" (error-message-string problem)))))
+      (_ (if (emacsos-conversation--safe-url-p url)
+             (browse-url url)
+           (message "No conversation object at point"))))))
 
 (defun emacsos-conversation-open-object ()
   "Run the current conversation's object-opening action."
@@ -339,24 +403,399 @@ remain owned by the backend; this small kernel owns only discovery and binding."
   (text-property-not-all (match-beginning 0) (match-end 0)
                          'emacsos--chat-verbatim nil))
 
+(declare-function emacsos-assist-web-git-local-directory "assist-web-git")
+(declare-function emacsos-assist-web-find-file "assist-web")
+(declare-function emacsos-assist-web--asset-local-file "assist-web" (path))
+(declare-function emacsos-assist-web--asset-view-file "assist-web")
+
+(defvar emacsos-conversation-render-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'emacsos-conversation--open-object)
+    (define-key map (kbd "RET") #'emacsos-conversation--open-object)
+    map)
+  "Explicit native file/table actions, also usable in ordinary Markdown buffers.")
+
+(defvar emacsos-conversation--image-work-budget nil
+  "Dynamically shared PNG byte/image-count allowance for one presentation pass.")
+
+(defvar emacsos-conversation--image-cache nil
+  "Dynamically shared local image results for one presentation pass.")
+
+(defvar-local emacsos-conversation--return-marker nil
+  "Conversation location to return to from an isolated table or image view.")
+
+(defun emacsos-conversation--workspace-file (path)
+  "Resolve PATH inside this conversation's existing local workspace.
+Server /tmp scratch, remote paths, Git internals in any letter case and
+symbolic links are excluded. Containment is lexical so a rejected symlink cannot invoke a
+remote file handler."
+  (when (and (stringp path) (<= (length path) 4096)
+             (not (string-match-p "[[:cntrl:]]" path))
+             (not (file-remote-p path))
+             (not (string-prefix-p "/tmp/" path))
+             (fboundp 'emacsos-assist-web-git-local-directory))
+    (when-let ((root (emacsos-assist-web-git-local-directory)))
+      (let* ((root (file-name-as-directory (expand-file-name root)))
+             (relative (cond ((string-prefix-p "/workspace/" path) (substring path 11))
+                             ((string-prefix-p "/user/" path) (substring path 6))
+                             ((file-name-absolute-p path) nil)
+                             (t path)))
+             (file (and relative (expand-file-name relative root)))
+             (cursor file))
+        (when (and file (not (file-remote-p root))
+                   (not (file-remote-p file))
+                   (string-prefix-p root file)
+                   (not (member-ignore-case ".git" (split-string relative "/" t)))
+                   (not (member ".." (split-string relative "/" t))))
+          (while (and cursor (not (equal (directory-file-name cursor)
+                                         (directory-file-name root))))
+            (if (file-symlink-p cursor) (setq file nil cursor nil)
+              (setq cursor (directory-file-name (file-name-directory cursor)))))
+          (and file (not (file-symlink-p (directory-file-name root)))
+               (file-regular-p file) file))))))
+
+(defun emacsos-conversation--local-file (path)
+  "Return an editable workspace file, otherwise an existing ephemeral asset."
+  (or (emacsos-conversation--workspace-file path)
+      (and (fboundp 'emacsos-assist-web--asset-local-file)
+           (emacsos-assist-web--asset-local-file path))))
+
+(defun emacsos-conversation--png-dimensions (data)
+  "Return validated PNG header dimensions from bounded DATA, or nil."
+  (when (and (>= (length data) 24)
+             (equal (substring data 0 8) (unibyte-string 137 80 78 71 13 10 26 10))
+             (equal (substring data 12 16) "IHDR"))
+    (let ((width 0) (height 0))
+      (dotimes (i 4)
+        (setq width (+ (* width 256) (aref data (+ 16 i)))
+              height (+ (* height 256) (aref data (+ 20 i)))))
+      (and (> width 0) (> height 0) (<= width 4096) (<= height 4096)
+           (cons width height)))))
+
+(defun emacsos-conversation--image-allowance ()
+  "Return remaining inline PNG bytes/count from actual buffer displays."
+  (let ((remaining (cons (* 1024 1024) 16))
+        (seen (make-hash-table :test 'eq))
+        (position nil))
+    (save-restriction
+      (widen)
+      (setq position (point-min))
+      (while (< position (point-max))
+        (let ((display (get-text-property position 'display)))
+          (when (and (consp display) (eq (car display) 'image)
+                     (not (gethash display seen)))
+            (puthash display t seen)
+            (let* ((data (plist-get (cdr display) :data))
+                   (size (and (stringp data) (emacsos-conversation--png-dimensions data))))
+              (when size
+                (cl-decf (car remaining) (length data))
+                (cl-decf (cdr remaining))))))
+        (setq position (next-single-property-change position 'display nil (point-max)))))
+    remaining))
+
+(defun emacsos-conversation--png (file &optional remaining)
+  "Return a bounded native PNG display, debiting byte/count REMAINING.
+Admit at most 16 read/decode attempts and 1 MiB encoded bytes per buffer/pass.
+Each image has at most 4,194,304 source pixels; scaling does not reduce that cap."
+  (let ((remaining (or remaining (cons (* 1024 1024) 16)))
+        (window (or (get-buffer-window (current-buffer) t) (selected-window)))
+        (work-budget (or emacsos-conversation--image-work-budget (cons (* 1024 1024) 16)))
+        image)
+    (when (and (display-images-p) (image-type-available-p 'png)
+               (string-equal (downcase (or (file-name-extension file) "")) "png")
+               (> (car remaining) 0) (> (cdr remaining) 0) (> (cdr work-budget) 0)
+               (<= (file-attribute-size (file-attributes file))
+                   (min (car remaining) (car work-budget))))
+      (cl-decf (cdr remaining))
+      (cl-decf (cdr work-budget))
+      (let ((limit (min (car remaining) (car work-budget))))
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert-file-contents-literally file nil 0 (1+ limit))
+          (let* ((data (buffer-string))
+                 (size (and (<= (length data) limit)
+                            (emacsos-conversation--png-dimensions data))))
+            (cl-decf (car remaining) (length data))
+            (cl-decf (car work-budget) (length data))
+            (when (and size (<= (* (car size) (cdr size)) (* 2048 2048)))
+              (setq image (create-image data 'png t :max-width
+                                        (max 100 (min 800 (- (window-body-width window t) 20)))
+                                        :max-height 600)))))))
+    (when image
+      (add-hook 'kill-buffer-hook #'emacsos-conversation--flush-images nil t)
+      (add-hook 'before-change-functions #'emacsos-conversation--flush-images nil t)
+      (add-hook 'change-major-mode-hook #'emacsos-conversation--flush-images nil t))
+    image))
+
+(defun emacsos-conversation--flush-images (&optional beg end)
+  "Release owned inline PNGs in BEG..END before their displays are withdrawn."
+  (save-restriction
+    (unless (or beg end) (widen))
+    (let ((position (or beg (point-min))) (end (or end (point-max))) seen)
+      (while (< position end)
+	(let ((display (get-text-property position 'display)))
+          (when (and (get-text-property position 'emacsos-conversation-file-render)
+                     (eq (car-safe display) 'image) (eq (plist-get (cdr display) :type) 'png)
+                     (plist-get (cdr display) :data) (not (memq display seen)))
+            (push display seen)
+            (image-flush display t)))
+	(setq position (next-single-property-change position 'display nil end))))))
+
+(defun emacsos-conversation--flush-image-view ()
+  "Release the native snapshot display without clearing unrelated image caches."
+  (when-let ((image (image-get-display-property))) (image-flush image t)))
+
+(defun emacsos-conversation--before-image-transform ()
+  "Flush the current snapshot display when a native zoom command starts."
+  (when (and (symbolp this-command)
+             (or (memq this-command '(image-increase-size image-decrease-size
+							  image-mouse-increase-size image-mouse-decrease-size))
+                 (string-prefix-p "image-transform-" (symbol-name this-command))))
+    (emacsos-conversation--flush-image-view)))
+
+(defun emacsos-conversation-image-fit ()
+  "Fit the native image down to this window without changing source bytes."
+  (interactive)
+  (emacsos-conversation--table-window)
+  (unless (derived-mode-p 'image-mode) (user-error "No image view here"))
+  (emacsos-conversation--flush-image-view)
+  (image-transform-fit-both))
+
+(defun emacsos-conversation-image-original ()
+  "Show the native image at original size for scrolling its detail."
+  (interactive)
+  (emacsos-conversation--table-window)
+  (unless (derived-mode-p 'image-mode) (user-error "No image view here"))
+  (emacsos-conversation--flush-image-view)
+  (image-transform-reset-to-original))
+
+(defun emacsos-conversation--image-view (image)
+  "Open validated PNG IMAGE bytes in a temporary native, read-only snapshot."
+  (let ((origin (copy-marker (point))) (view (generate-new-buffer "*Assist image*")))
+    (condition-case problem
+        (progn
+          (with-current-buffer view
+            (set-buffer-multibyte nil)
+            (insert (plist-get (cdr image) :data)))
+          (pop-to-buffer view)
+          (let ((image-auto-resize t) (image-use-external-converter nil)
+                (imagemagick-types-inhibit t))
+            (image-mode))
+          (setq-local image-use-external-converter nil imagemagick-types-inhibit t)
+          (setq-local header-line-format
+                      (list (emacsos-conversation--table-control " Back " #'emacsos-conversation-table-back)
+                            (emacsos-conversation--table-control " Fit " #'emacsos-conversation-image-fit)
+                            (emacsos-conversation--table-control " 1:1 " #'emacsos-conversation-image-original)))
+          (emacsos-conversation--flush-image-view)
+          (image-transform-fit-both)
+          (use-local-map (copy-keymap (current-local-map)))
+          (local-set-key (kbd "C-c b") #'emacsos-conversation-table-back)
+          (local-set-key (kbd "q") #'emacsos-conversation-table-back)
+          (setq-local emacsos-conversation--return-marker origin buffer-read-only t)
+          (set-buffer-modified-p nil)
+          (add-hook 'kill-buffer-hook #'emacsos-conversation--flush-image-view nil t)
+          (add-hook 'change-major-mode-hook #'emacsos-conversation--flush-image-view nil t)
+          (add-hook 'pre-command-hook #'emacsos-conversation--before-image-transform nil t)
+          t)
+      (error
+       (with-current-buffer view (emacsos-conversation--flush-image-view))
+       (kill-buffer view)
+       (when (marker-buffer origin) (switch-to-buffer (marker-buffer origin)))
+       (message "Cannot display PNG: %s" (error-message-string problem))
+       nil))))
+
+(defun emacsos-conversation--object (beg end object &optional display)
+  "Make BEG..END an explicit native OBJECT, optionally with inert DISPLAY."
+  (add-text-properties beg end
+                       `(emacsos-conversation-object ,object
+						     keymap ,emacsos-conversation-render-map mouse-face highlight))
+  (when display (put-text-property beg end 'display display)))
+
+(defun emacsos-conversation--tables (beg end)
+  "Associate complete Markdown tables in BEG..END with an isolated view."
+  (save-excursion
+    (goto-char beg)
+    (while (< (point) end)
+      (if (not (looking-at "[ \t]*|[^\n]+|[ \t]*$"))
+          (forward-line 1)
+        (let ((start (match-beginning 0)) (header (match-string-no-properties 0)))
+          (forward-line 1)
+          (when (and (< (point) end)
+                     (not (get-text-property start 'emacsos--chat-verbatim))
+                     (looking-at "[ \t]*|[ \t]*:?-+[ \t]*:?\\(?:[ \t]*|[ \t]*:?-+[ \t]*:?\\)+[ \t]*|?[ \t]*$"))
+            (forward-line 1)
+            (while (and (< (point) end) (looking-at "[ \t]*|[^\n]+|[ \t]*$"))
+              (forward-line 1))
+            (let* ((finish (min end (point)))
+                   (source (buffer-substring-no-properties start finish))
+                   (label (propertize (concat "[Table: " (string-trim header) " · Open to scroll]\n")
+                                      'face 'fixed-pitch)))
+              (put-text-property start finish 'emacsos--chat-verbatim t)
+              (emacsos-conversation--object start finish (list 'table source) label))))))))
+
+(defun emacsos-conversation--file-display (path remaining)
+  "Return bounded local image or accurate file-link display for PATH."
+  (let* ((file (condition-case nil (emacsos-conversation--local-file path) (error nil)))
+         (image (and file
+                     (if (not (eq (gethash file emacsos-conversation--image-cache :unseen) :unseen))
+                         (gethash file emacsos-conversation--image-cache)
+                       (puthash file (condition-case nil
+                                         (emacsos-conversation--png file remaining)
+                                       (error nil)) emacsos-conversation--image-cache)))))
+    (or image (propertize
+               (format "[File: %s%s]" path
+                       (if file " · Open" " · Unavailable locally; refresh thread"))
+               'face 'emacsos-chat-link-face))))
+
+(defun emacsos-conversation--refresh-file-displays ()
+  "Redisplay current native file fences from local bytes without network work.
+Source, draft, queue markers and table presentation remain untouched."
+  (let ((position (point-min)) ranges)
+    (while (< position (point-max))
+      (let ((end (next-single-property-change
+                  position 'emacsos-conversation-file-render nil (point-max))))
+        (when (get-text-property position 'emacsos-conversation-file-render)
+          (push (list position end
+                      (cadr (get-text-property position 'emacsos-conversation-object))) ranges))
+        (setq position end)))
+    (with-silent-modifications
+      (emacsos-conversation--flush-images)
+      (dolist (range ranges)
+        (remove-text-properties (car range) (cadr range) '(display nil)))
+      (let ((remaining (emacsos-conversation--image-allowance))
+            (emacsos-conversation--image-work-budget (cons (* 1024 1024) 16))
+            (emacsos-conversation--image-cache (make-hash-table :test 'equal)))
+        (dolist (range (nreverse ranges))
+          (put-text-property (car range) (cadr range) 'display
+                             (emacsos-conversation--file-display (nth 2 range) remaining)))))))
+
+(defun emacsos-conversation--render-files (beg end)
+  "Present complete type:file render fences in BEG..END using local files."
+  (save-excursion
+    (goto-char beg)
+    (let ((emacsos-conversation--image-work-budget
+           (or emacsos-conversation--image-work-budget (cons (* 1024 1024) 16)))
+          (remaining (emacsos-conversation--image-allowance))
+          (emacsos-conversation--image-cache
+           (or emacsos-conversation--image-cache (make-hash-table :test 'equal))) start)
+      (while (setq start (text-property-any (point) end 'emacsos--chat-render-start t))
+        (goto-char start)
+        (forward-line 1)
+	(let ((body (point)))
+          (when (and (get-text-property start 'emacsos--chat-render-start)
+                     (re-search-forward "^[ \t]*```[ \t]*\r?$" end t))
+            (let ((finish (point)) (body-end (match-beginning 0)) fields)
+              (save-excursion
+		(goto-char body)
+		(while (re-search-forward "^\\([^:\n]+\\):[ \t]*\\([^\n]*\\)" body-end t)
+                  (setf (alist-get (downcase (string-trim (match-string-no-properties 1))) fields nil nil #'equal)
+			(string-trim (match-string-no-properties 2)))))
+              (when (equal (alist-get "type" fields nil nil #'equal) "file")
+		(let* ((path (alist-get "path" fields nil nil #'equal))
+                       (range (alist-get "lines" fields nil nil #'equal))
+                       (object (list 'file path range))
+                       (display (emacsos-conversation--file-display path remaining)))
+                  (when path
+                    (emacsos-conversation--object
+                     start finish object
+                     display)
+                    (put-text-property start finish 'emacsos-conversation-file-render t)))))))))))
+
+(defun emacsos-conversation-table-back ()
+  "Release the table or image snapshot, returning to its source if still live."
+  (interactive)
+  (emacsos-conversation--table-window)
+  (when (markerp emacsos-conversation--return-marker)
+    (let ((view (current-buffer)))
+      (when (marker-buffer emacsos-conversation--return-marker)
+        (switch-to-buffer (marker-buffer emacsos-conversation--return-marker))
+        (set-window-hscroll nil 0))
+      (kill-buffer view))))
+
+(defun emacsos-conversation--table-window ()
+  "Select the snapshot header event's window for a mouse action."
+  (when (and (mouse-event-p last-input-event)
+             (windowp (posn-window (event-start last-input-event))))
+    (select-window (posn-window (event-start last-input-event)))))
+
+(defun emacsos-conversation-table-scroll-left ()
+  "Scroll the isolated table left, keeping its header controls visible."
+  (interactive)
+  (emacsos-conversation--table-window)
+  (set-window-hscroll nil (max 0 (- (window-hscroll) 12))))
+
+(defun emacsos-conversation-table-scroll-right ()
+  "Scroll the isolated table right, keeping its header controls visible."
+  (interactive)
+  (emacsos-conversation--table-window)
+  (set-window-hscroll nil (+ (window-hscroll) 12)))
+
+(defun emacsos-conversation--table-control (label command)
+  "Return a 40-pixel touch header LABEL that invokes COMMAND."
+  (let* ((map (make-sparse-keymap))
+         (edge (propertize " " 'mouse-face 'highlight 'local-map map
+                           'display '(space :width (20) :height (40)))))
+    (define-key map [header-line mouse-1] command)
+    (concat edge (propertize label 'local-map map 'mouse-face 'highlight) edge)))
+
+(defun emacsos-conversation--table-view (source)
+  "Open aligned table SOURCE in its own horizontally scrollable window."
+  (let ((origin (copy-marker (point)))
+        (view (generate-new-buffer "*Assist table*")))
+    (with-current-buffer view
+      (special-mode)
+      (use-local-map (copy-keymap (current-local-map)))
+      (setq-local emacsos-conversation--return-marker origin
+                  truncate-lines t word-wrap nil auto-hscroll-mode nil
+                  header-line-format
+                  (list (emacsos-conversation--table-control " Back " #'emacsos-conversation-table-back)
+                        (emacsos-conversation--table-control " Left " #'emacsos-conversation-table-scroll-left)
+                        (emacsos-conversation--table-control " Right " #'emacsos-conversation-table-scroll-right)))
+      (face-remap-add-relative 'default 'fixed-pitch)
+      (local-set-key (kbd "C-c b") #'emacsos-conversation-table-back)
+      (local-set-key (kbd "<left>") #'emacsos-conversation-table-scroll-left)
+      (local-set-key (kbd "<right>") #'emacsos-conversation-table-scroll-right)
+      (let* ((inhibit-read-only t)
+             (rows (mapcar (lambda (line) (mapcar #'string-trim
+                                     (split-string (string-remove-suffix "|" (substring (string-trim line) 1)) "|")))
+                           (split-string source "\n" t)))
+             (widths (make-vector (apply #'max (mapcar #'length rows)) 0)))
+        (dolist (row rows)
+          (cl-loop for cell in row for col from 0 do
+                   (aset widths col (max (aref widths col) (string-width cell)))))
+        (if (> (+ (string-bytes source)
+                  (* (length rows) (+ 3 (* 3 (length widths)) (apply #'+ (append widths nil)))))
+               emacsos--chat-presentation-max-bytes)
+            (insert "Table exceeds alignment limit; showing source.\n\n" source)
+          (dolist (row rows)
+            (insert "| ")
+            (cl-loop for col below (length widths) for cell = (or (pop row) "") do
+                     (insert cell (make-string (- (aref widths col) (string-width cell)) ?\s) " | "))
+            (insert "\n"))))
+      (goto-char (point-min)))
+    (switch-to-buffer view)))
+
 (defun emacsos--chat-present-markdown-1 (beg end)
   "Apply the flat native Markdown presentation to BEG..END.
 
 The caller supplies one message body.  The grammar is intentionally small:
 triple-backtick fences; logical-line headings, lists, and quotes; then
-pipe tables; single-line non-nested code, links, bold, and italic.
-Source characters are
-never replaced or hidden."
+pipe tables; single-line non-nested code, links, bold, and italic.  Complete
+file render fences and tables gain native views.  Stored and copied source
+characters remain unchanged."
   (when (and (<= beg end)
              (<= (- (position-bytes end) (position-bytes beg))
                  emacsos--chat-presentation-max-bytes))
     (with-silent-modifications
       (save-excursion
+        (emacsos-conversation--flush-images beg end)
         (remove-text-properties beg end
                                 '(font-lock-face nil wrap-prefix nil
-                                  emacsos--chat-verbatim nil
-                                  emacsos-conversation-url nil keymap nil
-                                  mouse-face nil))
+						 emacsos--chat-verbatim nil
+						 emacsos-conversation-url nil keymap nil
+						 mouse-face nil display nil
+						 emacsos-conversation-object nil
+						 emacsos--chat-render-start nil emacsos-conversation-file-render nil))
         (save-restriction
           (narrow-to-region beg end)
           (let ((in-fence nil))
@@ -365,33 +804,33 @@ never replaced or hidden."
               (let ((line-start (point))
                     (line-end (line-end-position)))
                 (cond
-                 ((looking-at "[ \t]*```")
+                 ((looking-at (if in-fence "[ \t]*```[ \t]*\r?$" "[ \t]*```"))
+                  (when (and (not in-fence) (save-match-data (looking-at "[ \t]*```render[ \t]*\r?$")))
+                    (put-text-property line-start line-end 'emacsos--chat-render-start t))
                   (emacsos--chat-add-face line-start line-end
-                                         'emacsos-chat-code-face)
+                                          'emacsos-chat-code-face)
                   (emacsos--chat-add-face (match-beginning 0) (match-end 0)
-                                         'emacsos-chat-markup-face)
+                                          'emacsos-chat-markup-face)
                   (put-text-property line-start line-end
                                      'emacsos--chat-verbatim t)
                   (setq in-fence (not in-fence)))
                  (in-fence
                   (emacsos--chat-add-face line-start line-end
-                                         'emacsos-chat-code-face)
+                                          'emacsos-chat-code-face)
                   (put-text-property line-start line-end
                                      'emacsos--chat-verbatim t))
                  ((looking-at "[ \t]*|.*|[ \t]*$")
                   (emacsos--chat-add-face line-start line-end
-                                         'emacsos-chat-code-face)
-                  (put-text-property line-start line-end
-                                     'emacsos--chat-verbatim t))
+                                          'emacsos-chat-code-face))
                  ((looking-at "[ \t]*\\(#\\{1,6\\}\\)[ \t]+")
                   (emacsos--chat-add-face (match-beginning 1) (match-end 1)
-                                         'emacsos-chat-markup-face)
+                                          'emacsos-chat-markup-face)
                   (emacsos--chat-add-face (match-end 0) line-end
-                                         'emacsos-chat-heading-face))
+                                          'emacsos-chat-heading-face))
                  ((looking-at
                    "[ \t]*\\(?:[-+*]\\|[0-9]+[.)]\\)[ \t]+")
                   (emacsos--chat-add-face (match-beginning 0) (match-end 0)
-                                         'font-lock-builtin-face)
+                                          'font-lock-builtin-face)
                   (put-text-property line-start line-end 'wrap-prefix
                                      (make-string
                                       (save-excursion
@@ -400,9 +839,9 @@ never replaced or hidden."
                                       ?\s)))
                  ((looking-at "[ \t]*>[ \t]*")
                   (emacsos--chat-add-face (match-beginning 0) (match-end 0)
-                                         'emacsos-chat-markup-face)
+                                          'emacsos-chat-markup-face)
                   (emacsos--chat-add-face (match-end 0) line-end
-                                         'emacsos-chat-quote-face)
+                                          'emacsos-chat-quote-face)
                   (put-text-property line-start line-end 'wrap-prefix
                                      (make-string
                                       (save-excursion
@@ -411,16 +850,19 @@ never replaced or hidden."
                                       ?\s)))))
               (forward-line 1)))
 
+          (emacsos-conversation--tables (point-min) (point-max))
+          (emacsos-conversation--render-files (point-min) (point-max))
+
           ;; Inline code wins: later passes skip ranges marked verbatim.
           (goto-char (point-min))
           (while (re-search-forward "`\\([^`\n]+\\)`" nil t)
             (unless (emacsos--chat-match-verbatim-p)
               (emacsos--chat-add-face (match-beginning 0) (match-end 0)
-                                     'emacsos-chat-code-face)
+                                      'emacsos-chat-code-face)
               (emacsos--chat-add-face (match-beginning 0) (1+ (match-beginning 0))
-                                     'emacsos-chat-markup-face)
+                                      'emacsos-chat-markup-face)
               (emacsos--chat-add-face (1- (match-end 0)) (match-end 0)
-                                     'emacsos-chat-markup-face)
+                                      'emacsos-chat-markup-face)
               (put-text-property (match-beginning 0) (match-end 0)
                                  'emacsos--chat-verbatim t)))
 
@@ -429,18 +871,31 @@ never replaced or hidden."
                   "\\[\\([^][\n]+\\)\\](\\([^()\n]+\\))" nil t)
             (unless (emacsos--chat-match-verbatim-p)
               (emacsos--chat-add-face (match-beginning 1) (match-end 1)
-                                     'emacsos-chat-link-face)
+                                      'emacsos-chat-link-face)
               (emacsos--chat-add-face (match-beginning 0) (match-beginning 1)
-                                     'emacsos-chat-markup-face)
+                                      'emacsos-chat-markup-face)
               (emacsos--chat-add-face (match-end 1) (match-end 0)
-                                     'emacsos-chat-markup-face)
+                                      'emacsos-chat-markup-face)
               (let ((target (match-string-no-properties 2)))
+                (when (and (string-prefix-p "<" target) (string-suffix-p ">" target))
+                  (setq target (substring target 1 -1)))
                 (when (emacsos-conversation--safe-url-p target)
                   (add-text-properties
                    (match-beginning 1) (match-end 1)
                    `(emacsos-conversation-url ,target
-                     keymap ,emacsos-conversation-object-map
-                     mouse-face highlight))))
+					      keymap ,emacsos-conversation-object-map
+					      mouse-face highlight)))
+                (unless (or (emacsos-conversation--safe-url-p target)
+                            (string-prefix-p "#" target)
+                            (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*:" target))
+                  (let ((label-beg (match-beginning 1)) (label-end (match-end 1)))
+                    (save-match-data
+                      (let (lines)
+                        (when (string-match ":\\([0-9]+\\)\\'" target)
+                          (setq lines (match-string 1 target)
+                                target (substring target 0 (match-beginning 0))))
+                        (emacsos-conversation--object
+                         label-beg label-end (list 'file target lines)))))))
               (put-text-property (match-beginning 0) (match-end 0)
                                  'emacsos--chat-verbatim t)))
 
@@ -450,9 +905,9 @@ never replaced or hidden."
               (unless (emacsos--chat-match-verbatim-p)
                 (emacsos--chat-add-face (match-beginning 1) (match-end 1) 'bold)
                 (emacsos--chat-add-face (match-beginning 0) (match-beginning 1)
-                                       'emacsos-chat-markup-face)
+					'emacsos-chat-markup-face)
                 (emacsos--chat-add-face (match-end 1) (match-end 0)
-                                       'emacsos-chat-markup-face)
+					'emacsos-chat-markup-face)
                 (put-text-property (match-beginning 0) (match-end 0)
                                    'emacsos--chat-verbatim t))))
 
@@ -467,17 +922,17 @@ never replaced or hidden."
                        (point-max)))
                 (emacsos--chat-add-face (match-beginning 1) (match-end 1) 'italic)
                 (emacsos--chat-add-face (match-beginning 0) (match-beginning 1)
-                                       'emacsos-chat-markup-face)
+					'emacsos-chat-markup-face)
                 (emacsos--chat-add-face (match-end 1) (match-end 0)
-                                       'emacsos-chat-markup-face))))
+					'emacsos-chat-markup-face))))
           (remove-text-properties (point-min) (point-max)
-                                  '(emacsos--chat-verbatim nil)))))))
+                                  '(emacsos--chat-verbatim nil emacsos--chat-render-start nil)))))))
 
 (defun emacsos--chat-present-message (prefix-start body-start end role)
   "Present one ROLE message without changing PREFIX-START..END source text.
 
-BODY-START follows the visible role prefix.  Presentation is deliberately
-best-effort and never allowed to interrupt chat lifecycle code."
+BODY-START follows the literal role prefix, hidden in Assist streams.
+Presentation is best-effort and never interrupts chat lifecycle code."
   (condition-case error
       (progn
         (with-silent-modifications
@@ -491,7 +946,38 @@ best-effort and never allowed to interrupt chat lifecycle code."
            (if (eq role 'user)
                'emacsos-chat-user-role-face
              'emacsos-chat-assistant-role-face)))
-        (emacsos--chat-present-markdown-1 body-start end))
+        (with-silent-modifications
+          (remove-text-properties prefix-start end '(line-prefix nil wrap-prefix nil)))
+        (emacsos--chat-present-markdown-1 body-start end)
+        (when (derived-mode-p 'emacsos-assist-web-mode)
+          (with-silent-modifications
+            (put-text-property prefix-start body-start 'display "")
+            (when (> prefix-start (point-min))
+              (emacsos-conversation--separator (1- prefix-start)))
+            (when (eq role 'user)
+              (put-text-property prefix-start end 'line-prefix emacsos-conversation--human-inset)
+              (emacsos--chat-add-face body-start end 'emacsos-chat-user-message-face)
+              (let ((position prefix-start))
+                (while (< position end)
+                  (let* ((next (next-single-property-change position 'wrap-prefix nil end))
+                         (prefix (get-text-property position 'wrap-prefix)))
+                    (put-text-property position next 'wrap-prefix
+                                       (concat emacsos-conversation--human-inset
+                                               (if (stringp prefix) prefix "")))
+                    (setq position next))))
+              ;; Attachment objects keep their existing full-width native views.
+              (let ((position body-start))
+                (while (< position end)
+                  (let* ((next (next-single-property-change position 'display nil end))
+                         (display (get-text-property position 'display))
+                         (object (get-text-property position 'emacsos-conversation-object)))
+                    (when (or (eq (car-safe display) 'image)
+                              (eq (car-safe object) 'table)
+                              (get-text-property position 'emacsos-conversation-file-render))
+                      (remove-text-properties
+                       (save-excursion (goto-char position) (line-beginning-position)) next
+                       '(line-prefix nil wrap-prefix nil)))
+                    (setq position next))))))))
     (error
      (message "chat: couldn't present Markdown: %s"
               (error-message-string error))
@@ -502,9 +988,13 @@ best-effort and never allowed to interrupt chat lifecycle code."
   (condition-case error
       (when (<= (- (position-bytes end) (position-bytes beg))
                 emacsos--chat-presentation-max-bytes)
+        (with-silent-modifications
+          (emacsos-conversation--flush-images beg end)
+          (remove-text-properties beg end '(display nil)))
         (save-excursion
           (goto-char beg)
-          (let (messages)
+          (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) 16))
+                (emacsos-conversation--image-cache (make-hash-table :test 'equal)) messages)
             (while (re-search-forward "^\\(you> \\|bot> \\)" end t)
               (push (list (match-beginning 1) (match-end 1)
                           (if (eq (char-after (match-beginning 1)) ?y)
@@ -541,6 +1031,7 @@ and preserves point in the editable draft."
   (let ((inhibit-read-only t) (inhibit-modification-hooks t))
     (save-excursion
       (goto-char start)
+      (emacsos-conversation--flush-images start end)
       (delete-region start end)
       (let ((before (point)))
         (insert text)

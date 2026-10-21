@@ -17,6 +17,7 @@
 (require 'ucs-normalize)
 (require 'url)
 (require 'url-http)
+(require 'url-cache)
 (require 'url-util)
 (require 'wid-edit)
 
@@ -41,6 +42,12 @@
   "Show general Run/recovery REASON without invalidating a Git checkout."
   (setq emacsos-assist-web--lifecycle-notice reason)
   (emacsos-assist-web--update-lifecycle-headers))
+
+(defvar-local emacsos-assist-web--asset-directory nil)
+(defvar-local emacsos-assist-web--asset-generation 0)
+(defvar-local emacsos-assist-web--asset-refresh-pending nil)
+(defvar emacsos-assist-web--asset-render-accepted nil
+  "Dynamic completion marker for a canonical request that actually rendered.")
 
 (defvar-local emacsos-assist-web--auth-epoch 0)
 (defvar emacsos-assist-web--current-canonical-get-owner nil
@@ -952,6 +959,8 @@ A shared stop may outlive its original buffer pending exact durable recovery."
 
 (defun emacsos-assist-web--canonical-denied-local (status)
   "Latch canonical HTTP STATUS denial before fallible presentation."
+  (setq emacsos-assist-web--asset-refresh-pending nil)
+  (cl-incf emacsos-assist-web--asset-generation)
   (cl-incf emacsos-assist-web--auth-epoch)
   (setq emacsos-assist-web--thread-denial-floor
         emacsos-assist-web--auth-epoch)
@@ -2375,7 +2384,8 @@ retains it.  Decoded SSE records are bounded by the event filter.  Headers and
 encoded responses are rejected before URL-FILTER can redirect or decompress
 them.  STATUS-OBSERVER sees a bounded raw status prefix before any refusal;
 nil or a signal leaves that status unacknowledged for a later bounded retry."
-  (let ((received 0) (header "") (header-complete nil) (failed nil)
+  (let ((response-limit emacsos-assist-web-max-response-bytes)
+        (received 0) (header "") (header-complete nil) (failed nil)
         (status-prefix "") (status-seen nil)
         (bounded-body (not streaming)))
     (lambda (process bytes)
@@ -2413,7 +2423,7 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
         (unless failed
           (setq received (+ received (string-bytes bytes)))
           (when (and bounded-body
-                     (> received emacsos-assist-web-max-response-bytes))
+                     (> received response-limit))
             (setq failed t)
             (funcall fail process "Assist Web response is too large"))
           (unless (or failed header-complete)
@@ -2479,7 +2489,7 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
                         (setq position (match-end 0))))))
                   (setq header nil)
                   (when (and (not failed) bounded-body
-                             (> received emacsos-assist-web-max-response-bytes))
+                             (> received response-limit))
                     (setq failed t)
                     (funcall fail process "Assist Web response is too large"))))
                ((> (string-bytes header) emacsos-assist-web-max-header-bytes)
@@ -2586,10 +2596,12 @@ status is safely ignored as stale; nil permits a bounded later retry."
                         (> (cdr git-get-owner)
                            (plist-get record :git-auth-floor))))))
     (condition-case nil
-        (let ((thread-get (string-match
+        (let ((thread-get (or (and (memq status '(401 403))
+                                      (string-match "\\`threads/\\([^/]+\\)/assets\\(?:\\?.*\\)?\\'" path))
+                            (string-match
                            (if (memq status '(401 403 404))
                                "\\`threads/\\([^/]+\\)\\(?:/approval\\|/git\\)?\\'"
-                             "\\`threads/\\([^/]+\\)\\'") path))
+                             "\\`threads/\\([^/]+\\)\\'") path)))
               (tid nil)
               (run-id nil))
           (if thread-get
@@ -2642,9 +2654,202 @@ The ordinary chat callback continues to receive its original error string."
                ((eq detail 'trust) "Assist Web TLS/trust failed")
                (t "Assist Web connection unavailable"))))
 
+(defconst emacsos-assist-web--asset-max-bytes (* 1024 1024)
+  "Maximum bytes in one disposable asset, independent of JSON response limits.")
+(defconst emacsos-assist-web--asset-max-files 16
+  "Maximum most-recent referenced assets checked and cached per thread buffer.")
+
+(defun emacsos-assist-web--asset-path (path)
+  "Normalize a public logical asset PATH, retaining its root namespace."
+  (when (and (stringp path) (<= (length path) 4096)
+             (not (string-match-p "[[:cntrl:]\\\\:]" path)))
+    (let* ((logical (if (string-prefix-p "/" path) path (concat "/workspace/" path)))
+           (parts (split-string (substring logical 1) "/")))
+      (when (and (member (car parts) '("workspace" "user" "tmp")) (cdr parts)
+                 (cl-every (lambda (part) (and (not (string-empty-p part))
+                                              (not (string-prefix-p "." part)))) parts))
+        logical))))
+
+(defun emacsos-assist-web--asset-directory-p ()
+  "Return non-nil only for this buffer's existing local cache directory."
+  (and emacsos-assist-web--asset-directory
+       (not (file-remote-p emacsos-assist-web--asset-directory))
+       (not (file-symlink-p emacsos-assist-web--asset-directory))
+       (file-directory-p emacsos-assist-web--asset-directory)))
+
+(defun emacsos-assist-web--asset-file (path &optional create)
+  "Return the private cache name for PATH, optionally creating its directory."
+  (when-let ((logical (emacsos-assist-web--asset-path path)))
+    (when (and emacsos-assist-web--thread-id
+               (emacsos-assist-web--valid-id-p emacsos-assist-web--thread-id))
+      (when (and create (or (not emacsos-assist-web--asset-directory)
+                            (and (not (file-symlink-p emacsos-assist-web--asset-directory))
+                                 (not (file-exists-p emacsos-assist-web--asset-directory)))))
+        (setq emacsos-assist-web--asset-directory (make-temp-file "emacsos-assets-" t)))
+      (when (emacsos-assist-web--asset-directory-p)
+        (let ((extension (if (string-match "\\.\\([A-Za-z0-9]\\{1,16\\}\\)\\'" logical)
+                             (downcase (match-string 1 logical)) "bin")))
+          (expand-file-name
+           (concat (secure-hash 'sha256 (concat emacsos-assist-web--thread-id "\0" logical))
+                   "." extension) emacsos-assist-web--asset-directory))))))
+
+(defun emacsos-assist-web--asset-local-file (path)
+  "Return an existing bounded, regular cached PATH without requesting anything."
+  (when-let ((file (emacsos-assist-web--asset-file path)))
+    (let ((attributes (file-attributes file)))
+      (and attributes (null (file-attribute-type attributes)) (file-regular-p file)
+           (<= (file-attribute-size attributes) emacsos-assist-web--asset-max-bytes) file))))
+
+(defun emacsos-assist-web--asset-bytes (file)
+  "Read at most one asset of regular FILE; reject links and growth beyond cap."
+  (when file
+    (let ((attributes (file-attributes file)))
+      (when (and attributes (null (file-attribute-type attributes)) (file-regular-p file)
+                 (<= (file-attribute-size attributes) emacsos-assist-web--asset-max-bytes))
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert-file-contents-literally file nil 0 (1+ emacsos-assist-web--asset-max-bytes))
+          (when (<= (buffer-size) emacsos-assist-web--asset-max-bytes) (buffer-string)))))))
+
+(defun emacsos-assist-web--asset-view-file (file)
+  "Show a read-only literal snapshot of cached FILE without visiting it."
+  (let ((data (emacsos-assist-web--asset-bytes file))
+        (buffer (get-buffer-create (concat "*Assist cached " (file-name-nondirectory file) "*"))))
+    (unless data (user-error "Cached file unavailable; refresh thread"))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (set-buffer-multibyte t)
+        (insert (decode-coding-string data 'utf-8)))
+      (fundamental-mode)
+      (setq buffer-read-only t)
+      (set-buffer-modified-p nil)
+      (goto-char (point-min)))
+    (pop-to-buffer buffer)))
+
+(defun emacsos-assist-web--asset-header (name end)
+  "Read one unambiguous HTTP header NAME before END in the response buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search t) value)
+      (while (re-search-forward (concat "^" (regexp-quote name) ":[ \t]*\\([^\r\n]*\\)") end t)
+        (when value (error "Duplicate asset response header"))
+        (setq value (string-trim (match-string-no-properties 1))))
+      value)))
+
+(defun emacsos-assist-web--asset-response (buffer)
+  "Decode bounded identity bytes or a 304 validator from HTTP response BUFFER."
+  (with-current-buffer buffer
+    (unless (and (memq url-http-response-status '(200 304))
+                 (markerp url-http-end-of-headers))
+      (error "Asset request failed (%s)" url-http-response-status))
+    (let* ((start (1+ (marker-position url-http-end-of-headers)))
+           (etag (emacsos-assist-web--asset-header "ETag" start))
+           (declared (emacsos-assist-web--asset-header "Content-Length" start))
+           (data (encode-coding-string (buffer-substring-no-properties start (point-max)) 'raw-text)))
+      (unless (and etag (string-match-p "\\`\"[0-9a-f]\\{64\\}\"\\'" etag)
+                   (<= (length data) emacsos-assist-web--asset-max-bytes)
+                   (or (not declared)
+                       (and (string-match-p "\\`[0-9]\\{1,7\\}\\'" declared)
+                            (= (string-to-number declared) (length data)))))
+        (error "Invalid or incomplete asset response"))
+      (if (= url-http-response-status 304)
+          (unless (zerop (length data)) (error "Unexpected 304 asset body"))
+        (unless (and (string-prefix-p "application/octet-stream" (or url-http-content-type ""))
+                     (equal etag (concat "\"" (secure-hash 'sha256 data) "\"")))
+          (error "Asset bytes do not match their validator")))
+      (list :status url-http-response-status :etag etag :data data))))
+
+(defun emacsos-assist-web--asset-cleanup ()
+  "Discard this buffer's disposable cache; never touch its editable workspace."
+  (cl-incf emacsos-assist-web--asset-generation)
+  (setq emacsos-assist-web--asset-refresh-pending nil)
+  (when (emacsos-assist-web--asset-directory-p)
+    (delete-directory emacsos-assist-web--asset-directory t))
+  (setq emacsos-assist-web--asset-directory nil))
+
+(defun emacsos-assist-web--asset-references ()
+  "Return the latest bounded unique native file-fence paths in this transcript.
+The existing 256 KiB presentation eligibility remains unchanged; maps are excluded."
+  (let ((position (point-min)) (end (or (emacsos-assist-web--prompt-start) (point-max))) paths)
+    (while (< position end)
+      (when (get-text-property position 'emacsos-conversation-file-render)
+        (when-let ((logical (emacsos-assist-web--asset-path
+                            (cadr (get-text-property position 'emacsos-conversation-object)))))
+          (push logical paths)))
+      (setq position (next-single-property-change
+                      position 'emacsos-conversation-file-render nil end)))
+    (seq-take (delete-dups paths) emacsos-assist-web--asset-max-files)))
+
+(defun emacsos-assist-web--refresh-assets ()
+  "Check referenced files once in the user's refresh flow, never in rendering.
+Editable workspace files win. Complete downloads atomically replace disposable
+cache bytes; failure keeps an existing complete copy. No retries are scheduled."
+  (let* ((origin (current-buffer)) (tid emacsos-assist-web--thread-id)
+         (generation emacsos-assist-web--asset-generation)
+         (send-generation emacsos-assist-web--send-generation)
+         (auth-epoch emacsos-assist-web--auth-epoch)
+         (paths (cl-remove-if (lambda (path)
+                                (condition-case nil (emacsos-conversation--workspace-file path) (error nil)))
+                              (emacsos-assist-web--asset-references)))
+         (names (mapcar (lambda (path) (emacsos-assist-web--asset-file path t)) paths))
+         (failures 0))
+    (when (emacsos-assist-web--asset-directory-p)
+      (dolist (file (directory-files emacsos-assist-web--asset-directory t "\\`[0-9a-f]\\{64\\}\\."))
+        (unless (member file names) (delete-file file))))
+    (cl-labels
+        ((current-p ()
+           (and (buffer-live-p origin)
+                (with-current-buffer origin
+                  (and (equal tid emacsos-assist-web--thread-id)
+                       (= generation emacsos-assist-web--asset-generation)
+                       (= send-generation emacsos-assist-web--send-generation)
+                       (= auth-epoch emacsos-assist-web--auth-epoch)
+                       (not emacsos-assist-web--denied)))))
+         (next (remaining)
+           (when (current-p)
+             (with-current-buffer origin
+               (if (not remaining)
+                   (progn
+                     (emacsos-conversation--refresh-file-displays)
+                     (when paths
+                       (message (if (zerop failures) "Referenced files refreshed"
+                                  "Some files unavailable; complete cached copies retained"))))
+                 (let* ((path (car remaining))
+                        (file (emacsos-assist-web--asset-file path))
+                        (old (condition-case nil (emacsos-assist-web--asset-bytes file) (error nil)))
+                        (validator (and old (concat "\"" (secure-hash 'sha256 old) "\""))))
+                   (emacsos-assist-web--request
+                    "GET" (format "threads/%s/assets?path=%s" tid (url-hexify-string path)) nil
+                    (lambda (response problem)
+                      (when (current-p)
+                        (with-current-buffer origin
+                          (condition-case nil
+                              (if problem (cl-incf failures)
+                                (if (= (plist-get response :status) 304)
+                                    (let ((now (emacsos-assist-web--asset-bytes file)))
+                                      (unless (and validator now
+                                                   (equal validator (plist-get response :etag))
+                                                   (equal validator (concat "\"" (secure-hash 'sha256 now) "\"")))
+                                        (cl-incf failures)))
+                                  (let ((destination (emacsos-assist-web--asset-file path)) temporary)
+                                    (unless (and destination (equal destination file))
+                                      (error "Asset cache no longer available"))
+                                    (unwind-protect
+                                        (progn
+                                          (setq temporary (make-temp-file (concat emacsos-assist-web--asset-directory "/download-")))
+                                          (let ((coding-system-for-write 'no-conversion))
+                                            (write-region (plist-get response :data) nil temporary nil 'silent))
+                                          (rename-file temporary destination t))
+                                      (when (and temporary (file-exists-p temporary)) (delete-file temporary))))))
+                            (error (cl-incf failures)))
+                          (next (cdr remaining)))))
+                    (when validator (list (cons "If-None-Match" validator))) nil nil nil nil t)))))))
+      (next paths))))
+
 (defun emacsos-assist-web--request
     (method path payload callback &optional headers allow-status array-type object-type
-            git-typed-error)
+            git-typed-error raw-response)
   "Send METHOD to PATH with optional JSON PAYLOAD and HEADERS.
 
 Invoke CALLBACK with (VALUE ERROR).  Report network and parsing failures as
@@ -2653,13 +2858,19 @@ ALLOW-STATUS only for a bounded structured non-2xx response the caller owns.
 ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
 GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
 error instead of the legacy string.  A Git probe's nondiagnostic failure
-does not downgrade a separate chat-accepted Git observation."
-  (let* ((run-owner (emacsos-assist-web--run-http-owner method path))
+does not downgrade a separate chat-accepted Git observation.
+RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
+  (let* ((emacsos-assist-web-max-response-bytes
+          (if raw-response (+ emacsos-assist-web--asset-max-bytes emacsos-assist-web-max-header-bytes)
+            emacsos-assist-web-max-response-bytes))
+        (run-owner (emacsos-assist-web--run-http-owner method path))
         (request-tid (and (equal method "GET") emacsos-assist-web--thread-id))
         (canonical-thread-get
          (and (equal method "GET")
               emacsos-assist-web--thread-id
               (equal path (concat "threads/" emacsos-assist-web--thread-id))))
+        (asset-intent (and canonical-thread-get emacsos-assist-web--asset-refresh-pending))
+        (asset-refresh-generation emacsos-assist-web--refresh-generation)
         (git-thread-get
          (and git-typed-error (equal method "GET") request-tid
               (equal path (concat "threads/" request-tid "/git"))))
@@ -2673,6 +2884,7 @@ does not downgrade a separate chat-accepted Git observation."
         (canonical-get-owner
          (when canonical-thread-get (cons git-access-record request-order)))
         token token-error)
+    (when canonical-thread-get (setq emacsos-assist-web--asset-refresh-pending nil))
     (condition-case error
         (setq token (emacsos-assist-web--read-token))
       ((error quit) (setq token-error (error-message-string error))))
@@ -2712,7 +2924,7 @@ does not downgrade a separate chat-accepted Git observation."
         (let* ((url-request-method method)
                (url-request-extra-headers
 		(append `(("Authorization" . ,(concat "Bearer " token))
-                          ("Accept" . "application/json"))
+                          ("Accept" . ,(if raw-response "application/octet-stream" "application/json")))
 			(when payload '(("Content-Type" . "application/json")))
 			headers))
                (url-request-data
@@ -2721,6 +2933,7 @@ does not downgrade a separate chat-accepted Git observation."
                (origin (current-buffer))
                (observed-http-status nil)
                (git-failure-notified nil)
+               (asset-displayed nil)
                (finished nil)
                response process timer)
           (cl-labels
@@ -2750,13 +2963,26 @@ does not downgrade a separate chat-accepted Git observation."
                      (when (timerp timer) (cancel-timer timer))
                      (setq emacsos-assist-web--requests
 			   (delq response emacsos-assist-web--requests))
-                     (let ((emacsos-assist-web--current-canonical-get-owner
+                     (let ((emacsos-assist-web--asset-render-accepted
+                            (and asset-intent
+                                 (lambda ()
+                                   (when (eq (current-buffer) origin)
+                                     (setq asset-displayed t)))))
+                           (emacsos-assist-web--current-canonical-get-owner
                             canonical-get-owner))
                        (funcall callback value
                                 (if (and git-typed-error problem)
                                     (emacsos-assist-web--git-request-error
                                      status (or kind 'transport) detail)
-                                  problem)))))))
+                                  problem)))
+                     (when (and asset-displayed value (not problem) (buffer-live-p origin))
+                       (with-current-buffer origin
+                         (when (and (= asset-refresh-generation emacsos-assist-web--refresh-generation)
+                                    (equal (nth 0 asset-intent) emacsos-assist-web--thread-id)
+                                    (= (nth 1 asset-intent) emacsos-assist-web--send-generation)
+                                    (= (nth 2 asset-intent) emacsos-assist-web--asset-generation)
+                                    (not emacsos-assist-web--denied))
+                           (emacsos-assist-web--refresh-assets))))))))
             (condition-case error
 		(progn
                   (setq url (emacsos-assist-web--endpoint path))
@@ -2784,19 +3010,21 @@ does not downgrade a separate chat-accepted Git observation."
                                                 origin method path status nil
                                                 run-owner request-tid git-get-owner)
                                              ((error quit) nil)))))
-		       ;; url-http marks complete 4xx/5xx responses as errors.
-		       (if (and (plist-get transport-status :error)
-                                (not (and allow-status
-                                          (integerp status)
-                                          (<= 400 status 599)
-                                          (equal (plist-get transport-status :error)
-                                                 (list 'error 'http status)))))
+                               ;; url-http marks complete 4xx/5xx responses as errors.
+                               (if (and (plist-get transport-status :error)
+                                        (not (and raw-response (eql status 304)))
+                                        (not (and allow-status
+                                                  (integerp status)
+                                                  (<= 400 status 599)
+                                                  (equal (plist-get transport-status :error)
+                                                         (list 'error 'http status)))))
 				   (setq problem "Assist Web connection unavailable")
 				 (condition-case parse-error
 				     (setq value
-					   (emacsos-assist-web--response-json
-					    response-buffer allow-status
-					    array-type object-type))
+                                           (if raw-response
+                                               (emacsos-assist-web--asset-response response-buffer)
+                                             (emacsos-assist-web--response-json
+                                              response-buffer allow-status array-type object-type)))
 				   ((error quit)
 				    (setq problem
 					  (error-message-string parse-error)))))
@@ -2850,7 +3078,14 @@ does not downgrade a separate chat-accepted Git observation."
                       (set-process-filter
                        process
                        (emacsos-assist-web--guarded-filter
-			url-filter
+                        (if raw-response
+                            (lambda (active bytes)
+                              ;; url-http otherwise expands every 304 through
+                              ;; its disk cache even with caching disabled.
+                              ;; Our validator refers only to the private cache.
+                              (cl-letf (((symbol-function 'url-cache-extract) #'ignore))
+                                (funcall url-filter active bytes)))
+                          url-filter)
 			(lambda (active problem)
 			  (unless git-failure-notified
                             (setq git-failure-notified
@@ -3787,7 +4022,7 @@ back their input retain the original history at the outermost boundary."
       (insert text))))
 
 (defun emacsos-assist-web--write-prompt ()
-  "Append the protected prompt prefix and start editable input."
+  "Append the hidden protected prefix and a boundary above editable input."
   (let ((before (point)))
     ;; Install before the prompt itself, then follow later status/action
     ;; insertions at that boundary rather than deleting their entry on Send.
@@ -3797,6 +4032,11 @@ back their input retain the original history at the outermost boundary."
     ;; A prompt field keeps ordinary line motion out of the protected prefix.
     (add-text-properties before (point)
                          '(read-only t field prompt front-sticky t rear-nonsticky t))
+    (with-silent-modifications
+      (emacsos-conversation--separator before t)
+      (put-text-property (1+ before) (point) 'display "")
+      (remove-text-properties before (point)
+                              '(line-prefix nil wrap-prefix nil font-lock-face nil)))
     (setq emacsos-assist-web--input-marker (copy-marker (point) nil))))
 
 (defun emacsos-assist-web--anchor-at (position)
@@ -4024,6 +4264,7 @@ client) the body is empty and the server keeps the historical clear."
          (format "%s <%s>" thread-label emacsos-assist-web--thread-id) t))
       (emacsos-assist-web-git--sync-keys)
       (emacsos-assist-web--set-workspace-directory)
+      (emacsos-conversation--flush-images)
       (erase-buffer)
       ;; Queue markers belonged to the erased presentation, never to this
       ;; canonical snapshot.  Rebuild remaining provisional entries below.
@@ -4048,7 +4289,9 @@ client) the body is empty and the server keeps the historical clear."
              "Review pending action" 'follow-link t
              'action (lambda (_) (emacsos-assist-web-review-approval source)))
             (insert "\n\n")))
-        (let ((emacsos--chat-presentation-max-bytes
+        (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) 16))
+              (emacsos-conversation--image-cache (make-hash-table :test 'equal))
+              (emacsos--chat-presentation-max-bytes
                (if (<= presentation-bytes emacsos--chat-presentation-max-bytes)
                    emacsos--chat-presentation-max-bytes
                  0)))
@@ -4105,7 +4348,9 @@ client) the body is empty and the server keeps the historical clear."
         (set-buffer-modified-p nil)
         ;; A passive reopen cannot replace another dead owner's exact bytes.
         ;; Explicit Refresh stages, durably normalizes and claims that receipt.
-        (unless dormant (emacsos-assist-web--save-draft)))))))
+        (prog1 (unless dormant (emacsos-assist-web--save-draft))
+          (when emacsos-assist-web--asset-render-accepted
+            (funcall emacsos-assist-web--asset-render-accepted))))))))
 
 (defun emacsos-assist-web--snapshot-cache-name (tid)
   "Return the bounded per-thread snapshot cache filename for TID."
@@ -5475,7 +5720,8 @@ ordinary interactive `find-file' prompt and navigation."
   (add-hook 'post-command-hook #'emacsos-assist-web-git--sync-keys nil t)
   (add-hook 'post-command-hook #'emacsos-assist-web--remember-input-undo nil t)
   (add-hook 'kill-buffer-hook #'emacsos-assist-web-git--teardown nil t)
-  (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t))
+  (add-hook 'kill-buffer-hook #'emacsos-assist-web--buffer-killed nil t)
+  (add-hook 'kill-buffer-hook #'emacsos-assist-web--asset-cleanup nil t))
 
 (define-key emacsos-assist-web-mode-map (kbd "M-p")
             #'emacsos-assist-web-previous-input)
@@ -7405,6 +7651,10 @@ or recheck the exact Run behind an owned observer."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
+        (when explicit
+          (setq emacsos-assist-web--asset-refresh-pending
+                (list emacsos-assist-web--thread-id emacsos-assist-web--send-generation
+                      (cl-incf emacsos-assist-web--asset-generation))))
         (let* ((shared-claim
                 (and explicit
                      (not emacsos-assist-web--passive-recovery-invalid-p)

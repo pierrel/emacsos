@@ -130,6 +130,12 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
         (should (equal requests '(("POST" "threads/thread-1/messages"
                                  ((message . "send this draft"))))))
         (should (equal (emacsos-assist-web--input) ""))
+        ;; The old final newline becomes the boundary of the appended message.
+        ;; Expect only its exact cosmetic separator properties to change.
+        (add-text-properties (1- (length transcript)) (length transcript)
+                             '(face emacsos-chat-message-separator-face
+                                    line-prefix nil wrap-prefix nil)
+                             transcript)
         (let ((entry (car emacsos-assist-web--queue)))
           (should (equal-including-properties
                    (buffer-substring (point-min) tail) transcript))
@@ -1001,3 +1007,107 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
       (face-spec-set 'org-table spec))))
 
 (provide 'test-interaction-typography)
+
+(ert-deftest interaction-stream-layout-preserves-source-and-rerenders ()
+  (interaction-test--thread
+    (goto-char (point-min))
+    (search-forward "you> ")
+    (let* ((body (point)) (prefix (- body 5))
+           (end (+ body (length "First")))
+           (literal (buffer-string))
+           (inset emacsos-conversation--human-inset))
+      (should (equal (get-text-property prefix 'display) ""))
+      (should (equal (get-text-property body 'line-prefix) inset))
+      (should (equal (get-text-property body 'wrap-prefix) inset))
+      (should (memq 'emacsos-chat-user-message-face
+                    (get-text-property body 'font-lock-face)))
+      (dotimes (_ 3)
+        (emacsos--chat-present-message prefix body end 'user)
+        (should (equal (get-text-property prefix 'wrap-prefix) inset))
+        (should (equal (get-text-property body 'wrap-prefix) inset)))
+      (emacsos--chat-present-message prefix body end 'assistant)
+      (should-not (get-text-property body 'line-prefix))
+      (should-not (get-text-property prefix 'wrap-prefix))
+      (should-not (memq 'emacsos-chat-user-message-face
+                        (get-text-property body 'font-lock-face)))
+      (should (equal (buffer-string) literal)))
+    (goto-char (point-min))
+    (search-forward "bot> ")
+    (should-not (get-text-property (point) 'line-prefix))
+    (should (eq (get-text-property (- (point) 6) 'face)
+                'emacsos-chat-message-separator-face))))
+
+(ert-deftest interaction-stream-human-list-quote-and-native-table ()
+  (interaction-test--thread
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert "you> prose\n- list words\n> quote words\n| A | B |\n|---|---|\n| 1 | 2 |")
+      (let ((literal (buffer-string)))
+        (emacsos--chat-present-message (point-min) (+ (point-min) 5) (point-max) 'user)
+        (goto-char (point-min))
+        (search-forward "list words")
+        (let ((prefix (get-text-property (1- (point)) 'wrap-prefix)))
+          (should (equal (substring prefix 0 1) emacsos-conversation--human-inset))
+          (should (> (length prefix) 1)))
+        (search-forward "quote words")
+        (should (equal (substring (get-text-property (1- (point)) 'wrap-prefix) 0 1)
+                       emacsos-conversation--human-inset))
+        (search-forward "| A")
+        (should (eq (car (get-text-property (1- (point)) 'emacsos-conversation-object)) 'table))
+        (should-not (get-text-property (1- (point)) 'line-prefix))
+        (should-not (get-text-property (1- (point)) 'wrap-prefix))
+        (should (equal literal (buffer-string)))))))
+
+(ert-deftest interaction-stream-input-self-insertion-has-no-transcript-properties ()
+  (interaction-test--thread
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (goto-char (point-max))
+      (let ((start (point)) (last-command-event ?x))
+        (should (equal (get-text-property (1- start) 'display) ""))
+        (should (eq (get-text-property (marker-position emacsos-assist-web--prompt-marker) 'face)
+                    'emacsos-chat-input-separator-face))
+        (self-insert-command 1)
+        (dolist (property '(display face font-lock-face line-prefix wrap-prefix read-only field))
+          (should-not (get-text-property start property)))
+        (should (equal (emacsos-assist-web--input) "x"))
+        (delete-char -1)
+        (should (= (point) start))
+        (should-error (delete-char -1) :type 'text-read-only)))))
+
+(ert-deftest interaction-stream-file-fence-fallback-remains-full-width ()
+  (interaction-test--thread
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert "you> before\n```render\ntype: file\npath: /workspace/missing.pdf\n```\nafter")
+      (emacsos--chat-present-message (point-min) (+ (point-min) 5) (point-max) 'user)
+      (goto-char (point-min)) (search-forward "```render")
+      (should (get-text-property (1- (point)) 'emacsos-conversation-file-render))
+      (should-not (get-text-property (1- (point)) 'line-prefix))
+      (should-not (get-text-property (1- (point)) 'wrap-prefix))
+      (search-forward "after")
+      (should (equal (get-text-property (1- (point)) 'line-prefix)
+                     emacsos-conversation--human-inset)))))
+
+(ert-deftest interaction-stream-prompt-can-be-created-outside-redraw ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    ;; Queue and recovery paths also write prompts without a redraw binding.
+    (emacsos-assist-web--write-prompt)
+    (should (equal (emacsos-assist-web--input) ""))
+    (let ((last-command-event ?x)) (self-insert-command 1))
+    (should (equal (emacsos-assist-web--input) "x"))
+    (should-error (delete-region (point-min) (1+ (point-min))) :type 'text-read-only)))
+
+(ert-deftest interaction-stream-draft-undo-retains-the-hidden-boundary ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (buffer-enable-undo)
+    (emacsos-assist-web--write-prompt)
+    (setq buffer-undo-list nil)
+    (let ((protected (buffer-string)) (last-command-event ?x))
+      (self-insert-command 1)
+      (undo-boundary)
+      (let ((inhibit-message t)) (undo 1))
+      (should (equal-including-properties (buffer-string) protected))
+      (should (equal (emacsos-assist-web--input) "")))))
