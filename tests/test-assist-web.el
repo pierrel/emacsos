@@ -2875,26 +2875,29 @@
         (should send-callback)))))
 
 (ert-deftest test-assist-web-settled-refresh-reacks-the-thread-read ()
-  "A settled refresh re-sends the read receipt to the dedicated open endpoint."
-  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
-        requests callback)
-    (with-temp-buffer
-      (emacsos-assist-web-mode)
-      (setq emacsos-assist-web--thread-id "thread-1")
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (method path _payload cb &rest _)
-                   (push (list method path) requests)
-                   (setq callback cb)))
-                ((symbol-function 'emacsos-assist-web--render) #'ignore)
-                ((symbol-function 'emacsos-assist-web--try-write-cache)
-                 (lambda (&rest _) t))
-                ((symbol-function 'emacsos-assist-web--git-note-safely)
-                 (lambda (&rest _) nil)))
-        (emacsos-assist-web-refresh-thread)
-        (funcall callback test-assist-web--snapshot nil)
-        (should (member '("GET" "threads/thread-1") requests))
-        (should (member '("POST" "threads/thread-1/open") requests)))
-)))
+  "A visible settled refresh acknowledges; switching away before delivery does not."
+  (dolist (visible '(t nil))
+    (save-window-excursion
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+            requests callback)
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (switch-to-buffer (current-buffer))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method path _payload cb &rest _)
+                       (push (list method path) requests)
+                       (setq callback cb)))
+                    ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--try-write-cache)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore))
+            (emacsos-assist-web-refresh-thread)
+            (unless visible (set-window-buffer (selected-window) (get-buffer-create " *receipt-away*")))
+            (funcall callback test-assist-web--snapshot nil)
+            (should (member '("GET" "threads/thread-1") requests))
+            (should (eq (not (null (member '("POST" "threads/thread-1/open") requests)))
+                        visible))))))))
 
 (ert-deftest test-assist-web-busy-refresh-does-not-reack-the-thread-read ()
   "A busy refresh renders no settled view and must not re-send the receipt."
@@ -2928,8 +2931,10 @@ server clears only flags for a view that is still current."
         requests callback)
     (let ((snapshot (copy-tree test-assist-web--snapshot)))
       (setf (alist-get 'revision (alist-get 'thread snapshot)) "rev-abc")
-      (with-temp-buffer
+      (save-window-excursion
+       (with-temp-buffer
         (emacsos-assist-web-mode)
+        (switch-to-buffer (current-buffer))
         (setq emacsos-assist-web--thread-id "thread-1")
         (cl-letf (((symbol-function 'emacsos-assist-web--request)
                    (lambda (method path payload cb &rest _)
@@ -2947,7 +2952,7 @@ server clears only flags for a view that is still current."
                        requests)))
             (should ack)
             (should (equal (nth 0 ack) "POST"))
-            (should (equal (nth 2 ack) '((revision . "rev-abc"))))))))))
+            (should (equal (nth 2 ack) '((revision . "rev-abc")))))))))))
 
 (ert-deftest test-assist-web-reopening-thread-preserves-live-buffer-state ()
   (let* ((thread '((id . "thread-1") (description . "Thread")
@@ -9060,33 +9065,38 @@ server clears only flags for a view that is still current."
 ;;; test-assist-web.el ends here
 
 (ert-deftest test-assist-web-queue-refresh-acknowledges-rendered-revision ()
-  "Public current-queue Refresh acknowledges exactly the successful settled view."
-  (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
-        (snapshot (copy-tree test-assist-web--snapshot)) requests rendered)
-    (setf (alist-get 'revision (alist-get 'thread snapshot)) "rendered-revision")
-    (with-temp-buffer
-      (emacsos-assist-web-mode)
-      (setq emacsos-assist-web--thread-id "thread-1")
-      (let ((entry (emacsos-assist-web--entry
-                    "A" 'terminal-unreconciled
-                    "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
-        (setf (plist-get entry :run-id) "run-a"
-              (plist-get entry :verified-outcome) "success")
-        (setq emacsos-assist-web--queue (list entry)))
-      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
-                ((symbol-function 'emacsos-assist-web--try-write-cache) (lambda (&rest _) t))
-                ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
-                ((symbol-function 'emacsos-assist-web--render) (lambda (_) (setq rendered t)))
-                ((symbol-function 'emacsos-assist-web--request)
-                 (lambda (method path payload callback &rest _)
-                   (push (list method path payload) requests)
-                   (if (equal method "GET") (funcall callback snapshot nil)
-                     (funcall callback nil nil)))))
-        (emacsos-assist-web-refresh-thread nil nil nil nil t)
-        (should rendered)
-        (should-not emacsos-assist-web--queue)
-        (should (member '("POST" "threads/thread-1/open"
-                         ((revision . "rendered-revision"))) requests))))))
+  "Visible current-queue Refresh acknowledges; hidden reconciliation stays unread."
+  (dolist (visible '(t nil))
+    (save-window-excursion
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+            (snapshot (copy-tree test-assist-web--snapshot)) requests rendered)
+        (setf (alist-get 'revision (alist-get 'thread snapshot)) "rendered-revision")
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (when visible (switch-to-buffer (current-buffer)))
+          (let ((entry (emacsos-assist-web--entry
+                        "A" 'terminal-unreconciled
+                        "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :verified-outcome) "success")
+            (setq emacsos-assist-web--queue (list entry)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--try-write-cache) (lambda (&rest _) t))
+                    ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--render) (lambda (_) (setq rendered t)))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method path payload callback &rest _)
+                       (push (list method path payload) requests)
+                       (if (equal method "GET") (funcall callback snapshot nil)
+                         (funcall callback nil nil)))))
+            (if visible (emacsos-assist-web-refresh-thread nil nil nil nil t)
+              (emacsos-assist-web--reconcile-when-settled))
+            (should rendered)
+            (should-not emacsos-assist-web--queue)
+            (should (eq (not (null (member '("POST" "threads/thread-1/open"
+                                            ((revision . "rendered-revision"))) requests)))
+                        visible))))))))
 
 (ert-deftest test-assist-web-read-receipt-transport-fences-definitive-auth-denial ()
   "Exercise actual request parsing; old-server 404 and transient failures stay benign."

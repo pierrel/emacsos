@@ -4213,10 +4213,11 @@ Nil REVISION sends an empty body for legacy unconditional acknowledgment."
     (error nil)))
 
 (defun emacsos-assist-web--ack-rendered-thread (snapshot)
-  "Acknowledge a settled SNAPSHOT after successful canonical rendering.
+  "Acknowledge a settled SNAPSHOT rendered in a visible thread window.
 Dormant stopped buffers remain passive recovery views.  Both ordinary refresh
-and queue reconciliation use this path; cached and failed renders do not."
-  (when (and (not (emacsos-assist-web--dormant-stop-p))
+and queue reconciliation use this path; hidden, cached and failed views do not."
+  (when (and (get-buffer-window (current-buffer) 'visible)
+             (not (emacsos-assist-web--dormant-stop-p))
              (member (alist-get 'status (alist-get 'thread snapshot))
                      emacsos-assist-web--settled-snapshot-statuses))
     (emacsos-assist-web--ack-thread-read

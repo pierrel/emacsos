@@ -377,7 +377,8 @@ thread, and =C-c a r= refreshes the catalog from any buffer.  =C-c a g=
 refreshes a canonical thread and Git view, or the catalog in a draft or elsewhere;
 The thread list shows one state indicator, in priority order: busy, error,
 urgent, unread reply, or unmerged Git work. Opening or refreshing a settled
-thread acknowledges the displayed snapshot. Cached views and background probes
+thread acknowledges the displayed snapshot only while its buffer has a visible
+window. Cached views, hidden-buffer rendering and background probes
 do not clear unread state; a newer server notification survives a stale receipt.
 
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
