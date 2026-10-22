@@ -122,6 +122,10 @@ the session watches required processes and the display. A busy Emacs command
 does not trigger a restart; a live but wedged Emacs or broken server socket
 requires manual recovery. Cleanup removes the session-created power-event
 FIFO after its reader groups stop, so supervised restarts can create it again.
+A refused or failed deep-suspend attempt is logged without terminating the wake
+monitor or restarting the UI. The panel stays dark, trusted wake input remains
+active, and the existing timer retries later. External power still prevents
+deep suspend.
 
 * Chat Server
 

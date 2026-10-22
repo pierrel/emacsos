@@ -476,15 +476,43 @@ if [ "$queue_guard" -eq 1 ]; then
     as_lab wake
     rm -f /tmp/doas.log
     printf '%s\n' 'Delayed FIFO consumption preserves screen-off deadline: OK'
-    printf '%s\n' 1 >/tmp/suspend-status
+    # Reproduce the phone's missing-modem admission failure with the real
+    # root helper. The same timed reader must retain its wake guard and PID.
+    touch /tmp/power-policy-test
+    rm -f /tmp/modem/idProduct /tmp/power-policy-attempts
+    : >/tmp/power/state
+    before=$(wc -l </tmp/swaymsg.log)
     as_lab press
-    if wait "$power_pid"; then
-        printf '%s\n' 'permanent suspend failure left monitor successful' >&2
-        exit 1
-    fi
+    generation=$(cat /run/emacsos-ui/power-generation)
+    wait_policy_attempt
+    [ "$(policy_code)" -eq 1 ]
+    grep -F 'expected EG25 modem is absent' /tmp/root-error.log >/dev/null
+    sleep 0.5
+    kill -0 "$power_pid"
+    [ "$(wc -l </tmp/power-policy-attempts)" -ge 2 ]
+    [ ! -s /tmp/power/state ]
     [ "$(cat /run/emacsos-ui/power-state)" = blank ]
-    printf '%s\n' 0 >/tmp/suspend-status
-    printf '%s\n' 'Permanent admission failure exits the worker: OK'
+    [ "$(cat /run/emacsos-ui/power-generation)" = "$generation" ]
+    [ "$(wc -l </tmp/swaymsg.log)" -eq $((before + 2)) ]
+    printf '%s\n' 0125 >/tmp/modem/idProduct
+    rm -f /tmp/power-policy-attempts
+    wait_policy_attempt
+    [ "$(policy_code)" -eq 0 ]
+    [ "$(cat /tmp/power/state)" = mem ]
+    kill -0 "$power_pid"
+    # The actual trusted power input still wakes the panel after the failure.
+    python3 - <<'WAKE_AFTER_FAILURE'
+import os,struct
+fd=os.open('/tmp/wake-input-3',os.O_RDWR|os.O_NONBLOCK)
+os.write(fd,struct.pack('@llHHi',0,0,1,116,1));os.close(fd)
+WAKE_AFTER_FAILURE
+    attempt=0
+    while [ "$(cat /run/emacsos-ui/power-state)" != active ]; do
+        [ "$attempt" -lt 100 ]; attempt=$((attempt + 1)); sleep 0.02
+    done
+    kill -0 "$power_pid"
+    rm -f /tmp/power-policy-test /tmp/power-policy-attempts
+    printf '%s\n' 'Failed suspend retains the reader, dark panel, retry and trusted wake: OK'
 fi
 kill "$power_pid" 2>/dev/null || true
 wait "$power_pid" 2>/dev/null || true
