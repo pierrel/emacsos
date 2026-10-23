@@ -380,6 +380,12 @@ Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
 thread, and =C-c a r= refreshes the catalog from any buffer.  =C-c a g=
 refreshes a canonical thread and Git view, or the catalog in a draft or elsewhere;
+The thread list shows one state indicator, in priority order: busy, error,
+urgent, unread reply, or unmerged Git work. Opening or refreshing a settled
+thread acknowledges the displayed snapshot only while its buffer has a visible
+window. Cached views, hidden-buffer rendering and background probes
+do not clear unread state; a newer server notification survives a stale receipt.
+
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
 =M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
 you return to the present.  Recall never sends a message.  Ordinary undo and

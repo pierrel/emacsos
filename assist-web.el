@@ -1988,7 +1988,8 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'."
     (let ((threads
            (mapcar (lambda (entry)
                      (emacsos-assist-web--catalog-entry
-                      entry '(id description search_description repo_label status)))
+                      entry '(id description search_description repo_label status
+                               unread urgent unmerged)))
                    (append wire-threads nil)))
           (repositories
            (mapcar (lambda (entry)
@@ -2572,20 +2573,24 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
 
 (defun emacsos-assist-web--http-access-status
     (origin method path status &optional early-failure run-owner request-tid git-get-owner)
-  "Classify ORIGIN's thread, approval or Run GET access failure.
+  "Classify ORIGIN's thread, approval, Run GET or read-receipt access failure.
 METHOD and PATH identify the exact endpoint, including the thread Git GET.
 STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
 classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
-REQUEST-TID is the trusted origin thread captured before an async T GET; it
+REQUEST-TID is the trusted origin thread captured before an async request; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
 GIT-GET-OWNER binds a Git GET to shared thread request-start order. A
 definitive denial wins unless a later-started canonical GET validated access.
 Return non-nil when the access notification completed or the exact Run
 status is safely ignored as stale; nil permits a bounded later retry."
-  (when (and (equal method "GET")
+  (when (and (or (equal method "GET")
+                 (and (equal method "POST")
+                      (memq status '(401 403))
+                      (stringp path)
+                      (string-match-p "\\`threads/[^/]+/open\\'" path)))
              (or (memq status '(401 403 404)) early-failure)
              (stringp path)
              (or (not git-get-owner)
@@ -2595,7 +2600,9 @@ status is safely ignored as stale; nil permits a bounded later retry."
                         (> (cdr git-get-owner)
                            (plist-get record :git-auth-floor))))))
     (condition-case nil
-        (let ((thread-get (or (and (memq status '(401 403))
+        (let ((thread-get (or (and (equal method "POST")
+                                      (string-match "\\`threads/\\([^/]+\\)/open\\'" path))
+                             (and (memq status '(401 403))
                                       (string-match "\\`threads/\\([^/]+\\)/assets\\(?:\\?.*\\)?\\'" path))
                             (string-match
                            (if (memq status '(401 403 404))
@@ -2863,7 +2870,8 @@ RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
           (if raw-response (+ emacsos-assist-web--asset-max-bytes emacsos-assist-web-max-header-bytes)
             emacsos-assist-web-max-response-bytes))
         (run-owner (emacsos-assist-web--run-http-owner method path))
-        (request-tid (and (equal method "GET") emacsos-assist-web--thread-id))
+        (request-tid (and (member method '("GET" "POST"))
+                          emacsos-assist-web--thread-id))
         (canonical-thread-get
          (and (equal method "GET")
               emacsos-assist-web--thread-id
@@ -4193,6 +4201,29 @@ of it, together with the oldest pagination cursor already reached."
               (alist-get 'next_before result) nil))
       result)))
 
+(defun emacsos-assist-web--ack-thread-read (tid revision)
+  "Acknowledge TID's rendered snapshot REVISION through POST /open.
+A failed receipt leaves rendering intact.  The server conditionally clears
+notifications only while their read-receipt identity still matches.
+Nil REVISION sends an empty body for legacy unconditional acknowledgment."
+  (condition-case nil
+      (emacsos-assist-web--request
+       "POST" (format "threads/%s/open" (emacsos-assist-web--require-id tid))
+       (when revision `((revision . ,revision))) #'ignore)
+    (error nil)))
+
+(defun emacsos-assist-web--ack-rendered-thread (snapshot)
+  "Acknowledge a settled SNAPSHOT rendered in a visible thread window.
+Dormant stopped buffers remain passive recovery views.  Both ordinary refresh
+and queue reconciliation use this path; hidden, cached and failed views do not."
+  (when (and (get-buffer-window (current-buffer) 'visible)
+             (not (emacsos-assist-web--dormant-stop-p))
+             (member (alist-get 'status (alist-get 'thread snapshot))
+                     emacsos-assist-web--settled-snapshot-statuses))
+    (emacsos-assist-web--ack-thread-read
+     emacsos-assist-web--thread-id
+     (alist-get 'revision (alist-get 'thread snapshot)))))
+
 (defun emacsos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed."
   (let ((inhibit-read-only t)
@@ -4551,7 +4582,7 @@ suppressing a genuine repeated submission."
                                   (alist-get 'description thread) width))
                     (metadata-source (format "%s · %s"
                                              (alist-get 'repo_label thread)
-                                             (alist-get 'status thread)))
+                                             (emacsos-assist-web--state-pill thread)))
                     (metadata (emacsos-assist-web--fit-list-line
                                metadata-source
                                (max 0 (- width
@@ -4589,6 +4620,29 @@ suppressing a genuine repeated submission."
        (if-let ((window (get-buffer-window (current-buffer) t)))
            (window-body-width window)
          40)))
+
+(defun emacsos-assist-web--state-pill (thread)
+  "Return THREAD's status token using the web list's precedence.
+Busy beats error, urgent, unread, and unmerged, in that order.  Otherwise
+return the raw stage.  Indicator tokens are fixed literals.
+The wire's unmerged field is true, false, or null (unavailable/not checked).
+Only true draws an indicator; legacy string yes is also accepted."
+  (let ((status (alist-get 'status thread))
+        (unmerged (alist-get 'unmerged thread)))
+    (cond
+     ((member status
+              '("queued" "cloning" "starting_sandbox" "processing"
+                "paused" "initializing"))
+      "🔄")
+     ((equal status "error")
+      "🛑")
+     ((alist-get 'urgent thread)
+      "⚠️")
+     ((alist-get 'unread thread)
+      "📬")
+     ((or (equal unmerged "yes") (eq unmerged t))
+      "🔀")
+     (t status))))
 
 (defun emacsos-assist-web--fit-list-line (text width)
   "Fit TEXT into WIDTH frame columns with a visible truncation marker.
@@ -4765,8 +4819,9 @@ The graphical phone measures proportional text against the same pixel budget."
           ;; claiming that a canonical transcript was cached.
           (setq emacsos-assist-web--snapshot nil)))
     (switch-to-buffer buffer)
-    ;; Opening a thread can sync its branch while the local checkout remains usable.
-    ;; Canonical metadata updates invalidate older Git requests through the epoch.
+    ;; Canonical refresh and queue reconciliation acknowledge only successfully
+    ;; rendered settled snapshots; cached views and read-only probes do not.
+    ;; Opening can fetch the branch while cached files remain usable.
     (with-current-buffer buffer
       (when (and emacsos-assist-web--snapshot
                  (not (emacsos-assist-web-git--gate-reason t)))
@@ -5032,7 +5087,8 @@ VERIFIED-START-EPOCH fences later Run access denial."
                                        (setq emacsos-assist-web--display-recovery nil)
                                        (force-mode-line-update t)
                                        (message (if cached "Thread refreshed"
-                                                  "Thread refreshed; local cache write failed")))
+                                                  "Thread refreshed; local cache write failed"))
+                                       (emacsos-assist-web--ack-rendered-thread value))
                                      (unless (or retiring cached)
                                        (emacsos-assist-web--git-note-safely
                                         value nil git-auth-start-epoch
@@ -7256,6 +7312,7 @@ restoration pauses this buffer until restart."
                                (emacsos-assist-web--render value)
                                (emacsos-assist-web--sync-active-surface)
                                (setq emacsos-assist-web--display-recovery nil)
+                               (emacsos-assist-web--ack-rendered-thread value)
                                (message "Thread refreshed"))
                            ((error quit)
                             (setq emacsos-assist-web--display-recovery t

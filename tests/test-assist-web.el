@@ -2874,6 +2874,90 @@
         (should-not rendered)
         (should send-callback)))))
 
+(ert-deftest test-assist-web-settled-refresh-reacks-the-thread-read ()
+  "A visible settled refresh acknowledges; switching away before delivery does not."
+  (dolist (visible '(t nil))
+    (save-window-excursion
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+            requests callback)
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (switch-to-buffer (current-buffer))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method path _payload cb &rest _)
+                       (push (list method path) requests)
+                       (setq callback cb)))
+                    ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--try-write-cache)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore))
+            (emacsos-assist-web-refresh-thread)
+            (unless visible (set-window-buffer (selected-window) (get-buffer-create " *receipt-away*")))
+            (funcall callback test-assist-web--snapshot nil)
+            (should (member '("GET" "threads/thread-1") requests))
+            (should (eq (not (null (member '("POST" "threads/thread-1/open") requests)))
+                        visible))))))))
+
+(ert-deftest test-assist-web-busy-refresh-does-not-reack-the-thread-read ()
+  "A valid busy snapshot renders without acknowledging in a visible idle buffer."
+  (save-window-excursion
+    (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+          (busy-snapshot (copy-tree test-assist-web--snapshot))
+          requests callback rendered)
+      (setf (alist-get 'status (alist-get 'thread busy-snapshot)) "processing")
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (switch-to-buffer (current-buffer))
+        ;; No local observer owns a provisional render, so a busy view may render.
+        (should-not emacsos-assist-web--in-flight)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path _payload cb &rest _)
+                     (push (list method path) requests)
+                     (setq callback cb)))
+                  ((symbol-function 'emacsos-assist-web--render)
+                   (lambda (value) (setq rendered value)))
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore))
+          (emacsos-assist-web-refresh-thread)
+          (funcall callback busy-snapshot nil)
+          (should (get-buffer-window (current-buffer) 'visible))
+          (should (eq rendered busy-snapshot))
+          (should (member '("GET" "threads/thread-1") requests))
+          (should-not (member '("POST" "threads/thread-1/open") requests)))))))
+
+(ert-deftest test-assist-web-settled-refresh-ack-carries-the-rendered-revision ()
+  "The read receipt echoes the revision of the snapshot we rendered, so the
+server clears only flags for a view that is still current."
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        requests callback)
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'revision (alist-get 'thread snapshot)) "rev-abc")
+      (save-window-excursion
+       (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (switch-to-buffer (current-buffer))
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (method path payload cb &rest _)
+                     (push (list method path payload) requests)
+                     (setq callback cb)))
+                  ((symbol-function 'emacsos-assist-web--render) #'ignore)
+                  ((symbol-function 'emacsos-assist-web--try-write-cache)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'emacsos-assist-web--git-note-safely)
+                   (lambda (&rest _) nil)))
+          (emacsos-assist-web-refresh-thread)
+          (funcall callback snapshot nil)
+          (let ((ack (cl-find-if
+                       (lambda (r) (equal (nth 1 r) "threads/thread-1/open"))
+                       requests)))
+            (should ack)
+            (should (equal (nth 0 ack) "POST"))
+            (should (equal (nth 2 ack) '((revision . "rev-abc")))))))))))
+
 (ert-deftest test-assist-web-reopening-thread-preserves-live-buffer-state ()
   (let* ((thread '((id . "thread-1") (description . "Thread")
                    (repo_label . "Assist") (status . "running")))
@@ -3527,7 +3611,11 @@
     (should
      (equal (emacsos-assist-web--require-catalog
              (test-assist-web--wire-catalog (list valid-thread) nil nil))
-            `((threads . (,valid-thread))
+            `((threads
+               . (((id . "thread-1") (description . "Thread")
+                   (search_description . "thread") (repo_label . "Assist")
+                   (status . "ready") (unread . nil) (urgent . nil)
+                   (unmerged . nil))))
               (repositories . nil) (harnesses . nil))))
     (should-error
      (emacsos-assist-web--require-catalog
@@ -3571,7 +3659,14 @@
           (emacsos-assist-web--require-catalog
            (test-assist-web--wire-catalog threads nil nil))))
     (should (= (length (alist-get 'threads catalog)) 148))
-    (should (equal (alist-get 'threads catalog) threads))))
+    ;; The projection appends the three state fields to every wire thread; the
+    ;; ZWJ/VS16 emoji in the descriptions round-trip byte-for-byte.
+    (should
+     (equal (alist-get 'threads catalog)
+            (cl-loop for thread in threads
+                     collect (append thread
+                                     '((unread . nil) (urgent . nil)
+                                       (unmerged . nil))))))))
 
 (ert-deftest test-assist-web-catalog-rejects-other-hostile-format-text ()
   (let ((valid-thread '((id . "thread-1") (description . "Thread")
@@ -3596,6 +3691,127 @@
          (emacsos-assist-web--require-catalog
           (test-assist-web--wire-catalog
            nil nil `(((key . ,key) (label . "Harness"))))))))))
+
+(ert-deftest test-assist-web-catalog-carries-state-fields-and-tolerates-absent-ones ()
+  (let* ((busy '((id . "busy") (description . "Busy") (search_description . "busy")
+                 (repo_label . "R") (status . "processing") (urgent . t)))
+         (new `((id . "new") (description . "New") (search_description . "new")
+                (repo_label . "R") (status . "ready") (unread . t)))
+         (plain '((id . "plain") (description . "Plain")
+                  (search_description . "plain")
+                  (repo_label . "R") (status . "ready")))
+         ;; The unmerged wire field is a BOOL or NIL on the new wire
+         ;; (true = checked dirty, false/nil = checked clean or not checked);
+         ;; the projection must carry it verbatim.
+         (dirty `((id . "dirty") (description . "Dirty")
+                  (search_description . "dirty")
+                  (repo_label . "R") (status . "ready") (unmerged . t)))
+         (catalog (emacsos-assist-web--require-catalog
+                   (test-assist-web--wire-catalog (list busy new plain dirty) nil nil))))
+    ;; The projection keeps the three state fields as nil when the wire object
+    ;; omits them, so absent fields degrade to false rather than erroring — and
+    ;; carries a present unmerged bool unchanged.
+    (should
+     (equal (alist-get 'threads catalog)
+            '(((id . "busy") (description . "Busy") (search_description . "busy")
+               (repo_label . "R") (status . "processing")
+               (unread . nil) (urgent . t) (unmerged . nil))
+              ((id . "new") (description . "New") (search_description . "new")
+               (repo_label . "R") (status . "ready")
+               (unread . t) (urgent . nil) (unmerged . nil))
+              ((id . "plain") (description . "Plain")
+               (search_description . "plain")
+               (repo_label . "R") (status . "ready")
+               (unread . nil) (urgent . nil) (unmerged . nil))
+              ((id . "dirty") (description . "Dirty")
+               (search_description . "dirty")
+               (repo_label . "R") (status . "ready")
+               (unread . nil) (urgent . nil) (unmerged . t)))))))
+
+(ert-deftest test-assist-web-state-pill-matches-web-precedence ()
+  (let ((busy "🔄")
+        (error "🛑")
+        (urgent "⚠️")
+        (new "📬")
+        (unmerged "🔀"))
+    ;; Each of the six live busy stages maps to the single busy token.
+    (dolist (stage '("queued" "cloning" "starting_sandbox" "processing"
+                     "paused" "initializing"))
+      (should (equal (emacsos-assist-web--state-pill
+                      `((id . "t") (status . ,stage)))
+                     busy)))
+    ;; First match wins, in the web's precedence.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "error") (urgent . t)))
+                   error))
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (urgent . t) (unread . t)))
+                   urgent))
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unread . t) (unmerged . t)))
+                   new))
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . t)))
+                   unmerged))
+    ;; Unmerged is a bool on the new wire (t/true = dirty). A legacy server may
+    ;; still send the tri-state string "yes", which is accepted across the
+    ;; two-PR transition window.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . "yes")))
+                   unmerged))
+    ;; "no" (checked, confirmed clean) and "unknown" (not checked behind a
+    ;; stronger pill) are NOT unmerged — they fall through to the raw stage.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . "no")))
+                   "ready"))
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready") (unmerged . "unknown")))
+                   "ready"))
+    ;; Nothing matches: the raw stage is returned so settled rows keep a state.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "ready")))
+                   "ready"))
+    ;; A busy stage masks every flag below it.
+    (should (equal (emacsos-assist-web--state-pill
+                    `((status . "processing") (urgent . t) (unread . t)
+                      (unmerged . t)))
+                   busy))))
+
+(ert-deftest test-assist-web-list-metadata-uses-state-pill ()
+  (let* ((ready '((id . "a") (description . "Ready")
+                  (search_description . "ready")
+                  (repo_label . "R") (status . "ready")))
+         (new `((id . "b") (description . "New")
+                (search_description . "new")
+                (repo_label . "R") (status . "ready") (unread . t)))
+         (busy `((id . "c") (description . "Busy")
+                 (search_description . "busy")
+                 (repo_label . "R") (status . "processing")))
+         (urgent `((id . "d") (description . "Urgent")
+                   (search_description . "urgent")
+                   (repo_label . "R") (status . "error") (urgent . t)))
+         (dirty `((id . "e") (description . "Dirty")
+                  (search_description . "dirty")
+                  (repo_label . "R") (status . "ready") (unmerged . "yes")))
+         (clean `((id . "f") (description . "Clean")
+                  (search_description . "clean")
+                  (repo_label . "R") (status . "ready") (unmerged . "no")))
+         (emacsos-assist-web--catalog
+          (test-assist-web--catalog ready new busy urgent dirty clean)))
+    ;; The metadata line is one status token, never a duplicated raw stage.
+    ;; Unmerged renders only for the tri-state "yes"; a confirmed-clean "no"
+    ;; thread shows its raw stage, not a token.
+    (should
+     (equal (mapcar (lambda (record)
+                      (cons (alist-get 'id (plist-get record :thread))
+                            (plist-get record :metadata)))
+                    (emacsos-assist-web--list-records 40))
+            '(("a" . "R · ready")
+              ("b" . "R · 📬")
+              ("c" . "R · 🔄")
+              ("d" . "R · 🛑")
+              ("e" . "R · 🔀")
+              ("f" . "R · ready"))))))
 
 (ert-deftest test-assist-web-native-list-renders-stable-collision-ordinals ()
   (let* ((a '((id . "a") (description . "Same description alpha")
@@ -8851,3 +9067,65 @@
 
 (provide 'test-assist-web)
 ;;; test-assist-web.el ends here
+
+(ert-deftest test-assist-web-queue-refresh-acknowledges-rendered-revision ()
+  "Visible current-queue Refresh acknowledges; hidden reconciliation stays unread."
+  (dolist (visible '(t nil))
+    (save-window-excursion
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+            (snapshot (copy-tree test-assist-web--snapshot)) requests rendered)
+        (setf (alist-get 'revision (alist-get 'thread snapshot)) "rendered-revision")
+        (with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (when visible (switch-to-buffer (current-buffer)))
+          (let ((entry (emacsos-assist-web--entry
+                        "A" 'terminal-unreconciled
+                        "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+            (setf (plist-get entry :run-id) "run-a"
+                  (plist-get entry :verified-outcome) "success")
+            (setq emacsos-assist-web--queue (list entry)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                    ((symbol-function 'emacsos-assist-web--try-write-cache) (lambda (&rest _) t))
+                    ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
+                    ((symbol-function 'emacsos-assist-web--render) (lambda (_) (setq rendered t)))
+                    ((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method path payload callback &rest _)
+                       (push (list method path payload) requests)
+                       (if (equal method "GET") (funcall callback snapshot nil)
+                         (funcall callback nil nil)))))
+            (if visible (emacsos-assist-web-refresh-thread nil nil nil nil t)
+              (emacsos-assist-web--reconcile-when-settled))
+            (should rendered)
+            (should-not emacsos-assist-web--queue)
+            (should (eq (not (null (member '("POST" "threads/thread-1/open"
+                                            ((revision . "rendered-revision"))) requests)))
+                        visible))))))))
+
+(ert-deftest test-assist-web-read-receipt-transport-fences-definitive-auth-denial ()
+  "Exercise actual request parsing; old-server 404 and transient failures stay benign."
+  (dolist (status '(401 403 404 500))
+    (let ((emacsos-assist-web-api-url "https://assist.invalid/api/v1/phone")
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          (emacsos-assist-web--requests nil) bearer endpoint)
+      (with-temp-buffer
+        (emacsos-assist-web-mode)
+        (setq emacsos-assist-web--thread-id "thread-1")
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token) (lambda () "token"))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (url callback &rest _)
+                     (setq endpoint url bearer (assoc "Authorization" url-request-extra-headers))
+                     (let ((response (generate-new-buffer " *receipt response*")))
+                       (with-current-buffer response
+                         (setq-local url-http-response-status status
+                                     url-http-content-type "text/plain"
+                                     url-http-end-of-headers (copy-marker (point-min)))
+                         (insert "malformed response")
+                         (funcall callback nil))
+                       response))))
+          (emacsos-assist-web--ack-thread-read "thread-1" "revision"))
+        (should bearer)
+        (should (equal endpoint "https://assist.invalid/api/v1/phone/threads/thread-1/open"))
+        (should (eq (not (null emacsos-assist-web--denied))
+                    (not (null (memq status '(401 403))))))))))
