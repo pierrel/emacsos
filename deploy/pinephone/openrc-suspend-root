@@ -9,7 +9,7 @@ umask 077
 power=/sys/power
 power_key=/sys/devices/platform/gpio-keys/power/wakeup
 axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
-modem=/sys/devices/platform/soc/1c1b000.usb/usb2/2-1
+modem_controller=/sys/devices/platform/soc/1c1b000.usb
 external_power=/sys/class/power_supply/axp20x-usb/online
 lock=/run/emacsos-openrc-suspend.lock
 
@@ -95,7 +95,14 @@ grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
 [ -r "$power/wakeup_count" ] && [ -w "$power/wakeup_count" ] ||
     fail 'wakeup counter is unavailable'
 [ -w "$power/state" ] || fail 'suspend state is unavailable'
-[ -f "$modem/idVendor" ] && [ ! -L "$modem/idVendor" ] &&
+# USB bus numbers vary at boot; the internal controller and port do not.
+modem=
+for candidate in "$modem_controller"/usb*/[0-9]*-1; do
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
+    [ -z "$modem" ] || fail 'ambiguous internal modem port'
+    modem=$candidate
+done
+[ -n "$modem" ] && [ -f "$modem/idVendor" ] && [ ! -L "$modem/idVendor" ] &&
     [ "$(sed -n '1p' "$modem/idVendor")" = 2c7c ] &&
     [ -f "$modem/idProduct" ] && [ ! -L "$modem/idProduct" ] &&
     [ "$(sed -n '1p' "$modem/idProduct")" = 0125 ] ||
