@@ -648,9 +648,12 @@ status check exposes the compact =Review= header action without discarding the a
 Run receipt or saved draft. After a decision, the same logical Run handle follows
 the approval resume and reconciles its completed canonical snapshot.
 Tap =Review= in a stopped Run header or =Review pending action= in a canonical
-snapshot to fetch all supported proposals. Network and region-download requests
-are discoverable even when the ordinary Run is ready. =Approvals and results=
-keeps retained independent results accessible. Several requests open one native
+snapshot to fetch all supported proposals. The =Status= buffer puts a prominent
+=Pending approvals: Review= link first whenever the thread has pending approvals,
+including independent requests while the ordinary Run is ready. It opens the
+same approval list; Git fact availability does not gate the notice. Network and
+region-download requests remain discoverable even when the ordinary Run is ready.
+=Approvals and results= keeps retained independent results accessible. Several requests open one native
 chooser; phone and desktop use this same client code.
 
 Outbound Email shows From, To, fixed Cc, subject and body; =Edit email= returns to
