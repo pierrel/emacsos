@@ -194,7 +194,8 @@ def main():
         if not ready and deadline is not None and now() >= deadline:
             result = subprocess.run([POWER, 'suspend', str(generation)], pass_fds=(3, 4, 5))
             if result.returncode not in (0, 75):
-                fail('suspend admission failed')
+                syslog.syslog(syslog.LOG_ERR, 'emacsos-power-monitor: suspend admission failed '
+                              f'({result.returncode}); keeping wake monitor active')
             deadline = now() + DELAY
 
 

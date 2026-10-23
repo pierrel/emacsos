@@ -29,7 +29,7 @@ install -o root -g root -m 0755 /source/process-group \
 sed -e 's|^power=/sys/power$|power=/tmp/power|' \
     -e 's|^power_key=.*$|power_key=/tmp/power-key/wakeup|' \
     -e 's|^axp_power_key=.*$|axp_power_key=/tmp/axp-power-key/wakeup|' \
-    -e 's|^modem=.*$|modem=/tmp/modem|' \
+    -e 's|^modem_controller=.*$|modem_controller=/tmp/modem-controller|' \
     -e 's|/sys/class/power_supply|/tmp/power-supplies|g' \
     /source/suspend-root >/tmp/suspend-root.test
 chmod 0755 /tmp/suspend-root.test
@@ -232,16 +232,16 @@ printf '%s\n' disabled >/tmp/external-power/power/wakeup
 printf '%s\n' Battery >/tmp/power-supplies/axp20x-battery/type
 printf '%s\n' 1 >/tmp/power-supplies/axp20x-battery/online
 printf '%s\n' Discharging >/tmp/power-supplies/axp20x-battery/status
-install -d -m 0755 /tmp/power /tmp/power-key /tmp/axp-power-key /tmp/modem/power
+install -d -m 0755 /tmp/power /tmp/power-key /tmp/axp-power-key /tmp/modem-controller/usb1/1-1/power
 printf '%s\n' 's2idle [deep]' >/tmp/power/mem_sleep
 printf '%s\n' 1 >/tmp/power/sync_on_suspend
 printf '%s\n' 41 >/tmp/power/wakeup_count
 : >/tmp/power/state
 printf '%s\n' disabled >/tmp/power-key/wakeup
 printf '%s\n' disabled >/tmp/axp-power-key/wakeup
-printf '%s\n' 2c7c >/tmp/modem/idVendor
-printf '%s\n' 0125 >/tmp/modem/idProduct
-printf '%s\n' disabled >/tmp/modem/power/wakeup
+printf '%s\n' 2c7c >/tmp/modem-controller/usb1/1-1/idVendor
+printf '%s\n' 0125 >/tmp/modem-controller/usb1/1-1/idProduct
+printf '%s\n' disabled >/tmp/modem-controller/usb1/1-1/power/wakeup
 
 mkfifo -m 0600 /run/emacsos-ui/power-events
 chown emacsos-lab:emacsos-lab /run/emacsos-ui/power-events
@@ -460,8 +460,34 @@ attempt=json.loads(open('/tmp/power-policy-attempts').readline())['at']
 assert .25 <= attempt-float(sys.argv[1]) < .58, 'unplug restarted the original blank deadline'
 DEADLINE
 as_lab wake
-rm -f /tmp/power-policy-test /tmp/power-policy-attempts
 printf '%s\n' 'Unplug before deadline keeps its original remaining time: OK'
+
+# The same internal controller/port must work under either boot bus number.
+mv /tmp/modem-controller/usb1 /tmp/modem-controller/usb2
+mv /tmp/modem-controller/usb2/1-1 /tmp/modem-controller/usb2/2-1
+as_lab press
+generation=$(cat /run/emacsos-ui/power-generation)
+as_lab suspend "$generation"
+[ "$(cat /tmp/power/state)" = mem ]
+[ "$(cat /tmp/modem-controller/usb2/2-1/power/wakeup)" = enabled ]
+as_lab wake
+# Refuse multiple candidates within that controller rather than guessing.
+mkdir -p /tmp/modem-controller/usb9/9-1
+as_lab press
+generation=$(cat /run/emacsos-ui/power-generation)
+: >/tmp/power/state
+if as_lab suspend "$generation"; then
+    printf '%s\n' 'ambiguous internal modem port was accepted' >&2
+    exit 1
+fi
+grep -F 'ambiguous internal modem port' /tmp/root-error.log >/dev/null
+[ ! -s /tmp/power/state ]
+as_lab wake
+rmdir /tmp/modem-controller/usb9/9-1 /tmp/modem-controller/usb9
+mv /tmp/modem-controller/usb2/2-1 /tmp/modem-controller/usb2/1-1
+mv /tmp/modem-controller/usb2 /tmp/modem-controller/usb1
+rm -f /tmp/power-policy-test /tmp/power-policy-attempts
+printf '%s\n' 'Internal modem resolves across boot bus numbers and rejects ambiguity: OK'
 
 if [ "$queue_guard" -eq 1 ]; then
     kill -STOP "$power_pid"
@@ -476,15 +502,43 @@ if [ "$queue_guard" -eq 1 ]; then
     as_lab wake
     rm -f /tmp/doas.log
     printf '%s\n' 'Delayed FIFO consumption preserves screen-off deadline: OK'
-    printf '%s\n' 1 >/tmp/suspend-status
+    # Reproduce the phone's missing-modem admission failure with the real
+    # root helper. The same timed reader must retain its wake guard and PID.
+    touch /tmp/power-policy-test
+    rm -f /tmp/modem-controller/usb1/1-1/idProduct /tmp/power-policy-attempts
+    : >/tmp/power/state
+    before=$(wc -l </tmp/swaymsg.log)
     as_lab press
-    if wait "$power_pid"; then
-        printf '%s\n' 'permanent suspend failure left monitor successful' >&2
-        exit 1
-    fi
+    generation=$(cat /run/emacsos-ui/power-generation)
+    wait_policy_attempt
+    [ "$(policy_code)" -eq 1 ]
+    grep -F 'expected EG25 modem is absent' /tmp/root-error.log >/dev/null
+    sleep 0.5
+    kill -0 "$power_pid"
+    [ "$(wc -l </tmp/power-policy-attempts)" -ge 2 ]
+    [ ! -s /tmp/power/state ]
     [ "$(cat /run/emacsos-ui/power-state)" = blank ]
-    printf '%s\n' 0 >/tmp/suspend-status
-    printf '%s\n' 'Permanent admission failure exits the worker: OK'
+    [ "$(cat /run/emacsos-ui/power-generation)" = "$generation" ]
+    [ "$(wc -l </tmp/swaymsg.log)" -eq $((before + 2)) ]
+    printf '%s\n' 0125 >/tmp/modem-controller/usb1/1-1/idProduct
+    rm -f /tmp/power-policy-attempts
+    wait_policy_attempt
+    [ "$(policy_code)" -eq 0 ]
+    [ "$(cat /tmp/power/state)" = mem ]
+    kill -0 "$power_pid"
+    # The actual trusted power input still wakes the panel after the failure.
+    python3 - <<'WAKE_AFTER_FAILURE'
+import os,struct
+fd=os.open('/tmp/wake-input-3',os.O_RDWR|os.O_NONBLOCK)
+os.write(fd,struct.pack('@llHHi',0,0,1,116,1));os.close(fd)
+WAKE_AFTER_FAILURE
+    attempt=0
+    while [ "$(cat /run/emacsos-ui/power-state)" != active ]; do
+        [ "$attempt" -lt 100 ]; attempt=$((attempt + 1)); sleep 0.02
+    done
+    kill -0 "$power_pid"
+    rm -f /tmp/power-policy-test /tmp/power-policy-attempts
+    printf '%s\n' 'Failed suspend retains the reader, dark panel, retry and trusted wake: OK'
 fi
 kill "$power_pid" 2>/dev/null || true
 wait "$power_pid" 2>/dev/null || true
@@ -577,13 +631,13 @@ if [ "$queue_guard" -eq 1 ]; then /tmp/suspend-root.test guarded-suspend; else /
 [ "$(cat /tmp/power/state)" = mem ]
 [ "$(cat /tmp/power-key/wakeup)" = enabled ]
 [ "$(cat /tmp/axp-power-key/wakeup)" = enabled ]
-[ "$(cat /tmp/modem/power/wakeup)" = enabled ]
+[ "$(cat /tmp/modem-controller/usb1/1-1/power/wakeup)" = enabled ]
 if /tmp/suspend-root.test unexpected >/tmp/root-arg.out 2>&1; then
     printf '%s\n' 'root suspend helper accepted an argument' >&2
     exit 1
 fi
 grep -F 'unknown guarded action' /tmp/root-arg.out >/dev/null
-printf '%s\n' dead >/tmp/modem/idProduct
+printf '%s\n' dead >/tmp/modem-controller/usb1/1-1/idProduct
 root_action=
 [ "$queue_guard" -ne 1 ] || root_action=guarded-suspend
 if /tmp/suspend-root.test $root_action >/tmp/root-modem.out 2>&1; then
@@ -596,7 +650,7 @@ grep -F 'emacsos-openrc-suspend expected EG25 modem is absent' /tmp/root-error.l
 # Exercise admission with real kernel guard FDs, helper code and display locks.
 # Sway/wtype and doas transport are fixtures. The PM counter/state handshake is
 # modeled because ordinary files cannot reject writes on kernel wake events.
-printf '%s\n' 0125 >/tmp/modem/idProduct
+printf '%s\n' 0125 >/tmp/modem-controller/usb1/1-1/idProduct
 cat >/tmp/kernel-pm-model.py <<'MODEL'
 import array, fcntl, os, re, sys, time
 from pathlib import Path

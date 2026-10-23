@@ -122,6 +122,11 @@ the session watches required processes and the display. A busy Emacs command
 does not trigger a restart; a live but wedged Emacs or broken server socket
 requires manual recovery. Cleanup removes the session-created power-event
 FIFO after its reader groups stop, so supervised restarts can create it again.
+A refused or failed deep-suspend attempt is logged without terminating the wake
+monitor or restarting the UI. The panel stays dark, trusted wake input remains
+active, and the existing timer retries later. External power still prevents
+deep suspend. The modem is identified by its internal USB controller, port and
+EG25 hardware IDs, without depending on the bus number assigned at boot.
 
 * Chat Server
 
@@ -375,6 +380,12 @@ Loading the desktop client enables =emacsos-desktop-assist-mode=: =C-c a l=
 opens the thread list, =C-c a t= offers filtered completion, =C-c a n= starts a new
 thread, and =C-c a r= refreshes the catalog from any buffer.  =C-c a g=
 refreshes a canonical thread and Git view, or the catalog in a draft or elsewhere;
+The thread list shows one state indicator, in priority order: busy, error,
+urgent, unread reply, or unmerged Git work. Opening or refreshing a settled
+thread acknowledges the displayed snapshot only while its buffer has a visible
+window. Cached views, hidden-buffer rendering and background probes
+do not clear unread state; a newer server notification survives a stale receipt.
+
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
 =M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
 you return to the present.  Recall never sends a message.  Ordinary undo and
