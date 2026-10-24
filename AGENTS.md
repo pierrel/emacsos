@@ -16,41 +16,36 @@ Reach the phone via `ssh phone` (home LAN) / `ssh phone-wg` (WireGuard, away). T
 phone**. There is **no small-model eval harness** here — the live phone is the contract
 (vs assist, where the eval is).
 
-## Development workflow
+## Testing and deployment facts
 
-Same three-phase **Design → Code → Review** as assist (see `../assist/AGENTS.md` "Development
-workflow" and the global `~/.codex/AGENTS.md` loop) — using the shared lens checklists
-`../.claude/agents/design-reviewer.md` + `../.claude/agents/code-reviewer.md`, run via
-`codex exec`/`codex review` (Codex) or subagents (Claude). Emphasis shifts for emacsos:
-- Design lenses lean on the **phone↔server wire protocol** shape (small + obvious) and the
-  **320×240 / T9 / single-buffer UX** constraints; the threat-model lens stays HEAVY for any
-  `mmcli`/root/SMS/network-listener surface (the `sms-forward` root daemon passed the local
-  loop then took 7 Copilot rounds of real hardening — slowloris, body-cap + its negative-
-  `Content-Length` bypass, bind exposure, injection).
-- Code review adds elisp specifics (marker insertion-types, buffer-local vs global state,
-  read-only text props) and server specifics (async/executor boundaries, lock pairing,
-  generator cleanup).
-- Applies to: `chat.el`, `os.el`, `network.el`, the wire protocol, `emacsos_server/app.py`,
-  the simulator, deploy plumbing (`Makefile` `phone-install`/`local-deploy`, `deploy/`), and
-  how assist is loaded.
-
-## Branching / deploy / testing
-
-Feature-branch off `main` only. Commit/push freely on branches; `main` commits need Pierre's
-go-ahead. Prefer ff merges. **"Ready"** = the three phases done + `make test-elisp` +
-`make test-server` pass + `make smoke` when the wire protocol or boot path changed. Phone
-deploy from a feature branch is OK (`make phone-install`/`make local-deploy`) but only one
-branch is on the phone at a time (`scp` overwrites). **Real-phone smoke after a boot-path
-refactor** — unit tests don't catch entry-point regressions (the assist `manage.web` package
-split crash-looped systemd until `__main__.py` was added; the principle applies to emacsos
-boot too).
+- Run `make test-elisp` (ERT) and `make test-server` (pytest) for affected client
+  and server changes. Use `make smoke` when the wire protocol or boot path
+  changes, plus real-phone smoke after a boot-path refactor. Unit tests do not
+  catch every entry-point regression; the Assist `manage.web` package split
+  crash-looped its service until `__main__.py` was added.
+- Load-bearing paths include `chat.el`, `os.el`, `network.el`, the phone/server
+  wire protocol, `emacsos_server/app.py`, the simulator, deploy plumbing
+  (`Makefile` `phone-install`/`local-deploy`, `deploy/`) and how Assist is loaded.
+- Check Elisp marker insertion types, buffer-local versus global state and
+  read-only text properties; check server async/executor boundaries, lock
+  pairing and generator cleanup. For root/SMS/network or `mmcli` changes,
+  trace untrusted arguments to privileged sinks and check authorization,
+  listener exposure, bounded reads/timeouts and secrets outside argv/logs.
+  The `sms-forward` hardening exposed slowloris, body-cap and negative
+  `Content-Length` bypasses, bind exposure and injection risks.
+- `make phone-install` and `make local-deploy` can install a feature branch.
+  Installing another branch overwrites its predecessor; preserve the intended
+  live composition. `make local-deploy` copies
+  the payload and performs a bounded clean OpenRC UI restart; it never
+  hot-reloads Lisp into the existing Emacs process. Verify the affected phone
+  flow after installation.
 
 ## Conventions
 
 - **Layers: deterministic emacs primitives + an interpretive agent** (README "Layers"). Every
   device action is an emacs interactive command; the dividing line is *determinism*. Emacs
   commands are **deterministic primitives** — concrete arg in, same action out, no model in the
-  loop (e.g. `(emacsos-call "+1XXXXXXXXXX")` stages that number in the local call UI). The
+  loop, no callback into the agent (e.g. `(emacsos-call "+1XXXXXXXXXX")` stages that number in the local call UI). The
   **agent is the interpretive layer**: turning fuzzy intent ("call Ana") into a concrete primitive
   call — resolution and disambiguation — is skill work. Safety-critical authorization may remain
   a deterministic local UI boundary; the ordinary public flow dials a staged call only after two
@@ -63,7 +58,7 @@ boot too).
   the 320×240 touchscreen — a confirm-via-modal *bricks* that action. Use the **in-row two-tap
   button** pattern (first tap relabels to "Confirm X?" + arms; second tap fires; any other tap
   cancels). Audit new keyboard commands for `y-or-n-p`/`yes-or-no-p`/`read-char`.
-- **The phone is the user.** Every UI decision is on a 320×240 screen with a T9 keyboard — fewer
+- **The phone is the user.** Every UI decision is on a 320×240 screen with a T9 keyboard and single-buffer focus — fewer
   buttons, larger hit targets, less text. When in doubt, test on the phone (or the simulator),
   not desktop intuition.
 - **assist is a sibling checkout, not a PyPI package.** The `Makefile` installs it editably from
@@ -100,5 +95,6 @@ boot too).
   catalog, Flow, Speech, Wire, Session, PIN security, and call reconstruction are merged and deployed
   in **assist** (the catalog/receptionist was reviewed in closed #208 and later landed; shipped PRs
   #209/#211/#214/#219/#220 cover the remaining P1 slices). Emacsos PR #34 is deployed and awaits only a safe
-  power path and the remaining live validation. See the meta `AGENTS.md` "Current state" and the P3
-  state doc before resuming; Pierre must initiate each live call.
+  power path and the remaining live validation. Read
+  `docs/2026-07-28-voice-call-p3-bridge.org` before resuming; Pierre must initiate
+  each live call.
