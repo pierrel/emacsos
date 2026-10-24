@@ -154,7 +154,8 @@ shares of aggregate CPU time across all cores. Process scanning is capped at
 1024 readable processes and reports truncation.
 
 Network evidence includes radio block state, interface state and receive/send
-counters, and IPv4/IPv6 main-table default routes with metrics. One bounded
+counters, and IPv4/IPv6 main-table default routes with metrics. IPv6 entries
+must be up and non-reject; kernel reject sentinels are excluded. One bounded
 cached NetworkManager query per sample records Wi-Fi/WWAN enabled state;
 unavailable results are unknown, not disabled. This does not query contacts or
 wake the modem with additional ModemManager polling. External power
@@ -169,8 +170,10 @@ the wake-guard descriptors. An attempt alone is not sleep evidence. The report
 requires a paired successful outcome in the same boot plus a positive increase
 in boottime minus monotonic time. It reports the measured duration bounds,
 not the entire helper interval as asleep; failed/refused/unpaired transitions
-and unexplained clock gaps never establish sleep. Missing periodic samples
-for more than five minutes plus five seconds of awake time are an issue even
+and unexplained clock gaps never establish sleep. Trailing awake sampling gaps
+are checked per recorded boot, including copied logs and boots before the latest
+one. Missing periodic samples for more than five minutes plus five seconds of
+awake time are an issue even
 when other event records continue.
 
 Run the reporter on the phone as the collection account, or on a copied log

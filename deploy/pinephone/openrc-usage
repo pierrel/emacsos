@@ -151,7 +151,8 @@ def collect(previous=None):
     try:
         for line in read(PROC / 'net/ipv6_route', 65536).splitlines():
             values = line.split()
-            if len(values) == 10 and values[0] == '0' * 32 and values[1] == '00':
+            if (len(values) == 10 and values[0] == '0' * 32 and values[1] == '00'
+                    and int(values[8], 16) & 1 and not int(values[8], 16) & 0x200):
                 routes.append({'family': 'ipv6', 'interface': values[9], 'metric': int(values[5], 16)})
     except FileNotFoundError:
         pass
@@ -233,8 +234,11 @@ def report(directory):
     confirmed_pairs = []
     boots = set()
     previous = None
+    last_samples = {}
+    last_events = {}
     for row in records:
         boots.add(row['boot_id'])
+        last_events[row['boot_id']] = row
         if row['event'] == 'suspend-attempt':
             attempts[(row['boot_id'], row['attempt'])] = row
         elif row['event'] == 'suspend-return':
@@ -254,6 +258,7 @@ def report(directory):
                     issues.append('successful suspend return has no positive clock evidence of sleep')
         elif row['event'] == 'sample':
             samples.append(row)
+            last_samples[row['boot_id']] = row
             if previous is not None and previous['boot_id'] == row['boot_id']:
                 awake = row['monotonic_after'] - previous['monotonic_before']
                 if awake > INTERVAL + 5:
@@ -275,6 +280,14 @@ def report(directory):
                 covered += sleep_bounds(overlap_start, overlap_end)[1]
         if low > covered:
             issues.append(f'sampling gap contains at least {low:.1f}s suspended time without paired sleep evidence')
+    for boot_id, event in last_events.items():
+        last = last_samples.get(boot_id)
+        if last is None:
+            issues.append(f'no usage samples retained for recorded boot {boot_id}')
+            continue
+        elapsed = event['monotonic_after'] - last['monotonic_before']
+        if elapsed > INTERVAL + 5:
+            issues.append(f'trailing awake sampling gap in boot {boot_id}: {elapsed:.1f}s')
     freshness_checked = False
     latest_samples = [row for row in samples if row['boot_id'] == records[-1]['boot_id']] if records else []
     if latest_samples:
@@ -285,8 +298,8 @@ def report(directory):
             elapsed = current['monotonic_after'] - last['monotonic_before']
             if elapsed > INTERVAL + 5:
                 issues.append(f'no samples for {elapsed:.1f}s of awake time at report time')
-    else:
-        issues.append('no usage samples for the latest recorded boot')
+    elif not records:
+        issues.append('no usage samples recorded')
     return {'samples': len(samples), 'boots': len(boots), 'live_freshness_checked': freshness_checked,
             'confirmed_sleep_intervals': sleep,
             'first_sample': samples[0] if samples else None, 'last_sample': samples[-1] if samples else None,

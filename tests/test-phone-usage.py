@@ -68,6 +68,22 @@ class UsageTests(unittest.TestCase):
         self.assertTrue(any('no samples for' in issue for issue in result['issues']))
         self.assertTrue(any('no usage samples' in issue for issue in self.report(records[1:])['issues']))
 
+    def test_trailing_awake_gap_survives_offline_and_later_boot_reports(self):
+        records = [stamp('sample', 10, 10),
+                   stamp('suspend-attempt', 600, 600, attempt='1'),
+                   stamp('suspend-return', 601, 601, attempt='1', status=77)]
+        for later in ([], [stamp('sample', 1, 1, boot_id='boot-b')]):
+            with self.subTest(later_boot=bool(later)):
+                result = self.report(records + later, stamp('report', 2, 2, boot_id='offline'))
+                self.assertTrue(any('trailing awake sampling gap' in issue for issue in result['issues']), result)
+                self.assertFalse(result['live_freshness_checked'])
+        result = self.report(records[1:] + [stamp('sample', 1, 1, boot_id='boot-b')])
+        self.assertIn('no usage samples retained for recorded boot boot-a', result['issues'])
+        sleeping = [stamp('sample', 10, 10),
+                    stamp('suspend-attempt', 20, 20, attempt='1'),
+                    stamp('suspend-return', 3620, 20.01, attempt='1', status=0)]
+        self.assertFalse(self.report(sleeping)['issues'])
+
     def test_old_boot_samples_do_not_certify_current_boot_collector(self):
         records = [stamp('sample', 10, 10),
                    stamp('suspend-attempt', 1100, 1100, attempt='1', boot_id='boot-b'),
@@ -111,6 +127,9 @@ class UsageTests(unittest.TestCase):
             put(proc / '44/stat', '44 (worker) ' + ' '.join(fields))
             put(proc / '44/cmdline', 'private-message\0secret-token')
             put(proc / 'net/route', 'Iface Destination Gateway Flags RefCnt Use Metric Mask\nwlan0 00000000 0100007F 0003 0 0 10 00000000\nwwan0 00000000 0100007F 0003 0 0 20 00000000\n')
+            put(proc / 'net/ipv6_route', '\n'.join(
+                '0' * 32 + ' 00 ' + '0' * 32 + ' 00 ' + '0' * 32 + ' 0000000a 00000000 00000000 ' + flags + ' ' + interface
+                for flags, interface in [('00200200', 'lo'), ('00000000', 'down0'), ('00000003', 'wlan0')]) + '\n')
             for name, values in {'battery': {'type':'Battery','capacity':'100','status':'Discharging','online':'1'},
                                  'usb': {'type':'USB','online':'1'}}.items():
                 for key, value in values.items(): put(sys / 'class/power_supply' / name / key, value)
@@ -126,7 +145,8 @@ class UsageTests(unittest.TestCase):
                 following, _ = usage.collect(previous)
             self.assertEqual(result['power_supplies']['battery']['status'], 'Discharging')
             self.assertEqual(result['power_supplies']['usb']['online'], '1')
-            self.assertEqual([r['interface'] for r in result['default_routes']], ['wlan0', 'wwan0'])
+            self.assertEqual([r['interface'] for r in result['default_routes']], ['wlan0', 'wwan0', 'wlan0'])
+            self.assertEqual(result['default_routes'][-1], {'family': 'ipv6', 'interface': 'wlan0', 'metric': 10})
             self.assertEqual(following['cpu_percent'], 50)
             new_process = next(row for row in following['top_processes'] if row['pid'] == 45)
             self.assertIsNone(new_process['cpu_percent'])
