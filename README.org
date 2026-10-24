@@ -128,6 +128,65 @@ active, and the existing timer retries later. External power still prevents
 deep suspend. The modem is identified by its internal USB controller, port and
 EG25 hardware IDs, without depending on the bus number assigned at boot.
 
+** Battery and usage evidence
+
+The optional =usage= process belongs to the existing UI service cgroup. Its
+singleton continues across supervised session-shell respawns; a complete service
+stop removes it through the existing cgroup cleanup. It samples every five
+minutes of awake time with a monotonic timer;
+it creates no wake alarm or suspend inhibitor. A collector failure is logged
+and does not restart or block the UI. The report flags missing samples. A second
+collector exits instead of replacing the running instance; changing collector
+code requires a verified replacement or the normal complete service restart.
+
+Private JSONL files live in
+=/var/lib/emacsos-lab/.local/state/emacsos-usage/=. The current file and three
+rotations retain about 8 MiB, plus the final record in each file. Records carry
+UTC time, boot identity, and monotonic/boottime clock bounds. Startup also
+records the collector source hash and kernel version for comparisons.
+
+Samples include battery capacity/status/current/voltage, external supply state,
+memory and swap, aggregate CPU use, and the ten busiest processes (names,
+PIDs and RSS only, never command arguments). The initial CPU percentages are
+unknown until a second sample supplies deltas; a newly observed process likewise
+has unknown CPU use until it has two observations. Process CPU percentages are
+shares of aggregate CPU time across all cores. Process scanning is capped at
+1024 readable processes and reports truncation.
+
+Network evidence includes radio block state, interface state and receive/send
+counters, and IPv4/IPv6 main-table default routes with metrics. One bounded
+cached NetworkManager query per sample records Wi-Fi/WWAN enabled state;
+unavailable results are unknown, not disabled. This does not query contacts or
+wake the modem with additional ModemManager polling. External power
+does not mean the battery is charging. A route does not prove that it carried
+traffic; compare counter deltas, and do not add tunnel traffic to its physical
+interface traffic as if those were separate transfers. No packet contents,
+addresses, contacts or messages are collected.
+
+The screen-off suspend path records an attempt before the existing helper and
+its outcome afterward. These writes have a bounded timeout and cannot retain
+the wake-guard descriptors. An attempt alone is not sleep evidence. The report
+requires a paired successful outcome in the same boot plus a positive increase
+in boottime minus monotonic time. It reports the measured duration bounds,
+not the entire helper interval as asleep; failed/refused/unpaired transitions
+and unexplained clock gaps never establish sleep. Missing periodic samples
+for more than five minutes plus five seconds of awake time are an issue even
+when other event records continue.
+
+Run the reporter on the phone as the collection account, or on a copied log
+directory using the source script:
+
+#+begin_src sh
+python3 -I deploy/pinephone/openrc-usage report <COPIED_LOG_DIRECTORY>
+#+end_src
+
+Exit status 1 means the report found an evidence problem. Review =issues= first,
+then compare first/last battery and external-power observations, CPU/process
+samples, interface counters and confirmed sleep intervals over comparable use.
+Keep battery-powered and externally powered periods separate. A copied log
+does not prove that the live collector is still running; freshness against the
+current clock is checked only when the report runs in that same boot.
+
 * Chat Server
 
 =emacsos-server= (in =server/=) is a small FastAPI process that handles

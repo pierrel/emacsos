@@ -78,6 +78,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-power-monitor" \
+    "$deploy_dir/openrc-usage" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/emacsos-wvkbd-launch" \
     "$deploy_dir/swipe-learning-collector.py" \
