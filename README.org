@@ -170,11 +170,14 @@ the wake-guard descriptors. An attempt alone is not sleep evidence. The report
 requires a paired successful outcome in the same boot plus a positive increase
 in boottime minus monotonic time. It reports the measured duration bounds,
 not the entire helper interval as asleep; failed/refused/unpaired transitions
-and unexplained clock gaps never establish sleep. Trailing awake sampling gaps
-are checked per recorded boot, including copied logs and boots before the latest
-one. Missing periodic samples for more than five minutes plus five seconds of
-awake time are an issue even
-when other event records continue.
+and unexplained clock gaps never establish sleep. Leading and trailing awake
+sampling gaps are checked per recorded boot against its first and last retained
+events,
+including copied logs and boots before the latest one. The report does not infer
+missing history before the first retained event. Unexplained suspended time in
+these retained boundary intervals is also an issue. Missing periodic samples for
+more than five minutes plus five seconds of awake time are an issue even when
+other event records continue.
 
 Run the reporter on the phone as the collection account, or on a copied log
 directory using the source script:

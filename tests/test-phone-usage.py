@@ -84,6 +84,23 @@ class UsageTests(unittest.TestCase):
                     stamp('suspend-return', 3620, 20.01, attempt='1', status=0)]
         self.assertFalse(self.report(sleeping)['issues'])
 
+    def test_retained_boot_prefix_outage_is_reported(self):
+        records = [stamp('collector-start', 10, 10),
+                   stamp('collector-start', 700, 700), stamp('sample', 700, 700)]
+        self.assertTrue(any('leading awake sampling gap' in issue for issue in self.report(records)['issues']))
+        self.assertFalse(self.report(records[1:])['issues'])
+        sleeping = [stamp('suspend-attempt', 10, 10, attempt='1'),
+                    stamp('suspend-return', 3610, 10.01, attempt='1', status=0),
+                    stamp('sample', 3620, 20.01)]
+        self.assertFalse(self.report(sleeping)['issues'])
+
+    def test_retained_prefix_and_tail_unexplained_sleep_is_a_fault(self):
+        for records in ([stamp('collector-start', 10, 10), stamp('sample', 3710, 310)],
+                        [stamp('sample', 10, 10), stamp('collector-start', 3710, 310)]):
+            with self.subTest(events=[row['event'] for row in records]):
+                self.assertTrue(any('without paired sleep evidence' in issue
+                                    for issue in self.report(records)['issues']))
+
     def test_old_boot_samples_do_not_certify_current_boot_collector(self):
         records = [stamp('sample', 10, 10),
                    stamp('suspend-attempt', 1100, 1100, attempt='1', boot_id='boot-b'),

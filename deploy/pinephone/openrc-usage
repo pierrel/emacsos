@@ -235,10 +235,13 @@ def report(directory):
     boots = set()
     previous = None
     last_samples = {}
+    first_events = {}
+    first_samples = {}
     last_events = {}
     for row in records:
         boots.add(row['boot_id'])
         last_events[row['boot_id']] = row
+        first_events.setdefault(row['boot_id'], row)
         if row['event'] == 'suspend-attempt':
             attempts[(row['boot_id'], row['attempt'])] = row
         elif row['event'] == 'suspend-return':
@@ -259,6 +262,7 @@ def report(directory):
         elif row['event'] == 'sample':
             samples.append(row)
             last_samples[row['boot_id']] = row
+            first_samples.setdefault(row['boot_id'], row)
             if previous is not None and previous['boot_id'] == row['boot_id']:
                 awake = row['monotonic_after'] - previous['monotonic_before']
                 if awake > INTERVAL + 5:
@@ -266,7 +270,10 @@ def report(directory):
             previous = row
     if attempts:
         issues.append(f'{len(attempts)} suspend attempt(s) have no outcome; sleep is unproven')
-    for start, end in zip(samples, samples[1:]):
+    windows = list(zip(samples, samples[1:]))
+    windows.extend((first_events[boot], row) for boot, row in first_samples.items())
+    windows.extend((row, last_events[boot]) for boot, row in last_samples.items())
+    for start, end in windows:
         if start['boot_id'] != end['boot_id']:
             continue
         low, _ = sleep_bounds(start, end)
@@ -285,6 +292,10 @@ def report(directory):
         if last is None:
             issues.append(f'no usage samples retained for recorded boot {boot_id}')
             continue
+        elapsed = (first_samples[boot_id]['monotonic_after']
+                   - first_events[boot_id]['monotonic_before'])
+        if elapsed > INTERVAL + 5:
+            issues.append(f'leading awake sampling gap in boot {boot_id}: {elapsed:.1f}s')
         elapsed = event['monotonic_after'] - last['monotonic_before']
         if elapsed > INTERVAL + 5:
             issues.append(f'trailing awake sampling gap in boot {boot_id}: {elapsed:.1f}s')
