@@ -4653,6 +4653,12 @@ Only true draws an indicator; legacy string yes is also accepted."
       "🔀")
      (t status))))
 
+(defface emacsos-assist-web-thread-metadata-face
+  '((((class color) (background light)) :slant italic :foreground "#555555")
+    (((class color) (background dark)) :slant italic :foreground "#b0b0b0")
+    (t :inherit shadow :slant italic))
+  "Slightly gray italic face for the repo/status metadata line of a thread row.")
+
 (defun emacsos-assist-web--fit-list-line (text width)
   "Fit TEXT into WIDTH frame columns with a visible truncation marker.
 The graphical phone measures proportional text against the same pixel budget."
@@ -4702,17 +4708,26 @@ The graphical phone measures proportional text against the same pixel budget."
            'rear-nonsticky t))))
 
 (defun emacsos-assist-web--insert-thread-row (record)
-  "Insert one fitted, touch-sized thread-list RECORD."
+  "Insert one fitted, touch-sized thread-list RECORD with a gray metadata line."
   (let* ((thread (plist-get record :thread))
          (ordinal (plist-get record :ordinal))
          (suffix (format " %4s" (if ordinal (format "#%d" ordinal) "")))
-         (start (point)))
+         (metadata (plist-get record :metadata))
+         (start (point))
+         (metadata-start
+          (+ start
+             (length (emacsos-assist-web--isolate-display-text
+                      (plist-get record :description)))
+             1)))
     (insert (emacsos-assist-web--isolate-display-text
              (plist-get record :description))
             "\n"
-            (emacsos-assist-web--isolate-display-text
-             (plist-get record :metadata))
-            suffix "\n")
+            (emacsos-assist-web--isolate-display-text metadata)
+            suffix "\n\n")
+    (add-text-properties
+     metadata-start
+     (+ metadata-start (length (emacsos-assist-web--isolate-display-text metadata)))
+     (list 'face 'emacsos-assist-web-thread-metadata-face))
     (add-text-properties
      start (point)
      (list 'emacsos-assist-web-thread-id (alist-get 'id thread)

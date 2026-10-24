@@ -3905,7 +3905,18 @@ server clears only flags for a view that is still current."
               (concat
                (emacsos-assist-web--isolate-display-text "مرحبا #1") "\n"
                (emacsos-assist-web--isolate-display-text "مستودع · ready")
-               "   #2\n"))))))
+               "   #2\n\n")))
+      (let* ((metadata (length (emacsos-assist-web--isolate-display-text "مستودع · ready")))
+             (metadata-start
+              (+ (point-min) (length (emacsos-assist-web--isolate-display-text "مرحبا #1")) 1)))
+        (should
+         (equal (get-text-property metadata-start 'face)
+                'emacsos-assist-web-thread-metadata-face))
+        (should
+         (eq (get-text-property (+ metadata-start metadata) 'face)
+             nil)))
+        (should
+         (eq (get-text-property (point-min) 'face) nil)))))
 
 (ert-deftest test-assist-web-native-list-opens-the-exact-id-at-point ()
   (let* ((a '((id . "thread-a") (description . "Same")
