@@ -14,6 +14,8 @@
 (declare-function emacsos-assist-web--valid-id-p "assist-web")
 (declare-function emacsos-assist-web--thread-header "assist-web")
 (declare-function emacsos-assist-web--request "assist-web")
+(declare-function emacsos-assist-web--approval-stopped-p "assist-web")
+(declare-function emacsos-assist-web-review-approval "assist-web")
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-status-setup-buffer "magit-status")
 (defvar emacsos-assist-web--denied)
@@ -480,13 +482,31 @@ MANUAL permits a repeated status reminder."
   (with-current-buffer emacsos-assist-web-git--status-source
     (emacsos-assist-web-git-thread-details)))
 
+(defun emacsos-assist-web-git--status-review-approval (_button)
+  "Open approval review for this Status view's original authorized thread."
+  (unless (emacsos-assist-web-git--status-valid-source-p)
+    (user-error "Open an authorized canonical Assist thread first"))
+  (with-current-buffer emacsos-assist-web-git--status-source
+    (emacsos-assist-web-review-approval)))
+
 (defun emacsos-assist-web-git--status-render ()
-  "Render a touch-readable factual Git view without altering local work."
+  "Render pending approvals and factual Git status without altering local work."
   (let ((inhibit-read-only t)
         (server emacsos-assist-web-git--status-server)
         (local emacsos-assist-web-git--status-local)
         (fresh (emacsos-assist-web-git--status-observation-current-p)))
     (erase-buffer)
+    (when (and (emacsos-assist-web-git--status-valid-source-p)
+               (with-current-buffer emacsos-assist-web-git--status-source
+                 (let* ((thread (alist-get 'thread emacsos-assist-web--snapshot))
+                        (count (alist-get 'approval_count thread)))
+                   (or (emacsos-assist-web--approval-stopped-p)
+                       (equal (alist-get 'status thread) "awaiting_approval")
+                       (and (integerp count) (> count 0))))))
+      (insert-text-button "Pending approvals: Review"
+                          'face '(bold warning) 'follow-link t
+                          'action #'emacsos-assist-web-git--status-review-approval)
+      (insert "\n\n"))
     (insert "Assist Git status\n\n")
     (when emacsos-assist-web-git--status-outcome
       (insert emacsos-assist-web-git--status-outcome "\n\n"))

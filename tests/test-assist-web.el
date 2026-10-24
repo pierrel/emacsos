@@ -8655,6 +8655,7 @@ server clears only flags for a view that is still current."
 (ert-deftest test-assist-web-approval-http-denial-fences-preview-and-old-callback ()
   "Malformed approval denials latch every peer before an old callback can return."
   (dolist (status '(401 403 404))
+   (dolist (path '("approval" "approvals"))
     (let ((source (generate-new-buffer " *approval denial source*"))
           (peer (generate-new-buffer " *approval denial peer*"))
           (preview (get-buffer-create "*assist Approval thread-1*"))
@@ -8692,7 +8693,7 @@ server clears only flags for a view that is still current."
                            response))))
               (with-current-buffer source
                 (emacsos-assist-web--request
-                 "GET" "threads/thread-1/approval" nil (lambda (&rest _) nil))))
+                 "GET" (format "threads/thread-1/%s" path) nil (lambda (&rest _) nil))))
             (dolist (buffer (list source peer))
               (with-current-buffer buffer
                 (should emacsos-assist-web--denied)
@@ -8704,7 +8705,7 @@ server clears only flags for a view that is still current."
                        (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
             (should-not (get-buffer "*assist Approval thread-1*")))
         (dolist (buffer (list preview peer source))
-          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+          (when (buffer-live-p buffer) (kill-buffer buffer))))))))
 
 (ert-deftest test-assist-web-canonical-reauthorization-clears-thread-denial ()
   "Canonical authorization clears a denied thread and its live peers."
@@ -9063,6 +9064,348 @@ server clears only flags for a view that is still current."
               (should-not (test-assist-web--approval-button "Reject"))
               (should (test-assist-web--approval-button "Refresh proposal"))))
         (when (buffer-live-p preview) (kill-buffer preview))
+        (kill-buffer source)))))
+
+(defconst test-assist-web--egress-approval
+  '((kind . "egress") (token . "01234567890123456789012345678901")
+    (state . "pending") (host . "docs.example.test") (port . 443)
+    (task . "Read synthetic documentation") (main_task . "")
+    (lifetime . "") (decisions . ("hour" "always" "decline"))))
+
+(ert-deftest test-assist-web-parity-approval-ready-thread-discovery ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'approval_count (alist-get 'thread snapshot)) 1)
+      (emacsos-assist-web--render snapshot)
+      (should (test-assist-web--approval-button "Review pending action")))))
+
+(ert-deftest test-assist-web-parity-approval-egress-scope-and-two-taps ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "parity-egress"
+          emacsos-assist-web--approval (copy-tree test-assist-web--egress-approval))
+    (should (emacsos-assist-web--require-approval
+             `((thread_id . "parity-egress") (proposal . ,emacsos-assist-web--approval)) "parity-egress"))
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "docs.example.test:443" (buffer-string)))
+    (should (string-match-p "For this thread only" (buffer-string)))
+    (let ((button (test-assist-web--approval-button "Allow for 1 hour")) decisions)
+      (cl-letf (((symbol-function 'emacsos-assist-web--submit-approval)
+                 (lambda (decision) (push decision decisions))))
+        (button-activate button)
+        (should-not decisions)
+        (button-activate button)
+        (should (equal decisions '("hour")))))))
+
+(ert-deftest test-assist-web-parity-approval-all-kinds-share-one-chooser ()
+  (let ((source (generate-new-buffer " *parity-source*")) preview)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "parity-list"))
+          (emacsos-assist-web--approval-choose
+           source "parity-list" (list (copy-tree test-assist-web--egress-approval)
+                                     (copy-tree test-assist-web--email-approval)))
+          (setq preview (current-buffer))
+          (should (string-match-p "egress: docs.example.test" (buffer-string)))
+          (should (string-match-p "send_email: Email" (buffer-string)))
+          (button-activate (test-assist-web--approval-button "egress: docs.example.test [pending]"))
+          (should (test-assist-web--approval-button "Allow for this thread")))
+      (when (buffer-live-p preview) (kill-buffer preview))
+      (kill-buffer source))))
+
+(ert-deftest test-assist-web-parity-approval-result-does-not-offer-grants ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--egress-approval))
+    (setf (alist-get 'state emacsos-assist-web--approval) "declined"
+          (alist-get 'decisions emacsos-assist-web--approval) nil)
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p "State: declined" (buffer-string)))
+    (should-not (test-assist-web--approval-button "Allow for 1 hour"))
+    (should-not (test-assist-web--approval-button "Decline"))))
+
+(ert-deftest test-assist-web-parity-approval-non-run-ack-is-exact ()
+  (let ((proposal test-assist-web--egress-approval))
+    (should (emacsos-assist-web--approval-ack-p
+             `((thread_id . "thread-1") (kind . "egress")
+               (token . ,(alist-get 'token proposal)) (status . "approved")) "thread-1" proposal))
+    (should-not (emacsos-assist-web--approval-ack-p
+                 '((thread_id . "thread-1") (run_id . "forged") (status . "approved"))
+                 "thread-1" proposal))
+    (should-not (emacsos-assist-web--approval-ack-p
+                 '((thread_id . "thread-1") (kind . "egress") (token . "other") (status . "approved"))
+                 "thread-1" proposal))))
+
+(ert-deftest test-assist-web-parity-approval-invalid-summary-preserves-draft ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (emacsos-assist-web--render (copy-tree test-assist-web--snapshot))
+    (emacsos-assist-web--replace-input "Unsent draft")
+    (let ((before (buffer-string))
+          (snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'approval_count (alist-get 'thread snapshot)) "1"
+            (alist-get 'approval_results (alist-get 'thread snapshot)) t)
+      (should-error (emacsos-assist-web--render snapshot))
+      (should (equal (buffer-string) before))
+      (should (equal (emacsos-assist-web--input) "Unsent draft")))))
+
+(ert-deftest test-assist-web-parity-approval-empty-refresh-closes-selected-chooser ()
+  (let ((source (generate-new-buffer " *parity-empty-source*")) preview callback
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq emacsos-assist-web--thread-id "parity-empty"))
+          (emacsos-assist-web--approval-choose
+           source "parity-empty" (list test-assist-web--egress-approval test-assist-web--email-approval))
+          (setq preview (current-buffer))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _path _payload cb &rest _) (setq callback cb)))
+                    ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+            (emacsos-assist-web-review-approval source)
+            (with-current-buffer preview
+              (button-activate (test-assist-web--approval-button "egress: docs.example.test [pending]")))
+            (funcall callback '((thread_id . "parity-empty") (proposals . nil)) nil)
+            (should-not (buffer-live-p preview))))
+      (when (buffer-live-p preview) (kill-buffer preview))
+      (kill-buffer source))))
+
+(defconst test-assist-web--reply-approval
+  '((kind . "send_reply") (token . "01234567890123456789012345678901")
+    (state . "pending") (sender . "+15555550100")
+    (action . ((name . "send_reply") (args . ((text . "Complete synthetic reply\nFinal line")))))
+    (decisions . ("approve" "edit" "reject"))))
+
+(defconst test-assist-web--download-approval
+  '((kind . "geo_download") (token . "01234567890123456789012345678901")
+    (state . "pending") (slug . "test/exact-region") (display_name . "Synthetic region")
+    (size_bytes . 1200) (warning . "Import rebuilds the geocoder; requests pause during replacement.")
+    (decisions . ("approve" "reject"))))
+
+(ert-deftest test-assist-web-approval-pending-requires-complete-advertised-decisions ()
+  (dolist (fixture (list test-assist-web--egress-approval test-assist-web--reply-approval
+                         test-assist-web--download-approval))
+    (let ((complete (alist-get 'decisions fixture)))
+      (dolist (partial (list nil (list (car complete)) (make-list (length complete) (car complete))))
+        (let ((proposal (copy-tree fixture)))
+          (setf (alist-get 'decisions proposal) partial)
+          (should-error (emacsos-assist-web--require-approval
+                         `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1"))))
+      (let ((proposal (copy-tree fixture)))
+        (setf (alist-get 'decisions proposal) (reverse (copy-sequence complete)))
+        (should (emacsos-assist-web--require-approval
+                 `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1")))))
+  (let ((proposal (copy-tree test-assist-web--egress-approval)))
+    (setf (alist-get 'decisions proposal) '("revoke"))
+    (should-error (emacsos-assist-web--require-approval
+                   `((thread_id . "thread-1") (proposal . ,proposal)) "thread-1"))))
+
+(ert-deftest test-assist-web-approval-reply-renders-complete-recipient-and-text ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval))
+    (emacsos-assist-web--require-approval
+     `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+    (emacsos-assist-web--render-approval)
+    (should (string-match-p (regexp-quote "Reply to: +15555550100\n\nComplete synthetic reply\nFinal line")
+                            (buffer-string)))
+    (should (test-assist-web--approval-button "Approve and send"))
+    (should (test-assist-web--approval-button "Edit reply"))
+    (should (test-assist-web--approval-button "Reject"))))
+
+(ert-deftest test-assist-web-approval-download-renders-exact-region-size-and-warning ()
+  (dolist (size '(1200 nil))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--approval (copy-tree test-assist-web--download-approval))
+      (setf (alist-get 'size_bytes emacsos-assist-web--approval) size)
+      (emacsos-assist-web--require-approval
+       `((thread_id . "thread-1") (proposal . ,emacsos-assist-web--approval)) "thread-1")
+      (emacsos-assist-web--render-approval)
+      (dolist (text (list "Download: Synthetic region" "Region: test/exact-region"
+                         (if size "Size: 1200 bytes" "Size unknown")
+                         (alist-get 'warning emacsos-assist-web--approval)))
+        (should (string-match-p (regexp-quote text) (buffer-string))))
+      (should (test-assist-web--approval-button "Approve download"))
+      (should (test-assist-web--approval-button "Decline")))))
+
+
+(ert-deftest test-assist-web-approval-uncertain-post-invalidates-chooser-and-older-get ()
+  (dolist (get-first '(nil t))
+    (let ((source (generate-new-buffer " *uncertain chooser source*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          get post posts)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path payload callback &rest _)
+                         (if (equal method "GET") (setq get callback)
+                           (push payload posts) (setq post callback))))
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+              (emacsos-assist-web-review-approval source)
+              (funcall get `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--reply-approval))) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "approve"))
+              (emacsos-assist-web-review-approval source)
+              (let ((old-get get)
+                    (collection `((thread_id . "thread-1")
+                                  (proposals . ,(list test-assist-web--reply-approval
+                                                      test-assist-web--egress-approval)))))
+                (when get-first (funcall old-get collection nil))
+                (funcall post nil "synthetic timeout")
+                (unless get-first (funcall old-get collection nil))
+                (with-current-buffer "*assist Approval thread-1*"
+                  (should (string-match-p "Decision not confirmed" (buffer-string)))
+                  (should-not (test-assist-web--approval-button "send_reply: +15555550100 [pending]"))
+                  (should-not (test-assist-web--approval-button "Approve and send")))
+                (should (= (length posts) 1))
+                ;; Only a read started after the uncertain result can restore controls.
+                (emacsos-assist-web-review-approval source)
+                (funcall get collection nil)
+                (with-current-buffer "*assist Approval thread-1*"
+                  (button-activate (test-assist-web--approval-button "send_reply: +15555550100 [pending]"))
+                  (let ((button (test-assist-web--approval-button "Approve and send")))
+                    (button-activate button)
+                    (should (= (length posts) 1))
+                    (button-activate button)
+                    (should (= (length posts) 2)))))))
+        (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
+        (kill-buffer source)))))
+
+(ert-deftest test-assist-web-approval-reply-editor-reviews-before-exact-second-tap ()
+  (with-temp-buffer
+    (emacsos-assist-web-approval-mode)
+    (setq emacsos-assist-web--thread-id "reply-editor"
+          emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval))
+    (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)) posts)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method path payload _callback &rest _)
+                   (push (list method path payload) posts))))
+        (emacsos-assist-web--edit-reply)
+        (widget-value-set (car widget-field-list) "Edited reply\r\nFinal line")
+        (goto-char (point-min))
+        (search-forward "Review edited reply")
+        (widget-apply (widget-at (1- (point))) :notify nil)
+        (should buffer-read-only)
+        (should (equal emacsos-assist-web--approval-edited '((text . "Edited reply\nFinal line"))))
+        (should (string-match-p "Edited reply\nFinal line" (buffer-string)))
+        (should-not posts)
+        (let ((button (test-assist-web--approval-button "Send edited reply")))
+          (button-activate button)
+          (should-not posts)
+          (button-activate button))
+        (should (equal posts
+                       `(("POST" "threads/reply-editor/approval"
+                          ((kind . "send_reply") (token . ,(alist-get 'token test-assist-web--reply-approval))
+                           (decision . "edit") (text . "Edited reply\nFinal line"))))))))))
+
+(ert-deftest test-assist-web-approval-reply-editor-cancel-keeps-reviewed-text ()
+  (dolist (prior '(nil "Previously reviewed edit"))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--thread-id "reply-cancel"
+            emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval)
+            emacsos-assist-web--approval-edited (and prior `((text . ,prior))))
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (&rest _) (ert-fail "Cancelling an edit submitted a request"))))
+          (emacsos-assist-web--edit-reply)
+          (widget-value-set (car widget-field-list) "Discard this edit")
+          (goto-char (point-min))
+          (search-forward "Cancel edit")
+          (widget-apply (widget-at (1- (point))) :notify nil)
+          (should buffer-read-only)
+          (should (equal emacsos-assist-web--approval-edited (and prior `((text . ,prior)))))
+          (should (string-match-p (regexp-quote (or prior "Complete synthetic reply\nFinal line"))
+                                  (buffer-string)))
+          (should-not (string-match-p "Discard this edit" (buffer-string))))))))
+
+(ert-deftest test-assist-web-approval-reply-editor-enforces-utf8-boundary ()
+  (dolist (value (list (make-string 65536 ?a) (make-string 32768 ?é)
+                       (make-string 65537 ?a) (make-string 32769 ?é) "   " "bad\0text"))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--thread-id "reply-size"
+            emacsos-assist-web--approval (copy-tree test-assist-web--reply-approval))
+      (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+        (emacsos-assist-web--edit-reply)
+        (let ((field (car widget-field-list)))
+          (widget-value-set field value)
+          (goto-char (point-min))
+          (search-forward "Review edited reply")
+          (widget-apply (widget-at (1- (point))) :notify nil)
+          (if (= (string-bytes value) 65536)
+              (progn (should buffer-read-only)
+                     (should (equal (alist-get 'text emacsos-assist-web--approval-edited) value)))
+            (should-not buffer-read-only)
+            (should-not emacsos-assist-web--approval-edited)
+            (should (equal (widget-value field) value))))))))
+
+
+(ert-deftest test-assist-web-approval-reply-crlf-collection-canonicalizes-before-validation ()
+  (dolist (text '("First line\r\nSecond line" "First line\rSecond line"))
+    (let ((proposal (copy-tree test-assist-web--reply-approval)))
+      (setf (alist-get 'text (alist-get 'args (alist-get 'action proposal))) text)
+      (let* ((collection (emacsos-assist-web--approval-response
+                          `((thread_id . "thread-1")
+                            (proposals . ,(list proposal test-assist-web--egress-approval))) "thread-1"))
+             (reply (car collection)))
+        (should (= (length collection) 2))
+        (should (equal (alist-get 'token reply) (alist-get 'token proposal)))
+        (should (equal (alist-get 'text (alist-get 'args (alist-get 'action proposal))) text))
+        (with-temp-buffer
+          (emacsos-assist-web-approval-mode)
+          (setq emacsos-assist-web--thread-id "thread-1" emacsos-assist-web--approval reply)
+          (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+            (emacsos-assist-web--render-approval)
+            (should (string-match-p "First line\nSecond line" (buffer-string)))
+            (should (test-assist-web--approval-button "Reject"))
+            (emacsos-assist-web--edit-reply)
+            (should (equal (widget-value (car widget-field-list)) "First line\nSecond line"))))))))
+
+(ert-deftest test-assist-web-approval-success-closes-stale-chooser-preserving-selected-peer ()
+  (dolist (order '(before after different-peer))
+    (let ((source (generate-new-buffer " *success chooser source*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+          get post)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq emacsos-assist-web--thread-id "thread-1"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method _path _payload callback &rest _)
+                         (if (equal method "GET") (setq get callback) (setq post callback))))
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore))
+              (emacsos-assist-web-review-approval source)
+              (funcall get `((thread_id . "thread-1") (proposal . ,test-assist-web--reply-approval)) nil)
+              (with-current-buffer "*assist Approval thread-1*"
+                (emacsos-assist-web--submit-approval "approve"))
+              (emacsos-assist-web-review-approval source)
+              (let ((old-get get)
+                    (collection `((thread_id . "thread-1")
+                                  (proposals . ,(list test-assist-web--reply-approval
+                                                      test-assist-web--egress-approval)))))
+                (unless (eq order 'after) (funcall old-get collection nil))
+                (when (eq order 'different-peer)
+                  (with-current-buffer "*assist Approval thread-1*"
+                    (button-activate (test-assist-web--approval-button "egress: docs.example.test [pending]"))))
+                (funcall post '((thread_id . "thread-1") (run_id . "accepted-reply")) nil)
+                (when (eq order 'after) (funcall old-get collection nil))
+                (if (eq order 'different-peer)
+                    (with-current-buffer "*assist Approval thread-1*"
+                      (should (equal (alist-get 'kind emacsos-assist-web--approval) "egress"))
+                      (should (test-assist-web--approval-button "Allow for 1 hour")))
+                  (should-not (get-buffer "*assist Approval thread-1*"))))))
+        (when-let ((preview (get-buffer "*assist Approval thread-1*"))) (kill-buffer preview))
         (kill-buffer source)))))
 
 (provide 'test-assist-web)

@@ -116,10 +116,98 @@
       `((observer_lost . t) (queue_cleared . t)
         (same_buffer . ,(eq buffer (current-buffer)))))))
 
-(defun phone-e2e-main (action tid text)
-  "Run user ACTION on TID with TEXT and print one JSON receipt."
+(defun phone-e2e-button (predicate)
+  "Find an actual native button whose label satisfies PREDICATE."
+  (let ((button (next-button (point-min) t)) found)
+    (while (and button (not found))
+      (if (funcall predicate (button-label button))
+          (setq found button)
+        (setq button (next-button (button-end button)))))
+    (or found (error "Expected native approval control is absent"))))
+
+(defun phone-e2e-require-preview (text expected)
+  "Require fixture EXPECTED fields in rendered TEXT before any confirmation."
+  (unless (and (consp expected) (seq-every-p #'stringp expected))
+    (error "Approval fixture omitted its expected preview fields"))
+  (dolist (field expected)
+    (unless (string-match-p (regexp-quote field) text)
+      (error "Approval preview missing fixture field: %s" field))))
+
+(defun phone-e2e-approval (kind &optional expected)
+  "Verify fixture EXPECTED fields and confirm KIND through the real shared client."
+  (let ((source (current-buffer)) preview text original-run discovery)
+    (phone-e2e-wait (lambda () (and emacsos-assist-web--snapshot
+                                   (not emacsos-assist-web--requests))))
+    (when (member kind '("send_email" "email_archive" "email_delete"))
+      (emacsos-assist-web--replace-input (concat "Synthetic approval:" kind))
+      (emacsos-assist-web-send)
+      (phone-e2e-wait #'emacsos-assist-web--approval-stopped-p)
+      (setq original-run (plist-get (emacsos-assist-web--queue-head) :run-id))
+      (unless original-run (error "Stopped approval lost its original Run receipt"))
+      (emacsos-assist-web-refresh-thread)
+      (phone-e2e-wait (lambda () (not emacsos-assist-web--requests))))
+    (when (member kind '("egress" "geo_download"))
+      (unless (equal (alist-get 'status (alist-get 'thread emacsos-assist-web--snapshot)) "ready")
+        (error "Independent approval fixture did not reach ready Run state")))
+    (emacsos-assist-web--replace-input "Synthetic unsent draft")
+    (if (emacsos-assist-web--approval-stopped-p)
+        (let* ((header (emacsos-assist-web--thread-header))
+               (position (string-match "\\[Review\\]" header))
+               (map (and position (get-text-property position 'local-map header)))
+               (command (and map (lookup-key map [header-line mouse-1]))))
+          (unless (commandp command)
+            (error "Stopped Run has no visible Review header action"))
+          (setq discovery "header-review")
+          (call-interactively command))
+      (setq discovery "thread-review")
+      (button-activate (phone-e2e-button (lambda (label) (equal label "Review pending action")))))
+    (phone-e2e-wait
+     (lambda () (and (setq preview (get-buffer (format "*assist Approval %s*"
+                                                      (buffer-local-value 'emacsos-assist-web--thread-id source))))
+                     (not (buffer-local-value 'emacsos-assist-web--requests source)))))
+    (with-current-buffer preview
+      (unless emacsos-assist-web--approval
+        (button-activate
+         (phone-e2e-button (lambda (label)
+                             (and (string-prefix-p (concat kind ":") label)
+                                  (string-suffix-p "[pending]" label))))))
+      (unless (equal (alist-get 'kind emacsos-assist-web--approval) kind)
+        (error "Wrong approval kind opened"))
+      (setq text (buffer-string))
+      (phone-e2e-require-preview text expected)
+      (let* ((label (cond ((equal kind "egress") "Allow for 1 hour")
+                          ((equal kind "geo_download") "Approve download")
+                          ((member kind '("send_email" "send_reply")) "Approve and send")
+                          (t "Approve")))
+             (button (phone-e2e-button (lambda (value) (equal value label)))))
+        (button-activate button)
+        (when (plist-get (emacsos-assist-web--thread-safety-record emacsos-assist-web--thread-id)
+                         :approval-pending)
+          (error "First tap submitted a decision"))
+        (button-activate button)))
+    (phone-e2e-wait (lambda () (and (not (buffer-live-p preview))
+                                   (not (buffer-local-value 'emacsos-assist-web--requests source)))))
+    (set-buffer source)
+    (when original-run
+      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--queue)
+                                     (not (emacsos-assist-web--approval-stopped-p)))))
+      (unless (equal (alist-get 'status
+                               (phone-e2e-request "GET" (format "threads/%s/runs/%s"
+                                                               emacsos-assist-web--thread-id original-run)))
+                     "success")
+        (error "Original stopped Run did not reconcile to success")))
+    (unless (equal (emacsos-assist-web--input) "Synthetic unsent draft")
+      (error "Approval lost the unsent draft"))
+    `((approval_kind . ,kind) (approval_preview . ,text) (preview_fields_verified . t)
+      (two_taps . t) (draft_preserved . t) (discovery_used . t) (discovery_control . ,discovery)
+      (original_run . ,original-run) (original_run_reconciled . ,(and original-run t)))))
+
+(defun phone-e2e-main (action tid text &optional expected-json)
+  "Run user ACTION on TID with TEXT and fixture EXPECTED-JSON; print its receipt."
   (condition-case problem
       (let (recovery)
+        (when (equal action "approval-desktop")
+          (load "/src/emacsos/assist-desktop.el" nil t))
         (when (equal action "accepted-fresh")
           (setq emacsos-assist-web-cache-directory
                 (make-temp-file "/home/test/e2e-client-cache-" t)
@@ -142,7 +230,10 @@
          (t (phone-e2e-open tid)))
         (cond
          ((equal action "auth-recovery") (setq recovery (phone-e2e-auth-recovery)))
-         ((equal action "observer-recovery") (setq recovery (phone-e2e-observer-recovery text))))
+         ((equal action "observer-recovery") (setq recovery (phone-e2e-observer-recovery text)))
+         ((member action '("approval" "approval-desktop"))
+          (setq recovery (phone-e2e-approval text
+                           (and expected-json (json-parse-string expected-json :array-type 'list :null-object nil))))))
         (when (member action '("new" "send" "accepted"))
           (emacsos-assist-web--replace-input text)
           (emacsos-assist-web-send)

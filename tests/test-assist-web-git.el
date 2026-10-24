@@ -1175,3 +1175,115 @@
 
 (provide 'test-assist-web-git)
 ;;; test-assist-web-git.el ends here
+
+(ert-deftest test-assist-web-git-status-pending-approvals-open-existing-list ()
+  "Status exposes pending independent approvals before Git facts on both clients."
+  (dolist (pending '(("ready" 2) ("awaiting_approval" nil) ("ready" 0 t)))
+      (let ((source (generate-new-buffer " *status-approval-source*"))
+            (view (generate-new-buffer " *status-approval-view*"))
+            (emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+            requests)
+        (unwind-protect
+            (progn
+              (with-current-buffer source
+                (emacsos-assist-web-mode)
+                (setq-local emacsos-assist-web--thread-id "thread-1"
+                            emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                            emacsos-assist-web--stopped-reobserve
+                            (and (nth 2 pending) '(:kind approval))
+                            emacsos-assist-web--snapshot
+                            `((thread . ((id . "thread-1") (status . ,(car pending))
+                                         (approval_count . ,(cadr pending))))))
+                (insert "unsent Status draft"))
+              (with-current-buffer view
+                (special-mode)
+                (setq-local emacsos-assist-web-git--status-source source
+                            emacsos-assist-web-git--status-identity
+                            '("thread-1" . "aaaaaaaaaaaaaaaaaaaa"))
+                (emacsos-assist-web-git--status-render)
+                (goto-char (point-min))
+                (should (looking-at "Pending approvals"))
+                (let ((button (button-at (point))))
+                  (should button)
+                  (should (memq 'bold (button-get button 'face)))
+                  (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                             (lambda (method path body callback &rest _)
+                               (push (list method path body (current-buffer)) requests)
+                               (funcall callback
+                                        '((thread_id . "thread-1")
+                                          (proposals .
+                                           (((kind . "egress") (token . "0123456789abcdef")
+                                             (state . "pending") (host . "docs.example.test")
+                                             (port . 443) (task . "Read documentation")
+                                             (main_task . "Read documentation") (lifetime . "thread")
+                                             (decisions . ("hour" "always" "decline")))
+                                            ((kind . "geo_download") (token . "fedcba9876543210")
+                                             (state . "pending") (slug . "test/region")
+                                             (display_name . "Test region") (size_bytes . 1200)
+                                             (warning . "Rebuild required")
+                                             (decisions . ("approve" "reject")))))) nil))))
+                    (button-activate button))))
+              (should (equal requests
+                             (list (list "GET" "threads/thread-1/approvals" nil source))))
+              (with-current-buffer "*assist Approval thread-1*"
+                (should (derived-mode-p 'emacsos-assist-web-approval-mode))
+                (should (eq emacsos-assist-web--approval-source source))
+                (should-not emacsos-assist-web--approval)
+                (should (string-match-p "Approvals and results" (buffer-string)))
+                (should (string-match-p "egress: docs.example.test" (buffer-string)))
+                (should (string-match-p "geo_download: Test region" (buffer-string))))
+              (with-current-buffer source
+                (should (equal (buffer-string) "unsent Status draft")))
+              (with-current-buffer source
+                (setq emacsos-assist-web--stopped-reobserve nil
+                      emacsos-assist-web--snapshot
+                      '((thread . ((id . "thread-1") (status . "ready")
+                                   (approval_count . 0) (approval_results . t))))))
+              (with-current-buffer view
+                (emacsos-assist-web-git--status-render)
+                (should-not (string-match-p "Pending approvals" (buffer-string)))
+                (should (string-prefix-p "Assist Git status" (buffer-string)))))
+          (when-let ((preview (get-buffer "*assist Approval thread-1*")))
+            (kill-buffer preview))
+          (kill-buffer view)
+          (kill-buffer source)))))
+
+(ert-deftest test-assist-web-git-status-approval-link-rechecks-original-source ()
+  "An old Status notice cannot issue a review read after source authority changes."
+  (dolist (change '(denied thread repository killed))
+    (let ((source (generate-new-buffer " *status-approval-old-source*"))
+          (view (generate-new-buffer " *status-approval-old-view*"))
+          requested)
+      (unwind-protect
+          (progn
+            (with-current-buffer source
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--metadata
+                          (copy-tree test-assist-web-git--metadata)
+                          emacsos-assist-web--snapshot
+                          '((thread . ((id . "thread-1") (status . "ready")
+                                       (approval_count . 1))))))
+            (with-current-buffer view
+              (special-mode)
+              (setq-local emacsos-assist-web-git--status-source source
+                          emacsos-assist-web-git--status-identity
+                          '("thread-1" . "aaaaaaaaaaaaaaaaaaaa"))
+              (emacsos-assist-web-git--status-render)
+              (let ((button (button-at (point-min))))
+                (should button)
+                (if (eq change 'killed)
+                    (kill-buffer source)
+                  (with-current-buffer source
+                    (pcase change
+                      ('denied (setq emacsos-assist-web--denied t))
+                      ('thread (setq emacsos-assist-web--thread-id "another-thread"))
+                      ('repository
+                       (setq emacsos-assist-web-git--metadata '(:repo-key "other"))))))
+                (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                           (lambda (&rest _) (setq requested t))))
+                  (should-error (button-activate button) :type 'user-error))
+                (should-not requested)
+                (emacsos-assist-web-git--status-render)
+                (should-not (string-match-p "Pending approvals" (buffer-string))))))
+        (kill-buffer view)
+        (when (buffer-live-p source) (kill-buffer source))))))

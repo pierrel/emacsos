@@ -12,6 +12,199 @@ from run import Driver
 
 
 class DriverTests(unittest.TestCase):
+    def test_final_effect_census_awaits_executor_and_refuses_duplicates(self):
+        expected = [effect for kind in ('send_email', 'email_archive', 'email_delete',
+                                        'send_reply', 'geo_download')
+                    for effect in [{'kind': kind}, {'kind': kind}]]
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                driver = Driver.__new__(Driver)
+                flows, censuses = [], []
+                pending = []
+
+                def client(action, _tid='', kind='', _expected=None, **kwargs):
+                    if action == 'new':
+                        return {'thread_id': 'thread-1'}
+                    flows.append((action, kind))
+                    return {'approval_kind': kind, 'preview_fields_verified': True,
+                            'two_taps': True, 'draft_preserved': True, 'discovery_used': True,
+                            'discovery_control': 'header-review' if kind in {
+                                'send_email', 'email_archive', 'email_delete'} else 'thread-review',
+                            'original_run': 'original', 'original_run_reconciled': True}
+
+                def api(method, _path, body=None):
+                    if method == 'POST':
+                        pending[:] = [body['kind']]
+                        return {'expected_preview': ['synthetic fixture field']}
+                    return {'proposals': [{'kind': pending[0], 'state': 'pending'}]}
+
+                def state(_tid):
+                    effects = []
+                    if len(flows) == 12:
+                        censuses.append(True)
+                        effects = expected[:-1] if len(censuses) == 1 else (
+                            expected + ([{'kind': 'send_reply'}] if duplicate else []))
+                    return {'runs': [], 'synthetic_effects': effects}
+
+                def wait(_description, predicate):
+                    result = predicate()
+                    return result if result else predicate()
+
+                driver.client, driver.api, driver.state, driver.wait = client, api, state, wait
+                driver.wait_ready = driver.wait_egress_resolution = Mock()
+                driver.passed = Mock()
+                if duplicate:
+                    with self.assertRaises(AssertionError):
+                        driver.hitl_scenarios()
+                else:
+                    driver.hitl_scenarios()
+                self.assertEqual(len(flows), 12)
+                self.assertEqual(len(censuses), 2)
+
+    def test_incomplete_preview_fails_before_confirmation(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(progn (dolist (case '(("send_reply" "Reply to: +15555550100" "Complete synthetic SMS reply")
+                                        ("geo_download" "Region: test/wrong-region" "Region: test/exact-region")))
+          (let ((source (generate-new-buffer " *fixture-preview-source*"))
+                (preview (get-buffer-create "*assist Approval thread-1*")) (taps 0))
+            (unwind-protect
+                (progn
+                  (with-current-buffer preview
+                    (setq-local emacsos-assist-web--approval `((kind . ,(car case))))
+                    (insert (cadr case)))
+                  (with-current-buffer source
+                    (emacsos-assist-web-mode)
+                    (setq emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web--snapshot '((thread . ((status . "ready")))))
+                    (insert-text-button "Review pending action" 'action (lambda (_) nil))
+                    (cl-letf (((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+                              ((symbol-function 'phone-e2e-wait)
+                               (lambda (predicate) (unless (funcall predicate) (error "Unmet condition"))))
+                              ((symbol-function 'emacsos-assist-web--submit-approval)
+                               (lambda (&rest _) (cl-incf taps))))
+                      (unless (condition-case problem
+                                  (progn (phone-e2e-approval (car case) (list (caddr case))) nil)
+                                (error (string-match-p "Approval preview missing fixture field"
+                                                       (error-message-string problem))))
+                        (error "Incomplete preview did not fail at field verification"))
+                      (unless (= taps 0) (error "Incomplete preview submitted a decision")))))
+              (kill-buffer preview) (kill-buffer source))))
+          (phone-e2e-require-preview "Reply to: +15555550100\\nComplete synthetic SMS reply"
+                                     '("Reply to: +15555550100" "Complete synthetic SMS reply")))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_independent_setup_waits_for_real_run_and_queue_quiescence(self):
+        driver = Driver.__new__(Driver)
+        observations = [
+            {"queue_holder": "thread-1", "runs": [{"status": "success"}]},
+            {"queue_holder": None, "runs": [{"status": "pending"}]},
+            {"queue_holder": None, "runs": [{"status": "running"}]},
+            {"queue_holder": None, "runs": [{"status": "success"}]},
+            {"queue_holder": None, "runs": [{"status": "awaiting_approval"}, {"status": "success"}]},
+        ]
+        driver.state = Mock(side_effect=observations)
+        driver.api = Mock(side_effect=[{"thread": {"status": stage}}
+                                      for stage in ["ready", "ready", "ready", "starting_sandbox", "ready"]])
+
+        def wait(_description, predicate):
+            for _ in observations[:-1]:
+                self.assertIsNone(predicate())
+            return predicate()
+
+        driver.wait = wait
+        self.assertEqual(driver.wait_ready("thread-1"), observations[-1])
+
+    def test_egress_ack_waits_for_new_main_resolution_not_an_old_success(self):
+        driver = Driver.__new__(Driver)
+        old = {"id": "old", "origin": "system", "status": "success"}
+        done = {"id": "new", "origin": "system", "status": "success"}
+        driver.state = Mock(side_effect=[{"runs": [old]},
+            {"runs": [old, {**done, "status": "pending"}]},
+            {"runs": [old, {**done, "status": "running"}]}, {"runs": [old, done]}])
+
+        def wait(_description, predicate):
+            for _ in range(3):
+                self.assertIsNone(predicate())
+            return predicate()
+
+        driver.wait = wait
+        self.assertEqual(driver.wait_egress_resolution("thread-1", {"old"}), done)
+
+    def test_approval_waits_for_pending_canonical_refresh_over_cached_ready(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (let* ((cached '((thread . ((id . "thread-1") (description . "Synthetic")
+                                     (status . "ready") (workspace . ((repo_label . "Fixture")))))
+                           (messages . nil)))
+                 (fresh (copy-tree cached)))
+            (setf (alist-get 'status (alist-get 'thread fresh)) "awaiting_approval"
+                  (alist-get 'approval_count (alist-get 'thread fresh)) 1)
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () t))
+                      ((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+                      ((symbol-function 'phone-e2e-wait)
+                       (lambda (predicate)
+                         (unless (funcall predicate)
+                           (setq emacsos-assist-web--requests nil)
+                           (emacsos-assist-web--render fresh)
+                           (unless (funcall predicate) (error "Unmet refresh condition")))))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _body _callback &rest _)
+                         (unless (and (equal method "GET")
+                                      (equal path "threads/thread-1/approvals")
+                                      (equal (alist-get 'status (alist-get 'thread
+                                                        emacsos-assist-web--snapshot)) "awaiting_approval"))
+                           (error "Discovery preceded the canonical refresh"))
+                         (throw 'discovered t))))
+              (emacsos-assist-web--render cached t)
+              (setq emacsos-assist-web--requests '(pending-canonical-get))
+              (unless (catch 'discovered (phone-e2e-approval "send_reply") nil)
+                (error "Fresh visible control did not request approvals")))))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stopped_approval_uses_visible_header_when_snapshot_is_still_ready(self):
+        repo = Path(__file__).resolve().parents[2]
+        expression = """(with-temp-buffer
+          (emacsos-assist-web-mode)
+          (setq emacsos-assist-web--thread-id "thread-1"
+                emacsos-assist-web--snapshot '((thread . ((status . "ready")))))
+          (let ((entry (emacsos-assist-web--entry "Synthetic approval:send_email"
+                                                'accepted-unobserved "synthetic-key")))
+            (setf (plist-get entry :run-id) "run-original"
+                  (plist-get entry :approval-stopped) t
+                  (plist-get entry :requires-reobserve) t)
+            (setq emacsos-assist-web--queue (list entry)
+                  emacsos-assist-web--stopped-reobserve (list :kind 'approval :entry entry))
+            (cl-letf (((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+                      ((symbol-function 'emacsos-assist-web-send) #'ignore)
+                      ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore)
+                      ((symbol-function 'phone-e2e-wait)
+                       (lambda (predicate) (unless (funcall predicate) (error "Unmet condition"))))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _body _callback &rest _)
+                         (unless (and (equal method "GET")
+                                      (equal path "threads/thread-1/approvals")
+                                      (eq entry (emacsos-assist-web--queue-head))
+                                      (equal (plist-get entry :run-id) "run-original"))
+                           (error "Discovery lost its original Run or exact request"))
+                         (throw 'discovered t))))
+              (unless (catch 'discovered (phone-e2e-approval "send_email") nil)
+                (error "Visible approval action did not request the collection"))))))"""
+        result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
+            '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
+            env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_build_uses_remaining_global_budget_and_refuses_after_expiry(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1,0 +1,37 @@
+#+title: Shared phone and desktop approvals
+State: Reviewed implementation; connected acceptance pending (2026-10-20)
+
+* Outcome
+One assist-web.el path supports send Email, archive, recoverable Trash, SMS reply,
+exact host/port network grants, and geographic downloads. assist-desktop.el loads
+that same path; it does not own a second protocol or UI.
+
+* User flow and authority
+Canonical snapshots expose pending and retained independent service results even
+when ordinary Run status is ready. Review fetches the bounded plural collection;
+several items open a native chooser. Complete content, recipient/scope/lifetime,
+job state and explicit errors are visible before any actionable two-tap control.
+Email and SMS edits return to review. Unknown POST outcomes hide controls until
+fresh authoritative review, without automatically repeating an effect.
+
+Existing peer/in-flight/auth-generation fences apply to the plural endpoint and
+chooser. Empty refresh retires a vanished selection, including one selected while
+GET was in flight. Malformed summary fields are rejected before rendering can
+erase an unsent draft. Run receipts and independent acknowledgments remain
+separate shapes; neither permits unrelated stop ownership to be discarded.
+
+* Checks and limits
+The exact-candidate handoff records independent security/concurrency review and
+a separate documentation pass. Forty focused approval/peer ERT cases and seven
+desktop entry cases pass; install and payload checks pass. The combined native
+suite has inherited test isolation failures: the untouched base reproduces all
+91 unrelated failures. With a fresh thread-stop ledger per case, candidate
+836/838 and baseline 829/831 have the same two failures. The original assertions
+remain intact. Lint retains the same 65 warnings and missing package-header
+configuration as the base; byte compilation succeeds with inherited warnings. The existing
+phone-assist-e2e platform now has --hitl-only: it uses real HTTP/TLS, services,
+checkpoints and native UI with synthetic inference/provider/download effects.
+It tests phone and desktop loading, visible discovery, two taps, drafts and
+original stopped mail Run reconciliation. Source inspection or ERT alone is not
+a claim that this connected panel or a physical phone interaction passed.
+Root owns all real installation, device operations and any authorized merge.

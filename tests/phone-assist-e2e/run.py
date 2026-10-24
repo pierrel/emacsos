@@ -135,8 +135,9 @@ class Driver:
         return json.loads(self.docker("exec", "--user", "1000:1000", "-i", self.name + "-client",
             "python", "-c", script, input=json.dumps({"method": method, "path": path, "body": body})))
 
-    def client(self, action, tid="", text=""):
-        expression = "(phone-e2e-main " + " ".join(json.dumps(x) for x in (action, tid, text)) + ")"
+    def client(self, action, tid="", text="", expected=None):
+        values = (action, tid, text, json.dumps(expected))
+        expression = "(phone-e2e-main " + " ".join(json.dumps(x) for x in values) + ")"
         output = self.execute("client", "emacs", "-Q", "--batch", "-L", "/src/emacsos",
             "-l", "/src/emacsos/tests/phone-assist-e2e/client.el", "--eval", expression, timeout=RUN_SECONDS)
         line = next((l[9:] for l in output.splitlines() if l.startswith("E2E_JSON:")), None)
@@ -152,6 +153,26 @@ class Driver:
         result = self.api("GET", "/__e2e/state/" + tid)
         (self.args.logs / "state-last.json").write_text(self.scrub(json.dumps(result, indent=2)))
         return result
+
+    def wait_ready(self, tid):
+        """Observe real Run and queue quiescence before independent proposal setup."""
+        def ready():
+            observed = self.state(tid)
+            thread = self.api("GET", "/api/v1/phone/threads/" + tid)["thread"]
+            return (observed if thread["status"] == "ready"
+                    and observed["queue_holder"] is None
+                    and not any(run["status"] in {"pending", "running", "revocation_pending"}
+                                for run in observed["runs"]) else None)
+        return self.wait("ordinary Run and queue idle before independent approval", ready)
+
+    def wait_egress_resolution(self, tid, prior_runs):
+        """Require the acknowledged grant's actual main continuation to finish."""
+        def completed():
+            fresh = [run for run in self.state(tid)["runs"]
+                     if run["id"] not in prior_runs and run["origin"] == "system"]
+            assert len(fresh) <= 1, "An egress decision created duplicate main continuations"
+            return fresh[0] if fresh and fresh[0]["status"] == "success" else None
+        return self.wait("egress main continuation completed", completed)
 
     def git(self, checkout, *args):
         return self.execute("client", "git", "-C", checkout, *args).strip()
@@ -296,6 +317,58 @@ class Driver:
         (self.args.logs / "terminal-sandbox-census.json").write_text(json.dumps(census, indent=2))
         self.passed("live child completion wakes queued parent user before exactly one handoff")
 
+    def hitl_scenarios(self):
+        """Explicit capability flows; provider effects and fixture inference are synthetic."""
+        result = self.client("new", text="Initialize synthetic approval thread")
+        tid = result["thread_id"]
+        for surface in ("approval", "approval-desktop"):
+            for kind in ("send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download"):
+                setup = None
+                if kind in {"egress", "geo_download"}:
+                    self.wait_ready(tid)
+                if kind in {"send_reply", "egress", "geo_download"}:
+                    setup = self.api("POST", "/__e2e/approval/" + tid, {"kind": kind})
+                    self.wait("pending " + kind, lambda: any(
+                        p["kind"] == kind and p["state"] == "pending"
+                        for p in self.api("GET", "/api/v1/phone/threads/" + tid + "/approvals")["proposals"]))
+                prior_runs = {run["id"] for run in self.state(tid)["runs"]} if kind == "egress" else None
+                if kind == "send_email":
+                    expected = ['From: Synthetic assistant <assistant@example.test>\n', 'To: reader@example.test\n',
+                                'Cc: oversight@example.test\n', 'Subject: Synthetic review\n', '\n\nComplete synthetic body\n\n']
+                elif kind in {"email_archive", "email_delete"}:
+                    expected = ['Id: synthetic-message\n', 'From: sender@example.test\n', 'To: reader@example.test\n',
+                                'Date: 2026-10-20\n', 'Subject: Synthetic message\n', '\n\nComplete synthetic mailbox body\n\n']
+                elif kind == "send_reply":
+                    expected = ['Reply to: +15555550100\n\nComplete synthetic SMS reply\n\n']
+                else:
+                    expected = setup['expected_preview']
+                receipt = self.client(surface, tid, kind, expected)
+                assert receipt["approval_kind"] == kind
+                assert receipt["preview_fields_verified"]
+                assert receipt["two_taps"] and receipt["draft_preserved"] and receipt["discovery_used"]
+                assert receipt["discovery_control"] == ("header-review" if kind in {
+                    "send_email", "email_archive", "email_delete"} else "thread-review")
+                if kind in {"send_email", "email_archive", "email_delete"}:
+                    assert receipt["original_run"] and receipt["original_run_reconciled"]
+                if setup and "run_id" in setup:
+                    self.wait("completed approval " + kind, lambda: any(
+                        run["work_id"] == next(r["work_id"] for r in self.state(tid)["runs"]
+                                                if r["id"] == setup["run_id"])
+                        and run["status"] == "success" for run in self.state(tid)["runs"]))
+                if kind == "egress":
+                    self.wait_egress_resolution(tid, prior_runs)
+                self.passed(surface + ": " + kind + " complete preview, two taps and draft preservation")
+        kinds = ("send_email", "email_archive", "email_delete", "send_reply", "geo_download")
+
+        def effects_complete():
+            effects = self.state(tid)["synthetic_effects"]
+            return effects if all(sum(e["kind"] == kind for e in effects) >= 2 for kind in kinds) else None
+
+        effects = self.wait("all reviewed synthetic effects recorded", effects_complete)
+        for kind in kinds:
+            assert sum(effect["kind"] == kind for effect in effects) == 2
+        self.passed("all fake external effects occurred once per reviewed proposal")
+
     def cleanup(self):
         if not self.created:
             return
@@ -330,6 +403,7 @@ def main():
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--emacsos-source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--logs", type=Path, required=True)
+    parser.add_argument("--hitl-only", action="store_true", help="Run the shared phone/desktop HITL capability panel")
     args = parser.parse_args()
     def interrupted(signum, frame):
         raise KeyboardInterrupt("Client interrupted; cleaning up its container")
@@ -338,7 +412,10 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix=driver.name + "-") as name:
             driver.bootstrap(Path(name))
-            driver.scenarios()
+            if args.hitl_only:
+                driver.hitl_scenarios()
+            else:
+                driver.scenarios()
     finally:
         try:
             driver.cleanup()
