@@ -16,14 +16,6 @@ Reach the phone via `ssh phone` (home LAN) / `ssh phone-wg` (WireGuard, away). T
 phone**. There is **no small-model eval harness** here — the live phone is the contract
 (vs assist, where the eval is).
 
-## Workspace principles and process
-
-In the agentic workspace, read the canonical meta-repo `AGENTS.md` ("Design
-philosophy") and `coordination/PROCESS.md` for engineering principles, roles,
-review, delivery and merge ownership. These paths are relative to the canonical
-agentic root. A registered `.worktrees/<lane>/emacsos` checkout is an effort
-worktree, not that root. Project-specific contracts below supplement that policy.
-
 ## Testing and deployment facts
 
 - Run `make test-elisp` (ERT) and `make test-server` (pytest) for affected client
@@ -43,10 +35,10 @@ worktree, not that root. Project-specific contracts below supplement that policy
   `Content-Length` bypasses, bind exposure and injection risks.
 - `make phone-install` and `make local-deploy` can install a feature branch.
   Installing another branch overwrites its predecessor; preserve the intended
-  live composition through Root's delivery process. `make local-deploy` copies
+  live composition. `make local-deploy` copies
   the payload and performs a bounded clean OpenRC UI restart; it never
-  hot-reloads Lisp into the existing Emacs process. Root owns live operations
-  and verifies the affected phone flow.
+  hot-reloads Lisp into the existing Emacs process. Verify the affected phone
+  flow after installation.
 
 ## Conventions
 
@@ -103,5 +95,6 @@ worktree, not that root. Project-specific contracts below supplement that policy
   catalog, Flow, Speech, Wire, Session, PIN security, and call reconstruction are merged and deployed
   in **assist** (the catalog/receptionist was reviewed in closed #208 and later landed; shipped PRs
   #209/#211/#214/#219/#220 cover the remaining P1 slices). Emacsos PR #34 is deployed and awaits only a safe
-  power path and the remaining live validation. See the meta `AGENTS.md` "Current state" and the P3
-  state doc before resuming; Pierre must initiate each live call.
+  power path and the remaining live validation. Read
+  `docs/2026-07-28-voice-call-p3-bridge.org` before resuming; Pierre must initiate
+  each live call.
