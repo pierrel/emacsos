@@ -139,6 +139,13 @@ class UsageTests(unittest.TestCase):
             self.assertFalse(result['issues'], result)
             self.assertEqual(result['samples'], 1)
 
+    def test_mixed_sleep_issue_reports_only_unexplained_lower_bound(self):
+        records = [stamp('sample', 10, 10), stamp('suspend-attempt', 20, 20, attempt='1'),
+                   stamp('suspend-return', 3620, 20, attempt='1', status=0),
+                   stamp('sample', 3920, 310)]
+        self.assertEqual(self.report(records)['issues'], [
+            'sampling gap contains at least 10.0s suspended time without paired sleep evidence'])
+
     def test_old_boot_samples_do_not_certify_current_boot_collector(self):
         records = [stamp('sample', 10, 10),
                    stamp('suspend-attempt', 1100, 1100, attempt='1', boot_id='boot-b'),

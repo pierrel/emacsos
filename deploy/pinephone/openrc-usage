@@ -292,7 +292,7 @@ def report(directory):
             if overlap_start['boottime'] <= overlap_end['boottime']:
                 covered += sleep_bounds(overlap_start, overlap_end)[1]
         if low > covered:
-            issues.append(f'sampling gap contains at least {low:.1f}s suspended time without paired sleep evidence')
+            issues.append(f'sampling gap contains at least {low - covered:.1f}s suspended time without paired sleep evidence')
     for boot_id, event in last_events.items():
         last = last_samples.get(boot_id)
         if last is None:
