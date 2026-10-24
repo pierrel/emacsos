@@ -2,6 +2,7 @@
 from importlib.machinery import SourceFileLoader
 import importlib.util
 import json
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -100,6 +101,43 @@ class UsageTests(unittest.TestCase):
             with self.subTest(events=[row['event'] for row in records]):
                 self.assertTrue(any('without paired sleep evidence' in issue
                                     for issue in self.report(records)['issues']))
+
+    def test_live_boundary_unknown_sleep_is_a_fault(self):
+        result = self.report([stamp('sample', 10, 10)], stamp('report', 3611, 11))
+        self.assertTrue(result['live_freshness_checked'])
+        self.assertTrue(any('without paired sleep evidence' in issue for issue in result['issues']))
+
+    def test_reused_attempt_id_preserves_missing_outcome(self):
+        records = [stamp('sample', 10, 10), stamp('suspend-attempt', 20, 20, attempt='1'),
+                   stamp('suspend-attempt', 30, 30, attempt='1'),
+                   stamp('suspend-return', 31, 31, attempt='1', status=77),
+                   stamp('sample', 310, 310)]
+        self.assertTrue(any('missing outcome' in issue for issue in self.report(records)['issues']))
+
+    def test_report_clock_is_captured_with_snapshot_before_parsing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'usage.jsonl').write_text(json.dumps(stamp('sample', 10, 10)) + '\n')
+            (path / 'write.lock').touch(mode=0o600)
+            current = stamp('report', 10, 10)
+            original = json.loads
+            def decode(line):
+                current.update(stamp('report', 3611, 11))
+                with (path / 'usage.jsonl').open('a') as stream:
+                    stream.write(json.dumps(stamp('suspend-attempt', 11, 11, attempt='1')) + '\n')
+                    stream.write(json.dumps(stamp('suspend-return', 3611, 11, attempt='1', status=0)) + '\n')
+                return original(line)
+            def capture_clock():
+                with (path / 'write.lock').open('rb') as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return dict(current)
+            with patch.object(usage.json, 'loads', side_effect=decode), \
+                    patch.object(usage, 'clock', side_effect=capture_clock) as observed:
+                result = usage.report(path)
+            self.assertEqual(observed.call_count, 1)
+            self.assertFalse(result['issues'], result)
+            self.assertEqual(result['samples'], 1)
 
     def test_old_boot_samples_do_not_certify_current_boot_collector(self):
         records = [stamp('sample', 10, 10),

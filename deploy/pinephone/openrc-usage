@@ -217,6 +217,7 @@ def report(directory):
                 except FileNotFoundError:
                     continue
                 snapshots.append((path.name, stream, os.fstat(stream.fileno()).st_size))
+            current = clock()
         finally:
             if lock:
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -243,7 +244,10 @@ def report(directory):
         last_events[row['boot_id']] = row
         first_events.setdefault(row['boot_id'], row)
         if row['event'] == 'suspend-attempt':
-            attempts[(row['boot_id'], row['attempt'])] = row
+            key = row['boot_id'], row['attempt']
+            if key in attempts:
+                issues.append('suspend attempt ID reused with a missing outcome')
+            attempts[key] = row
         elif row['event'] == 'suspend-return':
             key = row['boot_id'], row['attempt']
             start = attempts.pop(key, None)
@@ -273,6 +277,8 @@ def report(directory):
     windows = list(zip(samples, samples[1:]))
     windows.extend((first_events[boot], row) for boot, row in first_samples.items())
     windows.extend((row, last_events[boot]) for boot, row in last_samples.items())
+    if records and records[-1]['boot_id'] == current['boot_id']:
+        windows.append((records[-1], current))
     for start, end in windows:
         if start['boot_id'] != end['boot_id']:
             continue
@@ -303,7 +309,6 @@ def report(directory):
     latest_samples = [row for row in samples if row['boot_id'] == records[-1]['boot_id']] if records else []
     if latest_samples:
         last = latest_samples[-1]
-        current = clock()
         if current['boot_id'] == last['boot_id']:
             freshness_checked = True
             elapsed = current['monotonic_after'] - last['monotonic_before']
