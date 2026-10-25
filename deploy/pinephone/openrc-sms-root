@@ -16,6 +16,7 @@ import dbus
 
 MAX_REQUEST_BYTES = 32768
 MAX_BODY_BYTES = 4096
+MAX_INCOMING_BYTES = 16 * 1024
 NUMBER_RE = re.compile(r"\+?[0-9]{5,15}\Z")
 SMS_PATH_RE = re.compile(r"/org/freedesktop/ModemManager1/SMS/[0-9]+\Z")
 MM_NAME = "org.freedesktop.ModemManager1"
@@ -181,7 +182,7 @@ def collect_incoming(connection, bus):
         if not properties or not SMS_PATH_RE.fullmatch(str(path)) or int(properties.get("State", 0)) != 3:
             continue
         number, text = str(properties.get("Number", "")), str(properties.get("Text", ""))
-        if not re.fullmatch(r"[+0-9A-Za-z]{1,20}", number) or not text or len(text.encode()) > MAX_BODY_BYTES:
+        if "\0" in number or len(number.encode()) > 128 or "\0" in text or len(text.encode()) > MAX_INCOMING_BYTES:
             continue
         observation = boot + ":" + owner + ":" + str(path)
         connection.execute("INSERT OR IGNORE INTO messages VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL)",
@@ -199,9 +200,16 @@ def receipt_operation(value):
             except Exception:
                 # Outgoing journal sync does not depend on the modem being present.
                 connection.rollback()
-            # Four 4 KiB bodies remain below 128 KiB even at 6x JSON escaping.
             rows = connection.execute("SELECT id,direction,number,text,status,occurred_at FROM messages WHERE ack_status IS NULL OR ack_status != status ORDER BY rowid LIMIT 4").fetchall()
-            print(json.dumps({"receipts": [dict(row) for row in rows]}, ensure_ascii=False))
+            batch = []
+            for row in rows:
+                trial = batch + [dict(row)]
+                # One maximum 16 KiB incoming body fits even at 6x escaping.
+                # Ordinary messages still drain four per handoff.
+                if len(json.dumps({"receipts": trial}, ensure_ascii=False).encode()) > 120 * 1024:
+                    break
+                batch = trial
+            print(json.dumps({"receipts": batch}, ensure_ascii=False))
         elif set(value) == {"operation", "message_id", "status"} and value["operation"] == "ack":
             if not isinstance(value["message_id"], str) or not ID_RE.fullmatch(value["message_id"]) or value["status"] not in {"received", "sent", "not_sent", "unknown"}:
                 raise ValueError("ack")

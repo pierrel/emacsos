@@ -823,3 +823,12 @@ standalone root systemd SMS bridge is superseded by this UI-owned PinePhone
 transport; do not enable both. Existing server inbound JSON history is not
 migrated or removed automatically. Operator migration must preserve original
 records and must not send messages.
+
+
+Received-SMS events also request one finite quiet-profile =feedbackd= vibration
+through the existing verified ModemManager observer. This adds no independent
+wake channel. Verify the installed =fbcli= options, session activation, theme and
+EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
+Incoming sender addresses (including brand names and unknown senders) and empty
+texts are preserved exactly. Received bodies share the server's 16 KiB byte bound;
+serialized receipt batches stay below the transport cap even with escaped text.

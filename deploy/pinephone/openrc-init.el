@@ -234,6 +234,21 @@ every agent-config load."
 (defvar emacsos-call--call-owner nil
   "Unique owner of the tracked call or pathless recovery state.")
 
+(defun emacsos-pinephone-sms-feedback (owner generation _path)
+  "Buzz once for a received SMS from the verified OWNER and GENERATION.
+The modem ring indicator and existing wake path must actually wake the phone;
+this finite client creates no separate network notification channel."
+  (when (and (equal owner emacsos-call--current-owner)
+             (= generation emacsos-call--owner-generation))
+    (condition-case nil
+        (let ((process (make-process
+                        :name "emacsos-sms-feedback" :buffer nil :noquery t
+                        :command '("/usr/bin/fbcli" "--event=message-new-sms"
+                                   "--profile=quiet" "--timeout=1" "--watch=2"))))
+          (run-at-time 4 nil (lambda ()
+                              (when (process-live-p process) (delete-process process)))))
+      (error (message "SMS vibration is unavailable.")))))
+
 (defun emacsos-sms-transport-status ()
   "Show whether the configured SMS handoff transport is running."
   (interactive)
@@ -1175,6 +1190,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (emacsos-pinephone-apply-typography)
   (server-start)
   (require 'os)
+  (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-feedback)
   (require 'swipe-learning)
   (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)
   (define-key emacsos-command-map (kbd "b") #'emacsos-firefox-start)

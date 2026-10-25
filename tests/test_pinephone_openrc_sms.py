@@ -346,5 +346,43 @@ class ReceiptBudgetTests(unittest.TestCase):
                             SMS.receipt_operation({'operation': 'ack', 'message_id': row['id'], 'status': row['status']})
                 self.assertEqual(len(set(ids)), 9)
 
+
+
+class IncomingObservationTests(unittest.TestCase):
+    def test_punctuation_empty_text_and_distinct_objects_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')):
+                connection = SMS.journal()
+                bus = Bus()
+                for index in (21, 22):
+                    bus.manager.objects[f'/org/freedesktop/ModemManager1/SMS/{index}'] = {SMS.SMS: {'State': 3, 'Number': 'T-Mobile', 'Text': ''}}
+                with mock.patch.object(SMS, 'Path', return_value=types.SimpleNamespace(read_text=lambda: 'synthetic-boot')):
+                    SMS.collect_incoming(connection, bus)
+                    SMS.collect_incoming(connection, bus)
+                rows = connection.execute("SELECT id,number,text FROM messages").fetchall()
+                self.assertEqual(len(rows), 2)
+                self.assertNotEqual(rows[0]['id'], rows[1]['id'])
+                self.assertTrue(all(row['number'] == 'T-Mobile' and row['text'] == '' for row in rows))
+                connection.close()
+
+    def test_large_escaped_incoming_receipts_still_drain_under_transport_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')):
+                connection = SMS.journal()
+                for index in range(5):
+                    connection.execute("INSERT INTO messages VALUES (?, 'incoming', '', ?, 'received', '2026-10-24T00:00:00+00:00', ?, NULL)", ('large'+str(index), '\x01'*16384, 'observation'+str(index)))
+                connection.commit(); connection.close()
+                seen = []
+                for _ in range(5):
+                    output = io.StringIO()
+                    with mock.patch.object(SMS.sys, 'stdout', output): SMS.receipt_operation({'operation': 'receipts'})
+                    self.assertLess(len(output.getvalue().encode()), 128*1024)
+                    rows = json.loads(output.getvalue())['receipts']
+                    self.assertEqual(len(rows), 1)
+                    seen.append(rows[0]['id'])
+                    with mock.patch.object(SMS.sys, 'stdout', io.StringIO()):
+                        SMS.receipt_operation({'operation':'ack', 'message_id':rows[0]['id'], 'status':'received'})
+                self.assertEqual(len(set(seen)), 5)
+
 if __name__ == "__main__":
     unittest.main()
