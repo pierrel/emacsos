@@ -1241,5 +1241,25 @@
       (should-not (buffer-live-p buffer))
       (should-not (buffer-live-p stderr-buffer)))))
 
+
+
+(ert-deftest emacsos-openrc-call-event-recovers-pending-json ()
+  (let* ((emacsos-pinephone-call-event-directory (make-temp-file "call-events-" t))
+         (emacsos-pinephone-call-event-busy nil)
+         (path (expand-file-name (concat (make-string 64 ?a) ".json") emacsos-pinephone-call-event-directory))
+         request)
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "{\"event_id\":\"event1\"}"))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method endpoint payload callback &rest _)
+                       (setq request (list method endpoint payload))
+                       (funcall callback '((status . "accepted")) nil))))
+            (emacsos-pinephone-call-event-sync))
+          (should (equal (cadr request) "events/call"))
+          (should-not (file-exists-p path)))
+      (delete-directory emacsos-pinephone-call-event-directory t))))
+
 (ert-run-tests-batch-and-exit)
+
 ;;; test-pinephone-openrc-init.el ends here

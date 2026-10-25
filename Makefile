@@ -52,6 +52,7 @@ test-pinephone-scripts:
 	tests/test-pinephone-openrc-power.sh
 	python3 tests/test-pinephone-openrc-power-startup.py
 	python3 tests/test-pinephone-openrc-session.py
+	python3 tests/test_pinephone_call_idle.py
 	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
 
 pinephone-openrc-install: test-pinephone-scripts

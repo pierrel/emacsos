@@ -9,6 +9,7 @@ source_dir=${POWER_TEST_SOURCE_DIR:-$repo_dir/deploy/pinephone}
 docker run --rm --network none --cap-add BLOCK_SUSPEND --cap-add SYS_PTRACE -i \
     -v "$source_dir/openrc-session-power:/source/session-power:ro" \
     -v "$source_dir/openrc-suspend-root:/source/suspend-root:ro" \
+    -v "$source_dir/openrc-call-root:/source/call-root:ro" \
     -v "$repo_dir/deploy/pinephone/openrc-power-monitor:/source/power-monitor:ro" \
     -v "$source_dir/openrc-process-group:/source/process-group:ro" \
     python:3.13-alpine /bin/sh -s <<'CONTAINER'
@@ -34,6 +35,16 @@ sed -e 's|^power=/sys/power$|power=/tmp/power|' \
     /source/suspend-root >/tmp/suspend-root.test
 chmod 0755 /tmp/suspend-root.test
 ln -s /usr/local/bin/python3 /usr/bin/python3
+mkdir -p /usr/local/sbin
+# Keep the reviewed call-lock and privilege-drop boundary; synthetic state
+# replaces only its bounded D-Bus snapshot query in this no-network fixture.
+sed 's|/usr/bin/python3 -I -|/tmp/call-state-check|' /source/call-root \
+    >/usr/local/sbin/emacsos-openrc-call
+chmod 0755 /usr/local/sbin/emacsos-openrc-call
+printf '%s\n' '#!/bin/sh' 'cat >/dev/null' 'exit "$(cat /tmp/call-state-status)"' >/tmp/call-state-check
+chmod 0755 /tmp/call-state-check
+printf '%s\n' 0 >/tmp/call-state-status
+ln -s /bin/true /usr/bin/mmcli
 
 mv /usr/bin/flock /usr/bin/flock.real
 printf '%s\n' \
@@ -56,12 +67,16 @@ chmod 0755 /usr/bin/logger
 cat >/usr/bin/doas <<'CLIENT'
 #!/usr/bin/python3
 import array, json, os, socket, sys
-assert sys.argv[1:3] == ['-n', '/usr/local/sbin/emacsos-openrc-suspend']
-assert sys.argv[3:] in ([], ['wake'], ['press'], ['monitor'])
+call = sys.argv[1:4] == ['-n', '/usr/local/sbin/emacsos-openrc-call', 'idle-blank']
+if call: assert len(sys.argv) == 5 and sys.argv[4].isdigit() and len(sys.argv[4]) <= 20
+if not call:
+    assert sys.argv[1:3] == ['-n', '/usr/local/sbin/emacsos-openrc-suspend']
+    assert sys.argv[3:] in ([], ['wake'], ['press'], ['monitor'])
+action = ['call-idle-blank', sys.argv[4]] if call else sys.argv[3:]
 sock = socket.socket(socket.AF_UNIX)
 sock.connect('/tmp/root-helper.sock')
-fds = array.array('i', [0, 1, 2]) if not sys.argv[3:] else array.array('i')
-sock.sendmsg([json.dumps(sys.argv[3:]).encode()],
+fds = array.array('i', [0, 1, 2]) if not action else array.array('i')
+sock.sendmsg([json.dumps(action).encode()],
              [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)] if fds else [])
 sock.shutdown(socket.SHUT_WR)
 result = json.loads(sock.makefile().read())
@@ -80,7 +95,7 @@ def serve(client):
     try:
         data, ancillary, _, _ = client.recvmsg(128, socket.CMSG_SPACE(3 * fds.itemsize))
         action = json.loads(data)
-        assert action in ([], ['wake'], ['press'], ['monitor'])
+        assert action in ([], ['wake'], ['press'], ['monitor']) or (len(action) == 2 and action[0] == 'call-idle-blank' and action[1].isdigit())
         for level, kind, value in ancillary:
             assert (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
             fds.frombytes(value)
@@ -90,7 +105,8 @@ def serve(client):
             result = {'code': int(Path('/tmp/suspend-status').read_text()), 'stdout': '', 'stderr': ''}
         else:
             if action:
-                process = subprocess.Popen(['/tmp/suspend-root.test', *action],
+                command = ['/usr/local/sbin/emacsos-openrc-call', 'idle-blank', action[1]] if action[0] == 'call-idle-blank' else ['/tmp/suspend-root.test', *action]
+                process = subprocess.Popen(command,
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             else:
                 assert len(fds) == 3
@@ -726,7 +742,7 @@ s = s.replace('wakeup_count=$(', 'admission_barrier before-read\nwakeup_count=$(
 bounded = "wakeup_count=$(timeout -s TERM -k 1 2 sed" in s
 read = '/usr/bin/python3 /tmp/kernel-pm-model.py read /tmp/power/wakeup_count'
 if bounded:
-    read = 'timeout -s TERM -k 1 2 ' + read + ' 3>&- 4>&- 5>&- 9>&-'
+    read = 'timeout -s TERM -k 1 2 ' + read + ' 3>&- 4>&- 5>&- 8>&- 9>&-'
 s = re.sub(r'^wakeup_count=.*$', 'wakeup_count=$(' + read + ') || exit 75', s, flags=re.M)
 s = re.sub(r'^printf .* >"\$power/wakeup_count" \|\| exit 75$',
            'admission_barrier before-accept\n/usr/bin/python3 /tmp/kernel-pm-model.py accept "$wakeup_count" || exit 75',
@@ -998,6 +1014,66 @@ if as_lab guarded-wake >/tmp/missing-guard.out 2>&1; then
     exit 1
 fi
 printf '%s\n' 'Kernel guard overlap, parent death and failure cleanup: OK'
+
+# Calls veto automatic blank/suspend, while an explicit power press remains usable.
+as_lab wake
+printf '%s\n' 75 >/tmp/call-state-status
+if as_lab idle-blank; then
+    printf '%s\n' 'automatic blank accepted active/unknown call state' >&2
+    exit 1
+fi
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+as_lab press
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+: >/tmp/power/state
+generation=$(cat /run/emacsos-ui/power-generation)
+as_lab suspend "$generation"
+[ ! -s /tmp/power/state ]
+printf '%s\n' 0 >/tmp/call-state-status
+as_lab wake
+# A wake that finishes before the guarded blank acquires the display lock
+# invalidates its old generation, including while its call snapshot was idle.
+stale_generation=$(cat /run/emacsos-ui/power-generation)
+as_lab wake
+/usr/local/sbin/emacsos-openrc-call idle-blank "$stale_generation"
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+# An unguarded internal operation cannot manufacture the root-owned call lock.
+if as_lab call-idle-blank; then
+    printf '%s\n' 'unguarded internal call blank was accepted' >&2
+    exit 1
+fi
+# A wake queued after blank owns the display lock restores the lit screen.
+python3 - <<'BLANK_BARRIER'
+from pathlib import Path
+p = Path('/usr/bin/swaymsg')
+s = p.read_text()
+s = s.replace('#!/bin/sh', """#!/bin/sh
+case $* in *'output DSI-1 power off')
+    if [ -e /tmp/block-call-blank ]; then
+        touch /tmp/call-blank-reached
+        read answer </tmp/call-blank-continue
+    fi
+    ;;
+esac""", 1)
+p.write_text(s)
+BLANK_BARRIER
+mkfifo -m 0666 /tmp/call-blank-continue
+touch /tmp/block-call-blank
+as_lab idle-blank &
+call_blank_pid=$!
+wait_file /tmp/call-blank-reached
+if flock -n /run/emacsos-openrc-call.lock true; then
+    printf '%s\n' 'outgoing mutation was not excluded during automatic blank' >&2
+    exit 1
+fi
+as_lab wake &
+call_wake_pid=$!
+printf '%s\n' continue >/tmp/call-blank-continue
+wait "$call_blank_pid"
+wait "$call_wake_pid"
+[ "$(cat /run/emacsos-ui/power-state)" = active ]
+rm -f /tmp/block-call-blank /tmp/call-blank-continue /tmp/call-blank-reached
+printf '%s\n' 'Call auto-blank/suspend veto, manual blank and both wake orderings: OK'
 
 printf '%s\n' \
     '#!/bin/sh' \

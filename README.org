@@ -787,3 +787,36 @@ is the worked example: it greps the user's files for a number via elisp, then
 stages it via =emacsos-call=; two local phone actions perform the dial.) New
 capabilities slot in the same way — a deterministic command plus a skill that
 routes to it — not as bespoke tools.
+
+
+* PinePhone daily call events and power
+Incoming calls request finite quiet-profile =feedbackd= ringing pulses and show
+the existing answer/decline screen. Confirmed answer stops ringing; only an
+owner/path-bound modem state4 observation marks the event as having reached
+active. After local Hangup succeeds, the UI retains its observation/watch until
+a verified terminal state; a successful method request is not carrier proof.
+Call audio continues through the existing callaudiocli routing.
+
+The fixed root idle check rejects active or unknown modem call state. The call
+mutation lock spans automatic screen blanking and deep-suspend admission, and
+existing power-generation checks prevent an old idle request from blanking a
+new wake. Manual power-button screen-off remains available during calls.
+Outgoing Start/adoption wakes the display. Kernel/modem wake and actual audio
+routing still require physical phone validation.
+
+Observed incoming terminal outcomes are saved privately under the user's state
+directory and handed to the existing authenticated phone API. Failed network
+handoffs retry the saved event, never a call. Unknown caller or reason is retained
+explicitly and keeps the restricted triage profile; permanent invalid records
+are retained with an =.invalid= suffix so later events continue. Server admission
+fixes the chosen call subscription and stable Run before acknowledging. Existing
+SMS subscriptions default to =event_kind="sms"=; call subscriptions use ="call"=
+with the same sender-regexp/saved-template mechanism and earliest-match rule.
+
+No event claims a voicemail transcript from call termination. Carrier access to
+voicemail, preferred transcript retrieval and any fallback transcription remain
+separate unresolved inputs. No noise-processing or recording changes are included.
+Verify =fbcli= availability/options, private-session feedbackd activation, quiet
+vibration, modem state exposure and suspend behavior on the actual phone before
+calling these hardware paths validated. Never start live calls or recordings
+without the user's participation.
