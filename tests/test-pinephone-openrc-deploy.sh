@@ -63,6 +63,7 @@ for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el 
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
+cp -- "$repo_dir/server/emacsos_server/sms_forward.py" "$manifest_stage/"
 cp -- "$deploy_dir/openrc-manifest.sha256" "$manifest_stage/"
 (cd "$manifest_stage" && sha256sum -c openrc-manifest.sha256)
 manifest_hash=$(sha256sum "$deploy_dir/openrc-manifest.sha256")
@@ -120,9 +121,9 @@ grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
 simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
-install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus emacs-magit git openssh-client-default >/dev/null' \
+install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus py3-requests emacs-magit git openssh-client-default >/dev/null' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
-dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus'" \
+dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests'" \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 snapshot_line=$(grep -nF 'snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.' \
@@ -181,6 +182,7 @@ phone-call.el
 phone-fonts.conf
 phone-sms-chat.el
 phone-sms.el
+sms_forward.py
 swipe-learning-collector.py
 swipe-learning.el
 waydroid-container-wrapper
@@ -365,7 +367,7 @@ grep -F "fail 'SMS helper already exists'" \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
     "$deploy_dir/openrc-doas.conf" >/dev/null
-grep -F "/usr/bin/python3 -I -c 'import dbus'" \
+grep -F "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests'" \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     "$deploy_dir/openrc-doas.conf" >/dev/null

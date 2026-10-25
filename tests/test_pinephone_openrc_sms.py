@@ -9,6 +9,8 @@ import pathlib
 import sys
 import types
 import unittest
+import tempfile
+import sqlite3
 from unittest import mock
 
 
@@ -194,6 +196,9 @@ class HelperTests(unittest.TestCase):
     def _run_main(self, raw, *, euid=0, argv=None, flock_error=None,
                   open_error=None):
         emitted = []
+        database = sqlite3.connect(":memory:")
+        database.row_factory = sqlite3.Row
+        database.execute("CREATE TABLE messages (id TEXT PRIMARY KEY, direction TEXT, number TEXT, text TEXT, status TEXT, occurred_at TEXT, observation TEXT UNIQUE, ack_status TEXT)")
         source = raw if hasattr(raw, "read") else io.BytesIO(raw)
         stdin = types.SimpleNamespace(buffer=source)
         lock = mock.MagicMock()
@@ -211,6 +216,7 @@ class HelperTests(unittest.TestCase):
             mock.patch.object(SMS, "open", return_value=lock,
                               side_effect=open_error, create=True),
             mock.patch.object(SMS, "_emit", side_effect=emitted.append),
+            mock.patch.object(SMS, "journal", return_value=database),
         ):
             status = SMS.main()
         return status, emitted, flock, bus
@@ -286,6 +292,59 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(bus.messaging.created,
                          {"number": "+14155550123", "text": 'Exact “text” 👋'})
 
+
+
+
+class JournalTests(unittest.TestCase):
+    def test_write_before_effect_and_uncertain_replay_never_sends_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, "JOURNAL_PATH", str(pathlib.Path(directory) / "private" / "messages.sqlite3")):
+                connection = SMS.journal()
+                status, created = SMS.begin_attempt(connection, "attempt1", "+15555550100", 'Exact "text" 👋')
+                self.assertEqual((status, created), ("unknown", True))
+                connection.close()  # crash before or after actual effect is indistinguishable
+                connection = SMS.journal()
+                self.assertEqual(SMS.begin_attempt(connection, "attempt1", "+15555550100", 'Exact "text" 👋'), ("unknown", False))
+                with self.assertRaises(ValueError):
+                    SMS.begin_attempt(connection, "attempt1", "+15555550100", "changed")
+                connection.rollback()
+                connection.execute("UPDATE messages SET status='sent' WHERE id='attempt1'")
+                connection.commit()
+                self.assertEqual(SMS.begin_attempt(connection, "attempt1", "+15555550100", 'Exact "text" 👋'), ("sent", False))
+                self.assertEqual(SMS.begin_attempt(connection, "attempt2", "+15555550100", 'Exact "text" 👋'), ("unknown", True))
+                connection.close()
+
+    def test_receipt_ack_of_unknown_cannot_hide_later_terminal_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, "JOURNAL_PATH", str(pathlib.Path(directory) / "private" / "messages.sqlite3")):
+                connection = SMS.journal()
+                SMS.begin_attempt(connection, "attempt1", "+15555550100", "hi")
+                connection.execute("UPDATE messages SET ack_status='unknown',status='sent'")
+                connection.commit()
+                self.assertEqual(connection.execute("SELECT id FROM messages WHERE ack_status IS NULL OR ack_status != status").fetchone()[0], "attempt1")
+                connection.close()
+
+
+class ReceiptBudgetTests(unittest.TestCase):
+    def test_maximum_escaped_receipts_drain_in_finite_bounded_batches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, "JOURNAL_PATH", str(pathlib.Path(directory) / "private" / "messages.sqlite3")):
+                connection = SMS.journal()
+                for index in range(9):
+                    SMS.begin_attempt(connection, 'message' + str(index), '+15555550100', '\x01' * 4096)
+                connection.close()
+                ids = []
+                for _ in range(3):
+                    output = io.StringIO()
+                    with mock.patch.object(SMS.sys, 'stdout', output):
+                        SMS.receipt_operation({'operation': 'receipts'})
+                    self.assertLess(len(output.getvalue().encode()), 128 * 1024)
+                    rows = json.loads(output.getvalue())['receipts']
+                    ids.extend(row['id'] for row in rows)
+                    with mock.patch.object(SMS.sys, 'stdout', io.StringIO()):
+                        for row in rows:
+                            SMS.receipt_operation({'operation': 'ack', 'message_id': row['id'], 'status': row['status']})
+                self.assertEqual(len(set(ids)), 9)
 
 if __name__ == "__main__":
     unittest.main()

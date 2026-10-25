@@ -234,6 +234,16 @@ every agent-config load."
 (defvar emacsos-call--call-owner nil
   "Unique owner of the tracked call or pathless recovery state.")
 
+(defun emacsos-sms-transport-status ()
+  "Show whether the configured SMS handoff transport is running."
+  (interactive)
+  (message "%s"
+           (condition-case nil
+               (with-temp-buffer
+                 (insert-file-contents "/run/emacsos-ui/sms-status" nil 0 256)
+                 (string-trim (buffer-string)))
+             (file-error "SMS transport is not configured or has not started."))))
+
 (defun emacsos-pinephone-sms-result (status success)
   "Return the strict terminal SMS STATUS, or conservative unknown."
   (cond
