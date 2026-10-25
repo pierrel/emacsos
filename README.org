@@ -806,7 +806,8 @@ routing still require physical phone validation.
 
 Observed incoming terminal outcomes are saved privately under the user's state
 directory and handed to the existing authenticated phone API. Failed network
-handoffs retry the saved event, never a call. Unknown caller or reason is retained
+handoffs retry the saved event fairly, never a call. Successful acknowledgments
+drain the next saved event; one failing record cannot starve later events. Unknown caller or reason is retained
 explicitly and keeps the restricted triage profile; permanent invalid records
 are retained with an =.invalid= suffix so later events continue. Server admission
 fixes the chosen call subscription and stable Run before acknowledging. Existing

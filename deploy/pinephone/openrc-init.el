@@ -272,6 +272,8 @@ every agent-config load."
   "Private local call-event handoffs; never a source workspace.")
 (defvar emacsos-pinephone-call-event-timer nil)
 (defvar emacsos-pinephone-call-event-busy nil)
+(defvar emacsos-pinephone-call-event-last-path nil
+  "Last offered saved event, for fair retry selection without changing identity.")
 
 (defun emacsos-pinephone-call-event-quarantine (path)
   "Keep an invalid saved observation at PATH without blocking later handoffs."
@@ -279,12 +281,17 @@ every agent-config load."
   (message "A saved call event needs inspection; later call events will continue."))
 
 (defun emacsos-pinephone-call-event-sync ()
-  "Hand off one saved call observation using existing authenticated phone API."
+  "Offer one saved event fairly; retries never repeat a phone call."
   (when (and (not emacsos-pinephone-call-event-busy)
              (file-directory-p emacsos-pinephone-call-event-directory))
-    (when-let ((path (car (directory-files
-                           emacsos-pinephone-call-event-directory t
-                           "\\`[0-9a-f]\\{64\\}\\.json\\\'"))))
+    (when-let* ((paths (directory-files emacsos-pinephone-call-event-directory t
+                                       "\\`[0-9a-f]\\{64\\}\\.json\\'"))
+                (path (or (and emacsos-pinephone-call-event-last-path
+                               (cl-find-if (lambda (value)
+                                             (string-lessp emacsos-pinephone-call-event-last-path value))
+                                           paths))
+                          (car paths))))
+      (setq emacsos-pinephone-call-event-last-path path)
       (condition-case nil
           (let ((event (with-temp-buffer
                          (insert-file-contents path nil 0 4097)
@@ -298,11 +305,13 @@ every agent-config load."
                (unless error
                  (if (equal (alist-get 'status value) "accepted")
                      (delete-file path)
-                   (emacsos-pinephone-call-event-quarantine path))))
+                   (emacsos-pinephone-call-event-quarantine path))
+                 (run-at-time 0 nil #'emacsos-pinephone-call-event-sync)))
              nil '(409 422)))
         (json-parse-error
          (setq emacsos-pinephone-call-event-busy nil)
-         (emacsos-pinephone-call-event-quarantine path))
+         (emacsos-pinephone-call-event-quarantine path)
+         (run-at-time 0 nil #'emacsos-pinephone-call-event-sync))
         (error (setq emacsos-pinephone-call-event-busy nil))))))
 
 (defun emacsos-pinephone-call-event (observation)

@@ -1260,6 +1260,34 @@
           (should-not (file-exists-p path)))
       (delete-directory emacsos-pinephone-call-event-directory t))))
 
-(ert-run-tests-batch-and-exit)
 
+
+
+(ert-deftest emacsos-openrc-call-event-retries-do-not-starve-later-saved-events ()
+  (let* ((emacsos-pinephone-call-event-directory (make-temp-file "call-events-" t))
+         (emacsos-pinephone-call-event-busy nil)
+         (emacsos-pinephone-call-event-last-path nil)
+         (first (expand-file-name (concat (make-string 64 ?a) ".json") emacsos-pinephone-call-event-directory))
+         (second (expand-file-name (concat (make-string 64 ?b) ".json") emacsos-pinephone-call-event-directory))
+         offered timers)
+    (unwind-protect
+        (progn
+          (with-temp-file first (insert "{\"event_id\":\"first\"}"))
+          (with-temp-file second (insert "{\"event_id\":\"second\"}"))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _endpoint payload callback &rest _)
+                       (let ((id (alist-get 'event_id payload)))
+                         (push id offered)
+                         (if (equal id "first") (funcall callback nil "HTTP503")
+                           (funcall callback '((status . "accepted")) nil)))))
+                    ((symbol-function 'run-at-time) (lambda (&rest args) (push args timers))))
+            (emacsos-pinephone-call-event-sync)
+            (emacsos-pinephone-call-event-sync))
+          (should (equal (reverse offered) '("first" "second")))
+          (should (file-exists-p first))
+          (should-not (file-exists-p second))
+          (should timers))
+      (delete-directory emacsos-pinephone-call-event-directory t))))
+
+(ert-run-tests-batch-and-exit)
 ;;; test-pinephone-openrc-init.el ends here
