@@ -72,12 +72,18 @@ def sync_once():
             body["sender"] = row["number"]
         else:
             body.update(number=row["number"], status=row["status"])
-        response = requests.post(url, json=body, headers={"X-Assist-SMS-Secret": SECRET},
-                                 timeout=HTTP_TIMEOUT, verify=VERIFY_TLS, allow_redirects=False)
-        if response.status_code != 200:
+        try:
+            response = requests.post(url, json=body, headers={"X-Assist-SMS-Secret": SECRET},
+                                     timeout=HTTP_TIMEOUT, verify=VERIFY_TLS, allow_redirects=False)
+            if response.status_code != 200:
+                continue
+            accepted = response.json()
+        except (requests.RequestException, ValueError):
+            # Keep this receipt unacknowledged, but offer the rest of the batch.
             continue
-        accepted = response.json()
-        if incoming and accepted.get("status") not in {"accepted", "duplicate"}:
+        if not isinstance(accepted, dict):
+            continue
+        if incoming and accepted.get("status") not in ("accepted", "duplicate"):
             continue
         if not incoming and (accepted.get("message_id") != row["id"] or accepted.get("status") != row["status"]):
             continue

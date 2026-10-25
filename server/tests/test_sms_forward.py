@@ -39,7 +39,7 @@ def test_outgoing_sync_never_calls_send_and_retries_same_receipt(monkeypatch):
         posts.append((url, kwargs['json'])); raise requests.Timeout('lost archive acknowledgment')
     monkeypatch.setattr(sf.requests, 'post', lost)
     for _ in range(2):
-        with pytest.raises(requests.Timeout): sf.sync_once()
+        sf.sync_once()
     assert [p[0] for p in posts] == ['https://server.invalid/sms/receipts'] * 2
     assert posts[0][1] == posts[1][1]
     assert calls == [{'operation': 'receipts'}] * 2
@@ -97,3 +97,23 @@ def test_ipv6_config_is_rejected_instead_of_endless_af_inet_bind(tmp_path, monke
     path.chmod(0o600)
     monkeypatch.setattr(sf, 'Path', lambda value: path)
     with pytest.raises(ValueError, match='IPv4'): sf.load_phone_config()
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'json', 'shape'])
+def test_one_failed_receipt_does_not_block_later_batch_rows(monkeypatch, failure):
+    rows=[receipt(id='first'),receipt(id='later')];calls=[];offered=[]
+    monkeypatch.setattr(sf,'helper',lambda payload,**kw:calls.append(payload) or SimpleNamespace(stdout=json.dumps({'receipts':rows})))
+    monkeypatch.setattr(sf,'INBOUND_URL','https://server.invalid/inbound/sms')
+    def post(url,**kwargs):
+        identity=kwargs['json']['message_id'];offered.append(identity)
+        if identity=='first':
+            if failure=='timeout': raise requests.Timeout('synthetic lost response')
+            def invalid():
+                if failure=='json': raise ValueError('synthetic malformed JSON')
+                return []
+            return SimpleNamespace(status_code=200,json=invalid)
+        return SimpleNamespace(status_code=200,json=lambda:{'status':'accepted'})
+    monkeypatch.setattr(sf.requests,'post',post)
+    sf.sync_once()
+    assert offered==['first','later']
+    assert calls==[{'operation':'receipts'},{'operation':'ack','message_id':'later','status':'received'}]

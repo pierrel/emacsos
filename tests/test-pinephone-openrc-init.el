@@ -1257,8 +1257,8 @@
       (emacsos-pinephone-sms-feedback ":1.7" 9 "/org/freedesktop/ModemManager1/SMS/1")
       (should (= (length calls) 1))
       (should (equal (plist-get (car calls) :command)
-                     '("/usr/bin/fbcli" "--event=message-new-sms" "--profile=quiet" "--timeout=1" "--watch=2")))
-      (should (equal (caar timers) 4)))))
+                     '("/usr/bin/fbcli" "--event=message-new-sms" "--profile=quiet" "--timeout=1" "--watch=4")))
+      (should (equal (caar timers) 5)))))
 
 (ert-run-tests-batch-and-exit)
 

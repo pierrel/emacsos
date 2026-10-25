@@ -244,8 +244,8 @@ this finite client creates no separate network notification channel."
         (let ((process (make-process
                         :name "emacsos-sms-feedback" :buffer nil :noquery t
                         :command '("/usr/bin/fbcli" "--event=message-new-sms"
-                                   "--profile=quiet" "--timeout=1" "--watch=2"))))
-          (run-at-time 4 nil (lambda ()
+                                   "--profile=quiet" "--timeout=1" "--watch=4"))))
+          (run-at-time 5 nil (lambda ()
                               (when (process-live-p process) (delete-process process)))))
       (error (message "SMS vibration is unavailable.")))))
 
