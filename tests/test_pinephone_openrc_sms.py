@@ -87,10 +87,11 @@ class Bus:
         self.replacement_owner = self.owner
         self.names = []
         self.messaging = Messaging(self)
+        self.message_properties = {}
         self.sms = SmsObject()
         self.manager = Manager({
             "/org/freedesktop/ModemManager1/Modem/3": {
-                SMS.MESSAGING: {},
+                SMS.MESSAGING: {"Messages": []},
                 SMS.THREE_GPP: {"RegistrationState": 1},
             },
         })
@@ -106,6 +107,11 @@ class Bus:
         assert name == self.owner
         if path == SMS.MM_ROOT:
             return Proxy(**{SMS.OBJECT_MANAGER: self.manager})
+        if path in self.message_properties:
+            def get_all(interface, timeout):
+                assert interface == SMS.SMS and timeout == 2
+                return self.message_properties[path]
+            return Proxy(**{"org.freedesktop.DBus.Properties": types.SimpleNamespace(GetAll=get_all)})
         if path.endswith("/Modem/3"):
             return Proxy(**{SMS.MESSAGING: self.messaging})
         if path.endswith("/SMS/12"):
@@ -355,7 +361,9 @@ class IncomingObservationTests(unittest.TestCase):
                 connection = SMS.journal()
                 bus = Bus()
                 for index in (21, 22):
-                    bus.manager.objects[f'/org/freedesktop/ModemManager1/SMS/{index}'] = {SMS.SMS: {'State': 3, 'Number': 'T-Mobile', 'Text': ''}}
+                    path = f'/org/freedesktop/ModemManager1/SMS/{index}'
+                    bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'].append(path)
+                    bus.message_properties[path] = {'State': 3, 'Number': 'T-Mobile', 'Text': ''}
                 with mock.patch.object(SMS, 'Path', return_value=types.SimpleNamespace(read_text=lambda: 'synthetic-boot')):
                     SMS.collect_incoming(connection, bus)
                     SMS.collect_incoming(connection, bus)
@@ -370,13 +378,13 @@ class IncomingObservationTests(unittest.TestCase):
             with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')):
                 connection = SMS.journal()
                 for index in range(5):
-                    connection.execute("INSERT INTO messages VALUES (?, 'incoming', '', ?, 'received', '2026-10-24T00:00:00+00:00', ?, NULL)", ('large'+str(index), '\x01'*16384, 'observation'+str(index)))
+                    connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES (?, 'incoming', '', ?, 'received', '2026-10-24T00:00:00+00:00', ?, NULL)", ('large'+str(index), '\x01'*SMS.MAX_INCOMING_BYTES, 'observation'+str(index)))
                 connection.commit(); connection.close()
                 seen = []
                 for _ in range(5):
                     output = io.StringIO()
                     with mock.patch.object(SMS.sys, 'stdout', output): SMS.receipt_operation({'operation': 'receipts'})
-                    self.assertLess(len(output.getvalue().encode()), 128*1024)
+                    self.assertLess(len(output.getvalue().encode()), 2*1024*1024)
                     rows = json.loads(output.getvalue())['receipts']
                     self.assertEqual(len(rows), 1)
                     seen.append(rows[0]['id'])
@@ -384,5 +392,40 @@ class IncomingObservationTests(unittest.TestCase):
                         SMS.receipt_operation({'operation':'ack', 'message_id':rows[0]['id'], 'status':'received'})
                 self.assertEqual(len(set(seen)), 5)
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+class RetryFairnessTests(unittest.TestCase):
+    def test_four_rejected_receipts_cannot_starve_later_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')):
+                connection = SMS.journal()
+                for index in range(6): SMS.begin_attempt(connection, 'message'+str(index), '+15555550100', 'hi')
+                connection.close()
+                batches = []
+                for _ in range(2):
+                    output = io.StringIO()
+                    with mock.patch.object(SMS.sys, 'stdout', output): SMS.receipt_operation({'operation':'receipts'})
+                    batches.append([row['id'] for row in json.loads(output.getvalue())['receipts']])
+                    # No ACK: simulate four permanently rejected HTTP400 handoffs.
+                self.assertEqual(batches[0], ['message0','message1','message2','message3'])
+                self.assertIn('message4', batches[1]); self.assertIn('message5', batches[1])
+                connection = SMS.journal()
+                self.assertEqual(connection.execute('SELECT COUNT(*) FROM messages WHERE ack_status IS NULL').fetchone()[0], 6)
+                connection.close()
+
+
+class LeafFailureTests(unittest.TestCase):
+    def test_unreadable_listed_leaf_does_not_hide_later_received_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory)/'private'/'messages.sqlite3')):
+                connection=SMS.journal();bus=Bus()
+                paths=['/org/freedesktop/ModemManager1/SMS/20','/org/freedesktop/ModemManager1/SMS/21']
+                bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages']=paths
+                bus.message_properties[paths[1]]={'State':3,'Number':'CITY BANK','Text':'still captured'}
+                with mock.patch.object(SMS,'Path',return_value=types.SimpleNamespace(read_text=lambda:'synthetic-boot')):
+                    SMS.collect_incoming(connection,bus)
+                row=connection.execute('SELECT number,text FROM messages').fetchone()
+                self.assertEqual(tuple(row),('CITY BANK','still captured'))
+                connection.close()
+
+if __name__ == '__main__': unittest.main()

@@ -44,7 +44,7 @@ def helper(payload, timeout=70):
         ["/usr/bin/doas", "-n", "/usr/local/sbin/emacsos-openrc-sms"],
         input=json.dumps(payload, ensure_ascii=False), capture_output=True,
         text=True, timeout=timeout)
-    if len(result.stdout.encode()) > 128 * 1024:
+    if len(result.stdout.encode()) > 2 * 1024 * 1024:
         raise ValueError("helper output exceeds bound")
     return result
 
@@ -197,8 +197,8 @@ def load_phone_config():
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or url.path != "/inbound/sms":
         raise ValueError("invalid SMS endpoint")
     address = ipaddress.ip_address(value["bind"])
-    if address.is_unspecified or address.is_multicast or not (address.is_private or address.is_loopback):
-        raise ValueError("SMS listener must use an explicit private interface")
+    if address.version != 4 or address.is_unspecified or address.is_multicast or not (address.is_private or address.is_loopback):
+        raise ValueError("SMS listener requires an explicit private IPv4 interface")
     if not isinstance(value["port"], int) or isinstance(value["port"], bool) or not 1024 <= value["port"] <= 65535:
         raise ValueError("invalid SMS port")
     if not value["ca"].startswith("/"):

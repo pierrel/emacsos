@@ -88,3 +88,12 @@ def test_trickled_bytes_do_not_extend_absolute_request_deadline(monkeypatch):
     stream = io.BufferedReader(reader, buffer_size=2)
     with pytest.raises(TimeoutError): stream.readline(100)
     assert timeouts == [10.0, 6.0, 2.0]
+
+
+@pytest.mark.parametrize('address', ['::1', 'fd00::1'])
+def test_ipv6_config_is_rejected_instead_of_endless_af_inet_bind(tmp_path, monkeypatch, address):
+    path = tmp_path/'sms.json'
+    path.write_text(json.dumps({'secret':'synthetic', 'inbound_url':'https://server.invalid/inbound/sms', 'bind':address, 'port':8767, 'ca':'/synthetic/ca.pem'}))
+    path.chmod(0o600)
+    monkeypatch.setattr(sf, 'Path', lambda value: path)
+    with pytest.raises(ValueError, match='IPv4'): sf.load_phone_config()

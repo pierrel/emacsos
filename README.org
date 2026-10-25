@@ -804,7 +804,7 @@ new observation. Physical deduplication across re-enumeration is not established
 
 An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the
 unprivileged transport inside the existing UI service. It requires exactly
-=secret=, =inbound_url= (HTTPS ending in =/inbound/sms=), =bind= (an explicit private
+=secret=, =inbound_url= (HTTPS ending in =/inbound/sms=), =bind= (an explicit private IPv4
 interface address), =port= (an available unprivileged port) and =ca= (absolute path
 to the trusted server CA). Keep this file and the journal out of Git. The server
 uses the same =ASSIST_SMS_SECRET=, =ASSIST_SMS_OUTBOUND_URL= pointing to that listener's =/outbound/sms/v1= path,
@@ -813,7 +813,7 @@ Configure actual addresses and secrets only in private runtime files.
 
 The transport waits for its interface and restarts independently of the UI after
 an exit. =M-x emacsos-sms-transport-status= reports its local state. Network failure
-retains journal receipts; receipt retries never replay SMS sends. The bridge
+retains journal receipts with fair retry selection; receipt retries never replay SMS sends. The bridge
 acknowledges only a server-confirmed durable handoff. Incoming modem messages are
 retained for the current SMS UI. Verify actual storage location, capacity and
 full-store behavior before relying on indefinite retention in daily use.
@@ -830,5 +830,5 @@ through the existing verified ModemManager observer. This adds no independent
 wake channel. Verify the installed =fbcli= options, session activation, theme and
 EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
 Incoming sender addresses (including brand names and unknown senders) and empty
-texts are preserved exactly. Received bodies share the server's 16 KiB byte bound;
+texts are preserved exactly. Received bodies share the server's bounded multipart-text envelope;
 serialized receipt batches stay below the transport cap even with escaped text.
