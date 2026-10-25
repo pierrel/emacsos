@@ -2183,5 +2183,20 @@ stays `active', so the modeline badge appears) and disarms a pending hang-up."
           (should captured)
           (should dismissed))))))
 
+
+(ert-deftest emacsos-call-pathless-hangup-dismisses-without-unverified-event ()
+  (let ((emacsos-call--state 'active)
+        (emacsos-call--call-owner ":1.new")
+        (emacsos-call--call-path nil)
+        (emacsos-call--incoming-observation '(:owner ":1.old" :path "/old"))
+        dismissed)
+    (let ((identity (emacsos-call--begin-operation 'hangup)))
+      (cl-letf (((symbol-function 'emacsos-call--call-snapshot-async)
+                 (lambda (&rest _) (ert-fail "Pathless Hangup cannot query old call")))
+                ((symbol-function 'emacsos-call--audio) #'ignore)
+                ((symbol-function 'emacsos-call--dismiss) (lambda () (setq dismissed t))))
+        (emacsos-call--hangup-finished identity "hung-up: global call ended")
+        (should dismissed)))))
+
 (provide 'test-call)
 ;;; test-call.el ends here

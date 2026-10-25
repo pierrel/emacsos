@@ -808,7 +808,9 @@ The fixed root idle check rejects active or unknown modem call state. The call
 mutation lock spans automatic screen blanking and deep-suspend admission, and
 existing power-generation checks prevent an old idle request from blanking a
 new wake. Manual power-button screen-off remains available during calls.
-Outgoing Start/adoption wakes the display. Kernel/modem wake and actual audio
+A call veto resets the existing idle timer without lighting a manually blanked
+display; the next timeout takes a fresh call/generation check. Outgoing
+Start/adoption wakes the display. Kernel/modem wake and actual audio
 routing still require physical phone validation.
 
 Observed incoming terminal outcomes are saved privately under the user's state

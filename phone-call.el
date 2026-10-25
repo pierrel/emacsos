@@ -1103,7 +1103,12 @@ claims the modem reached its terminal state; the watch remains until proof."
       (emacsos-call--dismiss))
      ((string-prefix-p "hung-up:" status)
       (emacsos-call--ring-feedback nil)
-      (if emacsos-call--incoming-observation
+      (if (and emacsos-call--incoming-observation
+               emacsos-call--call-owner emacsos-call--call-path
+               (equal (plist-get emacsos-call--incoming-observation :owner)
+                      emacsos-call--call-owner)
+               (equal (plist-get emacsos-call--incoming-observation :path)
+                      emacsos-call--call-path))
           (progn
             (emacsos-call--show-active "Ending call…")
             (emacsos-call--verify-incoming-outcome

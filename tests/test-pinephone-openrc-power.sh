@@ -1018,12 +1018,22 @@ printf '%s\n' 'Kernel guard overlap, parent death and failure cleanup: OK'
 # Calls veto automatic blank/suspend, while an explicit power press remains usable.
 as_lab wake
 printf '%s\n' 75 >/tmp/call-state-status
+rm -f /tmp/wtype.log
 if as_lab idle-blank; then
     printf '%s\n' 'automatic blank accepted active/unknown call state' >&2
     exit 1
 fi
 [ "$(cat /run/emacsos-ui/power-state)" = active ]
+[ "$(cat /tmp/wtype.log)" = '-k F24' ]
+# A later timeout after remote termination may blank normally without input.
+printf '%s\n' 0 >/tmp/call-state-status
+as_lab idle-blank
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+as_lab wake
+printf '%s\n' 75 >/tmp/call-state-status
 as_lab press
+[ "$(cat /run/emacsos-ui/power-state)" = blank ]
+if as_lab idle-blank; then exit 1; fi
 [ "$(cat /run/emacsos-ui/power-state)" = blank ]
 : >/tmp/power/state
 generation=$(cat /run/emacsos-ui/power-generation)

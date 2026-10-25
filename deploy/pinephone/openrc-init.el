@@ -296,17 +296,22 @@ every agent-config load."
           (let ((event (with-temp-buffer
                          (insert-file-contents path nil 0 4097)
                          (when (> (buffer-size) 4096) (signal 'json-parse-error '("Oversized call event")))
-                         (json-parse-buffer :object-type 'alist))))
+                         (json-parse-buffer :object-type 'alist :null-object nil))))
             (setq emacsos-pinephone-call-event-busy t)
             (emacsos-assist-web--request
              "POST" "events/call" event
              (lambda (value error)
                (setq emacsos-pinephone-call-event-busy nil)
                (unless error
-                 (if (equal (alist-get 'status value) "accepted")
+                 (let ((status (alist-get 'http_status value)))
+                   (cond
+                    ((and (integerp status) (<= 200 status 299)
+                          (equal (alist-get 'status value) "accepted"))
                      (delete-file path)
-                   (emacsos-pinephone-call-event-quarantine path))
-                 (run-at-time 0 nil #'emacsos-pinephone-call-event-sync)))
+                     (run-at-time 0 nil #'emacsos-pinephone-call-event-sync))
+                    ((memq status '(409 422))
+                     (emacsos-pinephone-call-event-quarantine path)
+                     (run-at-time 0 nil #'emacsos-pinephone-call-event-sync))))))
              nil '(409 422)))
         (json-parse-error
          (setq emacsos-pinephone-call-event-busy nil)

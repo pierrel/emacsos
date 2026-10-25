@@ -1254,7 +1254,7 @@
           (cl-letf (((symbol-function 'emacsos-assist-web--request)
                      (lambda (method endpoint payload callback &rest _)
                        (setq request (list method endpoint payload))
-                       (funcall callback '((status . "accepted")) nil))))
+                       (funcall callback '((http_status . 200) (status . "accepted")) nil))))
             (emacsos-pinephone-call-event-sync))
           (should (equal (cadr request) "events/call"))
           (should-not (file-exists-p path)))
@@ -1279,7 +1279,7 @@
                        (let ((id (alist-get 'event_id payload)))
                          (push id offered)
                          (if (equal id "first") (funcall callback nil "HTTP503")
-                           (funcall callback '((status . "accepted")) nil)))))
+                           (funcall callback '((http_status . 200) (status . "accepted")) nil)))))
                     ((symbol-function 'run-at-time) (lambda (&rest args) (push args timers))))
             (emacsos-pinephone-call-event-sync)
             (emacsos-pinephone-call-event-sync))
@@ -1288,6 +1288,29 @@
           (should-not (file-exists-p second))
           (should timers))
       (delete-directory emacsos-pinephone-call-event-directory t))))
+
+
+(ert-deftest emacsos-openrc-call-event-null-and-http-status-roundtrip ()
+  (dolist (status '(200 401 409 422 429 503))
+    (let* ((emacsos-pinephone-call-event-directory (make-temp-file "call-events-" t))
+           (emacsos-pinephone-call-event-busy nil)
+           (emacsos-pinephone-call-event-last-path nil)
+           (path (expand-file-name (concat (make-string 64 ?a) ".json") emacsos-pinephone-call-event-directory))
+           uploaded)
+      (unwind-protect
+          (progn
+            (with-temp-file path (insert "{\"event_id\":\"event1\",\"number\":null,\"reason\":null}"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _endpoint payload callback &rest _)
+                         (setq uploaded (json-encode payload))
+                         (funcall callback `((http_status . ,status) (status . "accepted")) nil)))
+                      ((symbol-function 'run-at-time) #'ignore))
+              (emacsos-pinephone-call-event-sync))
+            (should (string-match-p "\"number\":null" uploaded))
+            (should (string-match-p "\"reason\":null" uploaded))
+            (should (eq (file-exists-p path) (not (null (memq status '(401 429 503))))))
+            (should (eq (file-exists-p (concat path ".invalid")) (not (null (memq status '(409 422)))))))
+        (delete-directory emacsos-pinephone-call-event-directory t)))))
 
 (ert-run-tests-batch-and-exit)
 ;;; test-pinephone-openrc-init.el ends here
