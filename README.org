@@ -797,6 +797,13 @@ active. After local Hangup succeeds, the UI retains its observation/watch until
 a verified terminal state; a successful method request is not carrier proof.
 Call audio continues through the existing callaudiocli routing.
 
+The installed =99-emacsos-vibrator.rules= gives =emacsos-lab= ownership only of
+the =gpio-vibrator= event device with =ID_PATH=platform-vibrator=. Keyboard and
+other input access stays restricted. Installation/update and rollback manage the
+rule file; a live activation must separately reload udev and trigger only the
+verified vibrator device, then retry session feedbackd. A successful =fbcli= exit
+with =No feedback found= is a failure to validate vibration.
+
 The fixed root idle check rejects active or unknown modem call state. The call
 mutation lock spans automatic screen blanking and deep-suspend admission, and
 existing power-generation checks prevent an old idle request from blanking a

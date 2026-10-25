@@ -85,6 +85,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-chat-url" \
     "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
+    "$deploy_dir/99-emacsos-vibrator.rules" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/openrc-boot-mode" \
     "$deploy_dir/waydroid-container.service" \

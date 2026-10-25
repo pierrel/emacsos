@@ -54,7 +54,7 @@ for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt ph
     swipe-learning-collector.py openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root \
     openrc-device-root openrc-doas.conf openrc-chat-url openrc-assist-web-url \
-    openrc-emacs-server.nft \
+    openrc-emacs-server.nft 99-emacsos-vibrator.rules \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
@@ -89,7 +89,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 49 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 50 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -143,7 +143,8 @@ mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1
     [ "$keyboard_snapshot_line" -lt "$bootstrap_line" ]
 [ "$helper_backup_line" -lt "$bootstrap_line" ]
 grep -F 'bootstrap_helper_replaced=1' "$deploy_dir/openrc-update-root" >/dev/null
-expected='EMACSOS-COMMANDS.org
+expected='99-emacsos-vibrator.rules
+EMACSOS-COMMANDS.org
 assist-web-git-helper.py
 assist-web-git.el
 assist-web.el
@@ -337,7 +338,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 49 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 50 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
