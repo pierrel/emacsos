@@ -115,4 +115,3 @@
       ;; even if the same server draft was reopened and rejected meanwhile.
       (funcall approve '((state . "approved")) nil)
       (should-not sent))))
-
