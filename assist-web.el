@@ -8673,7 +8673,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                                emacsos-assist-web--approval-source source
                                emacsos-assist-web--approval proposal)
                          (emacsos-assist-web--render-approval))
-                       (switch-to-buffer buffer))))
+                       (unless (equal (alist-get 'kind proposal) "send_sms")
+                         (switch-to-buffer buffer)))))
                    (when (and (buffer-live-p old-preview)
                               (or (null old-proposal)
                                   (eq old-proposal
@@ -8788,7 +8789,13 @@ ACCEPTED-RUN-ID is its already validated Run identity."
   "Open the complete saved draft in the existing physical SMS confirmation surface."
   (require 'phone-sms)
   (let* ((proposal emacsos-assist-web--approval)
-         (context (cons (cons 'thread_id emacsos-assist-web--thread-id) (copy-tree proposal)))
+         (preview (current-buffer))
+         (source (or emacsos-assist-web--approval-source preview))
+         (tid emacsos-assist-web--thread-id)
+         (auth (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+         (record (emacsos-assist-web--thread-safety-record tid t))
+         (generation (plist-get record :approval-generation))
+         (context (cons (cons 'thread_id tid) (copy-tree proposal)))
          (encoded (concat "assist-sms:" (json-encode context))))
     (cond
      ((and (memq emacsos-sms--state '(proposed sending sent unknown))
@@ -8801,7 +8808,14 @@ ACCEPTED-RUN-ID is its already validated Run identity."
       (emacsos-assist-web--sms-journal
        (alist-get 'id proposal)
        (lambda (value error)
-         (if error (message "%s" error)
+         (when (and (buffer-live-p source) (buffer-live-p preview)
+                    (equal tid (buffer-local-value 'emacsos-assist-web--thread-id source))
+                    (eql auth (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+                    (not (buffer-local-value 'emacsos-assist-web--denied source))
+                    (eq record (emacsos-assist-web--thread-safety-record tid))
+                    (eql generation (plist-get record :approval-generation))
+                    (eq proposal (buffer-local-value 'emacsos-assist-web--approval preview)))
+          (if error (message "%s" error)
            (let ((observed (alist-get 'message value)))
              (if (and observed
                       (not (and (equal (alist-get 'number observed) (alist-get 'number proposal))
@@ -8816,7 +8830,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                    (let ((status (alist-get 'status observed)))
                      (emacsos-sms--finished emacsos-sms--proposal-id
                                            (pcase status ("sent" "sent") ("not_sent" "not-sent:send-failed") (_ "unknown:dbus-unavailable")))
-                     (emacsos-assist-web--sms-decision context status (lambda (&rest _) nil))))))))))))))
+                     (emacsos-assist-web--sms-decision context status (lambda (&rest _) nil)))))))))))))))
 
 (defun emacsos-assist-web--sms-discard (encoded completion)
   "Reject only a draft with no journaled attempt, retaining it until server ACK."
@@ -8834,11 +8848,20 @@ ACCEPTED-RUN-ID is its already validated Run identity."
     t))
 
 (defun emacsos-assist-web--sms-outcome (value)
-  "Report an observed phone outcome without granting any sending authority."
+  "Report only an exact journaled attempt, never a pre-attempt UI failure."
   (when (eq (plist-get value :event) 'terminal)
     (when-let ((context (emacsos-assist-web--sms-context (plist-get value :context))))
-      (let ((state (pcase (plist-get value :state) ('sent "sent") ('failed "not_sent") (_ "unknown"))))
-        (emacsos-assist-web--sms-decision context state (lambda (&rest _) nil))))))
+      (emacsos-assist-web--sms-journal
+       (alist-get 'id context)
+       (lambda (result error)
+         (let ((observed (and (not error) (alist-get 'message result))))
+           (when (and observed
+                      (equal (alist-get 'id observed) (alist-get 'id context))
+                      (equal (alist-get 'number observed) (alist-get 'number context))
+                      (equal (alist-get 'text observed) (alist-get 'text context))
+                      (member (alist-get 'status observed) '("sent" "not_sent" "unknown")))
+             (emacsos-assist-web--sms-decision
+              context (alist-get 'status observed) (lambda (&rest _) nil)))))))))
 
 (with-eval-after-load 'phone-sms
   (setq emacsos-sms-discard-function #'emacsos-assist-web--sms-discard)
