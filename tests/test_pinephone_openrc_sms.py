@@ -302,6 +302,26 @@ class HelperTests(unittest.TestCase):
 
 
 class JournalTests(unittest.TestCase):
+    def test_lookup_is_exact_read_only_and_never_contacts_modem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, "JOURNAL_PATH", str(pathlib.Path(directory) / "messages.sqlite3")):
+                connection = SMS.journal()
+                SMS.begin_attempt(connection, "outbox_test", "+15555550100", 'Exact "text" 👋')
+                before = list(connection.execute("SELECT * FROM messages"))
+                connection.close()
+                with mock.patch.object(SMS.dbus, "SystemBus", side_effect=AssertionError("lookup must not access modem")):
+                    for identity, expected in (("outbox_test", "unknown"), ("missing", None)):
+                        output = io.StringIO()
+                        with mock.patch.object(SMS.sys, "stdout", output):
+                            SMS.receipt_operation({"operation": "lookup", "message_id": identity})
+                        value = json.loads(output.getvalue())["message"]
+                        self.assertEqual(value["status"] if value else None, expected)
+                        if value:
+                            self.assertEqual((value["number"], value["text"]), ("+15555550100", 'Exact "text" 👋'))
+                connection = SMS.journal()
+                self.assertEqual([tuple(row) for row in connection.execute("SELECT * FROM messages")], [tuple(row) for row in before])
+                connection.close()
+
     def test_write_before_effect_and_uncertain_replay_never_sends_again(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(SMS, "JOURNAL_PATH", str(pathlib.Path(directory) / "private" / "messages.sqlite3")):

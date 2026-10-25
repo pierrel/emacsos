@@ -213,7 +213,7 @@ def collect_incoming(connection, bus):
 
 
 def receipt_operation(value):
-    """Read bounded pending receipts or acknowledge one exact observed status."""
+    """Read receipts, look up one attempt without the modem, or acknowledge status."""
     connection = journal()
     try:
         if value == {"operation": "receipts"}:
@@ -236,6 +236,11 @@ def receipt_operation(value):
                 connection.executemany("UPDATE messages SET last_offered=? WHERE id=?", [(turn, row["id"]) for row in batch])
                 connection.commit()
             print(json.dumps({"receipts": batch}, ensure_ascii=False))
+        elif set(value) == {"operation", "message_id"} and value["operation"] == "lookup":
+            if not isinstance(value["message_id"], str) or not ID_RE.fullmatch(value["message_id"]):
+                raise ValueError("lookup")
+            row = connection.execute("SELECT id,number,text,status FROM messages WHERE id=?", (value["message_id"],)).fetchone()
+            print(json.dumps({"message": dict(row) if row else None}, ensure_ascii=False))
         elif set(value) == {"operation", "message_id", "status"} and value["operation"] == "ack":
             if not isinstance(value["message_id"], str) or not ID_RE.fullmatch(value["message_id"]) or value["status"] not in {"received", "sent", "not_sent", "unknown"}:
                 raise ValueError("ack")

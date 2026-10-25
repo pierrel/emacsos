@@ -790,6 +790,16 @@ routes to it — not as bespoke tools.
 
 
 * PinePhone SMS journal and transport
+Ordinary Assist turns may stage exact SMS drafts for this phone. Open the thread
+and choose Review to use the existing SMS confirmation screen. Nothing is sent
+until two physical Send taps. The phone acknowledges the exact server proposal
+before invoking its fixed root helper with the same journal identity. A delayed
+approval response cannot send after its physical confirmation loses ownership.
+Cancel checks that no journal attempt exists and retains the draft until the
+server acknowledges rejection. Existing terminal or uncertain journal outcomes
+are shown without starting another attempt. Ordinary local SMS keeps its offline
+path; this adds no background sending authority.
+
 The fixed root SMS helper journals every exact outgoing attempt before calling
 ModemManager, including sends confirmed locally on the phone. A repeated attempt
 id reads its recorded outcome and never sends again. =sent= means ModemManager

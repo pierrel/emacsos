@@ -297,7 +297,7 @@ this finite client creates no separate network notification channel."
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))))))
 
-(defun emacsos-pinephone-sms-operation (number body completion)
+(defun emacsos-pinephone-sms-operation-local (number body completion &optional message-id)
   "Send NUMBER and BODY to the fixed root helper through bounded stdin."
   (let ((buffer (generate-new-buffer " *emacsos-sms*"))
         (stderr-buffer (generate-new-buffer " *emacsos-sms-stderr*"))
@@ -319,7 +319,8 @@ this finite client creates no separate network notification channel."
                               proc event completion stderr-buffer))))
           (process-send-string
            process
-           (json-encode `((number . ,number) (text . ,body))))
+           (json-encode (append `((number . ,number) (text . ,body))
+                                (when message-id `((message_id . ,message-id))))))
           (process-send-eof process)
           "pending: SMS requested")
       (error
@@ -327,6 +328,35 @@ this finite client creates no separate network notification channel."
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
        "unknown:dbus-unavailable"))))
+
+(defun emacsos-pinephone-sms-operation (number body completion)
+  "Send local SMS normally; server-linked SMS first acknowledges exact physical approval."
+  (let ((proposal-id emacsos-sms--proposal-id)
+        (encoded-context emacsos-sms--context)
+        (context (and (fboundp 'emacsos-assist-web--sms-context)
+                      (emacsos-assist-web--sms-context emacsos-sms--context))))
+    (if (not context)
+        (emacsos-pinephone-sms-operation-local number body completion)
+      (if (not (and (equal number (alist-get 'number context))
+                    (equal body (alist-get 'text context))))
+          "not-sent:invalid-input"
+        (emacsos-assist-web--sms-decision
+         context "approve"
+         (lambda (value error)
+           (cond
+            ((not (and (eq emacsos-sms--state 'sending)
+                       (equal proposal-id emacsos-sms--proposal-id)
+                       (equal encoded-context emacsos-sms--context)))
+             (funcall completion "unknown:dbus-unavailable"))
+            (error (funcall completion "not-sent:busy"))
+            (t
+             (if (equal (alist-get 'state value) "approved")
+                 (let ((result (emacsos-pinephone-sms-operation-local number body completion (alist-get 'id context))))
+                   (unless (string-prefix-p "pending:" result) (funcall completion result)))
+               (funcall completion (pcase (alist-get 'state value)
+                                     ("sent" "sent") ("unknown" "unknown:dbus-unavailable")
+                                     (_ "not-sent:busy"))))))))
+        "pending: phone approval requested"))))
 
 (defun emacsos-pinephone-call-result (operation status success)
   "Normalize helper STATUS, preserving uncertain dial and answer identity."
