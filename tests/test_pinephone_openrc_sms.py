@@ -9,6 +9,7 @@ import pathlib
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta
 import tempfile
 import sqlite3
 from unittest import mock
@@ -447,5 +448,141 @@ class LeafFailureTests(unittest.TestCase):
                 row=connection.execute('SELECT number,text FROM messages').fetchone()
                 self.assertEqual(tuple(row),('CITY BANK','still captured'))
                 connection.close()
+
+
+class RetainedInventoryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.patch = mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(self.directory.name)/'private'/'messages.sqlite3'))
+        self.patch.start()
+        self.connection = SMS.journal()
+        self.bus = Bus()
+
+    def tearDown(self):
+        self.connection.close()
+        self.patch.stop()
+        self.directory.cleanup()
+
+    def messages(self, indices):
+        paths = [f'/org/freedesktop/ModemManager1/SMS/{index}' for index in indices]
+        self.bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'] = paths
+        self.bus.message_properties = {path: {'State':3, 'Number':'+15555550100', 'Text':'identical',
+                                             'Timestamp':'2026-10-26T01:00:00+00:00'} for path in paths}
+        return paths
+
+    def collect(self):
+        SMS.collect_incoming(self.connection, self.bus)
+        return [dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
+
+    def test_original_timestamp_and_multiplicity_survive_reenumeration(self):
+        self.messages([20,21])
+        first = self.collect()
+        self.assertEqual(len(first),2)
+        self.assertTrue(all(not row['archive_only'] for row in first))
+        self.assertTrue(all(row['occurred_at']=='2026-10-26T01:00:00+00:00' for row in first))
+        self.assertNotEqual(first[0]['id'],first[1]['id'])
+        self.bus.owner=':1.99'
+        self.messages([0,1])
+        self.assertEqual(self.collect(),first)
+        self.messages([0,1,2])
+        after=self.collect()
+        self.assertEqual(len(after),3)
+        self.assertFalse(after[-1]['archive_only'])
+
+    def test_exact_legacy_bootstrap_preserves_uuid_time_and_ack(self):
+        self.messages([20])
+        boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        observation=boot+':'+self.bus.owner+':/org/freedesktop/ModemManager1/SMS/20'
+        self.connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES ('legacy','incoming','+15555550100','identical','received','2026-10-20T00:00:00+00:00',?,'received')",(observation,))
+        self.connection.commit()
+        before=[dict(row) for row in self.connection.execute('SELECT * FROM messages')]
+        before[0]['archive_only']=1
+        self.assertEqual(self.collect(),before)
+        self.bus.owner=':1.100';self.messages([0])
+        self.assertEqual(self.collect(),before)
+
+    def test_partial_identical_bootstrap_does_not_reuse_mapped_uuid(self):
+        paths=self.messages([20,21])
+        del self.bus.message_properties[paths[0]]
+        first=self.collect()
+        self.assertEqual(len(first),1)
+        self.messages([20,21])
+        after=self.collect()
+        self.assertEqual(len(after),2)
+        self.assertEqual(after[0]['id'],first[0]['id'])
+        self.assertNotEqual(after[0]['id'],after[1]['id'])
+        self.assertTrue(all(not row['archive_only'] for row in after))
+
+    def test_partial_namespace_publication_retains_original_sms_timestamp(self):
+        self.messages([20]); first=self.collect()
+        self.bus.owner=':1.99'; self.messages([0]); self.collect()
+        self.messages([0,1])
+        after=self.collect()
+        self.assertEqual(len(after),2)
+        self.assertEqual(after[-1]['occurred_at'],first[0]['occurred_at'])
+
+    def test_failed_leaf_delayed_capture_uses_sms_timestamp(self):
+        paths=self.messages([20])
+        del self.bus.message_properties[paths[0]]
+        self.collect()
+        self.messages([20])
+        row=self.collect()[0]
+        self.assertEqual(row['occurred_at'],'2026-10-26T01:00:00+00:00')
+        self.assertFalse(row['archive_only'])
+
+    def test_missing_invalid_and_naive_timestamp_are_archive_only_without_now(self):
+        for timestamp in (None, '', 'bad', '2026-10-26T01:00:00'):
+            with self.subTest(timestamp=timestamp):
+                paths=self.messages([30])
+                if timestamp is None:
+                    del self.bus.message_properties[paths[0]]['Timestamp']
+                else:
+                    self.bus.message_properties[paths[0]]['Timestamp']=timestamp
+                self.collect()
+        rows=self.connection.execute('SELECT occurred_at,archive_only FROM messages').fetchall()
+        self.assertTrue(all(row['occurred_at'] is None and row['archive_only'] for row in rows))
+        self.assertEqual(len(rows),3)  # Missing and empty are the same absent timestamp.
+
+    def test_timezone_offset_is_preserved_and_mutable_fields_do_not_replay(self):
+        paths=self.messages([20])
+        self.bus.message_properties[paths[0]]['Timestamp']='2026-10-25T16:06:32-07'
+        first=self.collect()
+        self.assertEqual(first[0]['occurred_at'],'2026-10-25T16:06:32-07:00')
+        self.bus.message_properties[paths[0]].update(Storage=2,DeliveryState=1)
+        self.assertEqual(self.collect(),first)
+
+    def test_reused_path_different_timestamp_preserves_independent_content(self):
+        paths=self.messages([20]);first=self.collect()
+        self.bus.message_properties[paths[0]]['Timestamp']='2026-10-26T02:00:00+00:00'
+        after=self.collect()
+        self.assertEqual(len(after),2)
+        self.assertNotEqual(after[0]['id'],after[1]['id'])
+        self.assertEqual(after[0],first[0])
+
+    def test_legacy_schema_migration_preserves_payload_time_and_ack(self):
+        self.connection.close()
+        pathlib.Path(SMS.JOURNAL_PATH).unlink()
+        old=sqlite3.connect(SMS.JOURNAL_PATH)
+        old.execute('CREATE TABLE messages (id TEXT PRIMARY KEY,direction TEXT,number TEXT,text TEXT,status TEXT,occurred_at TEXT,observation TEXT UNIQUE,ack_status TEXT)')
+        old.execute("INSERT INTO messages VALUES ('old','incoming','source','history','received','2026-10-25T00:00:00+00:00','oldowner:path','received')")
+        old.execute("INSERT INTO messages VALUES ('out','outgoing','dest','hi','sent','2026-10-25T00:00:00+00:00',NULL,'sent')")
+        old.commit();old.close()
+        pathlib.Path(SMS.JOURNAL_PATH).chmod(0o600)
+        self.connection=SMS.journal()
+        incoming=self.connection.execute("SELECT * FROM messages WHERE id='old'").fetchone()
+        self.assertEqual((incoming['text'],incoming['occurred_at'],incoming['ack_status'],incoming['archive_only']),('history','2026-10-25T00:00:00+00:00','received',1))
+        outgoing=self.connection.execute("SELECT * FROM messages WHERE id='out'").fetchone()
+        self.assertEqual((outgoing['status'],outgoing['ack_status'],outgoing['archive_only']),('sent','sent',0))
+        cutoff=self.connection.execute('SELECT occurred_at FROM incoming_cutover').fetchone()[0]
+        boundary=datetime.fromisoformat(cutoff)
+        for index,seconds in enumerate((-1,0,1),40):
+            paths=self.messages([index])
+            self.bus.message_properties[paths[0]]['Timestamp']=(boundary+timedelta(seconds=seconds)).isoformat()
+            self.collect()
+        flags=[row[0] for row in self.connection.execute("SELECT archive_only FROM messages WHERE number='+15555550100' ORDER BY rowid")]
+        self.assertEqual(flags,[1,1,0])
+        self.connection.close();self.connection=SMS.journal()
+        self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_cutover').fetchone()[0],cutoff)
+
 
 if __name__ == '__main__': unittest.main()
