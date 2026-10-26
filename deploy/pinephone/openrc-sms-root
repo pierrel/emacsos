@@ -17,6 +17,7 @@ import dbus
 MAX_REQUEST_BYTES = 32768
 MAX_BODY_BYTES = 4096
 MAX_INCOMING_BYTES = 256 * 1024
+CAPTURE_BATCH = 4
 NUMBER_RE = re.compile(r"\+?[0-9]{5,15}\Z")
 SMS_PATH_RE = re.compile(r"/org/freedesktop/ModemManager1/SMS/[0-9]+\Z")
 MM_NAME = "org.freedesktop.ModemManager1"
@@ -155,6 +156,7 @@ def journal():
         # Legacy incoming times were local rediscovery times, not SMS timestamps.
         # Preserve old IDs/content/times/ACKs but prevent pending history turns.
         connection.execute("UPDATE messages SET archive_only=1 WHERE direction='incoming'")
+    connection.execute("CREATE TABLE IF NOT EXISTS incoming_objects (observation TEXT PRIMARY KEY, content TEXT, occurred_at TEXT, last_checked INTEGER NOT NULL DEFAULT 0)")
     connection.execute("CREATE TABLE IF NOT EXISTS incoming_inventory (content TEXT NOT NULL, ordinal INTEGER NOT NULL, message_id TEXT NOT NULL UNIQUE, PRIMARY KEY(content,ordinal))")
     if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_cutover'").fetchone():
         connection.execute("CREATE TABLE incoming_cutover (occurred_at TEXT NOT NULL)")
@@ -202,9 +204,25 @@ def collect_incoming(connection, bus):
     paths = sorted({str(path) for path in messaging[0]["Messages"]})
     if any(not SMS_PATH_RE.fullmatch(path) for path in paths):
         raise ValueError("SMS path")
-    groups = {}
-    for path in paths:
-        observation = boot + ":" + owner + ":" + path
+    observations = {boot + ":" + owner + ":" + path: path for path in paths}
+    connection.execute("BEGIN IMMEDIATE")
+    for row in connection.execute("SELECT observation FROM incoming_objects").fetchall():
+        if row["observation"] not in observations:
+            connection.execute("DELETE FROM incoming_objects WHERE observation=?", (row["observation"],))
+    connection.executemany("INSERT OR IGNORE INTO incoming_objects (observation) VALUES (?)",
+                           [(observation,) for observation in observations])
+    connection.commit()
+    pending = [row for row in connection.execute("SELECT observation FROM incoming_objects WHERE content IS NULL ORDER BY last_checked,observation")
+               if row["observation"] in observations]
+    # Four two-second leaf calls plus the ten-second manager call fit inside
+    # the receipt deadline. Mark attempts first, so failed leaves rotate too.
+    for row in pending[:CAPTURE_BATCH]:
+        observation = row["observation"]
+        path = observations[observation]
+        connection.execute("BEGIN IMMEDIATE")
+        turn = connection.execute("SELECT COALESCE(MAX(last_checked),0)+1 FROM incoming_objects").fetchone()[0]
+        connection.execute("UPDATE incoming_objects SET last_checked=? WHERE observation=?", (turn, observation))
+        connection.commit()
         try:
             properties = dbus.Interface(bus.get_object(owner, path),
                                         "org.freedesktop.DBus.Properties").GetAll(SMS, timeout=2)
@@ -228,8 +246,24 @@ def collect_incoming(connection, bus):
             occurred_at = timestamp.isoformat() if timestamp.tzinfo is not None else None
         except (TypeError, ValueError):
             occurred_at = None
-        groups.setdefault(content, []).append((observation, number, text, occurred_at))
-    connection.execute("BEGIN IMMEDIATE")
+        # MM 1.24.2 gives each object a process-unique path and completes
+        # received content before State=3. Cache only that immutable content;
+        # renumbering/disappearance invalidates the alias on the next list.
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE incoming_objects SET content=?,occurred_at=? WHERE observation=?",
+                           (content, occurred_at, observation))
+        capture_inventory(connection, observations)
+        connection.commit()
+
+
+def capture_inventory(connection, observations):
+    """Allocate retained multiplicity inside the cache/message transaction."""
+    groups = {}
+    for row in connection.execute("SELECT observation,content,occurred_at FROM incoming_objects WHERE content IS NOT NULL"):
+        if row["observation"] not in observations:
+            continue
+        number, text = json.loads(row["content"])[:2]
+        groups.setdefault(row["content"], []).append((row["observation"], number, text, row["occurred_at"]))
     cutover = connection.execute("SELECT occurred_at FROM incoming_cutover").fetchone()
     for content, members in groups.items():
         count = connection.execute("SELECT COUNT(*) FROM incoming_inventory WHERE content=?", (content,)).fetchone()[0]
@@ -245,8 +279,8 @@ def collect_incoming(connection, bus):
         additional = max(0, len(members) - count)
         for ordinal, (observation, number, text, occurred_at, legacy) in enumerate(candidates[-additional:] if additional else [], count + 1):
             if legacy and (legacy["direction"], legacy["number"], legacy["text"]) != ("incoming", number, text):
-                # MM may reuse a path within the same owner. It is not proof
-                # that this current content is the legacy row's message.
+                # A legacy observation is reusable only with matching stored
+                # content; never guess an existing UUID from a path alone.
                 legacy = None
             if legacy:
                 identity = legacy["id"]
@@ -261,7 +295,6 @@ def collect_incoming(connection, bus):
                 connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only) VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL, ?)",
                                    (identity, number, text, occurred_at, saved_observation, int(archive_only)))
             connection.execute("INSERT INTO incoming_inventory VALUES (?,?,?)", (content, ordinal, identity))
-    connection.commit()
 
 
 def receipt_operation(value):

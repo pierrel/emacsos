@@ -820,6 +820,16 @@ received Number/Text/Data/Timestamp/SMSC/PduType/Class; mutable storage, state
 and delivery fields are excluded. This depends on retained received inventory:
 external deletion/replacement of received modem objects is not supported.
 
+Collection reads at most four uncached objects per poll. Attempts rotate fairly,
+including unreadable or incomplete objects. Each successful received-object
+cache update, inventory allocation and message commit is atomic, so a deadline
+or crash retains completed progress and the next poll skips those reads.
+Multiplicity counts include all cached objects still in the current modem list,
+even when capture spans several polls. Cache aliases absent from the current
+list or namespace are removed. The cache relies on ModemManager 1.24.2's producer
+contract: each object has a process-unique incrementing path, and received
+content is assembled before State=3. It never caches incomplete/outgoing objects.
+
 Incoming =occurred_at= uses the original timezone-aware ModemManager SMS
 =Timestamp=, never rediscovery time. The host admits a subscription only if that
 source time is strictly after creation: delayed old texts and equal timestamps

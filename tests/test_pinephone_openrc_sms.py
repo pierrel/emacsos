@@ -9,6 +9,8 @@ import pathlib
 import sys
 import types
 import unittest
+import signal
+import time
 from datetime import datetime, timedelta
 import tempfile
 import sqlite3
@@ -531,17 +533,15 @@ class RetainedInventoryTests(unittest.TestCase):
         self.assertFalse(row['archive_only'])
 
     def test_missing_invalid_and_naive_timestamp_are_archive_only_without_now(self):
-        for timestamp in (None, '', 'bad', '2026-10-26T01:00:00'):
-            with self.subTest(timestamp=timestamp):
-                paths=self.messages([30])
-                if timestamp is None:
-                    del self.bus.message_properties[paths[0]]['Timestamp']
-                else:
-                    self.bus.message_properties[paths[0]]['Timestamp']=timestamp
-                self.collect()
-        rows=self.connection.execute('SELECT occurred_at,archive_only FROM messages').fetchall()
+        paths=self.messages([30,31,32,33])
+        for path,timestamp in zip(paths,(None,'','bad','2026-10-26T01:00:00')):
+            if timestamp is None:
+                del self.bus.message_properties[path]['Timestamp']
+            else:
+                self.bus.message_properties[path]['Timestamp']=timestamp
+        rows=self.collect()
+        self.assertEqual(len(rows),4)
         self.assertTrue(all(row['occurred_at'] is None and row['archive_only'] for row in rows))
-        self.assertEqual(len(rows),3)  # Missing and empty are the same absent timestamp.
 
     def test_timezone_offset_is_preserved_and_mutable_fields_do_not_replay(self):
         paths=self.messages([20])
@@ -551,13 +551,84 @@ class RetainedInventoryTests(unittest.TestCase):
         self.bus.message_properties[paths[0]].update(Storage=2,DeliveryState=1)
         self.assertEqual(self.collect(),first)
 
-    def test_reused_path_different_timestamp_preserves_independent_content(self):
+    def test_new_object_path_different_timestamp_preserves_independent_content(self):
         paths=self.messages([20]);first=self.collect()
+        paths=self.messages([21])
         self.bus.message_properties[paths[0]]['Timestamp']='2026-10-26T02:00:00+00:00'
         after=self.collect()
         self.assertEqual(len(after),2)
         self.assertNotEqual(after[0]['id'],after[1]['id'])
         self.assertEqual(after[0],first[0])
+
+    def test_real_alarm_preserves_completed_read_and_next_poll_progresses(self):
+        paths=self.messages([20,21,22])
+        original=self.bus.get_object
+        blocked=[]
+        def get_object(owner,path):
+            obj=original(owner,path)
+            if path==paths[1]:
+                iface=obj.interfaces['org.freedesktop.DBus.Properties']
+                def slow(*args,**kwargs):
+                    blocked.append(path)
+                    signal.setitimer(signal.ITIMER_REAL,.01)
+                    time.sleep(1)
+                iface.GetAll=slow
+            return obj
+        self.bus.get_object=get_object
+        previous=signal.signal(signal.SIGALRM,SMS._alarm)
+        try:
+            with self.assertRaises(SMS.InputTimeout):self.collect()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0)
+            signal.signal(signal.SIGALRM,previous)
+            self.connection.rollback()
+        first=[dict(row) for row in self.connection.execute('SELECT * FROM messages')]
+        self.assertEqual(len(first),1)
+        # Next poll processes never-attempted22 before retrying failed21.
+        try:
+            signal.signal(signal.SIGALRM,SMS._alarm)
+            with self.assertRaises(SMS.InputTimeout):self.collect()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0)
+            signal.signal(signal.SIGALRM,previous)
+            self.connection.rollback()
+        after=[dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
+        self.assertEqual(len(after),2)
+        self.assertEqual(after[0],first[0])
+        self.assertEqual(len(blocked),2)
+
+    def test_failed_prefix_rotates_and_batched_identicals_preserve_multiplicity(self):
+        paths=self.messages(list(range(20,29)))
+        for path in paths[:4]:del self.bus.message_properties[path]
+        self.assertEqual(self.collect(),[])
+        after=self.collect()
+        self.assertEqual(len(after),4)
+        # Remaining good leaf gets a turn despite four permanently bad paths.
+        after=self.collect()
+        self.assertEqual(len(after),5)
+        self.assertEqual(len({row['id'] for row in after}),5)
+        self.bus.owner=':1.200';self.messages(list(range(40,45)))
+        self.collect();after=self.collect()
+        self.assertEqual(len(after),5)
+
+    def test_disappeared_alias_is_invalidated_before_reappearance(self):
+        paths=self.messages([20]);first=self.collect()
+        self.messages([]);self.collect()
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM incoming_objects').fetchone()[0],0)
+        paths=self.messages([20])
+        self.bus.message_properties[paths[0]]['Timestamp']='2026-10-26T02:00:00+00:00'
+        after=self.collect()
+        self.assertEqual(len(after),2)
+        self.assertEqual(after[0],first[0])
+
+    def test_cache_and_inventory_allocation_roll_back_together(self):
+        self.messages([20])
+        with mock.patch.object(SMS,'capture_inventory',side_effect=sqlite3.OperationalError('interrupted')):
+            with self.assertRaises(sqlite3.OperationalError):self.collect()
+        self.connection.rollback()
+        self.assertIsNone(self.connection.execute('SELECT content FROM incoming_objects').fetchone()[0])
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0],0)
+        self.assertEqual(len(self.collect()),1)
 
     def test_legacy_schema_migration_preserves_payload_time_and_ack(self):
         self.connection.close()
