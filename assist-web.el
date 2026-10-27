@@ -8596,7 +8596,8 @@ ACCEPTED-RUN-ID is its already validated Run identity."
       proposal))))
 
 (defun emacsos-assist-web--approval-response (value tid)
-  "Validate all proposals in VALUE for TID, retaining legacy replies."
+  "Validate supported proposals in VALUE for TID, retaining legacy replies.
+Desktop Assist leaves phone SMS proposals for review on the phone."
   (if (assq 'proposals value)
       (progn
         (unless (and (equal (alist-get 'thread_id value) tid)
@@ -8606,7 +8607,12 @@ ACCEPTED-RUN-ID is its already validated Run identity."
         (mapcar (lambda (proposal)
                   (emacsos-assist-web--require-approval
                    `((thread_id . ,tid) (proposal . ,proposal)) tid))
-                (alist-get 'proposals value)))
+                (seq-remove
+                 (lambda (proposal)
+                   (and (featurep 'assist-desktop)
+                        (emacsos-assist-web--object-p proposal)
+                        (equal (alist-get 'kind proposal) "send_sms")))
+                 (alist-get 'proposals value))))
     (when-let ((proposal (emacsos-assist-web--require-approval value tid)))
       (list proposal))))
 
