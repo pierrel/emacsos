@@ -54,6 +54,7 @@ test-pinephone-scripts:
 	python3 tests/test-pinephone-openrc-session.py
 	python3 tests/test_pinephone_openrc_sms.py
 	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
+	emacs -Q --batch -L . -L tests -l tests/test-sms-server-bridge.el -f ert-run-tests-batch-and-exit
 
 pinephone-openrc-install: test-pinephone-scripts
 	deploy/pinephone/install-openrc-session.sh
