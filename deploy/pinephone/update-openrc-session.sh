@@ -97,7 +97,7 @@ scp -q "$@" \
 scp -q "$@" "$repo_dir/os.el" "$repo_dir/emacsos-typography.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
     "$repo_dir/assist-web-git.el" "$repo_dir/assist-web-git-helper.py" \
     "$repo_dir/emacsos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
-    "$repo_dir/phone-sms.el" "$repo_dir/phone-sms-chat.el" \
+    "$repo_dir/phone-sms.el" "$repo_dir/phone-sms-chat.el" "$repo_dir/phone-notifications.el" \
     "$repo_dir/swipe-learning.el" \
     "$repo_dir/EMACSOS-COMMANDS.org" \
     "$phone_host:$stage/"

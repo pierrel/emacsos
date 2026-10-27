@@ -112,7 +112,7 @@ scp -q "$@" \
     "$repo_dir/network.el" \
     "$repo_dir/phone-call.el" \
     "$repo_dir/phone-sms.el" \
-    "$repo_dir/phone-sms-chat.el" \
+    "$repo_dir/phone-sms-chat.el" "$repo_dir/phone-notifications.el" \
     "$repo_dir/swipe-learning.el" \
     "$repo_dir/EMACSOS-COMMANDS.org" \
     "$phone_host:$stage/"

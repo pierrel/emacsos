@@ -235,19 +235,12 @@ every agent-config load."
   "Unique owner of the tracked call or pathless recovery state.")
 
 (defun emacsos-pinephone-sms-feedback (owner generation _path)
-  "Buzz once for a received SMS from the verified OWNER and GENERATION.
-The modem ring indicator and existing wake path must actually wake the phone;
-this finite client creates no separate network notification channel."
+  "Record and request feedback for a trusted raw modem SMS event.
+This signal does not establish message novelty or complete multipart receipt."
   (when (and (equal owner emacsos-call--current-owner)
              (= generation emacsos-call--owner-generation))
-    (condition-case nil
-        (let ((process (make-process
-                        :name "emacsos-sms-feedback" :buffer nil :noquery t
-                        :command '("/usr/bin/fbcli" "--event=message-new-sms"
-                                   "--profile=quiet" "--timeout=1" "--watch=4"))))
-          (run-at-time 5 nil (lambda ()
-                              (when (process-live-p process) (delete-process process)))))
-      (error (message "SMS vibration is unavailable.")))))
+    (emacsos-notifications-feedback
+     'sms "Raw modem message event; novelty and completion unverified")))
 
 (defun emacsos-sms-transport-status ()
   "Show whether the configured SMS handoff transport is running."
@@ -259,23 +252,26 @@ this finite client creates no separate network notification channel."
                  (string-trim (buffer-string)))
              (file-error "SMS transport is not configured or has not started."))))
 
+(defvar emacsos-pinephone-ring-notification nil
+  "Local reason identity shared by the current incoming call pulses.")
 (defvar emacsos-pinephone-ring-process nil
   "Current finite feedback client, owned by this UI session.")
 (defvar emacsos-pinephone-ring-timer nil
   "Timer for bounded vibration pulses while the verified call UI is incoming.")
 
 (defun emacsos-pinephone-ring-pulse ()
-  "Request one finite quiet-profile pulse from installed feedbackd."
+  "Record and request one finite pulse for the current incoming call."
   (when (and (eq emacsos-call--state 'incoming)
              (not (process-live-p emacsos-pinephone-ring-process)))
-    (setq emacsos-pinephone-ring-process
-          (make-process :name "emacsos-ring-feedback" :buffer nil
-                        :command '("/usr/bin/fbcli" "--event=phone-incoming-call"
-                                   "--profile=quiet" "--timeout=2" "--watch=3")
-                        :noquery t))
-    (let ((process emacsos-pinephone-ring-process))
-      (run-at-time 4 nil (lambda ()
-                          (when (process-live-p process) (delete-process process)))))))
+    (condition-case nil
+        (progn
+          (unless emacsos-pinephone-ring-notification
+            (setq emacsos-pinephone-ring-notification
+                  (emacsos-notifications-record 'call "Incoming call")))
+          (setq emacsos-pinephone-ring-process
+                (emacsos-notifications-feedback
+                 'call "Incoming call pulse" emacsos-pinephone-ring-notification)))
+      (error (message "Call notification unavailable; vibration not requested.")))))
 
 (defun emacsos-pinephone-ring-feedback (ringing)
   "Start finite incoming-call pulses for RINGING, or cancel them."
@@ -284,8 +280,9 @@ this finite client creates no separate network notification channel."
       (cancel-timer emacsos-pinephone-ring-timer))
     (setq emacsos-pinephone-ring-timer nil)
     (when (process-live-p emacsos-pinephone-ring-process)
-      (delete-process emacsos-pinephone-ring-process))
-    (setq emacsos-pinephone-ring-process nil))
+      (emacsos-notifications-stop-feedback emacsos-pinephone-ring-process))
+    (setq emacsos-pinephone-ring-process nil
+          emacsos-pinephone-ring-notification nil))
   (when (and ringing (not (timerp emacsos-pinephone-ring-timer)))
     (emacsos-pinephone-ring-pulse)
     (setq emacsos-pinephone-ring-timer

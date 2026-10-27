@@ -56,7 +56,7 @@ test-pinephone-scripts:
 	python3 -B tests/test-phone-usage.py
 
 	python3 tests/test_pinephone_call_idle.py
-	emacs -Q --batch -L . -l tests/test-pinephone-openrc-init.el
+	emacs -Q --batch -L . -l tests/test-phone-notifications.el -l tests/test-pinephone-openrc-init.el
 	emacs -Q --batch -L . -L tests -l tests/test-sms-server-bridge.el -f ert-run-tests-batch-and-exit
 
 pinephone-openrc-install: test-pinephone-scripts
@@ -115,7 +115,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp EMACSOS-COMMANDS.org $(PINEPHONE_HOST):~/EMACSOS-COMMANDS.org
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
