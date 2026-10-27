@@ -8538,10 +8538,18 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                    (emacsos-assist-web--object-p proposal)
                    (stringp (alist-get 'token proposal))
                    (string-match-p "\\`[A-Za-z0-9_-]\\{16,128\\}\\'" (alist-get 'token proposal))
-                   (member (alist-get 'state proposal) '("pending" "accepted" "approved" "declined" "importing" "ready" "failed" "expired"))
+                   (member (alist-get 'state proposal) '("pending" "accepted" "approved" "declined" "importing" "ready" "failed" "expired" "sent" "not_sent" "unknown" "rejected"))
                    (listp (alist-get 'decisions proposal)))
         (error "Invalid Assist approval response"))
       (pcase kind
+        ("send_sms"
+         (require 'phone-sms)
+         (unless (and (stringp (alist-get 'id proposal))
+                      (string-match-p "\\`outbox_[0-9a-f]\\{64\\}\\'" (alist-get 'id proposal))
+                      (stringp (alist-get 'number proposal))
+                      (string-match-p emacsos-sms--number-re (alist-get 'number proposal))
+                      (emacsos-sms--valid-body-p (alist-get 'text proposal)))
+           (error "Invalid complete SMS preview")))
         ("send_reply"
          (setq proposal (copy-tree proposal))
          (let ((args (alist-get 'args (alist-get 'action proposal))))
@@ -8573,6 +8581,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
         (_ (error "Unsupported Assist approval kind")))
       (let ((pending (cond ((equal kind "egress") '("hour" "always" "decline"))
                            ((equal kind "send_reply") '("approve" "edit" "reject"))
+                           ((equal kind "send_sms") '("approve" "reject"))
                            (t '("approve" "reject"))))
             (decisions (alist-get 'decisions proposal)))
         (unless (if (equal (alist-get 'state proposal) "pending")
@@ -8670,7 +8679,8 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
                                emacsos-assist-web--approval-source source
                                emacsos-assist-web--approval proposal)
                          (emacsos-assist-web--render-approval))
-                       (switch-to-buffer buffer))))
+                       (unless (equal (alist-get 'kind proposal) "send_sms")
+                         (switch-to-buffer buffer)))))
                    (when (and (buffer-live-p old-preview)
                               (or (null old-proposal)
                                   (eq old-proposal
@@ -8729,7 +8739,147 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
 		 (button-put button 'display (concat "Confirm " label "?")))))))))
     (insert "\n\n")))
 
+(defun emacsos-assist-web--sms-context (value)
+  "Read an immutable server SMS context, or return nil for ordinary local SMS."
+  (when (and (stringp value) (string-prefix-p "assist-sms:" value))
+    (condition-case nil
+        (json-parse-string (substring value 11) :object-type 'alist :null-object nil)
+      (error nil))))
+
+(defun emacsos-assist-web--sms-decision (context decision completion)
+  "Post a decision for the exact captured CONTEXT; never send a modem command."
+  (emacsos-assist-web--request
+   "POST" (format "threads/%s/approval" (alist-get 'thread_id context))
+   `((kind . "send_sms") (token . ,(alist-get 'token context)) (decision . ,decision))
+   (lambda (value error)
+     (let ((proposal (and (not error) (alist-get 'proposal value))))
+       (if (and proposal
+                (equal (alist-get 'id proposal) (alist-get 'id context))
+                (equal (alist-get 'number proposal) (alist-get 'number context))
+                (equal (alist-get 'text proposal) (alist-get 'text context)))
+           (funcall completion proposal nil)
+         (funcall completion nil (or error "SMS draft changed")))))))
+
+(defun emacsos-assist-web--sms-journal (identity completion)
+  "Look up IDENTITY in the existing fixed journal before displaying a send action."
+  (let ((buffer (generate-new-buffer " *sms journal*")) process timer)
+    (condition-case nil
+        (progn
+          (setq process
+                (make-process
+                 :name "sms-journal-lookup" :buffer buffer :noquery t
+                 :command '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-sms")
+                 :connection-type 'pipe :coding 'utf-8-unix
+                 :sentinel
+                 (lambda (proc _event)
+                   (when (memq (process-status proc) '(exit signal))
+                     (when (timerp timer) (cancel-timer timer))
+                     (unwind-protect
+                         (if (and (zerop (process-exit-status proc))
+                                  (<= (buffer-size buffer) 32768))
+                             (condition-case nil
+                                 (funcall completion
+                                          (with-current-buffer buffer
+                                            (goto-char (point-min))
+                                            (json-parse-buffer :object-type 'alist :null-object nil)) nil)
+                               (error (funcall completion nil "Journal reply invalid")))
+                           (funcall completion nil "Journal unavailable"))
+                       (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+          (setq timer (run-at-time 4 nil (lambda () (when (process-live-p process) (delete-process process)))))
+          (process-send-string process (json-encode `((operation . "lookup") (message_id . ,identity))))
+          (process-send-eof process))
+      (error (when (buffer-live-p buffer) (kill-buffer buffer))
+             (funcall completion nil "Journal unavailable")))))
+
+(defun emacsos-assist-web--review-sms ()
+  "Open the complete saved draft in the existing physical SMS confirmation surface."
+  (require 'phone-sms)
+  (let* ((proposal emacsos-assist-web--approval)
+         (preview (current-buffer))
+         (source (or emacsos-assist-web--approval-source preview))
+         (tid emacsos-assist-web--thread-id)
+         (auth (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+         (record (emacsos-assist-web--thread-safety-record tid t))
+         (generation (plist-get record :approval-generation))
+         (context (cons (cons 'thread_id tid) (copy-tree proposal)))
+         (encoded (concat "assist-sms:" (json-encode context))))
+    (cond
+     ((and (memq emacsos-sms--state '(proposed sending sent unknown))
+           (equal encoded emacsos-sms--context))
+      (emacsos-sms-show-status))
+     ((memq emacsos-sms--state '(proposed sending unknown))
+      (message "Finish the current phone SMS before reviewing another"))
+     ((equal (alist-get 'state proposal) "rejected") (message "SMS draft rejected; nothing sent"))
+     (t
+      (emacsos-assist-web--sms-journal
+       (alist-get 'id proposal)
+       (lambda (value error)
+         (when (and (buffer-live-p source) (buffer-live-p preview)
+                    (equal tid (buffer-local-value 'emacsos-assist-web--thread-id source))
+                    (eql auth (buffer-local-value 'emacsos-assist-web--auth-epoch source))
+                    (not (buffer-local-value 'emacsos-assist-web--denied source))
+                    (eq record (emacsos-assist-web--thread-safety-record tid))
+                    (eql generation (plist-get record :approval-generation))
+                    (eq proposal (buffer-local-value 'emacsos-assist-web--approval preview)))
+          (if error (message "%s" error)
+           (let ((observed (alist-get 'message value)))
+             (if (and observed
+                      (not (and (equal (alist-get 'number observed) (alist-get 'number proposal))
+                                (equal (alist-get 'text observed) (alist-get 'text proposal)))))
+                 (message "SMS journal content conflicts; no send allowed")
+               (when (not (memq emacsos-sms--state '(proposed sending unknown)))
+                 (emacsos-send-message (alist-get 'number proposal) (alist-get 'text proposal) encoded)
+                 (when observed
+                   ;; Project the verified journal result through the existing
+                   ;; terminal presenter; no transport is started here.
+                   (setq emacsos-sms--state 'sending)
+                   (let ((status (alist-get 'status observed)))
+                     (emacsos-sms--finished emacsos-sms--proposal-id
+                                           (pcase status ("sent" "sent") ("not_sent" "not-sent:send-failed") (_ "unknown:dbus-unavailable")))
+                     (emacsos-assist-web--sms-decision context status (lambda (&rest _) nil)))))))))))))))
+
+(defun emacsos-assist-web--sms-discard (encoded completion)
+  "Reject only a draft with no journaled attempt, retaining it until server ACK."
+  (when-let ((context (emacsos-assist-web--sms-context encoded)))
+    (emacsos-assist-web--sms-journal
+     (alist-get 'id context)
+     (lambda (value error)
+       (if (or error (alist-get 'message value))
+           (funcall completion nil)
+         (emacsos-assist-web--sms-decision
+          context "reject" (lambda (result failure)
+                             (funcall completion
+                                      (and (not failure)
+                                           (equal (alist-get 'state result) "rejected"))))))))
+    t))
+
+(defun emacsos-assist-web--sms-outcome (value)
+  "Report only an exact journaled attempt, never a pre-attempt UI failure."
+  (when (eq (plist-get value :event) 'terminal)
+    (when-let ((context (emacsos-assist-web--sms-context (plist-get value :context))))
+      (emacsos-assist-web--sms-journal
+       (alist-get 'id context)
+       (lambda (result error)
+         (let ((observed (and (not error) (alist-get 'message result))))
+           (when (and observed
+                      (equal (alist-get 'id observed) (alist-get 'id context))
+                      (equal (alist-get 'number observed) (alist-get 'number context))
+                      (equal (alist-get 'text observed) (alist-get 'text context))
+                      (member (alist-get 'status observed) '("sent" "not_sent" "unknown")))
+             (emacsos-assist-web--sms-decision
+              context (alist-get 'status observed) (lambda (&rest _) nil)))))))))
+
+(with-eval-after-load 'phone-sms
+  (setq emacsos-sms-discard-function #'emacsos-assist-web--sms-discard)
+  (add-hook 'emacsos-sms-lifecycle-functions #'emacsos-assist-web--sms-outcome))
+
 (defun emacsos-assist-web--render-approval ()
+  "Route SMS to its existing physical surface; retain the ordinary approval cards."
+  (if (equal (alist-get 'kind emacsos-assist-web--approval) "send_sms")
+      (emacsos-assist-web--review-sms)
+    (emacsos-assist-web--render-approval-other)))
+
+(defun emacsos-assist-web--render-approval-other ()
   "Render the exact proposal through the same phone and desktop controls."
   (if (and (not (equal (alist-get 'state emacsos-assist-web--approval) "unavailable"))
            (member (alist-get 'kind emacsos-assist-web--approval)

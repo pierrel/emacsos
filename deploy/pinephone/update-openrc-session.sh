@@ -71,6 +71,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-power-monitor" \
+    "$deploy_dir/openrc-usage" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/emacsos-wvkbd-launch" \
     "$deploy_dir/swipe-learning-collector.py" \
@@ -86,6 +87,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-chat-url" \
     "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
+    "$deploy_dir/99-emacsos-vibrator.rules" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/openrc-boot-mode" \
     "$deploy_dir/waydroid-container.service" \

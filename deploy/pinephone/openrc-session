@@ -250,6 +250,10 @@ sleep 0.2
 kill -0 "$idle_pid" 2>/dev/null || fail 'swayidle exited during startup'
 kill -0 "$power_pid" 2>/dev/null || fail 'power timer exited during startup'
 
+# Optional telemetry belongs to the service cgroup, not a reusable child PID.
+# The singleton survives shell respawns; service stop kills the whole cgroup.
+/usr/bin/python3 -I "$root/usage" run &
+
 printf '%s\n' ready >"$runtime/.ready.tmp"
 mv -- "$runtime/.ready.tmp" "$runtime/ready"
 rm -f -- "$runtime/failure"

@@ -12,9 +12,10 @@ def receipt(**values):
             'occurred_at': '2026-10-24T20:00:00+00:00', **values}
 
 
+@pytest.mark.parametrize('archive_only', [False, True])
 @pytest.mark.parametrize('code,accepted', [(503, False), (400, False), (401, False), (200, True)])
-def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accepted):
-    row = receipt(); calls = []; posts = []
+def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accepted, archive_only):
+    row = receipt(archive_only=int(archive_only), occurred_at=None if archive_only else '2026-10-24T20:00:00+00:00'); calls = []; posts = []
     def helper(payload, timeout=70):
         calls.append(payload)
         return SimpleNamespace(stdout=json.dumps({'receipts': [row]}))
@@ -26,6 +27,8 @@ def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accept
     sf.sync_once()
     assert (len(calls) == 2) is accepted
     assert posts[0][1]['json']['text'] == row['text']
+    assert posts[0][1]['json']['archive_only'] is archive_only
+    assert posts[0][1]['json']['occurred_at'] == row['occurred_at']
     assert posts[0][1]['allow_redirects'] is False
     if accepted:
         assert calls[1] == {'operation': 'ack', 'message_id': 'physical1', 'status': 'received'}

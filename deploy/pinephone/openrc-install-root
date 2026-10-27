@@ -11,7 +11,7 @@ snapshot=
 reference_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=995ff59707f43528daa85a9e020a75a12d24136274748241b3f408d4ad253c64
+manifest_hash=723c7c778be53eabc475d50f89369a59d44e27d4b3703a77dbea07446e88020f
 committed=0
 mutating=0
 lab_group_created=0
@@ -140,7 +140,8 @@ cleanup() {
                     rm -f -- /etc/nftables.d/49-emacsos-callback.nft
                     /usr/sbin/nft -f /etc/nftables.nft >/dev/null 2>&1 || true
                 fi
-                rm -f -- /etc/init.d/emacsos-ui \
+                rm -f -- /etc/udev/rules.d/99-emacsos-vibrator.rules \
+                    /etc/init.d/emacsos-ui \
                     /etc/dbus-1/system.d/99-emacsos-waydroid.conf \
                     /usr/local/share/dbus-1/system-services/id.waydro.Container.service \
                     /usr/local/libexec/emacsos-waydroid-container \
@@ -215,12 +216,16 @@ flock -n -x 9 || fail 'install lock is busy'
     [ ! -L /var/lib/emacsos-lab/EMACSOS-COMMANDS.org ] ||
     fail 'command reference already exists'
 
+check_safe_root_directory /etc/udev/rules.d
+[ ! -e /etc/udev/rules.d/99-emacsos-vibrator.rules ] &&
+    [ ! -L /etc/udev/rules.d/99-emacsos-vibrator.rules ] || fail 'vibrator rule already exists'
+
 count=0
 for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-usage|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|99-emacsos-vibrator.rules|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -234,13 +239,13 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 50 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 52 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
 for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
+    openrc-session openrc-session-power openrc-power-monitor openrc-usage openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
@@ -249,7 +254,7 @@ for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf je
     EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root sms_forward.py \
     openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
-    openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
+    openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft 99-emacsos-vibrator.rules \
     assist-web-token assist-web-ca.pem wvkbd-emacsos wvkbd-notice; do
     case $name in
         wvkbd-emacsos) maximum=16777216; file_limit=32768 ;;
@@ -473,6 +478,8 @@ install -o root -g root -m 0755 "$snapshot/openrc-session" \
     /usr/local/share/emacsos-openrc/session
 install -o root -g root -m 0755 "$snapshot/openrc-power-monitor" \
     /usr/local/share/emacsos-openrc/power-monitor
+install -o root -g root -m 0755 "$snapshot/openrc-usage" \
+    /usr/local/share/emacsos-openrc/usage
 install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
@@ -536,6 +543,9 @@ install -o root -g root -m 0600 "$snapshot/EMACSOS-COMMANDS.org" \
 cmp -s "$snapshot/EMACSOS-COMMANDS.org" "$reference_tmp"
 [ "$(stat -c '%U:%G:%a:%h:%F' "$reference_tmp")" = \
     'root:root:600:1:regular file' ]
+# Device creation applies this narrow rule. Live activation is a separate scoped operation.
+install -o root -g root -m 0644 "$snapshot/99-emacsos-vibrator.rules" \
+    /etc/udev/rules.d/99-emacsos-vibrator.rules
 install -o root -g root -m 0644 "$snapshot/openrc-emacs-server.nft" \
     /etc/nftables.d/49-emacsos-callback.nft
 nft_rule_created=1

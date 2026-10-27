@@ -259,6 +259,115 @@ this finite client creates no separate network notification channel."
                  (string-trim (buffer-string)))
              (file-error "SMS transport is not configured or has not started."))))
 
+(defvar emacsos-pinephone-ring-process nil
+  "Current finite feedback client, owned by this UI session.")
+(defvar emacsos-pinephone-ring-timer nil
+  "Timer for bounded vibration pulses while the verified call UI is incoming.")
+
+(defun emacsos-pinephone-ring-pulse ()
+  "Request one finite quiet-profile pulse from installed feedbackd."
+  (when (and (eq emacsos-call--state 'incoming)
+             (not (process-live-p emacsos-pinephone-ring-process)))
+    (setq emacsos-pinephone-ring-process
+          (make-process :name "emacsos-ring-feedback" :buffer nil
+                        :command '("/usr/bin/fbcli" "--event=phone-incoming-call"
+                                   "--profile=quiet" "--timeout=2" "--watch=3")
+                        :noquery t))
+    (let ((process emacsos-pinephone-ring-process))
+      (run-at-time 4 nil (lambda ()
+                          (when (process-live-p process) (delete-process process)))))))
+
+(defun emacsos-pinephone-ring-feedback (ringing)
+  "Start finite incoming-call pulses for RINGING, or cancel them."
+  (unless ringing
+    (when (timerp emacsos-pinephone-ring-timer)
+      (cancel-timer emacsos-pinephone-ring-timer))
+    (setq emacsos-pinephone-ring-timer nil)
+    (when (process-live-p emacsos-pinephone-ring-process)
+      (delete-process emacsos-pinephone-ring-process))
+    (setq emacsos-pinephone-ring-process nil))
+  (when (and ringing (not (timerp emacsos-pinephone-ring-timer)))
+    (emacsos-pinephone-ring-pulse)
+    (setq emacsos-pinephone-ring-timer
+          (run-at-time 3 3 #'emacsos-pinephone-ring-pulse))))
+
+(defvar emacsos-pinephone-call-event-directory
+  (expand-file-name "emacsos/call-events/"
+                    (or (getenv "XDG_STATE_HOME") "~/.local/state/"))
+  "Private local call-event handoffs; never a source workspace.")
+(defvar emacsos-pinephone-call-event-timer nil)
+(defvar emacsos-pinephone-call-event-busy nil)
+(defvar emacsos-pinephone-call-event-last-path nil
+  "Last offered saved event, for fair retry selection without changing identity.")
+
+(defun emacsos-pinephone-call-event-quarantine (path)
+  "Keep an invalid saved observation at PATH without blocking later handoffs."
+  (rename-file path (concat path ".invalid"))
+  (message "A saved call event needs inspection; later call events will continue."))
+
+(defun emacsos-pinephone-call-event-sync ()
+  "Offer one saved event fairly; retries never repeat a phone call."
+  (when (and (not emacsos-pinephone-call-event-busy)
+             (file-directory-p emacsos-pinephone-call-event-directory))
+    (when-let* ((paths (directory-files emacsos-pinephone-call-event-directory t
+                                       "\\`[0-9a-f]\\{64\\}\\.json\\'"))
+                (path (or (and emacsos-pinephone-call-event-last-path
+                               (cl-find-if (lambda (value)
+                                             (string-lessp emacsos-pinephone-call-event-last-path value))
+                                           paths))
+                          (car paths))))
+      (setq emacsos-pinephone-call-event-last-path path)
+      (condition-case nil
+          (let ((event (with-temp-buffer
+                         (insert-file-contents path nil 0 4097)
+                         (when (> (buffer-size) 4096) (signal 'json-parse-error '("Oversized call event")))
+                         (json-parse-buffer :object-type 'alist :null-object nil))))
+            (setq emacsos-pinephone-call-event-busy t)
+            (emacsos-assist-web--request
+             "POST" "events/call" event
+             (lambda (value error)
+               (setq emacsos-pinephone-call-event-busy nil)
+               (unless error
+                 (let ((status (alist-get 'http_status value)))
+                   (cond
+                    ((and (integerp status) (<= 200 status 299)
+                          (equal (alist-get 'status value) "accepted"))
+                     (delete-file path)
+                     (run-at-time 0 nil #'emacsos-pinephone-call-event-sync))
+                    ((memq status '(409 422))
+                     (emacsos-pinephone-call-event-quarantine path)
+                     (run-at-time 0 nil #'emacsos-pinephone-call-event-sync))))))
+             nil '(409 422)))
+        (json-parse-error
+         (setq emacsos-pinephone-call-event-busy nil)
+         (emacsos-pinephone-call-event-quarantine path)
+         (run-at-time 0 nil #'emacsos-pinephone-call-event-sync))
+        (error (setq emacsos-pinephone-call-event-busy nil))))))
+
+(defun emacsos-pinephone-call-event (observation)
+  "Durably queue one phone OBSERVATION before attempting server handoff."
+  (make-directory emacsos-pinephone-call-event-directory t)
+  (set-file-modes emacsos-pinephone-call-event-directory #o700)
+  (let* ((identity (secure-hash 'sha256 (format "%s:%s:%s" (current-time) (random) (emacs-pid))))
+         (path (expand-file-name (concat identity ".json") emacsos-pinephone-call-event-directory))
+         (temporary (make-temp-file (expand-file-name ".pending-" emacsos-pinephone-call-event-directory))))
+    (unwind-protect
+        (progn
+          (let ((write-region-inhibit-fsync nil))
+            (with-temp-file temporary
+              (insert (json-encode (cons (cons 'event_id identity) observation)))))
+          (set-file-modes temporary #o600)
+          (rename-file temporary path))
+      (when (file-exists-p temporary) (delete-file temporary))))
+  (unless (timerp emacsos-pinephone-call-event-timer)
+    (setq emacsos-pinephone-call-event-timer
+          (run-at-time 30 30 #'emacsos-pinephone-call-event-sync)))
+  (emacsos-pinephone-call-event-sync))
+
+(unless (timerp emacsos-pinephone-call-event-timer)
+  (setq emacsos-pinephone-call-event-timer
+        (run-at-time 30 30 #'emacsos-pinephone-call-event-sync)))
+
 (defun emacsos-pinephone-sms-result (status success)
   "Return the strict terminal SMS STATUS, or conservative unknown."
   (cond
@@ -297,7 +406,7 @@ this finite client creates no separate network notification channel."
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))))))
 
-(defun emacsos-pinephone-sms-operation (number body completion)
+(defun emacsos-pinephone-sms-operation-local (number body completion &optional message-id)
   "Send NUMBER and BODY to the fixed root helper through bounded stdin."
   (let ((buffer (generate-new-buffer " *emacsos-sms*"))
         (stderr-buffer (generate-new-buffer " *emacsos-sms-stderr*"))
@@ -319,7 +428,8 @@ this finite client creates no separate network notification channel."
                               proc event completion stderr-buffer))))
           (process-send-string
            process
-           (json-encode `((number . ,number) (text . ,body))))
+           (json-encode (append `((number . ,number) (text . ,body))
+                                (when message-id `((message_id . ,message-id))))))
           (process-send-eof process)
           "pending: SMS requested")
       (error
@@ -327,6 +437,35 @@ this finite client creates no separate network notification channel."
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
        "unknown:dbus-unavailable"))))
+
+(defun emacsos-pinephone-sms-operation (number body completion)
+  "Send local SMS normally; server-linked SMS first acknowledges exact physical approval."
+  (let ((proposal-id emacsos-sms--proposal-id)
+        (encoded-context emacsos-sms--context)
+        (context (and (fboundp 'emacsos-assist-web--sms-context)
+                      (emacsos-assist-web--sms-context emacsos-sms--context))))
+    (if (not context)
+        (emacsos-pinephone-sms-operation-local number body completion)
+      (if (not (and (equal number (alist-get 'number context))
+                    (equal body (alist-get 'text context))))
+          "not-sent:invalid-input"
+        (emacsos-assist-web--sms-decision
+         context "approve"
+         (lambda (value error)
+           (cond
+            ((not (and (eq emacsos-sms--state 'sending)
+                       (equal proposal-id emacsos-sms--proposal-id)
+                       (equal encoded-context emacsos-sms--context)))
+             (funcall completion "unknown:dbus-unavailable"))
+            (error (funcall completion "not-sent:busy"))
+            (t
+             (if (equal (alist-get 'state value) "approved")
+                 (let ((result (emacsos-pinephone-sms-operation-local number body completion (alist-get 'id context))))
+                   (unless (string-prefix-p "pending:" result) (funcall completion result)))
+               (funcall completion (pcase (alist-get 'state value)
+                                     ("sent" "sent") ("unknown" "unknown:dbus-unavailable")
+                                     (_ "not-sent:busy"))))))))
+        "pending: phone approval requested"))))
 
 (defun emacsos-pinephone-call-result (operation status success)
   "Normalize helper STATUS, preserving uncertain dial and answer identity."
@@ -1163,6 +1302,8 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
         emacsos-call-operation-function #'emacsos-pinephone-call-operation
         emacsos-call-audio-function #'emacsos-pinephone-call-audio
         emacsos-call-wake-function #'emacsos-pinephone-wake-display
+        emacsos-call-ring-feedback-function #'emacsos-pinephone-ring-feedback
+        emacsos-call-event-function #'emacsos-pinephone-call-event
         emacsos-sms-operation-function #'emacsos-pinephone-sms-operation
         emacsos-call-control-gap-lines 1)
   (let ((url-file "/etc/emacsos-openrc/chat-url"))

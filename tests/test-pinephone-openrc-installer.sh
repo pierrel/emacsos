@@ -25,12 +25,12 @@ adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
 for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
-    openrc-session openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
+    openrc-session openrc-session-power openrc-power-monitor openrc-usage openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
     openrc-chat-url openrc-assist-web-url \
-    openrc-emacs-server.nft \
+    openrc-emacs-server.nft 99-emacsos-vibrator.rules \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf \
     waydroid-container-wrapper; do
@@ -294,7 +294,7 @@ printf '%s\n' '#!/bin/sh' \
     'exit 0' >/usr/local/sbin/test-wvkbd-proof
 chmod 0755 /usr/local/sbin/test-wvkbd-proof
 : >/tmp/wvkbd-proof-log
-install -d -o root -g root -m 0755 /etc/nftables.d
+install -d -o root -g root -m 0755 /etc/nftables.d /etc/udev/rules.d
 printf '%s\n' 'table inet filter { chain input { type filter hook input priority 0; policy drop; } }' \
     >/etc/nftables.nft
 printf '%s\n' '#!/bin/sh' 'exit 0' >/usr/sbin/nft
@@ -347,6 +347,7 @@ fi
 [ ! -e /usr/local/sbin/emacsos-openrc-device ]
 [ ! -e /etc/emacsos-openrc ]
 [ ! -e /etc/nftables.d/49-emacsos-callback.nft ]
+[ ! -e /etc/udev/rules.d/99-emacsos-vibrator.rules ]
 [ ! -e /usr/local/share/dbus-1/system-services/id.waydro.Container.service ]
 [ ! -e /etc/dbus-1/system.d/99-emacsos-waydroid.conf ]
 [ ! -e /usr/local/libexec/emacsos-waydroid-container ]
@@ -384,6 +385,7 @@ grep -F 'rollback preserved UI recovery files because processes remain' \
 [ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -f /etc/emacsos-openrc/chat-url ]
 [ -f /etc/nftables.d/49-emacsos-callback.nft ]
+cmp -s /source/99-emacsos-vibrator.rules /etc/udev/rules.d/99-emacsos-vibrator.rules
 [ -f /usr/local/share/emacsos-openrc/os.el ]
 [ -f /usr/local/share/emacsos-openrc/chat.el ]
 [ -f /usr/local/share/emacsos-openrc/dtach-shell.el ]
@@ -413,6 +415,7 @@ rm -f /etc/init.d/emacsos-ui \
     /usr/local/bin/wvkbd-emacsos \
     /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt \
     /etc/nftables.d/49-emacsos-callback.nft \
+    /etc/udev/rules.d/99-emacsos-vibrator.rules \
     /etc/doas.d/95-emacsos-ui.conf
 rmdir /var/lib/emacsos-wvkbd-transaction 2>/dev/null || true
 rmdir /usr/local/share/licenses/wvkbd-emacsos 2>/dev/null || true
