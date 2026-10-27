@@ -20,6 +20,7 @@
      (call-interactively (lookup-key emacsos-command-map (kbd "n")))
      (should (eq major-mode 'special-mode))
      (should buffer-read-only)
+     (should (= (point) (point-min)))
      (emacsos-notifications-record 'system "Synthetic refresh reason")
      (revert-buffer t t)
      (should (string-match-p "Synthetic refresh reason" (buffer-string)))
@@ -27,10 +28,14 @@
 
 (ert-deftest notifications-require-reason-and-suppress-effect-on-storage-failure ()
   (notifications-test-journal
-   (cl-letf (((symbol-function 'make-process) (lambda (&rest _) (ert-fail "Unlogged feedback"))))
-     (should-not (emacsos-notifications-feedback 'sms ""))
-     (cl-letf (((symbol-function 'rename-file) (lambda (&rest _) (error "Disk failure"))))
-       (should-not (emacsos-notifications-feedback 'call "Incoming call"))))))
+   (let (client-attempted)
+     (cl-letf (((symbol-function 'make-process)
+                (lambda (&rest _) (setq client-attempted t) nil)))
+       (should-not (emacsos-notifications-feedback 'sms ""))
+       (should-not client-attempted)
+       (cl-letf (((symbol-function 'rename-file) (lambda (&rest _) (error "Disk failure"))))
+         (should-not (emacsos-notifications-feedback 'call "Incoming call")))
+       (should-not client-attempted)))))
 
 (ert-deftest notifications-each-request-precedes-client-and-reports-failure ()
   (notifications-test-journal
@@ -84,3 +89,23 @@
      (make-symbolic-link target emacsos-notifications-file)
      (should-error (emacsos-notifications-record 'sms "Synthetic reason"))
      (should (equal (with-temp-buffer (insert-file-contents target) (buffer-string)) "private")))))
+
+(ert-deftest notifications-byte-budget-evicts-old-multibyte-rows ()
+  (notifications-test-journal
+   (let* ((emacsos-notifications--bytes 1200)
+          (reason (make-string 200 #x1f600))
+          (old (emacsos-notifications-record 'system reason)))
+     (emacsos-notifications-record 'system reason)
+     (emacsos-notifications-record 'sms "Synthetic incoming event")
+     (let ((rows (emacsos-notifications--rows)))
+       (should-not (cl-find old rows :key (lambda (row) (alist-get 'id row)) :test #'equal))
+       (should (equal (alist-get 'reason (car (last rows))) "Synthetic incoming event")))
+     (should (<= (file-attribute-size (file-attributes emacsos-notifications-file)) 1200)))))
+
+(ert-deftest notifications-oversized-new-row-preserves-existing-journal ()
+  (notifications-test-journal
+   (emacsos-notifications-record 'system "Synthetic existing entry")
+   (let ((before (with-temp-buffer (insert-file-contents emacsos-notifications-file) (buffer-string)))
+         (emacsos-notifications--bytes 400))
+     (should-error (emacsos-notifications-record 'system (make-string 200 #x1f600)))
+     (should (equal before (with-temp-buffer (insert-file-contents emacsos-notifications-file) (buffer-string)))))))

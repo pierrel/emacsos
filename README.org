@@ -945,7 +945,7 @@ records and must not send messages.
 
 
 The phone notification log opens with =C-c e n= and refreshes with =g=.
-It retains the newest 256 local reason events in private
+It retains up to 256 newest local reason events within 128 KiB in private
 =$XDG_STATE_HOME/emacsos/notifications.jsonl= (normally
 =~/.local/state/emacsos/notifications.jsonl=), mode 0600. Each known SMS/call
 feedback client request is recorded before it starts; a storage failure suppresses

@@ -49,6 +49,11 @@
           (setq temporary (make-temp-file (expand-file-name ".notifications-" directory)))
           (with-temp-buffer
             (dolist (item rows) (insert (json-encode item) "\n"))
+            (while (and (cdr rows)
+                        (> (string-bytes (buffer-string)) emacsos-notifications--bytes))
+              (goto-char (point-min))
+              (delete-region (point) (progn (forward-line 1) (point)))
+              (setq rows (cdr rows)))
             (when (> (string-bytes (buffer-string)) emacsos-notifications--bytes)
               (error "Notification journal exceeds its limit"))
             (write-region (point-min) (point-max) temporary nil 'silent))
@@ -146,6 +151,7 @@ recorded separately. Storage failure suppresses the feedback request."
                               (alist-get 'at row) (alist-get 'source row)
                               (alist-get 'event row) (alist-get 'reason row))))
           (insert "No recorded notifications.\n")))
+      (goto-char (point-min))
       (special-mode)
       (setq-local revert-buffer-function
                   (lambda (&rest _) (emacsos-notifications-show))))
