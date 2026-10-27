@@ -155,5 +155,31 @@
     (should (eq (key-binding (kbd "C-c a d")) #'emacsos-assist-web-git-diff))
     (should (eq (key-binding (kbd "C-c g")) #'emacsos-assist-web-git-refresh))))
 
+(ert-deftest test-assist-desktop-sms-does-not-block-other-approvals ()
+  (let* ((sms `((kind . "send_sms") (state . "pending")
+                (id . ,(concat "outbox_" (make-string 64 ?a)))
+                (number . "+15555550100") (text . "Synthetic draft")
+                (token . ,(make-string 64 ?b)) (decisions . ("approve" "reject"))))
+         (egress '((kind . "egress") (token . "01234567890123456789012345678901")
+                   (state . "pending") (host . "docs.example.test") (port . 443)
+                   (task . "Read synthetic documentation") (main_task . "")
+                   (lifetime . "") (decisions . ("hour" "always" "decline"))))
+         (response `((thread_id . "thread-1") (proposals . (,sms ,egress)))))
+    (let ((emacsos-desktop-assist-mode nil))
+      (should (equal (emacsos-assist-web--approval-response response "thread-1")
+                     (list egress)))
+      (should (equal (emacsos-assist-web--approval-response
+                      `((thread_id . "thread-1") (proposals . (,egress ,sms)))
+                      "thread-1")
+                     (list egress))))
+    (should-not (emacsos-assist-web--approval-response
+                 `((thread_id . "thread-1") (proposals . (,sms)))
+                 "thread-1"))
+    (should-error (emacsos-assist-web--approval-response
+                   '((thread_id . "thread-1")
+                     (proposals . (((kind . "unsupported") (state . "pending")))))
+                   "thread-1"))
+    (should-not (featurep 'phone-sms))))
+
 (provide 'test-assist-desktop)
 ;;; test-assist-desktop.el ends here
