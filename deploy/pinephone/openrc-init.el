@@ -234,13 +234,70 @@ every agent-config load."
 (defvar emacsos-call--call-owner nil
   "Unique owner of the tracked call or pathless recovery state.")
 
-(defun emacsos-pinephone-sms-feedback (owner generation _path)
-  "Record and request feedback for a trusted raw modem SMS event.
-This signal does not establish message novelty or complete multipart receipt."
+(defvar emacsos-pinephone-sms-alert-process nil
+  "Current local completed-message eligibility query; never a server request.")
+
+(defun emacsos-pinephone-sms-alert-finished (process _event)
+  "Use only the current helper's committed local alert identities."
+  (when (and (eq process emacsos-pinephone-sms-alert-process)
+             (memq (process-status process) '(exit signal)))
+    (setq emacsos-pinephone-sms-alert-process nil)
+    (let ((buffer (process-buffer process)))
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (unless (zerop (process-exit-status process)) (error "Alert query failed"))
+                (let* ((value (with-current-buffer buffer
+                                (json-parse-string (buffer-string) :object-type 'alist :array-type 'list)))
+                       (ids (alist-get 'alerts value)))
+                  (unless (and (equal (mapcar #'car value) '(alerts)) (listp ids)
+                               (<= (length ids) 4)
+                               (cl-every (lambda (id) (and (stringp id)
+                                                          (string-match-p "\\`[0-9a-f]\\{32\\}\\'" id))) ids)
+                               (= (length ids) (length (delete-dups (copy-sequence ids)))))
+                    (error "Invalid alert identities"))
+                  (dolist (id ids)
+                    (condition-case nil
+                        (progn
+                          (emacsos-notifications--record 'sms "Completed incoming SMS" "recorded" id)
+                          (emacsos-notifications-feedback 'sms "Completed incoming SMS" id))
+                      (error (message "SMS alert could not be logged; vibration not requested."))))))
+            (error (message "Local SMS alert query unavailable.")))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(defun emacsos-pinephone-sms-alert-sync ()
+  "Asynchronously collect and claim completed local SMS, even without a server."
+  (unless emacsos-pinephone-sms-alert-process
+    (let ((buffer (generate-new-buffer " *emacsos-sms-alerts*")) process)
+      (condition-case nil
+          (progn
+            (setq process (make-process
+                           :name "emacsos-sms-alerts" :buffer buffer :noquery t
+                           :connection-type 'pipe :coding 'utf-8-unix :sentinel #'ignore
+                           :command '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-sms")
+                           :filter (lambda (_ text)
+                                     (when (buffer-live-p buffer)
+                                       (with-current-buffer buffer
+                                         (insert (substring text 0 (min (length text)
+                                                                       (max 0 (- 4096 (buffer-size)))))))))))
+            (setq emacsos-pinephone-sms-alert-process process)
+            (process-send-string process "{\"operation\":\"alerts\"}")
+            (process-send-eof process)
+            (set-process-sentinel process #'emacsos-pinephone-sms-alert-finished)
+            (when (memq (process-status process) '(exit signal))
+              (run-at-time 0 nil #'emacsos-pinephone-sms-alert-finished process "finished"))
+            (run-at-time 35 nil (lambda () (when (process-live-p process) (delete-process process)))))
+        (error
+         (setq emacsos-pinephone-sms-alert-process nil)
+         (when (process-live-p process) (delete-process process))
+         (when (buffer-live-p buffer) (kill-buffer buffer))
+         (message "Local SMS alert query could not start."))))))
+
+(defun emacsos-pinephone-sms-added (owner generation _path)
+  "Prompt local collection for trusted SMS signals; never buzz from raw Added."
   (when (and (equal owner emacsos-call--current-owner)
              (= generation emacsos-call--owner-generation))
-    (emacsos-notifications-feedback
-     'sms "Raw modem message event; novelty and completion unverified")))
+    (emacsos-pinephone-sms-alert-sync)))
 
 (defun emacsos-sms-transport-status ()
   "Show whether the configured SMS handoff transport is running."
@@ -358,12 +415,17 @@ This signal does not establish message novelty or complete multipart receipt."
       (when (file-exists-p temporary) (delete-file temporary))))
   (unless (timerp emacsos-pinephone-call-event-timer)
     (setq emacsos-pinephone-call-event-timer
-          (run-at-time 30 30 #'emacsos-pinephone-call-event-sync)))
+          (run-at-time 30 30 #'emacsos-pinephone-local-event-sync)))
   (emacsos-pinephone-call-event-sync))
 
 (unless (timerp emacsos-pinephone-call-event-timer)
   (setq emacsos-pinephone-call-event-timer
-        (run-at-time 30 30 #'emacsos-pinephone-call-event-sync)))
+        (run-at-time 30 30 #'emacsos-pinephone-local-event-sync)))
+
+(defun emacsos-pinephone-local-event-sync ()
+  "Run existing local event work; SMS eligibility does not depend on call handoff."
+  (unwind-protect (emacsos-pinephone-call-event-sync)
+    (emacsos-pinephone-sms-alert-sync)))
 
 (defun emacsos-pinephone-sms-result (status success)
   "Return the strict terminal SMS STATUS, or conservative unknown."
@@ -1328,7 +1390,8 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (emacsos-pinephone-apply-typography)
   (server-start)
   (require 'os)
-  (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-feedback)
+  (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-added)
+  (emacsos-pinephone-sms-alert-sync)
   (require 'swipe-learning)
   (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)
   (define-key emacsos-command-map (kbd "b") #'emacsos-firefox-start)

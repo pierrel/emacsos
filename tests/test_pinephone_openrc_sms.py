@@ -476,6 +476,65 @@ class RetainedInventoryTests(unittest.TestCase):
         SMS.collect_incoming(self.connection, self.bus)
         return [dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
 
+    def alert_poll(self):
+        output = io.StringIO()
+        with mock.patch.object(SMS.dbus, 'SystemBus', return_value=self.bus), mock.patch.object(SMS.sys, 'stdout', output):
+            SMS.receipt_operation({'operation':'alerts'})
+        return json.loads(output.getvalue())['alerts']
+
+    def activate_alerts(self):
+        self.connection.execute("UPDATE incoming_alert_start SET occurred_at='2026-10-26T00:00:00+00:00'")
+        self.connection.commit()
+
+    def test_local_alerts_skip_fifteen_old_reenumerated_objects_then_claim_new_once(self):
+        self.activate_alerts()
+        self.messages(range(15))
+        for value in self.bus.message_properties.values(): value['Timestamp']='2026-10-25T23:00:00+00:00'
+        self.assertEqual([self.alert_poll() for _ in range(5)], [[]]*5)
+        original=[dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
+        self.assertEqual(len(original),15)
+        self.bus.owner=':1.99'
+        self.messages(range(200,215))
+        for value in self.bus.message_properties.values(): value['Timestamp']='2026-10-25T23:00:00+00:00'
+        self.assertEqual([self.alert_poll() for _ in range(5)], [[]]*5)
+        self.assertEqual([dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')],original)
+        path='/org/freedesktop/ModemManager1/SMS/215'
+        self.bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'].append(path)
+        self.bus.message_properties[path]={'State':3,'Number':'+15555550100','Text':'genuinely new',
+                                           'Timestamp':'2026-10-26T01:00:00+00:00'}
+        ids=self.alert_poll()
+        self.assertEqual(len(ids),1)
+        self.assertEqual(self.alert_poll(),[])
+        self.connection.execute("UPDATE messages SET ack_status=status")
+        self.connection.commit()
+        self.assertEqual(self.alert_poll(),[])
+        self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_alert_start').fetchone()[0],
+                         '2026-10-26T00:00:00+00:00')
+
+    def test_local_alerts_complete_identicals_survive_restart_and_ack(self):
+        self.activate_alerts()
+        paths=self.messages([20,21])
+        for value in self.bus.message_properties.values(): value['State']=2
+        self.assertEqual(self.alert_poll(),[])
+        for value in self.bus.message_properties.values(): value['State']=3
+        ids=self.alert_poll()
+        self.assertEqual(len(ids),2)
+        self.assertEqual(len(set(ids)),2)
+        self.connection.close()
+        self.connection=SMS.journal()
+        self.bus.owner=':1.99'
+        self.messages([30,31])
+        self.assertEqual(self.alert_poll(),[])
+        self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_alert_start').fetchone()[0],
+                         '2026-10-26T00:00:00+00:00')
+
+    def test_local_alerts_missing_and_equal_source_times_stay_history(self):
+        self.activate_alerts()
+        paths=self.messages([20,21,22])
+        for path,value in zip(paths, ['', 'invalid', '2026-10-26T00:00:00+00:00']):
+            self.bus.message_properties[path]['Timestamp']=value
+        self.assertEqual(self.alert_poll(),[])
+
     def test_original_timestamp_and_multiplicity_survive_reenumeration(self):
         self.messages([20,21])
         first = self.collect()
@@ -644,6 +703,7 @@ class RetainedInventoryTests(unittest.TestCase):
         self.assertEqual((incoming['text'],incoming['occurred_at'],incoming['ack_status'],incoming['archive_only']),('history','2026-10-25T00:00:00+00:00','received',1))
         outgoing=self.connection.execute("SELECT * FROM messages WHERE id='out'").fetchone()
         self.assertEqual((outgoing['status'],outgoing['ack_status'],outgoing['archive_only']),('sent','sent',0))
+        self.assertEqual((incoming['alert_claimed'],outgoing['alert_claimed']),(1,1))
         cutoff=self.connection.execute('SELECT occurred_at FROM incoming_cutover').fetchone()[0]
         boundary=datetime.fromisoformat(cutoff)
         for index,seconds in enumerate((-1,0,1),40):
