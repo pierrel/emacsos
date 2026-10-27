@@ -26,7 +26,7 @@ trap 'exit 1' HUP INT TERM
 
 [ "$#" -ge 1 ] || fail 'an action is required'
 case $1 in
-    press|idle-blank|resume|wake|monitor|guarded-press|guarded-wake)
+    press|idle-blank|call-idle-blank|resume|wake|monitor|guarded-press|guarded-wake)
         [ "$#" -eq 1 ] || fail 'arguments are not accepted' ;;
     suspend)
         [ "$#" -eq 2 ] || fail 'a blank generation is required'
@@ -36,6 +36,12 @@ esac
 
 [ "$(id -un)" = emacsos-lab ] || fail 'wrong service user'
 case $1 in
+    call-idle-blank)
+        [ "/proc/$$/fd/8" -ef /run/emacsos-openrc-call.lock ] &&
+            [ -f "/proc/$$/fd/8" ] &&
+            [ "$(stat -Lc '%U:%G:%a' /proc/$$/fd/8)" = 'root:root:600' ] &&
+            flock -n -x 8 || fail 'call idle guard is absent'
+        ;;
     press|wake)
         # Activate kernel protection before waiting for the display lock.
         exec doas -n /usr/local/sbin/emacsos-openrc-suspend "$1"
@@ -73,6 +79,25 @@ done
 WAYLAND_DISPLAY=${wayland_socket##*/}
 export WAYLAND_DISPLAY
 
+if [ "$1" = idle-blank ]; then
+    # Call-state check and screen transition share the mutation lock, entered
+    # before the display lock. A veto must re-arm swayidle's one-shot timeout.
+    expected_generation=$(cat "$generation_file" 2>/dev/null || printf 0)
+    case $expected_generation in ''|*[!0-9]*) fail 'invalid idle generation' ;; esac
+    [ "${#expected_generation}" -le 20 ] || fail 'invalid idle generation'
+    set +e
+    doas -n /usr/local/sbin/emacsos-openrc-call idle-blank "$expected_generation"
+    idle_status=$?
+    set -e
+    if [ "$idle_status" -eq 75 ]; then
+        # Seat activity resets the idle timer without waking a manually blanked
+        # display. Every later timeout takes a fresh generation and call check.
+        timeout -s TERM -k 1 3 /usr/bin/wtype -k F24 ||
+            fail 'could not re-arm idle timeout'
+    fi
+    exit "$idle_status"
+fi
+
 [ -p "$events" ] && [ ! -L "$events" ] || fail 'power timer pipe is absent'
 
 # The existing supervised worker owns the trusted input queues and deadline.
@@ -85,7 +110,7 @@ chmod 0600 "$lock"
 exec 9>"$lock"
 case $1 in
     press|resume|wake) flock -x 9 || fail 'power transition lock failed' ;;
-    idle-blank) flock -n -x 9 || fail 'power transition is busy' ;;
+    call-idle-blank) flock -n -x 9 || fail 'power transition is busy' ;;
     suspend) flock -w 2 -x 9 || fail 'power transition is busy' ;;
 esac
 
@@ -163,7 +188,11 @@ case $1 in
             blank) restore_active ;;
         esac
         ;;
-    idle-blank)
+    call-idle-blank)
+        # A completed wake after the idle sample vetoes this old blank request.
+        # A wake queued behind this display lock restores the screen afterward.
+        [ "$(cat "$generation_file" 2>/dev/null || printf 0)" = "${EMACSOS_CALL_IDLE_GENERATION-}" ] || exit 0
+        # Manual press remains available while a call is ringing or active.
         [ "$current" != active ] || enter_blank
         ;;
     resume)

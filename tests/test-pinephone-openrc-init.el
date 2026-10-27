@@ -1241,5 +1241,76 @@
       (should-not (buffer-live-p buffer))
       (should-not (buffer-live-p stderr-buffer)))))
 
+
+
+(ert-deftest emacsos-openrc-call-event-recovers-pending-json ()
+  (let* ((emacsos-pinephone-call-event-directory (make-temp-file "call-events-" t))
+         (emacsos-pinephone-call-event-busy nil)
+         (path (expand-file-name (concat (make-string 64 ?a) ".json") emacsos-pinephone-call-event-directory))
+         request)
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "{\"event_id\":\"event1\"}"))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method endpoint payload callback &rest _)
+                       (setq request (list method endpoint payload))
+                       (funcall callback '((http_status . 200) (status . "accepted")) nil))))
+            (emacsos-pinephone-call-event-sync))
+          (should (equal (cadr request) "events/call"))
+          (should-not (file-exists-p path)))
+      (delete-directory emacsos-pinephone-call-event-directory t))))
+
+
+
+
+(ert-deftest emacsos-openrc-call-event-retries-do-not-starve-later-saved-events ()
+  (let* ((emacsos-pinephone-call-event-directory (make-temp-file "call-events-" t))
+         (emacsos-pinephone-call-event-busy nil)
+         (emacsos-pinephone-call-event-last-path nil)
+         (first (expand-file-name (concat (make-string 64 ?a) ".json") emacsos-pinephone-call-event-directory))
+         (second (expand-file-name (concat (make-string 64 ?b) ".json") emacsos-pinephone-call-event-directory))
+         offered timers)
+    (unwind-protect
+        (progn
+          (with-temp-file first (insert "{\"event_id\":\"first\"}"))
+          (with-temp-file second (insert "{\"event_id\":\"second\"}"))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (_method _endpoint payload callback &rest _)
+                       (let ((id (alist-get 'event_id payload)))
+                         (push id offered)
+                         (if (equal id "first") (funcall callback nil "HTTP503")
+                           (funcall callback '((http_status . 200) (status . "accepted")) nil)))))
+                    ((symbol-function 'run-at-time) (lambda (&rest args) (push args timers))))
+            (emacsos-pinephone-call-event-sync)
+            (emacsos-pinephone-call-event-sync))
+          (should (equal (reverse offered) '("first" "second")))
+          (should (file-exists-p first))
+          (should-not (file-exists-p second))
+          (should timers))
+      (delete-directory emacsos-pinephone-call-event-directory t))))
+
+
+(ert-deftest emacsos-openrc-call-event-null-and-http-status-roundtrip ()
+  (dolist (status '(200 401 409 422 429 503))
+    (let* ((emacsos-pinephone-call-event-directory (make-temp-file "call-events-" t))
+           (emacsos-pinephone-call-event-busy nil)
+           (emacsos-pinephone-call-event-last-path nil)
+           (path (expand-file-name (concat (make-string 64 ?a) ".json") emacsos-pinephone-call-event-directory))
+           uploaded)
+      (unwind-protect
+          (progn
+            (with-temp-file path (insert "{\"event_id\":\"event1\",\"number\":null,\"reason\":null}"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _endpoint payload callback &rest _)
+                         (setq uploaded (json-encode payload))
+                         (funcall callback `((http_status . ,status) (status . "accepted")) nil)))
+                      ((symbol-function 'run-at-time) #'ignore))
+              (emacsos-pinephone-call-event-sync))
+            (should (string-match-p "\"number\":null" uploaded))
+            (should (string-match-p "\"reason\":null" uploaded))
+            (should (eq (file-exists-p path) (not (null (memq status '(401 429 503))))))
+            (should (eq (file-exists-p (concat path ".invalid")) (not (null (memq status '(409 422)))))))
+        (delete-directory emacsos-pinephone-call-event-directory t)))))
+
 (ert-run-tests-batch-and-exit)
 ;;; test-pinephone-openrc-init.el ends here

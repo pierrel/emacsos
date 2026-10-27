@@ -119,10 +119,17 @@ chmod 0600 "$lock"
 exec 9>"$lock"
 flock -n -x 9 || fail 'suspend is already in progress'
 
-wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
+# Serialize outgoing call mutations across state sampling and the actual sleep.
+# Incoming modem wakes remain fenced by the kernel wakeup-count handshake.
+exec 8>/run/emacsos-openrc-call.lock
+flock -n -x 8 || exit 75
+
+wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 8>&- 9>&-) || exit 75
 case $wakeup_count in
     ''|*[!0-9]*) fail 'invalid wakeup counter' ;;
 esac
+
+/usr/local/sbin/emacsos-openrc-call idle-check 8>&- || exit 75
 
 # Queued hardware input or a guarded request blocks the bounded counter read while it waits for the
 # display lock. Timeout releases that lock; a later kernel wake event rejects the
@@ -132,7 +139,7 @@ printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
 # IRQs participate in the kernel wakeup-count handshake.
 external_power_present && exit 77
 if ! printf '%s\n' mem >"$power/state"; then
-    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
+    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 8>&- 9>&-) || exit 75
     [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75
     exit 1
 fi

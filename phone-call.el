@@ -64,6 +64,45 @@ SIM7600 transport implemented here."
   :type '(choice (const nil) function)
   :group 'emacsos)
 
+(defcustom emacsos-call-ring-feedback-function nil
+  "Optional platform function: non-nil starts ringing feedback, nil stops it."
+  :type '(choice (const nil) function)
+  :group 'emacsos)
+
+(defun emacsos-call--ring-feedback (ringing)
+  "Request bounded platform feedback for RINGING without blocking call control."
+  (when emacsos-call-ring-feedback-function
+    (condition-case nil
+        (funcall emacsos-call-ring-feedback-function ringing)
+      (error (message "Call vibration is unavailable.")))))
+
+(defvar emacsos-call-event-function nil
+  "Optional consumer of one immutable observed incoming-call outcome.")
+(defvar emacsos-call--incoming-observation nil
+  "Owner/path-bound incoming observation and whether active was observed.")
+
+(defun emacsos-call--record-incoming (owner path number observed-state)
+  "Capture OWNER, PATH and NUMBER as one new incoming-call observation."
+  (setq emacsos-call--incoming-observation
+        (when emacsos-call-event-function
+          (list :owner owner :path path :number number :active (eq observed-state 4)))))
+
+(defun emacsos-call--finish-incoming (reason)
+  "Report the tracked termination REASON without inferring carrier voicemail."
+  (let ((observation emacsos-call--incoming-observation))
+    (setq emacsos-call--incoming-observation nil)
+    (when (and observation emacsos-call-event-function
+               (equal (plist-get observation :owner) emacsos-call--call-owner)
+               (equal (plist-get observation :path) emacsos-call--call-path))
+      (condition-case nil
+          (funcall emacsos-call-event-function
+                   (list (cons 'number (plist-get observation :number))
+                         (cons 'outcome (if (plist-get observation :active)
+                                            "terminated_after_active"
+                                          "terminated_before_active"))
+                         (cons 'reason reason)))
+        (error (message "Call event could not be saved; check phone status."))))))
+
 (defcustom emacsos-call-control-gap-lines 3
   "Blank lines between the two call controls.
 The roomy default preserves the original EmacsOS phone layout.  A platform
@@ -582,6 +621,7 @@ ORIGINAL pre-call buffer."
 (defun emacsos-call-show-incoming (number)
   "Show the incoming-call screen for NUMBER."
   (setq emacsos-call--answer-confirm-pending nil)
+  (emacsos-call--ring-feedback t)
   (emacsos-call--show-buffer (emacsos-call--render-incoming number)))
 
 (defun emacsos-call--show-active (status)
@@ -689,6 +729,7 @@ DEFAULT-STATUS defaults to \"Calling…\".  SNAPSHOT-KNOWN-P says OBSERVED-STATE
 came from a CallAdded snapshot whose immutable sender matched the current
 unique owner.  An asynchronous snapshot closes the path-adoption gap and
 verifies direction and number."
+  (when emacsos-call-wake-function (funcall emacsos-call-wake-function))
   (setq emacsos-call--call-path path
         emacsos-call--call-owner owner
         emacsos-call--call-number number
@@ -839,9 +880,11 @@ re-render always run."
 (defun emacsos-call--dismiss ()
   "End the call UI: clear tracked-call identity, restore the pre-call
 buffer, kill the call buffers, drop the badge.  Idempotent."
+  (emacsos-call--ring-feedback nil)
   (emacsos-call--clear-dial-confirm)
   (setq emacsos-call--state nil
         emacsos-call--watched-call nil
+        emacsos-call--incoming-observation nil
         emacsos-call--call-path nil
         emacsos-call--call-owner nil
         emacsos-call--call-number nil
@@ -905,6 +948,7 @@ buffer, kill the call buffers, drop the badge.  Idempotent."
       (setq emacsos-call--state 'dial-requested
             emacsos-call--requested-call-events nil)
       (emacsos-call--show-requested)
+      (when emacsos-call-wake-function (funcall emacsos-call-wake-function))
       (let* ((operation-owner emacsos-call--current-owner)
              (owner-generation emacsos-call--owner-generation)
              (finish (lambda (result)
@@ -989,9 +1033,13 @@ buffer, kill the call buffers, drop the badge.  Idempotent."
        (if emacsos-call--call-path "In progress" "Status unknown"))
       (emacsos-call--replay-deferred-call-event))
      ((string-prefix-p "answered:" status)
+      (emacsos-call--ring-feedback nil)
       (setq emacsos-call--pending-operation nil
             emacsos-call--state 'active)
       (emacsos-call--show-active "In progress")
+      (when emacsos-call--incoming-observation
+        (emacsos-call--verify-incoming-outcome
+         emacsos-call--call-owner emacsos-call--call-path nil))
       (emacsos-call--replay-deferred-call-event))
      ((emacsos-call--uncertain-answer-p status (nth 2 identity))
       (let ((path (nth 2 identity))
@@ -1007,11 +1055,10 @@ buffer, kill the call buffers, drop the badge.  Idempotent."
                    (current (nth 1 snapshot)))
                (cond
                 ((and same-call (eq direction 1) (eq current 4))
-                 (setq emacsos-call--state 'active)
+                 (emacsos-call--on-call-state nil 4 nil)
                  (emacsos-call--show-active "In progress"))
                 ((and same-call (eq direction 1) (eq current 7))
-                 (emacsos-call--audio nil)
-                 (emacsos-call--dismiss))
+                 (emacsos-call--on-call-state nil 7 nil))
                 ((and same-call (eq direction 1)
                       (memq current '(0 1 2 3 5 6)))
                  (emacsos-call--audio nil)
@@ -1025,19 +1072,52 @@ buffer, kill the call buffers, drop the badge.  Idempotent."
       (emacsos-call-show-incoming emacsos-call--call-number)
       (emacsos-call--replay-deferred-call-event)))))
 
+(defun emacsos-call--verify-incoming-outcome (owner path ending)
+  "Reconcile a helper result with a verified OWNER/PATH snapshot.
+ENDING is non-nil after Hangup returned. A successful request alone never
+claims the modem reached its terminal state; the watch remains until proof."
+  (emacsos-call--call-snapshot-async
+   owner path
+   (lambda (snapshot)
+     (when (and emacsos-call--incoming-observation
+                (equal owner emacsos-call--call-owner)
+                (equal path emacsos-call--call-path))
+       (let ((current (and (eq (nth 0 snapshot) 1) (nth 1 snapshot))))
+         (cond
+          ((eq current 7) (emacsos-call--on-call-state nil 7 nil))
+          ((eq current 4)
+           (emacsos-call--on-call-state nil 4 nil)
+           (when ending (emacsos-call--show-active "Ending call…")))
+          (ending
+           (emacsos-call--show-active
+            (if snapshot "Ending call…" "Status unknown")))))))))
+
 (defun emacsos-call--hangup-finished (identity status)
   "Apply terminal hangup STATUS only to matching operation IDENTITY."
   (when (emacsos-call--operation-current-p identity)
     (setq emacsos-call--pending-operation nil)
     (message "%s" status)
-    (if (or (eq emacsos-call--state 'terminated)
-            (string-prefix-p "hung-up:" status))
-        (progn
-          (emacsos-call--audio nil)
-          (emacsos-call--dismiss))
-      (if (eq emacsos-call--state 'incoming)
-          (emacsos-call-show-incoming emacsos-call--call-number)
-        (emacsos-call--show-active "Hang up failed")))
+    (cond
+     ((eq emacsos-call--state 'terminated)
+      (emacsos-call--audio nil)
+      (emacsos-call--dismiss))
+     ((string-prefix-p "hung-up:" status)
+      (emacsos-call--ring-feedback nil)
+      (if (and emacsos-call--incoming-observation
+               emacsos-call--call-owner emacsos-call--call-path
+               (equal (plist-get emacsos-call--incoming-observation :owner)
+                      emacsos-call--call-owner)
+               (equal (plist-get emacsos-call--incoming-observation :path)
+                      emacsos-call--call-path))
+          (progn
+            (emacsos-call--show-active "Ending call…")
+            (emacsos-call--verify-incoming-outcome
+             emacsos-call--call-owner emacsos-call--call-path t))
+        (emacsos-call--audio nil)
+        (emacsos-call--dismiss)))
+     ((eq emacsos-call--state 'incoming)
+      (emacsos-call-show-incoming emacsos-call--call-number))
+     (t (emacsos-call--show-active "Hang up failed")))
     (emacsos-call--replay-deferred-call-event)))
 
 (defun emacsos-call--answer-tap ()
@@ -1192,6 +1272,7 @@ the exact unique owner, so this function performs no synchronous D-Bus read."
               emacsos-call--call-owner owner
               emacsos-call--call-number number
               emacsos-call--state 'incoming)
+        (emacsos-call--record-incoming owner path number observed-state)
         ;; Establish a visible surface before any registration/read that can
         ;; dispatch a reentrant StateChanged callback.
         (if (eq observed-state 4)
@@ -1263,6 +1344,10 @@ the 750 ms local fallback."
       (cond
        ((eq effective 7) (emacsos-call--on-call-state nil 7 nil))
        ((eq effective 4)
+        (when emacsos-call--incoming-observation
+          (setq emacsos-call--incoming-observation
+                (plist-put emacsos-call--incoming-observation :active t)))
+        (emacsos-call--ring-feedback nil)
         (unless (eq emacsos-call--state 'active)
           (setq emacsos-call--state 'active)
           (emacsos-call--audio t))
@@ -1393,7 +1478,7 @@ entry point."
     (when owner
       (emacsos-call--on-call-added-from-owner owner path))))
 
-(defun emacsos-call--on-call-state (_old new _reason)
+(defun emacsos-call--on-call-state (_old new reason)
   "Drive the call UI from the watched call's state.
 4 = active → in-progress screen (covers inbound-answered AND outbound-
 connected); 7 = terminated → dismiss after any pending helper releases its
@@ -1404,6 +1489,10 @@ states are ignored.  Used instead of Voice.CallDeleted, which does not fire
 promptly on this modem."
   (cond
    ((eq new 4)
+    (when emacsos-call--incoming-observation
+      (setq emacsos-call--incoming-observation
+            (plist-put emacsos-call--incoming-observation :active t)))
+    (emacsos-call--ring-feedback nil)
     (let ((was-incoming (eq emacsos-call--state 'incoming)))
       (setq emacsos-call--state 'active)
       (when emacsos-call--pending-operation
@@ -1418,6 +1507,8 @@ promptly on this modem."
         (emacsos-call--render-active emacsos-call--call-number "In progress")
         (emacsos-call--rerender)))))                ; outbound ringing → connected
    ((eq new 7)
+    (emacsos-call--finish-incoming reason)
+    (emacsos-call--ring-feedback nil)
     (when emacsos-call-operation-function (emacsos-call--audio nil))
     ;; A helper still owns the root flock.  Keep its non-interactive pending
     ;; surface until the sentinel reports, so no second mutation can collide.

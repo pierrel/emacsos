@@ -1,0 +1,2 @@
+# Only the PinePhone platform vibrator belongs to the UI; keyboard input stays restricted.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_PATH}=="platform-vibrator", ATTRS{name}=="gpio-vibrator", OWNER="emacsos-lab", GROUP="input", MODE="0660"
