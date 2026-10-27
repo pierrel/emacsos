@@ -1,0 +1,355 @@
+#!/usr/bin/python3
+"""Awake-only PinePhone usage samples and bounded local reporting."""
+
+import fcntl
+import hashlib
+from contextlib import ExitStack
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+
+PROC = Path('/proc')
+SYS = Path('/sys')
+DIRECTORY = Path('/var/lib/emacsos-lab/.local/state/emacsos-usage')
+INTERVAL = 300
+MAX_BYTES = 2 * 1024 * 1024
+MAX_RECORD_BYTES = 65536
+FILES = 4
+MAX_PROCESSES = 1024
+
+
+def read(path, limit=16384):
+    with path.open() as stream:
+        return stream.read(limit).strip()
+
+
+def number(path):
+    try:
+        return int(read(path, 64))
+    except (OSError, ValueError):
+        return None
+
+
+def clock():
+    before = time.monotonic()
+    boot = time.clock_gettime(time.CLOCK_BOOTTIME)
+    after = time.monotonic()
+    return {'utc': time.time(), 'boot_id': read(PROC / 'sys/kernel/random/boot_id', 64),
+            'boottime': boot, 'monotonic_before': before, 'monotonic_after': after}
+
+
+def private_directory():
+    DIRECTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = DIRECTORY.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError('usage directory must be private and owned by the sampler user')
+
+
+def open_private(path):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or info.st_mode & 0o077):
+        os.close(fd)
+        raise ValueError('unsafe usage log or lock')
+    return os.fdopen(fd, 'a+')
+
+
+def append(event, **fields):
+    private_directory()
+    with open_private(DIRECTORY / 'write.lock') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open_private(DIRECTORY / 'usage.jsonl') as current:
+            if current.tell() >= MAX_BYTES:
+                for index in range(FILES - 1, 0, -1):
+                    source = DIRECTORY / ('usage.jsonl' if index == 1 else f'usage.{index - 1}.jsonl')
+                    target = DIRECTORY / f'usage.{index}.jsonl'
+                    if source.exists():
+                        os.replace(source, target)
+        with open_private(DIRECTORY / 'usage.jsonl') as stream:
+            record = json.dumps({'event': event, **clock(), **fields}, separators=(',', ':')) + '\n'
+            if len(record) > MAX_RECORD_BYTES:
+                raise ValueError('usage record exceeds its size limit')
+            stream.write(record)
+
+
+def collect(previous=None):
+    cpu = [int(value) for value in read(PROC / 'stat').splitlines()[0].split()[1:9]]
+    total, busy = sum(cpu), sum(cpu) - cpu[3] - cpu[4]
+    old_total, old_busy, old_processes = previous or (total, busy, {})
+    elapsed = total - old_total
+    memory = {line.split(':')[0]: int(line.split()[1])
+              for line in read(PROC / 'meminfo').splitlines() if line.split()[1].isdigit()}
+    processes = {}
+    rows = []
+    truncated = False
+    for directory in PROC.iterdir():
+        if not directory.name.isdigit():
+            continue
+        if len(processes) >= MAX_PROCESSES:
+            truncated = True
+            break
+        try:
+            prefix, _, suffix = read(directory / 'stat', 4096).rpartition(') ')
+            values = suffix.split()
+            identity = (int(directory.name), int(values[19]))
+            ticks = int(values[11]) + int(values[12])
+            processes[identity] = ticks
+            old_ticks = old_processes.get(identity)
+            percent = (100 * max(0, ticks - old_ticks) / elapsed
+                       if elapsed > 0 and old_ticks is not None else None)
+            rows.append({'pid': identity[0], 'comm': prefix.partition('(')[2][:64],
+                         'state': values[0], 'rss_kib': int(values[21]) * os.sysconf('SC_PAGE_SIZE') // 1024,
+                         'cpu_percent': percent})
+        except (OSError, ValueError, IndexError):
+            continue  # Processes can exit between enumeration and their stat read.
+    rows.sort(key=lambda row: (row['cpu_percent'] or 0, row['rss_kib']), reverse=True)
+    supplies = {}
+    for directory in (SYS / 'class/power_supply').glob('*'):
+        values = {}
+        for key in ('type', 'status', 'capacity', 'online', 'current_now', 'voltage_now'):
+            try:
+                values[key] = read(directory / key, 64)
+            except OSError:
+                pass
+        supplies[directory.name] = values
+    interfaces = {}
+    for directory in (SYS / 'class/net').glob('*'):
+        try:
+            interfaces[directory.name] = {
+                'state': read(directory / 'operstate', 64),
+                'rx_bytes': number(directory / 'statistics/rx_bytes'),
+                'tx_bytes': number(directory / 'statistics/tx_bytes')}
+        except OSError:
+            continue
+    radios = []
+    for directory in (SYS / 'class/rfkill').glob('*'):
+        try:
+            radios.append({'type': read(directory / 'type', 64),
+                           'soft_blocked': number(directory / 'soft'),
+                           'hard_blocked': number(directory / 'hard')})
+        except OSError:
+            continue
+    radio_enabled = None
+    try:
+        observed = subprocess.run(['/usr/bin/nmcli', '-t', '-f', 'WIFI,WWAN', 'radio'],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  text=True, timeout=2, check=True).stdout.strip().split(':')
+        if len(observed) == 2 and all(value in ('enabled', 'disabled') for value in observed):
+            radio_enabled = dict(zip(('wifi', 'wwan'), observed))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    routes = []
+    for line in read(PROC / 'net/route').splitlines()[1:]:
+        values = line.split()
+        if len(values) >= 8 and values[1] == '00000000' and values[7] == '00000000':
+            routes.append({'family': 'ipv4', 'interface': values[0], 'metric': int(values[6])})
+    try:
+        for line in read(PROC / 'net/ipv6_route', 65536).splitlines():
+            values = line.split()
+            if (len(values) == 10 and values[0] == '0' * 32 and values[1] == '00'
+                    and int(values[8], 16) & 1 and not int(values[8], 16) & 0x200):
+                routes.append({'family': 'ipv6', 'interface': values[9], 'metric': int(values[5], 16)})
+    except FileNotFoundError:
+        pass
+    fields = {'cpu_percent': (100 * (busy - old_busy) / elapsed if elapsed > 0 else None),
+              'memory_kib': {key: memory.get(key) for key in ('MemTotal', 'MemAvailable', 'SwapTotal', 'SwapFree')},
+              'process_count': len(processes), 'process_scan_truncated': truncated, 'top_processes': rows[:10],
+              'power_supplies': supplies, 'interfaces': interfaces, 'radios': radios,
+              'networkmanager_radio_enabled': radio_enabled, 'default_routes': routes}
+    return fields, (total, busy, processes)
+
+
+def run():
+    private_directory()
+    with open_private(DIRECTORY / 'run.lock') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('usage sampler is already running')
+        append('collector-start', kernel=os.uname().release,
+               collector_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        previous = None
+        while True:
+            fields, previous = collect(previous)
+            append('sample', **fields)
+            # CLOCK_MONOTONIC excludes suspend and does not arm a wake alarm.
+            time.sleep(INTERVAL)
+
+
+def sleep_bounds(start, end):
+    low = ((end['boottime'] - end['monotonic_after'])
+           - (start['boottime'] - start['monotonic_before']))
+    high = ((end['boottime'] - end['monotonic_before'])
+            - (start['boottime'] - start['monotonic_after']))
+    return max(0, low), max(0, high)
+
+
+def open_reader(path):
+    stream = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC), 'rb')
+    info = os.fstat(stream.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES + MAX_RECORD_BYTES:
+        stream.close()
+        raise ValueError('usage input must be a bounded regular file')
+    return stream
+
+
+def report(directory):
+    records = []
+    issues = []
+    with ExitStack() as resources:
+        try:
+            lock = resources.enter_context(open_reader(directory / 'write.lock'))
+        except FileNotFoundError:
+            lock = None  # A copied log set need not include the live writer lock.
+        if lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+        snapshots = []
+        try:
+            for index in range(FILES - 1, -1, -1):
+                path = directory / (f'usage.{index}.jsonl' if index else 'usage.jsonl')
+                try:
+                    stream = resources.enter_context(open_reader(path))
+                except FileNotFoundError:
+                    continue
+                snapshots.append((path.name, stream, os.fstat(stream.fileno()).st_size))
+            current = clock()
+        finally:
+            if lock:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        # Descriptors retain rotated inodes; byte cutoffs exclude later appends.
+        # Parsing never holds up power-event writes behind the shared lock.
+        for name, stream, size in snapshots:
+            for line in stream.read(size).splitlines():
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    issues.append(f'incomplete or invalid record in {name}')
+    attempts = {}
+    samples = []
+    sleep = []
+    confirmed_pairs = []
+    boots = set()
+    previous = None
+    last_samples = {}
+    first_events = {}
+    first_samples = {}
+    last_events = {}
+    for row in records:
+        boots.add(row['boot_id'])
+        last_events[row['boot_id']] = row
+        first_events.setdefault(row['boot_id'], row)
+        if row['event'] == 'suspend-attempt':
+            key = row['boot_id'], row['attempt']
+            if key in attempts:
+                issues.append('suspend attempt ID reused with a missing outcome')
+            attempts[key] = row
+        elif row['event'] == 'suspend-return':
+            key = row['boot_id'], row['attempt']
+            start = attempts.pop(key, None)
+            if start is None:
+                issues.append('suspend return has no retained attempt')
+            elif row['status'] == 0:
+                low, high = sleep_bounds(start, row)
+                if low > 0:
+                    confirmed_pairs.append((start, row))
+                    sleep.append({'boot_id': row['boot_id'],
+                                  'start_boottime': start['boottime'], 'end_boottime': row['boottime'],
+                                  'start_utc': start['utc'], 'end_utc': row['utc'],
+                                  'seconds_min': low, 'seconds_max': high})
+                else:
+                    issues.append('successful suspend return has no positive clock evidence of sleep')
+        elif row['event'] == 'sample':
+            samples.append(row)
+            last_samples[row['boot_id']] = row
+            first_samples.setdefault(row['boot_id'], row)
+            if previous is not None and previous['boot_id'] == row['boot_id']:
+                awake = row['monotonic_after'] - previous['monotonic_before']
+                if awake > INTERVAL + 5:
+                    issues.append(f'awake sampling gap: {awake:.1f}s')
+            previous = row
+    if attempts:
+        issues.append(f'{len(attempts)} suspend attempt(s) have no outcome; sleep is unproven')
+    windows = list(zip(samples, samples[1:]))
+    windows.extend((first_events[boot], row) for boot, row in first_samples.items())
+    windows.extend((row, last_events[boot]) for boot, row in last_samples.items())
+    if records and records[-1]['boot_id'] == current['boot_id']:
+        windows.append((records[-1], current))
+    for start, end in windows:
+        if start['boot_id'] != end['boot_id']:
+            continue
+        low, _ = sleep_bounds(start, end)
+        covered = 0
+        for sleep_start, sleep_end in confirmed_pairs:
+            if sleep_start['boot_id'] != start['boot_id']:
+                continue
+            overlap_start = max((start, sleep_start), key=lambda row: row['boottime'])
+            overlap_end = min((end, sleep_end), key=lambda row: row['boottime'])
+            if overlap_start['boottime'] <= overlap_end['boottime']:
+                covered += sleep_bounds(overlap_start, overlap_end)[1]
+        if low > covered:
+            issues.append(f'sampling gap contains at least {low - covered:.1f}s suspended time without paired sleep evidence')
+    for boot_id, event in last_events.items():
+        last = last_samples.get(boot_id)
+        if last is None:
+            issues.append(f'no usage samples retained for recorded boot {boot_id}')
+            continue
+        elapsed = (first_samples[boot_id]['monotonic_after']
+                   - first_events[boot_id]['monotonic_before'])
+        if elapsed > INTERVAL + 5:
+            issues.append(f'leading awake sampling gap in boot {boot_id}: {elapsed:.1f}s')
+        elapsed = event['monotonic_after'] - last['monotonic_before']
+        if elapsed > INTERVAL + 5:
+            issues.append(f'trailing awake sampling gap in boot {boot_id}: {elapsed:.1f}s')
+    freshness_checked = False
+    latest_samples = [row for row in samples if row['boot_id'] == records[-1]['boot_id']] if records else []
+    if latest_samples:
+        last = latest_samples[-1]
+        if current['boot_id'] == last['boot_id']:
+            freshness_checked = True
+            elapsed = current['monotonic_after'] - last['monotonic_before']
+            if elapsed > INTERVAL + 5:
+                issues.append(f'no samples for {elapsed:.1f}s of awake time at report time')
+    elif not records:
+        issues.append('no usage samples recorded')
+    return {'samples': len(samples), 'boots': len(boots), 'live_freshness_checked': freshness_checked,
+            'confirmed_sleep_intervals': sleep,
+            'first_sample': samples[0] if samples else None, 'last_sample': samples[-1] if samples else None,
+            'issues': issues,
+            'notes': ['CPU percentages are shares of aggregate CPU time across all cores.',
+                      'Interface counter deltas show traffic; default routes alone do not establish its path.',
+                      'Only paired successful outcomes with positive clock evidence establish sleep.']}
+
+
+def main(arguments):
+    if arguments == ['run']:
+        run()
+    elif len(arguments) in (3, 4) and arguments[0] == 'event':
+        event, attempt = arguments[1:3]
+        if event not in ('suspend-attempt', 'suspend-return') or not attempt.isdigit():
+            raise ValueError('invalid suspend event')
+        if event == 'suspend-return' and len(arguments) == 4:
+            append(event, attempt=attempt, status=int(arguments[3]))
+        elif event == 'suspend-attempt' and len(arguments) == 3:
+            append(event, attempt=attempt)
+        else:
+            raise ValueError('suspend return requires its helper status')
+    elif len(arguments) == 2 and arguments[0] == 'report':
+        result = report(Path(arguments[1]))
+        print(json.dumps(result, indent=2))
+        return bool(result['issues'])
+    else:
+        raise ValueError('usage: openrc-usage run | event suspend-attempt ID | event suspend-return ID STATUS | report DIRECTORY')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, ValueError, KeyError, IndexError) as error:
+        print('emacsos-usage: ' + str(error), file=sys.stderr)
+        raise SystemExit(1)

@@ -93,6 +93,14 @@ publish_state() {
     printf '%s\n' "$1" >"$state"
 }
 
+usage_event() {
+    # Diagnostics cannot hold the display lock indefinitely or retain wake guards.
+    timeout -s TERM -k 1 1 /usr/bin/python3 -I \
+        /usr/local/share/emacsos-openrc/usage event "$@" \
+        3>&- 4>&- 5>&- 9>&- || \
+        printf '%s\n' 'emacsos-session-power: usage event was not recorded' >&2
+}
+
 sway() {
     timeout -s TERM -k 1 3 swaymsg -s "$sway_socket" "$@" >/dev/null
 }
@@ -176,12 +184,14 @@ case $1 in
     suspend)
         [ "$current" = blank ] || exit 0
         [ "$(cat "$generation_file")" = "$2" ] || exit 0
+        usage_event suspend-attempt "$$"
         set +e
         # OpenDoas closes nonstandard descriptors. Carry the same kernel
         # objects in stdio until the root admission owner restores them.
         doas -n /usr/local/sbin/emacsos-openrc-suspend 0<&4 1<&3 2<&5
         suspend_status=$?
         set -e
+        usage_event suspend-return "$$" "$suspend_status"
         case $suspend_status in
             # External power skips deep sleep and keeps the panel dark.
             0|75|77) exit 0 ;;
