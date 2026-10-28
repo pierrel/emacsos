@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixed EG25 call mutations and read-only idle-state checks for EmacsOS.
+# Fixed EG25 call mutations for the unprivileged EmacsOS session.
 
 set -eu
 PATH=/usr/bin:/usr/sbin:/bin:/sbin
@@ -24,55 +24,6 @@ trap 'exit 1' HUP INT TERM
 [ "$(id -u)" -eq 0 ] || fail 'call helper must run as root'
 [ "$#" -ge 1 ] || fail 'missing operation'
 [ -x /usr/bin/mmcli ] || fail 'mmcli is unavailable'
-
-# Fixed state check; idle-blank also holds the mutation lock through blanking.
-# Suspend uses idle-check while already holding that lock. Unknown state vetoes both.
-if { [ "$#" -eq 1 ] && [ "$1" = idle-check ]; } ||
-   { [ "$#" -eq 2 ] && [ "$1" = idle-blank ]; }; then
-    if [ "$1" = idle-blank ]; then
-        case $2 in ''|*[!0-9]*) fail 'invalid idle generation' ;; esac
-        [ "${#2}" -le 20 ] || fail 'invalid idle generation'
-        EMACSOS_CALL_IDLE_GENERATION=$2
-        export EMACSOS_CALL_IDLE_GENERATION
-        exec 8>/run/emacsos-openrc-call.lock
-        flock -n -x 8 || exit 75
-    fi
-    if /usr/bin/timeout -s TERM -k 1 4 /usr/bin/python3 -I - <<'CALLSTATE'
-import sys
-import re
-import dbus
-try:
-    bus = dbus.SystemBus()
-    owner = str(bus.get_name_owner('org.freedesktop.ModemManager1'))
-    objects = dbus.Interface(bus.get_object(owner, '/org/freedesktop/ModemManager1'),
-                             'org.freedesktop.DBus.ObjectManager').GetManagedObjects(timeout=2)
-    voice = 'org.freedesktop.ModemManager1.Modem.Voice'
-    call = 'org.freedesktop.ModemManager1.Call'
-    modems = [interfaces[voice] for interfaces in objects.values() if voice in interfaces]
-    if len(modems) != 1 or 'Calls' not in modems[0]:
-        sys.exit(75)
-    # Calls are leaf objects listed by Voice, not assumed ObjectManager entries.
-    for path in modems[0]['Calls']:
-        path = str(path)
-        if not re.fullmatch(r'/org/freedesktop/ModemManager1/Call/[0-9]+', path):
-            sys.exit(75)
-        properties = dbus.Interface(bus.get_object(owner, path),
-                                    'org.freedesktop.DBus.Properties').GetAll(call, timeout=1)
-        if int(properties.get('State', 0)) != 7:
-            sys.exit(75)
-    if str(bus.get_name_owner('org.freedesktop.ModemManager1')) != owner:
-        sys.exit(75)
-except Exception:
-    sys.exit(75)
-sys.exit(0)
-CALLSTATE
-    then :; else exit 75; fi
-    if [ "$1" = idle-blank ]; then
-        exec /bin/su -s /bin/sh emacsos-lab -c \
-            'exec /usr/local/share/emacsos-openrc/session-power call-idle-blank'
-    fi
-    exit 0
-fi
 
 touch "$lock"
 chown root:root "$lock"
