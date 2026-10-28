@@ -952,13 +952,25 @@ feedback client request is recorded before it starts; a storage failure suppress
 that new request. Client failures and intentional stops are separate entries.
 A recorded request does not prove physical vibration. Call pulses retain one
 correlation identity while recording each request. Reasons omit SMS bodies,
-numbers and caller details. Raw modem SMS events explicitly have unverified
-novelty/completion; this log does not itself fix duplicate notifications or cover
-external applications/direct hardware writers. Existing calls and local SMS
-continue to use the same finite feedback clients, independent of server config.
+numbers and caller details. SMS feedback now follows a durable completed-message
+claim, not raw modem Added signals. This log does not cover external applications
+or direct hardware writers. Existing calls and local SMS continue to use the
+same finite feedback clients, independent of server configuration.
 
-Received-SMS events also request one finite quiet-profile =feedbackd= vibration
-through the existing verified ModemManager observer. This adds no independent
+The existing 30-second UI event timer and trusted modem signals prompt asynchronous
+local collection. Bounded reads can defer a new leaf behind reconnect history. Only a newly captured State=3 incoming UUID, with a valid original
+SMS timestamp after the durable local-alert activation time and not archive-only,
+is eligible. Activation does not reset on UI/modem restart. Existing rows and
+retained old history start handled; re-enumerated UUIDs remain handled, while two
+independent identical messages retain separate claims. Claims are independent of
+server configuration, forwarding, subscription matching and receipt ACKs.
+The fixed root helper returns and atomically claims at most four IDs without
+message contents. Claim-before-effect permits a missed alert after a process crash
+or log failure; it never retries an uncertain physical vibration. No message is
+deleted or replayed to repair notification state.
+
+A claimed completed incoming SMS requests one finite quiet-profile =feedbackd=
+vibration through the existing local reason logger. This adds no independent
 wake channel. Verify the installed =fbcli= options, session activation, theme and
 EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
 Incoming sender addresses (including brand names and unknown senders) and empty

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Fixed root helper for exact SMS sends, private journal receipts and acknowledgment."""
+"""Fixed root helper for exact SMS sends, receipts, ACKs and local alert claims."""
 
 import fcntl
 import json
@@ -156,6 +156,12 @@ def journal():
         # Legacy incoming times were local rediscovery times, not SMS timestamps.
         # Preserve old IDs/content/times/ACKs but prevent pending history turns.
         connection.execute("UPDATE messages SET archive_only=1 WHERE direction='incoming'")
+    if "alert_claimed" not in {row[1] for row in connection.execute("PRAGMA table_info(messages)")}:
+        # Existing receipts are history at local-alert activation, regardless of ACK.
+        connection.execute("ALTER TABLE messages ADD COLUMN alert_claimed INTEGER NOT NULL DEFAULT 1")
+    connection.execute("CREATE TABLE IF NOT EXISTS incoming_alert_start (occurred_at TEXT NOT NULL)")
+    if not connection.execute("SELECT 1 FROM incoming_alert_start").fetchone():
+        connection.execute("INSERT INTO incoming_alert_start VALUES (?)", (datetime.now(timezone.utc).isoformat(),))
     connection.execute("CREATE TABLE IF NOT EXISTS incoming_objects (observation TEXT PRIMARY KEY, content TEXT, occurred_at TEXT, last_checked INTEGER NOT NULL DEFAULT 0)")
     connection.execute("CREATE TABLE IF NOT EXISTS incoming_inventory (content TEXT NOT NULL, ordinal INTEGER NOT NULL, message_id TEXT NOT NULL UNIQUE, PRIMARY KEY(content,ordinal))")
     if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_cutover'").fetchone():
@@ -292,16 +298,38 @@ def capture_inventory(connection, observations):
                 archive_only = occurred_at is None or (cutover is not None and
                     datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(cutover["occurred_at"]))
                 saved_observation = None if connection.execute("SELECT 1 FROM messages WHERE observation=?", (observation,)).fetchone() else observation
-                connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only) VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL, ?)",
-                                   (identity, number, text, occurred_at, saved_observation, int(archive_only)))
+                alert_start = connection.execute("SELECT occurred_at FROM incoming_alert_start").fetchone()[0]
+                alert_claimed = archive_only or datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(alert_start)
+                connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only,alert_claimed) VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL, ?, ?)",
+                                   (identity, number, text, occurred_at, saved_observation, int(archive_only), int(alert_claimed)))
             connection.execute("INSERT INTO incoming_inventory VALUES (?,?,?)", (content, ordinal, identity))
 
 
+def claim_incoming_alerts(connection):
+    """Claim up to four completed local notifications, independently of server ACK.
+
+    The durable claim precedes the UI effect: a crash or logging failure can miss
+    an alert, but must not replay an uncertain vibration attempt.
+    """
+    connection.execute("BEGIN IMMEDIATE")
+    identities = [row[0] for row in connection.execute(
+        "SELECT id FROM messages WHERE direction='incoming' AND status='received' AND archive_only=0 AND alert_claimed=0 ORDER BY rowid LIMIT 4")]
+    connection.executemany("UPDATE messages SET alert_claimed=1 WHERE id=?", [(identity,) for identity in identities])
+    connection.commit()
+    return identities
+
+
 def receipt_operation(value):
-    """Read receipts, look up one attempt without the modem, or acknowledge status."""
+    """Collect receipts/claim local alerts, read one attempt, or acknowledge status."""
     connection = journal()
     try:
-        if value == {"operation": "receipts"}:
+        if value == {"operation": "alerts"}:
+            try:
+                collect_incoming(connection, dbus.SystemBus())
+            except Exception:
+                connection.rollback()
+            print(json.dumps({"alerts": claim_incoming_alerts(connection)}))
+        elif value == {"operation": "receipts"}:
             try:
                 collect_incoming(connection, dbus.SystemBus())
             except Exception:
@@ -339,7 +367,7 @@ def receipt_operation(value):
 
 
 def main():
-    """Validate stdin, serialize modem mutation, and emit one terminal result."""
+    """Validate bounded stdin and execute a fixed send or journal operation."""
     if os.geteuid() != 0 or len(sys.argv) != 1:
         _emit("not-sent:invalid-input")
         return 2
