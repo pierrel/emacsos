@@ -881,23 +881,21 @@ accepted the message, not carrier delivery. =unknown= must not be retried as a n
 send to repair the archive.
 
 The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
-source checkout. Received modem history is retained. A durable content inventory
-with ordinal multiplicity preserves UUIDs across owner/boot/path re-enumeration;
-two independent identical retained objects still have two UUIDs. The inventory
-never decrements when a leaf is temporarily unreadable. Its fingerprint contains
-received Number/Text/Data/Timestamp/SMSC/PduType/Class; mutable storage, state
-and delivery fields are excluded. This depends on retained received inventory:
-external deletion/replacement of received modem objects is not supported.
+source checkout. Received modem history is retained for the offline UI. A unique
+SHA256 key over exact sender, UTC-normalized original Timestamp and Text/Data
+maps repeated observations to one durable UUID. Equal messages within the source
+timestamp resolution deliberately collapse. Exported paths, owner changes and raw
+Added signals do not establish novelty. See
+[[file:docs/2026-10-28-sms-platform-identity-simplification.org][the pinned platform contract and simplification design]].
 
-Collection reads at most four uncached objects per poll. Attempts rotate fairly,
-including unreadable or incomplete objects. Each successful received-object
-cache update, inventory allocation and message commit is atomic, so a deadline
-or crash retains completed progress and the next poll skips those reads.
-Multiplicity counts include all cached objects still in the current modem list,
-even when capture spans several polls. Cache aliases absent from the current
-list or namespace are removed. The cache relies on ModemManager 1.24.2's producer
-contract: each object has a process-unique incrementing path, and received
-content is assembled before State=3. It never caches incomplete/outgoing objects.
+Collection reads at most four objects per poll. A durable cursor advances before
+each read, including unreadable/incomplete objects. Each completed content key
+and receipt commits atomically. A deadline retains earlier progress and the next
+poll starts beyond the failed leaf. Trusted Added and multipart State3 completion
+signals supply bounded transient priority hints, so new completions do not wait
+behind an entire retained-history sweep. Hints are not durable identity and
+never directly request vibration. No cached payload inventory or multiplicity
+reconciliation remains; repeated reads are safe through SQLite uniqueness.
 
 Incoming =occurred_at= uses the original timezone-aware ModemManager SMS
 =Timestamp=, never rediscovery time. The host admits a subscription only if that
@@ -909,16 +907,16 @@ not an original SMS timestamp and never establishes subscription eligibility.
 
 On first journal upgrade, existing incoming rows become archive-only without
 changing UUID, body, stored time or acknowledgment. Exact current observations
-can seed the inventory with their existing UUID; obsolete history rows remain
-untouched. A journal with existing incoming history also records one durable
+in the old content inventory seed the new key map with an existing UUID; every
+old duplicate row and its ACK remain untouched. A journal with existing incoming history also records one durable
 upgrade cutoff. Unidentified messages timestamped at or before that cutoff stay
 archive-only, even if ModemManager publishes them later under new paths. This
 explicit migration baseline avoids replaying history to older subscriptions;
 post-cutoff timestamps use the normal subscription rule. Fresh journals have no
 migration cutoff. Outgoing rows and pending send outcomes retain their existing paths.
 No received modem messages are deleted, and no server identities are rewritten.
-Deploy matching host cutoff/archive-only support first. Phone rollback preserves
-the journal but restores old replay behavior; host downgrade while the new
+Deploy matching host cutoff/archive-only support first. Collection rollback requires a reviewed compatibility procedure; never restore
+an older journal snapshot to repair history. Host downgrade while the new
 transport is active rejects its metadata and retains receipts unacknowledged.
 
 An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the

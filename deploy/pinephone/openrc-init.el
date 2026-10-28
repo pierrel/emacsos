@@ -237,6 +237,9 @@ every agent-config load."
 (defvar emacsos-pinephone-sms-alert-process nil
   "Current local completed-message eligibility query; never a server request.")
 
+(defvar emacsos-pinephone-sms-alert-paths nil
+  "Bounded transient trusted Added hints; never receipt identities.")
+
 (defun emacsos-pinephone-sms-alert-finished (process _event)
   "Use only the current helper's committed local alert identities."
   (when (and (eq process emacsos-pinephone-sms-alert-process)
@@ -263,12 +266,21 @@ every agent-config load."
                           (emacsos-notifications-feedback 'sms "Completed incoming SMS" id))
                       (error (message "SMS alert could not be logged; vibration not requested."))))))
             (error (message "Local SMS alert query unavailable.")))
-        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (when emacsos-pinephone-sms-alert-paths
+        (emacsos-pinephone-sms-alert-sync)))))
 
-(defun emacsos-pinephone-sms-alert-sync ()
+(defun emacsos-pinephone-sms-alert-sync (&optional path)
   "Asynchronously collect and claim completed local SMS, even without a server."
+  (when (and (stringp path)
+             (string-match-p "\\`/org/freedesktop/ModemManager1/SMS/[0-9]+\\'" path))
+    (setq emacsos-pinephone-sms-alert-paths
+          (cons path (delete path emacsos-pinephone-sms-alert-paths)))
+    (when (> (length emacsos-pinephone-sms-alert-paths) 64)
+      (setcdr (nthcdr 63 emacsos-pinephone-sms-alert-paths) nil)))
   (unless emacsos-pinephone-sms-alert-process
-    (let ((buffer (generate-new-buffer " *emacsos-sms-alerts*")) process)
+    (let ((hint (pop emacsos-pinephone-sms-alert-paths))
+          (buffer (generate-new-buffer " *emacsos-sms-alerts*")) process)
       (condition-case nil
           (progn
             (setq process (make-process
@@ -281,7 +293,9 @@ every agent-config load."
                                          (insert (substring text 0 (min (length text)
                                                                        (max 0 (- 4096 (buffer-size)))))))))))
             (setq emacsos-pinephone-sms-alert-process process)
-            (process-send-string process "{\"operation\":\"alerts\"}")
+            (process-send-string process (json-encode
+                                          (append '((operation . "alerts"))
+                                                  (when hint `((path . ,hint))))))
             (process-send-eof process)
             (set-process-sentinel process #'emacsos-pinephone-sms-alert-finished)
             (when (memq (process-status process) '(exit signal))
@@ -293,11 +307,35 @@ every agent-config load."
          (when (buffer-live-p buffer) (kill-buffer buffer))
          (message "Local SMS alert query could not start."))))))
 
-(defun emacsos-pinephone-sms-added (owner generation _path)
+(defun emacsos-pinephone-sms-added (owner generation path)
   "Prompt local collection for trusted SMS signals; never buzz from raw Added."
   (when (and (equal owner emacsos-call--current-owner)
              (= generation emacsos-call--owner-generation))
-    (emacsos-pinephone-sms-alert-sync)))
+    (emacsos-pinephone-sms-alert-sync path)))
+
+(defvar emacsos-pinephone-sms-completed-handle nil
+  "Persistent completed-SMS signal observation, not a per-message subscription.")
+
+(defun emacsos-pinephone-sms-properties-changed (interface changed _invalidated)
+  "Hint collection when the current modem completes a multipart SMS."
+  (let ((owner (emacsos-call--event-owner)))
+    (when (and (emacsos-call--valid-owner-p owner)
+               (equal owner emacsos-call--current-owner)
+               (equal interface "org.freedesktop.ModemManager1.Sms")
+               (listp changed)
+               (equal (emacsos-call--snapshot-value changed "State") 3))
+      (emacsos-pinephone-sms-added owner emacsos-call--owner-generation
+                                 (emacsos-call--event-path)))))
+
+(defun emacsos-pinephone-register-sms-completion ()
+  "Observe completion without waiting for a retained-history scan."
+  (unless emacsos-pinephone-sms-completed-handle
+    (condition-case nil
+        (setq emacsos-pinephone-sms-completed-handle
+              (emacsos-call--register-signal-bounded
+               :system nil nil "org.freedesktop.DBus.Properties" "PropertiesChanged"
+               #'emacsos-pinephone-sms-properties-changed))
+      (error (message "SMS completion observation unavailable; periodic collection remains.")))))
 
 (defun emacsos-sms-transport-status ()
   "Show whether the configured SMS handoff transport is running."
@@ -1391,6 +1429,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (server-start)
   (require 'os)
   (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-added)
+  (emacsos-pinephone-register-sms-completion)
   (emacsos-pinephone-sms-alert-sync)
   (require 'swipe-learning)
   (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)

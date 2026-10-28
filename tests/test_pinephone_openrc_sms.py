@@ -378,7 +378,7 @@ class ReceiptBudgetTests(unittest.TestCase):
 
 
 class IncomingObservationTests(unittest.TestCase):
-    def test_punctuation_empty_text_and_distinct_objects_are_preserved(self):
+    def test_punctuation_empty_text_preserved_and_identical_objects_collapse(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')):
                 connection = SMS.journal()
@@ -391,8 +391,7 @@ class IncomingObservationTests(unittest.TestCase):
                     SMS.collect_incoming(connection, bus)
                     SMS.collect_incoming(connection, bus)
                 rows = connection.execute("SELECT id,number,text FROM messages").fetchall()
-                self.assertEqual(len(rows), 2)
-                self.assertNotEqual(rows[0]['id'], rows[1]['id'])
+                self.assertEqual(len(rows), 1)
                 self.assertTrue(all(row['number'] == 'T-Mobile' and row['text'] == '' for row in rows))
                 connection.close()
 
@@ -492,7 +491,7 @@ class RetainedInventoryTests(unittest.TestCase):
         for value in self.bus.message_properties.values(): value['Timestamp']='2026-10-25T23:00:00+00:00'
         self.assertEqual([self.alert_poll() for _ in range(5)], [[]]*5)
         original=[dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
-        self.assertEqual(len(original),15)
+        self.assertEqual(len(original),1)
         self.bus.owner=':1.99'
         self.messages(range(200,215))
         for value in self.bus.message_properties.values(): value['Timestamp']='2026-10-25T23:00:00+00:00'
@@ -502,7 +501,7 @@ class RetainedInventoryTests(unittest.TestCase):
         self.bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'].append(path)
         self.bus.message_properties[path]={'State':3,'Number':'+15555550100','Text':'genuinely new',
                                            'Timestamp':'2026-10-26T01:00:00+00:00'}
-        ids=self.alert_poll()
+        ids=[identity for _ in range(5) for identity in self.alert_poll()]
         self.assertEqual(len(ids),1)
         self.assertEqual(self.alert_poll(),[])
         self.connection.execute("UPDATE messages SET ack_status=status")
@@ -511,15 +510,14 @@ class RetainedInventoryTests(unittest.TestCase):
         self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_alert_start').fetchone()[0],
                          '2026-10-26T00:00:00+00:00')
 
-    def test_local_alerts_complete_identicals_survive_restart_and_ack(self):
+    def test_local_alerts_identicals_collapse_and_survive_restart_and_ack(self):
         self.activate_alerts()
         paths=self.messages([20,21])
         for value in self.bus.message_properties.values(): value['State']=2
         self.assertEqual(self.alert_poll(),[])
         for value in self.bus.message_properties.values(): value['State']=3
         ids=self.alert_poll()
-        self.assertEqual(len(ids),2)
-        self.assertEqual(len(set(ids)),2)
+        self.assertEqual(len(ids),1)
         self.connection.close()
         self.connection=SMS.journal()
         self.bus.owner=':1.99'
@@ -535,43 +533,43 @@ class RetainedInventoryTests(unittest.TestCase):
             self.bus.message_properties[path]['Timestamp']=value
         self.assertEqual(self.alert_poll(),[])
 
-    def test_original_timestamp_and_multiplicity_survive_reenumeration(self):
+    def test_original_timestamp_and_content_identity_survive_reenumeration(self):
         self.messages([20,21])
         first = self.collect()
-        self.assertEqual(len(first),2)
-        self.assertTrue(all(not row['archive_only'] for row in first))
-        self.assertTrue(all(row['occurred_at']=='2026-10-26T01:00:00+00:00' for row in first))
-        self.assertNotEqual(first[0]['id'],first[1]['id'])
+        self.assertEqual(len(first),1)
+        self.assertFalse(first[0]['archive_only'])
+        self.assertEqual(first[0]['occurred_at'],'2026-10-26T01:00:00+00:00')
         self.bus.owner=':1.99'
-        self.messages([0,1])
-        self.assertEqual(self.collect(),first)
         self.messages([0,1,2])
-        after=self.collect()
-        self.assertEqual(len(after),3)
-        self.assertFalse(after[-1]['archive_only'])
+        self.assertEqual(self.collect(),first)
 
-    def test_exact_legacy_bootstrap_preserves_uuid_time_and_ack(self):
+    def test_legacy_inventory_maps_to_existing_id_without_rewriting_history(self):
         self.messages([20])
-        boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        observation=boot+':'+self.bus.owner+':/org/freedesktop/ModemManager1/SMS/20'
-        self.connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES ('legacy','incoming','+15555550100','identical','received','2026-10-20T00:00:00+00:00',?,'received')",(observation,))
+        content=json.dumps(['+15555550100','identical',[],
+                            '2026-10-26T01:00:00+00:00','',0,-1],separators=(',',':'))
+        self.connection.execute('CREATE TABLE incoming_inventory (content TEXT,ordinal INTEGER,message_id TEXT)')
+        for ordinal in (1,2):
+            identity='legacy'+str(ordinal)
+            self.connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES (?, 'incoming','+15555550100','identical','received','2026-10-20T00:00:00+00:00',?,'received')",(identity,'oldnamespace'+str(ordinal)))
+            self.connection.execute('INSERT INTO incoming_inventory VALUES (?,?,?)',(content,ordinal,identity))
+        self.connection.execute('DROP TABLE incoming_keys')
         self.connection.commit()
-        before=[dict(row) for row in self.connection.execute('SELECT * FROM messages')]
-        before[0]['archive_only']=1
+        before=[dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
+        self.connection.close();self.connection=SMS.journal()
         self.assertEqual(self.collect(),before)
+        self.assertEqual(self.connection.execute('SELECT message_id FROM incoming_keys').fetchone()[0],'legacy1')
         self.bus.owner=':1.100';self.messages([0])
         self.assertEqual(self.collect(),before)
 
-    def test_partial_identical_bootstrap_does_not_reuse_mapped_uuid(self):
+    def test_partial_identical_observations_collapse_to_existing_identity(self):
         paths=self.messages([20,21])
         del self.bus.message_properties[paths[0]]
         first=self.collect()
         self.assertEqual(len(first),1)
         self.messages([20,21])
         after=self.collect()
-        self.assertEqual(len(after),2)
+        self.assertEqual(len(after),1)
         self.assertEqual(after[0]['id'],first[0]['id'])
-        self.assertNotEqual(after[0]['id'],after[1]['id'])
         self.assertTrue(all(not row['archive_only'] for row in after))
 
     def test_partial_namespace_publication_retains_original_sms_timestamp(self):
@@ -579,7 +577,7 @@ class RetainedInventoryTests(unittest.TestCase):
         self.bus.owner=':1.99'; self.messages([0]); self.collect()
         self.messages([0,1])
         after=self.collect()
-        self.assertEqual(len(after),2)
+        self.assertEqual(len(after),1)
         self.assertEqual(after[-1]['occurred_at'],first[0]['occurred_at'])
 
     def test_failed_leaf_delayed_capture_uses_sms_timestamp(self):
@@ -599,7 +597,7 @@ class RetainedInventoryTests(unittest.TestCase):
             else:
                 self.bus.message_properties[path]['Timestamp']=timestamp
         rows=self.collect()
-        self.assertEqual(len(rows),4)
+        self.assertEqual(len(rows),3)
         self.assertTrue(all(row['occurred_at'] is None and row['archive_only'] for row in rows))
 
     def test_timezone_offset_is_preserved_and_mutable_fields_do_not_replay(self):
@@ -608,6 +606,60 @@ class RetainedInventoryTests(unittest.TestCase):
         first=self.collect()
         self.assertEqual(first[0]['occurred_at'],'2026-10-25T16:06:32-07:00')
         self.bus.message_properties[paths[0]].update(Storage=2,DeliveryState=1)
+        self.assertEqual(self.collect(),first)
+
+    def test_added_hint_reads_new_completed_sms_before_large_retained_store_and_slow_leaf(self):
+        self.activate_alerts()
+        for count in (15,1000):
+            with self.subTest(retained=count):
+                paths=self.messages(range(count))
+                for properties in self.bus.message_properties.values():
+                    properties['Timestamp']='2026-10-25T23:00:00+00:00'
+                fresh='/org/freedesktop/ModemManager1/SMS/99999'
+                self.bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'].append(fresh)
+                self.bus.message_properties[fresh]={'State':3,'Number':'+15555550100','Text':f'new arrival {count}',
+                                                    'Timestamp':'2026-10-28T00:01:00+00:00'}
+                original=self.bus.get_object;reads=[]
+                def object_for(owner,path):
+                    obj=original(owner,path)
+                    if path in self.bus.message_properties:
+                        reads.append(path)
+                        if path==paths[0]:
+                            def unavailable(*args,**kwargs):raise TimeoutError('synthetic slow leaf')
+                            obj.interfaces['org.freedesktop.DBus.Properties'].GetAll=unavailable
+                    return obj
+                with mock.patch.object(self.bus,'get_object',side_effect=object_for):
+                    SMS.collect_incoming(self.connection,self.bus,hint=fresh)
+                self.assertEqual(reads[0],fresh)
+                self.assertEqual(len(reads),4)
+                rows=self.connection.execute("SELECT * FROM messages WHERE text=?",(f'new arrival {count}',)).fetchall()
+                self.assertEqual(len(rows),1)
+                self.assertEqual(rows[0]['occurred_at'],'2026-10-28T00:01:00+00:00')
+                self.assertEqual(len(SMS.claim_incoming_alerts(self.connection)),1)
+                self.assertEqual(SMS.claim_incoming_alerts(self.connection),[])
+
+    def test_multipart_completion_hint_does_not_wait_for_history_sweep(self):
+        self.activate_alerts()
+        paths=self.messages(range(1000))
+        for properties in self.bus.message_properties.values():
+            properties['Timestamp']='2026-10-25T23:00:00+00:00'
+        multipart=paths[-1]
+        self.bus.message_properties[multipart].update(State=2,Text='multipart new',Timestamp='2026-10-28T00:01:00+00:00')
+        SMS.collect_incoming(self.connection,self.bus,hint=multipart)
+        self.assertEqual(SMS.claim_incoming_alerts(self.connection),[])
+        # Pinned MM emits PropertiesChanged State3, not another Added.
+        self.bus.message_properties[multipart]['State']=3
+        SMS.collect_incoming(self.connection,self.bus,hint=multipart)
+        ids=SMS.claim_incoming_alerts(self.connection)
+        self.assertEqual(len(ids),1)
+        SMS.collect_incoming(self.connection,self.bus,hint=multipart)
+        self.assertEqual(SMS.claim_incoming_alerts(self.connection),[])
+
+    def test_equivalent_source_timezone_reobservations_share_one_identity(self):
+        paths=self.messages([20])
+        first=self.collect()
+        self.bus.owner=':1.90';paths=self.messages([200])
+        self.bus.message_properties[paths[0]]['Timestamp']='2026-10-25T18:00:00-07:00'
         self.assertEqual(self.collect(),first)
 
     def test_new_object_path_different_timestamp_preserves_independent_content(self):
@@ -621,6 +673,7 @@ class RetainedInventoryTests(unittest.TestCase):
 
     def test_real_alarm_preserves_completed_read_and_next_poll_progresses(self):
         paths=self.messages([20,21,22])
+        self.bus.message_properties[paths[2]]['Text']='different message'
         original=self.bus.get_object
         blocked=[]
         def get_object(owner,path):
@@ -656,36 +709,35 @@ class RetainedInventoryTests(unittest.TestCase):
         self.assertEqual(after[0],first[0])
         self.assertEqual(len(blocked),2)
 
-    def test_failed_prefix_rotates_and_batched_identicals_preserve_multiplicity(self):
+    def test_failed_prefix_rotates_and_batched_identicals_collapse(self):
         paths=self.messages(list(range(20,29)))
         for path in paths[:4]:del self.bus.message_properties[path]
         self.assertEqual(self.collect(),[])
         after=self.collect()
-        self.assertEqual(len(after),4)
+        self.assertEqual(len(after),1)
         # Remaining good leaf gets a turn despite four permanently bad paths.
         after=self.collect()
-        self.assertEqual(len(after),5)
-        self.assertEqual(len({row['id'] for row in after}),5)
+        self.assertEqual(len(after),1)
+        self.assertEqual(len({row['id'] for row in after}),1)
         self.bus.owner=':1.200';self.messages(list(range(40,45)))
         self.collect();after=self.collect()
-        self.assertEqual(len(after),5)
+        self.assertEqual(len(after),1)
 
-    def test_disappeared_alias_is_invalidated_before_reappearance(self):
+    def test_same_path_new_source_timestamp_is_read_without_payload_cache(self):
         paths=self.messages([20]);first=self.collect()
-        self.messages([]);self.collect()
-        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM incoming_objects').fetchone()[0],0)
         paths=self.messages([20])
         self.bus.message_properties[paths[0]]['Timestamp']='2026-10-26T02:00:00+00:00'
         after=self.collect()
         self.assertEqual(len(after),2)
         self.assertEqual(after[0],first[0])
 
-    def test_cache_and_inventory_allocation_roll_back_together(self):
+    def test_content_key_and_message_roll_back_together_but_scan_progress_persists(self):
         self.messages([20])
-        with mock.patch.object(SMS,'capture_inventory',side_effect=sqlite3.OperationalError('interrupted')):
+        with mock.patch.object(SMS,'capture_incoming',side_effect=sqlite3.OperationalError('interrupted')):
             with self.assertRaises(sqlite3.OperationalError):self.collect()
         self.connection.rollback()
-        self.assertIsNone(self.connection.execute('SELECT content FROM incoming_objects').fetchone()[0])
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM incoming_keys').fetchone()[0],0)
+        self.assertIsNotNone(self.connection.execute('SELECT path FROM incoming_scan').fetchone()[0])
         self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0],0)
         self.assertEqual(len(self.collect()),1)
 

@@ -2,6 +2,7 @@
 """Fixed root helper for exact SMS sends, receipts, ACKs and local alert claims."""
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -162,8 +163,17 @@ def journal():
     connection.execute("CREATE TABLE IF NOT EXISTS incoming_alert_start (occurred_at TEXT NOT NULL)")
     if not connection.execute("SELECT 1 FROM incoming_alert_start").fetchone():
         connection.execute("INSERT INTO incoming_alert_start VALUES (?)", (datetime.now(timezone.utc).isoformat(),))
-    connection.execute("CREATE TABLE IF NOT EXISTS incoming_objects (observation TEXT PRIMARY KEY, content TEXT, occurred_at TEXT, last_checked INTEGER NOT NULL DEFAULT 0)")
-    connection.execute("CREATE TABLE IF NOT EXISTS incoming_inventory (content TEXT NOT NULL, ordinal INTEGER NOT NULL, message_id TEXT NOT NULL UNIQUE, PRIMARY KEY(content,ordinal))")
+    connection.execute("CREATE TABLE IF NOT EXISTS incoming_scan (path TEXT)")
+    if not connection.execute("SELECT 1 FROM incoming_scan").fetchone():
+        connection.execute("INSERT INTO incoming_scan VALUES (NULL)")
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_keys'").fetchone():
+        connection.execute("CREATE TABLE incoming_keys (content_key TEXT PRIMARY KEY, message_id TEXT NOT NULL)")
+        # Keep every legacy receipt unchanged. Only future observations collapse
+        # equal source messages; they reuse the first existing durable identity.
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_inventory'").fetchone():
+            for row in connection.execute("SELECT content,message_id FROM incoming_inventory ORDER BY ordinal"):
+                connection.execute("INSERT OR IGNORE INTO incoming_keys VALUES (?,?)",
+                                   (incoming_key(row["content"]), row["message_id"]))
     if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_cutover'").fetchone():
         connection.execute("CREATE TABLE incoming_cutover (occurred_at TEXT NOT NULL)")
         if connection.execute("SELECT 1 FROM messages WHERE direction='incoming' LIMIT 1").fetchone():
@@ -190,19 +200,16 @@ def begin_attempt(connection, message_id, number, text, occurred_at=None):
     return "unknown", True
 
 
-def collect_incoming(connection, bus):
-    """Capture retained received inventory without replaying namespace changes.
+def collect_incoming(connection, bus, hint=None):
+    """Capture completed SMS using source-content identity, not exported paths.
 
-    Received objects are never deleted by this stack. Immutable content plus
-    multiplicity therefore preserves independent identical messages across MM
-    path/owner changes. High-water ordinals never shrink. Incoming event time
-    comes from the original aware SMS Timestamp, never rediscovery time.
-    Exact legacy observations retain UUID/time/ACK and become archive-only.
+    A durable scan cursor rotates bounded leaf reads, including failed reads.
+    Equal sender/timestamp/content observations collapse
+    by policy, including across owner/path changes. Source time never becomes NOW.
     """
     owner = str(bus.get_name_owner(MM_NAME))
     if not re.fullmatch(r":[0-9]+\.[0-9]+", owner):
         raise ValueError("owner")
-    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     objects = dbus.Interface(bus.get_object(owner, MM_ROOT), OBJECT_MANAGER).GetManagedObjects(timeout=10)
     messaging = [interfaces[MESSAGING] for interfaces in objects.values() if MESSAGING in interfaces]
     if len(messaging) != 1 or "Messages" not in messaging[0]:
@@ -210,24 +217,15 @@ def collect_incoming(connection, bus):
     paths = sorted({str(path) for path in messaging[0]["Messages"]})
     if any(not SMS_PATH_RE.fullmatch(path) for path in paths):
         raise ValueError("SMS path")
-    observations = {boot + ":" + owner + ":" + path: path for path in paths}
-    connection.execute("BEGIN IMMEDIATE")
-    for row in connection.execute("SELECT observation FROM incoming_objects").fetchall():
-        if row["observation"] not in observations:
-            connection.execute("DELETE FROM incoming_objects WHERE observation=?", (row["observation"],))
-    connection.executemany("INSERT OR IGNORE INTO incoming_objects (observation) VALUES (?)",
-                           [(observation,) for observation in observations])
-    connection.commit()
-    pending = [row for row in connection.execute("SELECT observation FROM incoming_objects WHERE content IS NULL ORDER BY last_checked,observation")
-               if row["observation"] in observations]
-    # Four two-second leaf calls plus the ten-second manager call fit inside
-    # the receipt deadline. Mark attempts first, so failed leaves rotate too.
-    for row in pending[:CAPTURE_BATCH]:
-        observation = row["observation"]
-        path = observations[observation]
-        connection.execute("BEGIN IMMEDIATE")
-        turn = connection.execute("SELECT COALESCE(MAX(last_checked),0)+1 FROM incoming_objects").fetchone()[0]
-        connection.execute("UPDATE incoming_objects SET last_checked=? WHERE observation=?", (turn, observation))
+    previous = connection.execute("SELECT path FROM incoming_scan").fetchone()[0]
+    ordered = [path for path in paths if previous is None or path > previous]
+    ordered += [path for path in paths if previous is not None and path <= previous]
+    if hint in paths:
+        ordered = [hint] + [path for path in ordered if path != hint]
+    # Advance before each bounded read. A timeout retains earlier receipts and
+    # the next poll continues beyond the timed-out leaf rather than starving.
+    for path in ordered[:CAPTURE_BATCH]:
+        connection.execute("UPDATE incoming_scan SET path=?", (path,))
         connection.commit()
         try:
             properties = dbus.Interface(bus.get_object(owner, path),
@@ -252,57 +250,39 @@ def collect_incoming(connection, bus):
             occurred_at = timestamp.isoformat() if timestamp.tzinfo is not None else None
         except (TypeError, ValueError):
             occurred_at = None
-        # MM 1.24.2 gives each object a process-unique path and completes
-        # received content before State=3. Cache only that immutable content;
-        # renumbering/disappearance invalidates the alias on the next list.
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("UPDATE incoming_objects SET content=?,occurred_at=? WHERE observation=?",
-                           (content, occurred_at, observation))
-        capture_inventory(connection, observations)
+        capture_incoming(connection, content, occurred_at)
         connection.commit()
 
 
-def capture_inventory(connection, observations):
-    """Allocate retained multiplicity inside the cache/message transaction."""
-    groups = {}
-    for row in connection.execute("SELECT observation,content,occurred_at FROM incoming_objects WHERE content IS NOT NULL"):
-        if row["observation"] not in observations:
-            continue
-        number, text = json.loads(row["content"])[:2]
-        groups.setdefault(row["content"], []).append((row["observation"], number, text, row["occurred_at"]))
+def incoming_key(content):
+    """Hash sender, original source time and payload; identical messages collapse."""
+    number, text, data, source_time = json.loads(content)[:4]
+    try:
+        timestamp = datetime.fromisoformat(source_time)
+        if timestamp.utcoffset() is not None:
+            source_time = timestamp.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        pass
+    return hashlib.sha256(json.dumps([number, source_time, text, data],
+                                   ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def capture_incoming(connection, content, occurred_at):
+    """Insert a new source key and receipt atomically, preserving old receipt IDs."""
+    key = incoming_key(content)
+    if connection.execute("SELECT 1 FROM incoming_keys WHERE content_key=?", (key,)).fetchone():
+        return
+    number, text = json.loads(content)[:2]
+    identity = uuid.uuid4().hex
     cutover = connection.execute("SELECT occurred_at FROM incoming_cutover").fetchone()
-    for content, members in groups.items():
-        count = connection.execute("SELECT COUNT(*) FROM incoming_inventory WHERE content=?", (content,)).fetchone()[0]
-        candidates = []
-        for observation, number, text, occurred_at in members:
-            legacy = connection.execute("SELECT * FROM messages WHERE observation=?", (observation,)).fetchone()
-            mapped = connection.execute("SELECT content FROM incoming_inventory WHERE message_id=?", (legacy["id"],)).fetchone() if legacy else None
-            if mapped:
-                if mapped["content"] == content:
-                    continue
-                legacy = None
-            candidates.append((observation, number, text, occurred_at, legacy))
-        additional = max(0, len(members) - count)
-        for ordinal, (observation, number, text, occurred_at, legacy) in enumerate(candidates[-additional:] if additional else [], count + 1):
-            if legacy and (legacy["direction"], legacy["number"], legacy["text"]) != ("incoming", number, text):
-                # A legacy observation is reusable only with matching stored
-                # content; never guess an existing UUID from a path alone.
-                legacy = None
-            if legacy:
-                identity = legacy["id"]
-                # Older clients recorded rediscovery time. Keep their immutable
-                # payload/time/ACK; pending legacy receipts must not fire turns.
-                connection.execute("UPDATE messages SET archive_only=1 WHERE id=?", (identity,))
-            else:
-                identity = uuid.uuid4().hex
-                archive_only = occurred_at is None or (cutover is not None and
-                    datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(cutover["occurred_at"]))
-                saved_observation = None if connection.execute("SELECT 1 FROM messages WHERE observation=?", (observation,)).fetchone() else observation
-                alert_start = connection.execute("SELECT occurred_at FROM incoming_alert_start").fetchone()[0]
-                alert_claimed = archive_only or datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(alert_start)
-                connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only,alert_claimed) VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL, ?, ?)",
-                                   (identity, number, text, occurred_at, saved_observation, int(archive_only), int(alert_claimed)))
-            connection.execute("INSERT INTO incoming_inventory VALUES (?,?,?)", (content, ordinal, identity))
+    archive_only = occurred_at is None or (cutover is not None and
+        datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(cutover["occurred_at"]))
+    alert_start = connection.execute("SELECT occurred_at FROM incoming_alert_start").fetchone()[0]
+    alert_claimed = archive_only or datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(alert_start)
+    connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only,alert_claimed) VALUES (?, 'incoming', ?, ?, 'received', ?, NULL, NULL, ?, ?)",
+                       (identity, number, text, occurred_at, int(archive_only), int(alert_claimed)))
+    connection.execute("INSERT INTO incoming_keys VALUES (?,?)", (key, identity))
 
 
 def claim_incoming_alerts(connection):
@@ -323,9 +303,11 @@ def receipt_operation(value):
     """Collect receipts/claim local alerts, read one attempt, or acknowledge status."""
     connection = journal()
     try:
-        if value == {"operation": "alerts"}:
+        if (value == {"operation": "alerts"} or
+                set(value) == {"operation", "path"} and value["operation"] == "alerts"
+                and isinstance(value["path"], str) and SMS_PATH_RE.fullmatch(value["path"])):
             try:
-                collect_incoming(connection, dbus.SystemBus())
+                collect_incoming(connection, dbus.SystemBus(), value.get("path"))
             except Exception:
                 connection.rollback()
             print(json.dumps({"alerts": claim_incoming_alerts(connection)}))
