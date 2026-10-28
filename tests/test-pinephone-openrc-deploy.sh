@@ -38,7 +38,7 @@ for script in openrc-session openrc-session-power openrc-suspend-root \
     emacsos-ui.initd waydroid-container-wrapper; do
     sh -n "$deploy_dir/$script"
 done
-for script in openrc-sms-root openrc-wifi-connect-root openrc-power-monitor; do
+for script in openrc-sms-root openrc-wifi-connect-root openrc-power-monitor openrc-usage; do
     python3 -I -c 'compile(open(__import__("sys").argv[1], encoding="utf-8").read(), __import__("sys").argv[1], "exec")' \
         "$deploy_dir/$script"
 done
@@ -50,16 +50,16 @@ done
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
 for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
-    openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
+    openrc-session-power openrc-power-monitor openrc-usage openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root \
     openrc-device-root openrc-doas.conf openrc-chat-url openrc-assist-web-url \
-    openrc-emacs-server.nft \
+    openrc-emacs-server.nft 99-emacsos-vibrator.rules \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
@@ -90,7 +90,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 50 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 53 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -144,7 +144,8 @@ mutating_line=$(grep -nF 'mutating=1' "$deploy_dir/openrc-update-root" | tail -1
     [ "$keyboard_snapshot_line" -lt "$bootstrap_line" ]
 [ "$helper_backup_line" -lt "$bootstrap_line" ]
 grep -F 'bootstrap_helper_replaced=1' "$deploy_dir/openrc-update-root" >/dev/null
-expected='EMACSOS-COMMANDS.org
+expected='99-emacsos-vibrator.rules
+EMACSOS-COMMANDS.org
 assist-web-git-helper.py
 assist-web-git.el
 assist-web.el
@@ -176,10 +177,12 @@ openrc-session-power
 openrc-sms-root
 openrc-suspend-root
 openrc-sway.config
+openrc-usage
 openrc-wifi-connect-root
 os.el
 phone-call.el
 phone-fonts.conf
+phone-notifications.el
 phone-sms-chat.el
 phone-sms.el
 sms_forward.py
@@ -339,7 +342,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 50 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 53 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null

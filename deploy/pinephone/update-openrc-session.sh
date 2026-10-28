@@ -71,6 +71,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-session" \
     "$deploy_dir/openrc-session-power" \
     "$deploy_dir/openrc-power-monitor" \
+    "$deploy_dir/openrc-usage" \
     "$deploy_dir/openrc-process-group" \
     "$deploy_dir/emacsos-wvkbd-launch" \
     "$deploy_dir/swipe-learning-collector.py" \
@@ -86,6 +87,7 @@ scp -q "$@" \
     "$deploy_dir/openrc-chat-url" \
     "$deploy_dir/openrc-assist-web-url" \
     "$deploy_dir/openrc-emacs-server.nft" \
+    "$deploy_dir/99-emacsos-vibrator.rules" \
     "$deploy_dir/emacsos-ui.initd" \
     "$deploy_dir/openrc-boot-mode" \
     "$deploy_dir/waydroid-container.service" \
@@ -95,7 +97,7 @@ scp -q "$@" \
 scp -q "$@" "$repo_dir/os.el" "$repo_dir/emacsos-typography.el" "$repo_dir/chat.el" "$repo_dir/assist-web.el" \
     "$repo_dir/assist-web-git.el" "$repo_dir/assist-web-git-helper.py" \
     "$repo_dir/emacsos-assist.el" "$repo_dir/network.el" "$repo_dir/phone-call.el" \
-    "$repo_dir/phone-sms.el" "$repo_dir/phone-sms-chat.el" \
+    "$repo_dir/phone-sms.el" "$repo_dir/phone-sms-chat.el" "$repo_dir/phone-notifications.el" \
     "$repo_dir/swipe-learning.el" \
     "$repo_dir/EMACSOS-COMMANDS.org" \
     "$phone_host:$stage/"
