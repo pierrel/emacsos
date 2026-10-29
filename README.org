@@ -814,10 +814,48 @@ accepted the message, not carrier delivery. =unknown= must not be retried as a n
 send to repair the archive.
 
 The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
-source checkout. It also records incoming ModemManager observations. Retries of
-one owner/boot/object observation retain one id; identical independent objects
-retain separate ids. A new ModemManager owner can expose an old physical SMS as a
-new observation. Physical deduplication across re-enumeration is not established.
+source checkout. Received modem history is retained for the offline UI. A unique
+SHA256 key over exact sender, UTC-normalized original Timestamp and Text/Data
+maps repeated observations to one durable UUID. Equal messages within the source
+timestamp resolution deliberately collapse. Exported paths, owner changes and raw
+Added signals do not establish novelty. See
+[[file:docs/2026-10-28-sms-platform-identity-simplification.org][the pinned platform contract]] and
+[[file:docs/2026-10-28-sms-ingestion-only-scope.org][the current ingestion-only scope]].
+
+Collection reads at most four objects per poll. A durable cursor advances before
+each read, including unreadable/incomplete objects. Each completed content key
+and receipt commits atomically. A deadline retains earlier progress and the next
+poll starts beyond the failed leaf. Trusted Added and multipart State3 completion
+signals supply bounded transient priority hints, so new completions do not wait
+behind an entire retained-history sweep. Hints are not durable identity and
+never directly request vibration. No cached payload inventory or multiplicity
+reconciliation remains; repeated reads are safe through SQLite uniqueness.
+The local =collect= operation returns only a completion boolean and performs no
+notification, alert claim, acknowledgment or send. The original finite SMS
+feedback remains unchanged; novelty-gated feedback and the notification center
+are independent changes, not guarantees of this ingestion-only source.
+
+Incoming =occurred_at= uses the original timezone-aware ModemManager SMS
+=Timestamp=, never rediscovery time. The host admits a subscription only if that
+source time is strictly after creation: delayed old texts and equal timestamps
+remain history-only. Missing, invalid or timezone-naive timestamps use null wire
+time plus =archive_only=true=, so they cannot start a turn. The current host
+archive substitutes its recording time when wire time is null; that fallback is
+not an original SMS timestamp and never establishes subscription eligibility.
+
+On first journal upgrade, existing incoming rows become archive-only without
+changing UUID, body, stored time or acknowledgment. Exact current observations
+in the old content inventory seed the new key map with an existing UUID; every
+old duplicate row and its ACK remain untouched. A journal with existing incoming history also records one durable
+upgrade cutoff. Unidentified messages timestamped at or before that cutoff stay
+archive-only, even if ModemManager publishes them later under new paths. This
+explicit migration baseline avoids replaying history to older subscriptions;
+post-cutoff timestamps use the normal subscription rule. Fresh journals have no
+migration cutoff. Outgoing rows and pending send outcomes retain their existing paths.
+No received modem messages are deleted, and no server identities are rewritten.
+Deploy matching host cutoff/archive-only support first. Collection rollback requires a reviewed compatibility procedure; never restore
+an older journal snapshot to repair history. Host downgrade while the new
+transport is active rejects its metadata and retains receipts unacknowledged.
 
 An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the
 unprivileged transport inside the existing UI service. It requires exactly

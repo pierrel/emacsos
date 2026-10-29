@@ -259,6 +259,98 @@ this finite client creates no separate network notification channel."
                  (string-trim (buffer-string)))
              (file-error "SMS transport is not configured or has not started."))))
 
+(defvar emacsos-pinephone-sms-capture-process nil
+  "Current bounded local SMS capture; never a server request.")
+
+(defvar emacsos-pinephone-sms-capture-paths nil
+  "Bounded transient trusted Added hints; not receipt identities.")
+
+(defun emacsos-pinephone-sms-capture-finished (process _event)
+  "Consume only the current capture helper's bounded completion."
+  (when (and (eq process emacsos-pinephone-sms-capture-process)
+             (memq (process-status process) '(exit signal)))
+    (setq emacsos-pinephone-sms-capture-process nil)
+    (let ((buffer (process-buffer process)))
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (unless (zerop (process-exit-status process)) (error "Capture query failed"))
+                (let ((value (with-current-buffer buffer
+                               (json-parse-string (buffer-string) :object-type 'alist))))
+                  (unless (equal value '((collected . t)))
+                    (error "Capture query failed"))))
+            (error (message "Local SMS capture query unavailable.")))
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (when emacsos-pinephone-sms-capture-paths
+        (emacsos-pinephone-sms-capture-sync)))))
+
+(defun emacsos-pinephone-sms-capture-sync (&optional path)
+  "Asynchronously capture completed SMS locally, even without a server."
+  (when (and (stringp path)
+             (string-match-p "\\`/org/freedesktop/ModemManager1/SMS/[0-9]+\\'" path))
+    (setq emacsos-pinephone-sms-capture-paths
+          (cons path (delete path emacsos-pinephone-sms-capture-paths)))
+    (when (> (length emacsos-pinephone-sms-capture-paths) 64)
+      (setcdr (nthcdr 63 emacsos-pinephone-sms-capture-paths) nil)))
+  (unless emacsos-pinephone-sms-capture-process
+    (let ((hint (pop emacsos-pinephone-sms-capture-paths))
+          (buffer (generate-new-buffer " *emacsos-sms-captures*")) process)
+      (condition-case nil
+          (progn
+            (setq process (make-process
+                           :name "emacsos-sms-captures" :buffer buffer :noquery t
+                           :connection-type 'pipe :coding 'utf-8-unix :sentinel #'ignore
+                           :command '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-sms")
+                           :filter (lambda (_ text)
+                                     (when (buffer-live-p buffer)
+                                       (with-current-buffer buffer
+                                         (insert (substring text 0 (min (length text)
+                                                                       (max 0 (- 4096 (buffer-size)))))))))))
+            (setq emacsos-pinephone-sms-capture-process process)
+            (process-send-string process (json-encode
+                                          (append '((operation . "collect"))
+                                                  (when hint `((path . ,hint))))))
+            (process-send-eof process)
+            (set-process-sentinel process #'emacsos-pinephone-sms-capture-finished)
+            (when (memq (process-status process) '(exit signal))
+              (run-at-time 0 nil #'emacsos-pinephone-sms-capture-finished process "finished"))
+            (run-at-time 35 nil (lambda () (when (process-live-p process) (delete-process process)))))
+        (error
+         (setq emacsos-pinephone-sms-capture-process nil)
+         (when (process-live-p process) (delete-process process))
+         (when (buffer-live-p buffer) (kill-buffer buffer))
+         (message "Local SMS capture query could not start."))))))
+
+(defun emacsos-pinephone-sms-added (owner generation path)
+  "Prompt local collection for trusted SMS signals; never infer novelty from raw Added."
+  (when (and (equal owner emacsos-call--current-owner)
+             (= generation emacsos-call--owner-generation))
+    (emacsos-pinephone-sms-capture-sync path)))
+
+(defvar emacsos-pinephone-sms-completed-handle nil
+  "Persistent completed-SMS signal observation, not a per-message subscription.")
+
+(defun emacsos-pinephone-sms-properties-changed (interface changed _invalidated)
+  "Hint collection when the current modem completes a multipart SMS."
+  (let ((owner (emacsos-call--event-owner)))
+    (when (and (emacsos-call--valid-owner-p owner)
+               (equal owner emacsos-call--current-owner)
+               (equal interface "org.freedesktop.ModemManager1.Sms")
+               (listp changed)
+               (equal (emacsos-call--snapshot-value changed "State") 3))
+      (emacsos-pinephone-sms-added owner emacsos-call--owner-generation
+                                 (emacsos-call--event-path)))))
+
+(defun emacsos-pinephone-register-sms-completion ()
+  "Observe completion without waiting for a retained-history scan."
+  (unless emacsos-pinephone-sms-completed-handle
+    (condition-case nil
+        (setq emacsos-pinephone-sms-completed-handle
+              (emacsos-call--register-signal-bounded
+               :system nil nil "org.freedesktop.DBus.Properties" "PropertiesChanged"
+               #'emacsos-pinephone-sms-properties-changed))
+      (error (message "SMS completion observation unavailable; periodic collection remains.")))))
+
 (defun emacsos-pinephone-sms-result (status success)
   "Return the strict terminal SMS STATUS, or conservative unknown."
   (cond
@@ -1221,6 +1313,10 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (server-start)
   (require 'os)
   (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-feedback)
+  (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-added)
+  (emacsos-pinephone-register-sms-completion)
+  (emacsos-pinephone-sms-capture-sync)
+  (run-at-time 30 30 #'emacsos-pinephone-sms-capture-sync)
   (require 'swipe-learning)
   (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)
   (define-key emacsos-command-map (kbd "b") #'emacsos-firefox-start)
