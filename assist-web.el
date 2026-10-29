@@ -7812,6 +7812,7 @@ or recheck the exact Run behind an owned observer."
   "Durably remove waiting local submissions from this Assist Web thread.
 Keep editable input and every submitted or uncertain entry, including its
 immutable request identity.  Never cancel server work or start another send.
+Contract derived collision state and retain source-draft restoration actions.
 Return the number removed; a failed cache write leaves the queue unchanged."
   (interactive)
   (unless (derived-mode-p 'emacsos-assist-web-mode)
@@ -7827,23 +7828,29 @@ Return the number removed; a failed cache write leaves the queue unchanged."
                                   (eq (emacsos-assist-web--entry-state entry) 'queued))
                                 original)))
          (remaining (unless legacy (seq-difference original waiting #'eq)))
+         (original-collision emacsos-assist-web--collision-p)
          (count (length waiting))
          (inhibit-quit t))
     (when waiting
       (if legacy (setq emacsos-assist-web--follow-ups nil)
-        (setq emacsos-assist-web--queue remaining))
+        (setq emacsos-assist-web--queue remaining
+              emacsos-assist-web--collision-p
+              (and original-collision (>= (length remaining) 2))))
       (unless (condition-case nil
                   (if legacy (emacsos-assist-web--legacy-save-draft)
                     (emacsos-assist-web--save-draft))
                 ((error quit) nil))
         (if legacy (setq emacsos-assist-web--follow-ups original)
-          (setq emacsos-assist-web--queue original))
+          (setq emacsos-assist-web--queue original
+                emacsos-assist-web--collision-p original-collision))
         (user-error "Queue unchanged; local cache could not be saved"))
       ;; Delete from the tail so removal cannot swallow another waiting region.
       ;; Retained entries keep their markers and active transport callbacks.
       (unless legacy
+        (emacsos-assist-web--clear-recovery-draft-action)
         (dolist (entry (reverse waiting))
-          (emacsos-assist-web--entry-remove-render entry))))
+          (emacsos-assist-web--entry-remove-render entry))
+        (emacsos-assist-web--render-recovery-draft-action)))
     (message "Cleared %d waiting message%s; submitted and uncertain work kept"
              count (if (= count 1) "" "s"))
     count))

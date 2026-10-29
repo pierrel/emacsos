@@ -9536,8 +9536,12 @@ server clears only flags for a view that is still current."
 (ert-deftest test-assist-web-queue-clear-save-failure-keeps-resident-and-durable-state ()
   (dolist (failure '(nil error quit))
     (test-assist-web--with-clear-queue
-     (setq emacsos-assist-web--queue (list (emacsos-assist-web--entry "waiting")))
-     (emacsos-assist-web--entry-render (car emacsos-assist-web--queue))
+     (setq emacsos-assist-web--queue
+           (list (emacsos-assist-web--entry "waiting")
+                 (emacsos-assist-web--entry "also waiting"))
+           emacsos-assist-web--collision-p t)
+     (dolist (entry emacsos-assist-web--queue)
+       (emacsos-assist-web--entry-render entry))
      (emacsos-assist-web--replace-input "editable")
      (should (emacsos-assist-web--save-draft))
      (let ((original emacsos-assist-web--queue)
@@ -9547,6 +9551,7 @@ server clears only flags for a view that is still current."
                   (lambda () (if failure (signal failure nil) nil))))
          (should-error (assist-thread-queue-clear) :type 'user-error))
        (should (eq emacsos-assist-web--queue original))
+       (should emacsos-assist-web--collision-p)
        (should (equal (buffer-string) image))
        (should (equal (emacsos-assist-web--read-cache
                        (emacsos-assist-web--draft-cache-name)) saved))))))
@@ -9604,3 +9609,41 @@ server clears only flags for a view that is still current."
                 (lambda () (ert-fail "Invalid recovery must not save"))))
        (should-error (assist-thread-queue-clear) :type 'user-error))
      (should (eq emacsos-assist-web--queue original)))))
+
+(ert-deftest test-assist-web-queue-clear-contracts-collision-with-durable-queue ()
+  (test-assist-web--with-clear-queue
+   (setq emacsos-assist-web--collision-p t
+         emacsos-assist-web--queue
+         (list (emacsos-assist-web--entry "uncertain" 'acceptance-unknown
+                                        "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+               (emacsos-assist-web--entry "waiting" 'queued
+                                        "emacsos-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+   (should (= (assist-thread-queue-clear) 1))
+   (should-not emacsos-assist-web--collision-p)
+   (let ((saved (emacsos-assist-web--read-cache (emacsos-assist-web--draft-cache-name))))
+     (should-not (alist-get 'collision saved))
+     (should (= (length (alist-get 'queue saved)) 1)))
+   (with-temp-buffer
+     (emacsos-assist-web-mode)
+     (setq emacsos-assist-web--thread-id "clear-thread")
+     (emacsos-assist-web--write-prompt)
+     (emacsos-assist-web--restore-draft t)
+     (should-not emacsos-assist-web--collision-p)
+     (should (= (length emacsos-assist-web--queue) 1))
+     (should-not emacsos-assist-web--passive-recovery-invalid-p))))
+
+(ert-deftest test-assist-web-queue-clear-keeps-source-draft-restoration-actionable ()
+  (test-assist-web--with-clear-queue
+   (setq emacsos-assist-web--queue (list (emacsos-assist-web--entry "waiting"))
+         emacsos-assist-web--recovery-draft "retained source draft")
+   (emacsos-assist-web--entry-render (car emacsos-assist-web--queue))
+   (emacsos-assist-web--render-recovery-draft-action)
+   (should (= (assist-thread-queue-clear) 1))
+   (should (equal emacsos-assist-web--recovery-draft "retained source draft"))
+   (goto-char (point-min))
+   (should (search-forward "Restore Draft" nil t))
+   (let ((button (button-at (1- (point)))))
+     (should button)
+     (button-activate button))
+   (should (equal (emacsos-assist-web--input) "retained source draft"))
+   (should-not emacsos-assist-web--recovery-draft)))
