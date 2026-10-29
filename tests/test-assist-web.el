@@ -9647,3 +9647,28 @@ server clears only flags for a view that is still current."
      (button-activate button))
    (should (equal (emacsos-assist-web--input) "retained source draft"))
    (should-not emacsos-assist-web--recovery-draft)))
+
+(ert-deftest test-assist-web-queue-clear-reopen-keeps-source-draft-through-later-save ()
+  (test-assist-web--with-clear-queue
+   (setq emacsos-assist-web--queue (list (emacsos-assist-web--entry "waiting"))
+         emacsos-assist-web--recovery-draft "retained café source")
+   (emacsos-assist-web--entry-render (car emacsos-assist-web--queue))
+   (emacsos-assist-web--render-recovery-draft-action)
+   (should (= (assist-thread-queue-clear) 1))
+   (with-temp-buffer
+     (emacsos-assist-web-mode)
+     (setq emacsos-assist-web--thread-id "clear-thread")
+     (emacsos-assist-web--write-prompt)
+     (emacsos-assist-web--restore-draft)
+     (should emacsos-assist-web--queue-model-p)
+     (should-not emacsos-assist-web--queue)
+     (should (equal emacsos-assist-web--recovery-draft "retained café source"))
+     (should (emacsos-assist-web--save-draft))
+     (should (equal (alist-get 'recovery_draft
+                              (emacsos-assist-web--read-cache
+                               (emacsos-assist-web--draft-cache-name)))
+                    "retained café source"))
+     (goto-char (point-min))
+     (should (search-forward "Restore Draft" nil t))
+     (button-activate (button-at (1- (point))))
+     (should (equal (emacsos-assist-web--input) "retained café source")))))

@@ -8266,12 +8266,15 @@ ACCEPTED-RUN-ID is its already validated Run identity."
         t))))
 
 (defun emacsos-assist-web--restore-draft (&optional passive-transport)
-  "Restore queue state before exact transport, unless PASSIVE-TRANSPORT defers it."
+  "Restore queue state before exact transport, unless PASSIVE-TRANSPORT defers it.
+A present queue field also owns an empty FIFO and its retained source draft;
+only records without that field use legacy restoration.  Empty FIFOs start
+no transport or canonical adoption."
   (when-let* ((name (emacsos-assist-web--draft-cache-name))
               (draft (emacsos-assist-web--read-cache name)))
     (let ((entries (alist-get 'queue draft))
           (text (alist-get 'text draft)) changed)
-      (if (not entries)
+      (if (not (assq 'queue draft))
           (if passive-transport
               (unless (emacsos-assist-web--restore-passive-legacy-accepted draft)
                 (setq emacsos-assist-web--passive-recovery-invalid-p t)
@@ -8284,7 +8287,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                (recovery-draft (alist-get 'recovery_draft draft))
                (collision (alist-get 'collision draft))
                (valid-outer
-                (and (listp entries) (<= 1 (length entries) 4)
+                (and (listp entries) (<= 0 (length entries) 4)
                      (stringp text)
                      (or (null cached-thread-id)
                          (and (stringp cached-thread-id)
@@ -8416,7 +8419,7 @@ ACCEPTED-RUN-ID is its already validated Run identity."
                        "local recovery could not be saved; restart to recover")
                       (emacsos-assist-web--set-status
                        "local recovery could not be saved; restart to recover"))))
-                (unless (or passive-transport
+                (unless (or (null restored) passive-transport
                             (eq changed 'persistence-failed)
                             emacsos-assist-web--manual-recovery-required
                             (eq emacsos--assist-active-surface 'chat))
