@@ -513,3 +513,76 @@
      (should-not emacsos-assist-web--in-flight)
      (should emacsos-assist-web--pending-accepted-p)
      (should (equal emacsos-assist-web--run-id "accepted-run")))))
+
+(ert-deftest test-send-draft-r3-ready-snapshot-cannot-replace-active-stream-markers ()
+  (test-send-draft--with-thread
+   (emacsos-assist-web--append-pending "accepted message")
+   (emacsos-assist-web--reset-assistant 1)
+   (emacsos-assist-web--append-delta 1 1 "partial")
+   (emacsos-assist-web--replace-input "editable tail")
+   (setq emacsos-assist-web--run-id "active-run" emacsos-assist-web--pending-accepted-p t
+         emacsos-assist-web--in-flight t)
+   (let ((before (buffer-string))
+         (start (marker-position emacsos-assist-web--assistant-start)))
+     (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                (lambda (_m path _v cb &rest _)
+                  (funcall cb (if (string-match-p "/runs/" path)
+                                  '((thread_id . "draft-thread") (id . "active-run") (status . "running"))
+                                '((thread . ((id . "draft-thread") (description . "Canonical")
+                                              (status . "ready") (workspace . ((repo_label . "Synthetic")))))
+                                  (messages . nil))) nil)))
+               ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore))
+       ;; This is the same programmatic Refresh used after Git reconciliation.
+       (emacsos-assist-web-refresh-thread))
+     (should emacsos-assist-web--in-flight)
+     (should (equal before (buffer-string)))
+     (should (= start (marker-position emacsos-assist-web--assistant-start)))
+     (emacsos-assist-web--append-delta 1 2 " later")
+     (should (string-match-p "partial later" (buffer-string)))
+     (should (equal (emacsos-assist-web--input) "editable tail")))))
+
+(ert-deftest test-send-draft-r3-exact-terminal-refresh-clears-only-recheck-notice ()
+  (dolist (notice '(nil "Operator repair is required"))
+    (test-send-draft--with-thread
+     (emacsos-assist-web--append-pending "accepted message")
+     (setq emacsos-assist-web--run-id "finished-run" emacsos-assist-web--pending-accepted-p t
+           emacsos-assist-web--in-flight t)
+     (emacsos-assist-web--replace-input "editable tail")
+     (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                (lambda (_m path _v cb &rest _)
+                  (when notice (setq emacsos-assist-web--lifecycle-notice notice))
+                  (funcall cb (if (string-match-p "/runs/" path)
+                                  '((thread_id . "draft-thread") (id . "finished-run") (status . "success"))
+                                '((thread . ((id . "draft-thread") (description . "Final canonical")
+                                              (status . "ready") (workspace . ((repo_label . "Synthetic")))))
+                                  (messages . nil))) nil)))
+               ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore))
+       (emacsos-assist-web-refresh-thread))
+     (should-not emacsos-assist-web--run-id)
+     (should-not emacsos-assist-web--pending-accepted-p)
+     (should-not emacsos-assist-web--in-flight)
+     (should-not emacsos-assist-web--run-outcome-uncertain)
+     (should (equal emacsos-assist-web--lifecycle-notice notice))
+     (should (string-match-p "Final canonical" (buffer-string)))
+     (should (equal (emacsos-assist-web--input) "editable tail")))))
+
+(ert-deftest test-send-draft-r3-peer-recheck-notice-clears-only-with-matching-removal ()
+  (dolist (matching '(nil t))
+    (test-send-draft--with-thread
+     (let ((source (current-buffer)) (peer (generate-new-buffer " *recheck-peer*")))
+       (unwind-protect
+           (progn
+             (emacsos-assist-web--run-recheck-start "draft-thread" "finished-run")
+             (with-current-buffer peer
+               (emacsos-assist-web-mode)
+               (setq emacsos-assist-web--thread-id "draft-thread"
+                     emacsos-assist-web--lifecycle-notice "Run recheck pending; Refresh"
+                     emacsos-assist-web--run-outcome-uncertain
+                     (and matching (list (list :tid "draft-thread" :run-id "finished-run" :origin source :epoch 0)))))
+             (emacsos-assist-web--run-status-confirmed "draft-thread" "finished-run" 0)
+             (should-not emacsos-assist-web--lifecycle-notice)
+             (with-current-buffer peer
+               (should-not emacsos-assist-web--run-outcome-uncertain)
+               (should (equal emacsos-assist-web--lifecycle-notice
+                              (unless matching "Run recheck pending; Refresh")))))
+         (kill-buffer peer))))))

@@ -643,7 +643,10 @@ lines; already accepted Runs remain server history. A current response observer
 continues independently when another message is accepted. If a local chat starts
 while HTTP acceptance is pending, the accepted Web Run remains server-owned;
 explicit Refresh observes it after local chat finishes, without overlapping
-transports. After a restart,
+transports. Programmatic refresh may cache canonical history during streaming,
+but leaves the provisional response display intact until its exact Run is
+retired. Verified reconciliation clears its own pending-recheck notice without
+clearing unrelated access or repair warnings. After a restart,
 =Refresh= reads canonical server history and status; it does not reconstruct a
 local accepted-Run queue or automatically attach a previous SSE observer.
 A newly created thread keeps its current buffer and adopts its canonical title

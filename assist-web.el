@@ -577,6 +577,9 @@ The caller owns both the exact Run GET and subsequent canonical commit."
       (let ((origin (current-buffer)))
         (setq emacsos-assist-web--run-outcome-uncertain
               (delq record emacsos-assist-web--run-outcome-uncertain))
+        (when (and (not emacsos-assist-web--run-outcome-uncertain)
+                   (equal emacsos-assist-web--lifecycle-notice "Run recheck pending; Refresh"))
+          (setq emacsos-assist-web--lifecycle-notice nil))
         (when (and (equal tid (plist-get emacsos-assist-web--busy-check :tid))
                    (equal run-id (plist-get emacsos-assist-web--busy-check
                                             :run-id)))
@@ -587,13 +590,18 @@ The caller owns both the exact Run GET and subsequent canonical commit."
                        (and (derived-mode-p 'emacsos-assist-web-mode)
                             (equal emacsos-assist-web--thread-id tid))))
             (with-current-buffer other
-              (setq emacsos-assist-web--run-outcome-uncertain
-                    (seq-remove
-                     (lambda (candidate)
-                       (and (eq (plist-get candidate :origin) origin)
-                            (equal (plist-get candidate :tid) tid)
-                            (equal (plist-get candidate :run-id) run-id)))
-                     emacsos-assist-web--run-outcome-uncertain))
+              (let (removed)
+                (setq emacsos-assist-web--run-outcome-uncertain
+                      (seq-remove
+                       (lambda (candidate)
+                         (when (and (eq (plist-get candidate :origin) origin)
+                                    (equal (plist-get candidate :tid) tid)
+                                    (equal (plist-get candidate :run-id) run-id))
+                           (setq removed t)))
+                       emacsos-assist-web--run-outcome-uncertain))
+                (when (and removed (not emacsos-assist-web--run-outcome-uncertain)
+                           (equal emacsos-assist-web--lifecycle-notice "Run recheck pending; Refresh"))
+                  (setq emacsos-assist-web--lifecycle-notice nil)))
               (when (and (eq emacsos-assist-web--denied 'run)
                          (not emacsos-assist-web--run-outcome-uncertain))
                 (setq emacsos-assist-web--denied nil))
@@ -4125,12 +4133,12 @@ Refresh action and replaces only this view’s transient observer."
                                   git-reconcile-token))
                                ;; While this buffer owns a live observer, the
                                ;; existing provisional markers remain the only
-                               ;; safe insertion target.  Cache a still-busy
+                               ;; safe insertion target.  Cache the canonical
                                ;; snapshot but leave that rendered region intact;
                                ;; a terminal refresh performs the reconciliation.
                                (condition-case display-problem
                                    (progn
-                                     (unless (and busy emacsos-assist-web--in-flight)
+                                     (unless emacsos-assist-web--in-flight
                                        (emacsos-assist-web--render value)
                                        (setq emacsos-assist-web--display-recovery nil)
                                        (force-mode-line-update t)
