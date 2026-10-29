@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta
 import tempfile
 import sqlite3
+import subprocess
 from unittest import mock
 
 
@@ -581,6 +582,67 @@ class RetainedInventoryTests(unittest.TestCase):
                 rows=self.connection.execute("SELECT * FROM messages WHERE text=?",(f'new arrival {count}',)).fetchall()
                 self.assertEqual(len(rows),1)
                 self.assertEqual(rows[0]['occurred_at'],'2026-10-28T00:01:00+00:00')
+
+    def test_periodic_scan_recovers_missed_completion_across_helper_restarts(self):
+        paths = self.messages(range(20, 29))
+        incomplete = paths[0]
+        self.bus.message_properties[incomplete].update(State=2, Text='completed later')
+        # Each timer tick invokes the actual no-hint collect operation in a new
+        # helper process. Only SQLite carries cursor/receipt state between ticks.
+        child = """
+import importlib.util, io, json, sys
+from unittest import mock
+spec = importlib.util.spec_from_file_location('sms_fixture', sys.argv[1])
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+helper = fixture.SMS
+helper.JOURNAL_PATH = sys.argv[2]
+bus = fixture.Bus()
+bus.message_properties = json.load(sys.stdin)
+bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][helper.MESSAGING]['Messages'] = list(bus.message_properties)
+original = bus.get_object
+reads = []
+def get_object(owner, path):
+    if path in bus.message_properties:
+        reads.append(path)
+    return original(owner, path)
+bus.get_object = get_object
+output = io.StringIO()
+with mock.patch.object(helper.dbus, 'SystemBus', return_value=bus), mock.patch.object(helper.sys, 'stdout', output):
+    helper.receipt_operation({'operation': 'collect'})
+print(json.dumps({'result': json.loads(output.getvalue()), 'reads': reads}))
+"""
+        def periodic_tick():
+            result = subprocess.run(
+                [sys.executable, '-I', '-B', '-c', child, str(pathlib.Path(__file__).resolve()), SMS.JOURNAL_PATH],
+                input=json.dumps(self.bus.message_properties), text=True,
+                capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertEqual(value['result'], {'collected': True})
+            self.assertEqual(len(value['reads']), SMS.CAPTURE_BATCH)
+            return value['reads']
+
+        self.assertEqual(periodic_tick(), paths[:4])
+        self.assertEqual(self.connection.execute('SELECT path FROM incoming_scan').fetchone()[0], paths[3])
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM messages WHERE text='completed later'").fetchone()[0], 0)
+        # The source completes without Added or PropertiesChanged delivery.
+        self.bus.message_properties[incomplete]['State'] = 3
+        self.assertEqual(periodic_tick(), paths[4:8])
+        self.assertEqual(self.connection.execute('SELECT path FROM incoming_scan').fetchone()[0], paths[7])
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM messages WHERE text='completed later'").fetchone()[0], 0)
+        self.assertEqual(periodic_tick(), [paths[8], *paths[:3]])
+        captured = [dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
+        self.assertEqual(len(captured), 2)
+        completed = next(row for row in captured if row['text'] == 'completed later')
+        self.assertEqual(completed['occurred_at'], '2026-10-26T01:00:00+00:00')
+        self.assertFalse(completed['archive_only'])
+        # Another fresh process continues the persisted cursor and reobserves
+        # completed retained objects without another durable receipt identity.
+        self.assertEqual(periodic_tick(), paths[3:7])
+        self.assertEqual(periodic_tick(), [*paths[7:], *paths[:2]])
+        self.assertEqual([dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')], captured)
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM incoming_keys').fetchone()[0], 2)
 
     def test_multipart_completion_hint_does_not_wait_for_history_sweep(self):
         paths=self.messages(range(1000))
