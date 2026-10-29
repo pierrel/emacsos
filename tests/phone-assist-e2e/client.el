@@ -183,7 +183,10 @@
     (set-buffer source)
     (when original-run
       (phone-e2e-wait (lambda () (and (not emacsos-assist-web--http-draft)
-                                     (not emacsos-assist-web--in-flight))))
+                                     (not emacsos-assist-web--in-flight)
+                                     (not emacsos-assist-web--run-id)
+                                     (not emacsos-assist-web--pending-accepted-p)
+                                     (not emacsos-assist-web--requests))))
       (unless (equal (alist-get 'status
                                (phone-e2e-request "GET" (format "threads/%s/runs/%s"
                                                                emacsos-assist-web--thread-id original-run)))
