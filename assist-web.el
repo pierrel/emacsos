@@ -2934,10 +2934,16 @@ RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
                        "Too many Assist Web requests are already running")))
         (let* ((url-request-method method)
                (url-request-extra-headers
-		(append `(("Authorization" . ,(concat "Bearer " token))
-                          ("Accept" . ,(if raw-response "application/octet-stream" "application/json")))
-			(when payload '(("Content-Type" . "application/json")))
-			headers))
+                ;; url-http concatenates these with the UTF-8 body.  Even
+                ;; multibyte ASCII from token/cache files would promote its
+                ;; bytes to characters and expose the request in an error.
+                (mapcar (lambda (header)
+                          (cons (encode-coding-string (car header) 'utf-8)
+                                (encode-coding-string (cdr header) 'utf-8)))
+                        (append `(("Authorization" . ,(concat "Bearer " token))
+                                  ("Accept" . ,(if raw-response "application/octet-stream" "application/json")))
+                                (when payload '(("Content-Type" . "application/json")))
+                                headers)))
                (url-request-data
 		(and payload (encode-coding-string (json-encode payload) 'utf-8)))
                (url nil)
