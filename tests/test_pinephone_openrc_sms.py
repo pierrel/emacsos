@@ -9,6 +9,8 @@ import pathlib
 import sys
 import types
 import unittest
+import time
+import signal
 import tempfile
 import sqlite3
 from unittest import mock
@@ -329,6 +331,92 @@ class JournalTests(unittest.TestCase):
                 connection.commit()
                 self.assertEqual(connection.execute("SELECT id FROM messages WHERE ack_status IS NULL OR ack_status != status").fetchone()[0], "attempt1")
                 connection.close()
+
+
+class ReviewedFailureRegressions(unittest.TestCase):
+    def test_prior_sent_attempt_journal_open_or_lookup_failure_is_unknown_without_resend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')
+            with mock.patch.object(SMS, 'JOURNAL_PATH', path):
+                SMS.journal().close()
+                def connect():
+                    connection = sqlite3.connect(path)
+                    connection.row_factory = sqlite3.Row
+                    return connection
+                raw = json.dumps({'message_id': 'known-attempt', 'number': '+15555550100', 'text': 'synthetic sent text'}).encode()
+                emitted = []
+                bus = Bus()
+                with (mock.patch.object(SMS.os, 'geteuid', return_value=0),
+                      mock.patch.object(SMS.sys, 'argv', ['emacsos-openrc-sms']),
+                      mock.patch.object(SMS.sys, 'stdin', types.SimpleNamespace(buffer=io.BytesIO(raw))),
+                      mock.patch.object(SMS.signal, 'signal'), mock.patch.object(SMS.signal, 'alarm'),
+                      mock.patch.object(SMS.fcntl, 'flock'),
+                      mock.patch.object(SMS, 'open', return_value=mock.MagicMock(), create=True),
+                      mock.patch.object(SMS.dbus, 'SystemBus', return_value=bus) as system_bus,
+                      mock.patch.object(SMS, '_emit', side_effect=emitted.append),
+                      mock.patch.object(SMS, 'journal', side_effect=connect)):
+                    self.assertEqual(SMS.main(), 0)
+                    self.assertEqual(emitted, ['sent'])
+                    self.assertEqual(bus.sms.sent, 1)
+                    for stage in ('journal', 'begin_attempt'):
+                        for failure in (sqlite3.OperationalError('synthetic unavailable'), SMS.InputTimeout()):
+                            with self.subTest(stage=stage, failure=type(failure).__name__):
+                                emitted.clear()
+                                SMS.sys.stdin = types.SimpleNamespace(buffer=io.BytesIO(raw))
+                                with mock.patch.object(SMS, stage, side_effect=failure):
+                                    self.assertEqual(SMS.main(), 1)
+                                self.assertEqual(len(emitted), 1)
+                                self.assertTrue(emitted[0].startswith('unknown:'), emitted)
+                                self.assertEqual(bus.sms.sent, 1)
+                                self.assertEqual(system_bus.call_count, 1)
+                                with sqlite3.connect(path) as check:
+                                    self.assertEqual(check.execute("SELECT status FROM messages WHERE id='known-attempt'").fetchone()[0], 'sent')
+
+    def test_real_deadline_scan_progress_survives_restart_and_revisits_incomplete_leaf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SMS, 'JOURNAL_PATH', str(pathlib.Path(directory) / 'private' / 'messages.sqlite3')):
+                connection = SMS.journal()
+                bus = Bus()
+                paths = [f'/org/freedesktop/ModemManager1/SMS/{i}' for i in (20, 21, 22)]
+                bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'] = paths
+                bus.message_properties = {path: {'State': 3, 'Number': '+15555550100', 'Text': 'synthetic ' + path.rsplit('/', 1)[-1]} for path in paths}
+                bus.message_properties[paths[1]]['State'] = 2
+                original = bus.get_object
+                def object_for(owner, path):
+                    obj = original(owner, path)
+                    if path == paths[0]:
+                        def slow(*args, **kwargs):
+                            signal.setitimer(signal.ITIMER_REAL, .01)
+                            time.sleep(1)
+                        obj.interfaces['org.freedesktop.DBus.Properties'].GetAll = slow
+                    return obj
+                old_handler = signal.signal(signal.SIGALRM, SMS._alarm)
+                try:
+                    with mock.patch.object(bus, 'get_object', side_effect=object_for):
+                        def timed_poll():
+                            try:
+                                with self.assertRaises(SMS.InputTimeout):
+                                    SMS.collect_incoming(connection, bus)
+                            finally:
+                                signal.setitimer(signal.ITIMER_REAL, 0)
+                                connection.rollback()
+                        timed_poll()
+                        connection.close()
+                        connection = SMS.journal()  # next helper invocation has no memory of the cursor
+                        timed_poll()
+                        first = [dict(row) for row in connection.execute('SELECT * FROM messages ORDER BY rowid')]
+                        self.assertEqual([row['text'] for row in first], ['synthetic 22'])
+                        bus.message_properties[paths[1]]['State'] = 3  # completion hint is missed
+                        timed_poll()
+                        captured = [dict(row) for row in connection.execute('SELECT * FROM messages ORDER BY rowid')]
+                        self.assertEqual([row['text'] for row in captured], ['synthetic 22', 'synthetic 21'])
+                        self.assertEqual(captured[0], first[0])
+                        timed_poll()
+                        self.assertEqual([dict(row) for row in connection.execute('SELECT * FROM messages ORDER BY rowid')], captured)
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                    connection.close()
 
 
 class ReceiptBudgetTests(unittest.TestCase):

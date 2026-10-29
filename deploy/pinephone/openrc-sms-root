@@ -17,6 +17,7 @@ import dbus
 MAX_REQUEST_BYTES = 32768
 MAX_BODY_BYTES = 4096
 MAX_INCOMING_BYTES = 256 * 1024
+CAPTURE_BATCH = 4
 NUMBER_RE = re.compile(r"\+?[0-9]{5,15}\Z")
 SMS_PATH_RE = re.compile(r"/org/freedesktop/ModemManager1/SMS/[0-9]+\Z")
 MM_NAME = "org.freedesktop.ModemManager1"
@@ -150,6 +151,11 @@ def journal():
     connection.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, direction TEXT, number TEXT, text TEXT, status TEXT, occurred_at TEXT, observation TEXT UNIQUE, ack_status TEXT)")
     if "last_offered" not in {row[1] for row in connection.execute("PRAGMA table_info(messages)")}:
         connection.execute("ALTER TABLE messages ADD COLUMN last_offered INTEGER NOT NULL DEFAULT 0")
+    # Reuse the bounded periodic-scan progress contract; identity remains the
+    # existing observation key until the separate timestamp/replay change.
+    connection.execute("CREATE TABLE IF NOT EXISTS incoming_scan (path TEXT)")
+    if not connection.execute("SELECT 1 FROM incoming_scan").fetchone():
+        connection.execute("INSERT INTO incoming_scan VALUES (NULL)")
     connection.commit()
     return connection
 
@@ -175,6 +181,8 @@ def collect_incoming(connection, bus):
     Owner/path identity is an observation, not a verified carrier message id.
     A ModemManager restart may expose an old message as another observation;
     never discard a real text merely because its body and timestamp match.
+    The durable cursor rotates at most four objects per invocation, including
+    unreadable or incomplete objects; later polls wrap around to revisit them.
     """
     owner = str(bus.get_name_owner(MM_NAME))
     if not re.fullmatch(r":[0-9]+\.[0-9]+", owner):
@@ -185,10 +193,17 @@ def collect_incoming(connection, bus):
     if len(messaging) != 1 or "Messages" not in messaging[0]:
         raise ValueError("messaging")
     # ObjectManager enumerates modems. Leaf SMS objects are listed by Messaging.
-    for path in messaging[0]["Messages"]:
-        path = str(path)
-        if not SMS_PATH_RE.fullmatch(path):
-            raise ValueError("SMS path")
+    paths = sorted({str(path) for path in messaging[0]["Messages"]})
+    if any(not SMS_PATH_RE.fullmatch(path) for path in paths):
+        raise ValueError("SMS path")
+    previous = connection.execute("SELECT path FROM incoming_scan").fetchone()[0]
+    ordered = [path for path in paths if previous is None or path > previous]
+    ordered += [path for path in paths if previous is not None and path <= previous]
+    # Commit progress before each read, including incomplete/failed objects.
+    # A later deadline cannot roll back earlier progress or captured receipts.
+    for path in ordered[:CAPTURE_BATCH]:
+        connection.execute("UPDATE incoming_scan SET path=?", (path,))
+        connection.commit()
         observation = boot + ":" + owner + ":" + path
         if connection.execute("SELECT 1 FROM messages WHERE observation=?", (observation,)).fetchone():
             continue
@@ -311,10 +326,10 @@ def main():
             else:
                 status = send_sms(bus, number, text, attempt)
     except InputTimeout:
-        status = ("unknown:time-limit" if attempt["create"]
+        status = ("unknown:time-limit" if not created or attempt["create"]
                   else "not-sent:time-limit")
     except Exception:
-        status = ("unknown:dbus-unavailable" if attempt["create"]
+        status = ("unknown:dbus-unavailable" if not created or attempt["create"]
                   else "not-sent:dbus-unavailable")
     finally:
         signal.alarm(0)

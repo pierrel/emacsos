@@ -801,13 +801,19 @@ The fixed root SMS helper journals every exact outgoing attempt before calling
 ModemManager, including sends confirmed locally on the phone. A repeated attempt
 id reads its recorded outcome and never sends again. =sent= means ModemManager
 accepted the message, not carrier delivery. =unknown= must not be retried as a new
-send to repair the archive.
+send to repair the archive. If the journal cannot be opened or the prior attempt
+cannot be read, the result is also =unknown=: a definite negative requires a
+positively new durable claim with no modem effect begun.
 
 The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
 source checkout. It also records incoming ModemManager observations. Retries of
 one owner/boot/object observation retain one id; identical independent objects
 retain separate ids. A new ModemManager owner can expose an old physical SMS as a
 new observation. Physical deduplication across re-enumeration is not established.
+Incoming collection reuses a durable rotating cursor and a four-object read
+budget. Progress commits before each leaf, including failed or incomplete ones;
+a later deadline does not discard it. Subsequent polls wrap around and revisit
+a completed multipart object even if its completion signal was missed.
 
 An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the
 unprivileged transport inside the existing UI service. It requires exactly
