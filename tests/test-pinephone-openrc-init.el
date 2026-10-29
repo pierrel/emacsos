@@ -1241,5 +1241,25 @@
       (should-not (buffer-live-p buffer))
       (should-not (buffer-live-p stderr-buffer)))))
 
+
+
+(ert-deftest emacsos-openrc-sms-feedback-rejects-stale-owner-and-uses-finite-client ()
+  (let ((emacsos-call--current-owner ":1.7")
+        (emacsos-call--owner-generation 9)
+        calls timers)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args) (push args calls) 'fake-process))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest args) (push args timers))))
+      (emacsos-pinephone-sms-feedback ":1.old" 9 "/org/freedesktop/ModemManager1/SMS/1")
+      (emacsos-pinephone-sms-feedback ":1.7" 8 "/org/freedesktop/ModemManager1/SMS/1")
+      (should-not calls)
+      (emacsos-pinephone-sms-feedback ":1.7" 9 "/org/freedesktop/ModemManager1/SMS/1")
+      (should (= (length calls) 1))
+      (should (equal (plist-get (car calls) :command)
+                     '("/usr/bin/fbcli" "--event=message-new-sms" "--profile=quiet" "--timeout=1" "--watch=4")))
+      (should (equal (caar timers) 5)))))
+
 (ert-run-tests-batch-and-exit)
+
 ;;; test-pinephone-openrc-init.el ends here

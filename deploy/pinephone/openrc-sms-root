@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Bounded root helper for one exact outbound ModemManager SMS."""
+"""Fixed root helper for exact SMS sends, private journal receipts and acknowledgment."""
 
 import fcntl
 import json
@@ -7,11 +7,17 @@ import os
 import re
 import signal
 import sys
+import sqlite3
+import uuid
+from pathlib import Path
+from datetime import datetime, timezone
 
 import dbus
 
 MAX_REQUEST_BYTES = 32768
 MAX_BODY_BYTES = 4096
+MAX_INCOMING_BYTES = 256 * 1024
+CAPTURE_BATCH = 4
 NUMBER_RE = re.compile(r"\+?[0-9]{5,15}\Z")
 SMS_PATH_RE = re.compile(r"/org/freedesktop/ModemManager1/SMS/[0-9]+\Z")
 MM_NAME = "org.freedesktop.ModemManager1"
@@ -21,6 +27,8 @@ MESSAGING = "org.freedesktop.ModemManager1.Modem.Messaging"
 THREE_GPP = "org.freedesktop.ModemManager1.Modem.Modem3gpp"
 SMS = "org.freedesktop.ModemManager1.Sms"
 LOCK_PATH = "/run/emacsos-openrc-sms.lock"
+JOURNAL_PATH = "/var/lib/emacsos-sms/messages.sqlite3"
+ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 # ModemManager's 3GPP values which can carry an SMS: home, roaming, and the
 # LTE variants that explicitly retain SMS service.  Do not create an SMS
@@ -123,6 +131,138 @@ def send_sms(bus, number, text, attempt=None):
     return "sent"
 
 
+def journal():
+    """Open the fixed root-private journal; no caller controls filesystem paths."""
+    directory = Path(JOURNAL_PATH).parent
+    if directory.is_symlink():
+        raise ValueError("journal")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if directory.stat().st_uid != os.geteuid() or directory.stat().st_mode & 0o077:
+        raise ValueError("journal")
+    fd = os.open(JOURNAL_PATH, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    os.close(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        raise ValueError("journal")
+    connection = sqlite3.connect(JOURNAL_PATH, timeout=2)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, direction TEXT, number TEXT, text TEXT, status TEXT, occurred_at TEXT, observation TEXT UNIQUE, ack_status TEXT)")
+    if "last_offered" not in {row[1] for row in connection.execute("PRAGMA table_info(messages)")}:
+        connection.execute("ALTER TABLE messages ADD COLUMN last_offered INTEGER NOT NULL DEFAULT 0")
+    # Reuse the bounded periodic-scan progress contract; identity remains the
+    # existing observation key until the separate timestamp/replay change.
+    connection.execute("CREATE TABLE IF NOT EXISTS incoming_scan (path TEXT)")
+    if not connection.execute("SELECT 1 FROM incoming_scan").fetchone():
+        connection.execute("INSERT INTO incoming_scan VALUES (NULL)")
+    connection.commit()
+    return connection
+
+
+def begin_attempt(connection, message_id, number, text, occurred_at=None):
+    """Only the first durable claimant may mutate the modem for this id."""
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+    if row:
+        if (row["direction"], row["number"], row["text"]) != ("outgoing", number, text):
+            raise ValueError("conflict")
+        connection.commit()
+        return row["status"], False
+    connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES (?, 'outgoing', ?, ?, 'unknown', ?, NULL, NULL)",
+                       (message_id, number, text, occurred_at or datetime.now(timezone.utc).isoformat()))
+    connection.commit()
+    return "unknown", True
+
+
+def collect_incoming(connection, bus):
+    """Preserve each observed MM object, including identical independent texts.
+
+    Owner/path identity is an observation, not a verified carrier message id.
+    A ModemManager restart may expose an old message as another observation;
+    never discard a real text merely because its body and timestamp match.
+    The durable cursor rotates at most four objects per invocation, including
+    unreadable or incomplete objects; later polls wrap around to revisit them.
+    """
+    owner = str(bus.get_name_owner(MM_NAME))
+    if not re.fullmatch(r":[0-9]+\.[0-9]+", owner):
+        raise ValueError("owner")
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    objects = dbus.Interface(bus.get_object(owner, MM_ROOT), OBJECT_MANAGER).GetManagedObjects(timeout=10)
+    messaging = [interfaces[MESSAGING] for interfaces in objects.values() if MESSAGING in interfaces]
+    if len(messaging) != 1 or "Messages" not in messaging[0]:
+        raise ValueError("messaging")
+    # ObjectManager enumerates modems. Leaf SMS objects are listed by Messaging.
+    paths = sorted({str(path) for path in messaging[0]["Messages"]})
+    if any(not SMS_PATH_RE.fullmatch(path) for path in paths):
+        raise ValueError("SMS path")
+    previous = connection.execute("SELECT path FROM incoming_scan").fetchone()[0]
+    ordered = [path for path in paths if previous is None or path > previous]
+    ordered += [path for path in paths if previous is not None and path <= previous]
+    # Commit progress before each read, including incomplete/failed objects.
+    # A later deadline cannot roll back earlier progress or captured receipts.
+    for path in ordered[:CAPTURE_BATCH]:
+        connection.execute("UPDATE incoming_scan SET path=?", (path,))
+        connection.commit()
+        observation = boot + ":" + owner + ":" + path
+        if connection.execute("SELECT 1 FROM messages WHERE observation=?", (observation,)).fetchone():
+            continue
+        try:
+            properties = dbus.Interface(bus.get_object(owner, path),
+                                        "org.freedesktop.DBus.Properties").GetAll(SMS, timeout=2)
+        except InputTimeout:
+            raise
+        except Exception:
+            # A stale/unreadable leaf must not starve later received messages.
+            continue
+        if int(properties.get("State", 0)) != 3:
+            continue
+        number, text = str(properties.get("Number", "")), str(properties.get("Text", ""))
+        if "\0" in number or len(number.encode()) > 128 or "\0" in text or len(text.encode()) > MAX_INCOMING_BYTES:
+            continue
+        connection.execute("INSERT OR IGNORE INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL)",
+                           (uuid.uuid4().hex, number, text, datetime.now(timezone.utc).isoformat(), observation))
+        # A later failed leaf read cannot roll back earlier captured messages.
+        connection.commit()
+    connection.commit()
+
+
+def receipt_operation(value):
+    """Read bounded pending receipts or acknowledge one exact observed status."""
+    connection = journal()
+    try:
+        if value == {"operation": "receipts"}:
+            try:
+                collect_incoming(connection, dbus.SystemBus())
+            except Exception:
+                # Outgoing journal sync does not depend on the modem being present.
+                connection.rollback()
+            rows = connection.execute("SELECT id,direction,number,text,status,occurred_at FROM messages WHERE ack_status IS NULL OR ack_status != status ORDER BY last_offered,rowid LIMIT 4").fetchall()
+            batch = []
+            for row in rows:
+                trial = batch + [dict(row)]
+                # One maximum incoming body fits even at 6x JSON escaping.
+                # Ordinary messages still drain four per handoff.
+                if len(json.dumps({"receipts": trial}, ensure_ascii=False).encode()) > 2 * 1024 * 1024 - 16 * 1024:
+                    break
+                batch = trial
+            if batch:
+                turn = connection.execute("SELECT COALESCE(MAX(last_offered),0)+1 FROM messages").fetchone()[0]
+                connection.executemany("UPDATE messages SET last_offered=? WHERE id=?", [(turn, row["id"]) for row in batch])
+                connection.commit()
+            print(json.dumps({"receipts": batch}, ensure_ascii=False))
+        elif set(value) == {"operation", "message_id", "status"} and value["operation"] == "ack":
+            if not isinstance(value["message_id"], str) or not ID_RE.fullmatch(value["message_id"]) or value["status"] not in {"received", "sent", "not_sent", "unknown"}:
+                raise ValueError("ack")
+            connection.execute("UPDATE messages SET ack_status=? WHERE id=? AND status=?", (value["status"], value["message_id"], value["status"]))
+            connection.commit()
+            print('{"status":"accepted"}')
+        else:
+            raise ValueError("operation")
+    finally:
+        connection.close()
+
+
 def main():
     """Validate stdin, serialize modem mutation, and emit one terminal result."""
     if os.geteuid() != 0 or len(sys.argv) != 1:
@@ -132,19 +272,45 @@ def main():
     signal.alarm(3)
     try:
         raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
-        number, text = parse_request(raw)
+        value = json.loads(raw.decode("utf-8"))
+        if isinstance(value, dict) and "operation" in value:
+            signal.alarm(30)
+            receipt_operation(value)
+            return 0
+        occurred_at = value.pop("occurred_at", None) if isinstance(value, dict) else None
+        if occurred_at is not None:
+            if not isinstance(occurred_at, str) or len(occurred_at) > 64:
+                raise ValueError("timestamp")
+            instant = datetime.fromisoformat(occurred_at)
+            if instant.utcoffset() is None:
+                raise ValueError("timestamp")
+            occurred_at = instant.astimezone(timezone.utc).isoformat()
+        message_id = value.pop("message_id", None) if isinstance(value, dict) else None
+        if message_id is not None and (not isinstance(message_id, str) or not ID_RE.fullmatch(message_id)):
+            raise ValueError("identity")
+        number, text = parse_request(json.dumps(value).encode())
+        message_id = message_id or uuid.uuid4().hex
     except InputTimeout:
         _emit("not-sent:input-timeout")
         return 2
-    except (UnicodeError, ValueError, TypeError):
+    except (UnicodeError, ValueError, TypeError, OSError, sqlite3.Error):
         _emit("not-sent:invalid-input")
         return 2
     finally:
         signal.alarm(0)
 
     attempt = {"create": False}
+    connection = None
+    created = False
     try:
         signal.alarm(60)
+        connection = journal()
+        previous, created = begin_attempt(connection, message_id, number, text, occurred_at)
+        if not created:
+            connection.close()
+            status = "sent" if previous == "sent" else "not-sent:dbus-unavailable" if previous == "not_sent" else "unknown:dbus-unavailable"
+            _emit(status)
+            return 0 if status == "sent" else 1
         lock_file = open(LOCK_PATH, "a+b")
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -160,13 +326,24 @@ def main():
             else:
                 status = send_sms(bus, number, text, attempt)
     except InputTimeout:
-        status = ("unknown:time-limit" if attempt["create"]
+        status = ("unknown:time-limit" if not created or attempt["create"]
                   else "not-sent:time-limit")
     except Exception:
-        status = ("unknown:dbus-unavailable" if attempt["create"]
+        status = ("unknown:dbus-unavailable" if not created or attempt["create"]
                   else "not-sent:dbus-unavailable")
     finally:
         signal.alarm(0)
+    if connection is not None:
+        try:
+            if created:
+                outcome = "sent" if status == "sent" else "not_sent" if status.startswith("not-sent:") else "unknown"
+                connection.execute("UPDATE messages SET status=? WHERE id=? AND status='unknown'", (outcome, message_id))
+                connection.commit()
+        except Exception:
+            # An effect may already have happened. Leave the pre-effect unknown.
+            status = "unknown:dbus-unavailable"
+        finally:
+            connection.close()
     _emit(status)
     return 0 if status == "sent" else 1
 

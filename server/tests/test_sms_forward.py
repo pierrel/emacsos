@@ -1,137 +1,119 @@
-"""Unit tests for the sms-forward bridge — the mmcli parse + the forward/delete-on-ack
-logic, with mmcli and the HTTP POST mocked (no modem, no network)."""
+"""Synthetic journal-to-archive handoff and exact-send transport regressions."""
 from types import SimpleNamespace
-
-import emacsos_server.sms_forward as sf
-
-
-def _cp(stdout="", returncode=0, stderr=""):
-    return SimpleNamespace(stdout=stdout, returncode=returncode, stderr=stderr)
+import json
+import requests
+import pytest
+from emacsos_server import sms_forward as sf
 
 
-def test_parse_sms_keyvalue():
-    kv = sf.parse_sms(
-        "  sms.content.number    : +15551234567\n"
-        "  sms.content.text      : hey are you around?\n"
-        "  sms.properties.state  : received\n")
-    assert kv["sms.content.number"] == "+15551234567"
-    assert kv["sms.content.text"] == "hey are you around?"
-    assert kv["sms.properties.state"] == "received"
+def receipt(**values):
+    return {'id': 'physical1', 'direction': 'incoming', 'number': '+15555550100',
+            'text': '  exact "quote"\nline 👋  ', 'status': 'received',
+            'occurred_at': '2026-10-24T20:00:00+00:00', **values}
 
 
-def test_message_id_stable_and_content_derived():
-    a = sf.message_id("+1555", "2026-07-02T05:00:00", "hi")
-    b = sf.message_id("+1555", "2026-07-02T05:00:00", "hi")
-    c = sf.message_id("+1555", "2026-07-02T05:00:00", "different")
-    assert a == b and a != c and len(a) == 64
+@pytest.mark.parametrize('code,accepted', [(503, False), (400, False), (401, False), (200, True)])
+def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accepted):
+    row = receipt(); calls = []; posts = []
+    def helper(payload, timeout=70):
+        calls.append(payload)
+        return SimpleNamespace(stdout=json.dumps({'receipts': [row]}))
+    monkeypatch.setattr(sf, 'helper', helper)
+    monkeypatch.setattr(sf, 'INBOUND_URL', 'https://server.invalid/inbound/sms')
+    def post(url, **kwargs):
+        posts.append((url, kwargs)); return SimpleNamespace(status_code=code, json=lambda: {'status': 'accepted'})
+    monkeypatch.setattr(sf.requests, 'post', post)
+    sf.sync_once()
+    assert (len(calls) == 2) is accepted
+    assert posts[0][1]['json']['text'] == row['text']
+    assert posts[0][1]['allow_redirects'] is False
+    if accepted:
+        assert calls[1] == {'operation': 'ack', 'message_id': 'physical1', 'status': 'received'}
 
 
-def test_forward_deletes_on_200(monkeypatch):
-    monkeypatch.setattr(sf, "SECRET", "s")
-    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
-    monkeypatch.setattr(sf, "read_sms", lambda idx: {
-        "sms.content.number": "+1555", "sms.content.text": "hi",
-        "sms.properties.timestamp": "t", "sms.properties.state": "received"})
-    deleted = []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=200))
-    sf._forward_one("0", "7")
-    assert deleted == ["7"]                 # accepted -> deleted
+def test_outgoing_sync_never_calls_send_and_retries_same_receipt(monkeypatch):
+    row = receipt(direction='outgoing', status='sent'); calls = []; posts = []
+    monkeypatch.setattr(sf, 'helper', lambda payload, **kwargs: calls.append(payload) or SimpleNamespace(stdout=json.dumps({'receipts': [row]})))
+    monkeypatch.setattr(sf, 'INBOUND_URL', 'https://server.invalid/inbound/sms')
+    def lost(url, **kwargs):
+        posts.append((url, kwargs['json'])); raise requests.Timeout('lost archive acknowledgment')
+    monkeypatch.setattr(sf.requests, 'post', lost)
+    for _ in range(2):
+        sf.sync_once()
+    assert [p[0] for p in posts] == ['https://server.invalid/sms/receipts'] * 2
+    assert posts[0][1] == posts[1][1]
+    assert calls == [{'operation': 'receipts'}] * 2
 
 
-def test_forward_retains_on_503(monkeypatch):
-    monkeypatch.setattr(sf, "SECRET", "s")
-    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
-    monkeypatch.setattr(sf, "read_sms", lambda idx: {
-        "sms.content.number": "+1555", "sms.content.text": "hi",
-        "sms.properties.state": "received"})
-    deleted = []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=503))
-    sf._forward_one("0", "7")
-    assert deleted == []                    # transient -> retained for retry
+def test_send_preserves_exact_body_and_attempt_id(monkeypatch):
+    sent = []
+    monkeypatch.setattr(sf, 'helper', lambda payload, **kwargs: sent.append(payload) or SimpleNamespace(stdout='sent\n', returncode=0))
+    assert sf.send_sms('+15555550100', '  exact "quote"\n👋 ', 'attempt1', '2026-10-24T20:00:00+00:00') == 'sent'
+    assert sent == [{'number': '+15555550100', 'text': '  exact "quote"\n👋 ', 'message_id': 'attempt1', 'occurred_at': '2026-10-24T20:00:00+00:00'}]
 
 
-def test_forward_skips_and_deletes_empty_poison(monkeypatch):
-    monkeypatch.setattr(sf, "SECRET", "s")
-    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
-    monkeypatch.setattr(sf, "read_sms", lambda idx: {"sms.properties.state": "received"})  # no text
-    deleted, posted = [], []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: posted.append(1))
-    sf._forward_one("0", "9")
-    assert deleted == ["9"] and posted == []  # poison record deleted, never POSTed
+@pytest.mark.parametrize('stdout,code,status', [('unknown:time-limit\n',1,'unknown'), ('not-sent:no-service\n',1,'not_sent'), ('garbage\n',0,'unknown'), ('sent\n',1,'unknown')])
+def test_send_outcomes_are_conservative(monkeypatch, stdout, code, status):
+    monkeypatch.setattr(sf, 'helper', lambda *args, **kwargs: SimpleNamespace(stdout=stdout, returncode=code))
+    assert sf.send_sms('+15555550100', 'hi', 'attempt1', None) == status
 
 
-def test_forward_ignores_our_sent_records(monkeypatch):
-    monkeypatch.setattr(sf, "read_sms", lambda idx: {
-        "sms.content.number": "+1555", "sms.content.text": "our reply",
-        "sms.properties.state": "sent"})
-    deleted, posted = [], []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: posted.append(1))
-    sf._forward_one("0", "3")
-    assert posted == [] and deleted == []     # a sent record is left alone
+def test_bind_not_ready_retries_without_dropping_receipts(monkeypatch):
+    states = []; attempts = []
+    class Serving(Exception): pass
+    class Server:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def serve_forever(self): raise Serving()
+    def server(*args):
+        attempts.append(1)
+        if len(attempts) == 1: raise OSError('interface not yet present')
+        return Server()
+    monkeypatch.setattr(sf, 'HTTPServer', server)
+    monkeypatch.setattr(sf, 'publish_transport_state', states.append)
+    monkeypatch.setattr(sf.time, 'sleep', lambda seconds: None)
+    with pytest.raises(Serving): sf.serve()
+    assert len(attempts) == 2
+    assert 'waiting' in states[0] and 'running' in states[1]
 
 
-def test_forward_retains_on_read_failure(monkeypatch):
-    monkeypatch.setattr(sf, "SECRET", "s")
-    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
-    monkeypatch.setattr(sf, "read_sms", lambda idx: None)   # transient mmcli read failure
-    deleted, posted = [], []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: posted.append(1))
-    sf._forward_one("0", "5")
-    assert deleted == [] and posted == []       # not read → retained, never posted or deleted
+def test_trickled_bytes_do_not_extend_absolute_request_deadline(monkeypatch):
+    import io
+    clock = iter([0.0, 4.0, 8.0, 12.0])
+    monkeypatch.setattr(sf.time, 'monotonic', lambda: next(clock))
+    timeouts = []
+    class Raw(io.RawIOBase):
+        def readinto(self, buffer): buffer[0] = ord('x'); return 1
+    reader = sf._DeadlineReader(Raw(), SimpleNamespace(settimeout=timeouts.append), 10.0)
+    stream = io.BufferedReader(reader, buffer_size=2)
+    with pytest.raises(TimeoutError): stream.readline(100)
+    assert timeouts == [10.0, 6.0, 2.0]
 
 
-def test_read_sms_returns_none_on_mmcli_failure(monkeypatch):
-    monkeypatch.setattr(sf, "_mmcli", lambda *a, **k: _cp(stdout="", returncode=1))
-    assert sf.read_sms("3") is None             # nonzero rc / empty -> None (transient)
+@pytest.mark.parametrize('address', ['::1', 'fd00::1'])
+def test_ipv6_config_is_rejected_instead_of_endless_af_inet_bind(tmp_path, monkeypatch, address):
+    path = tmp_path/'sms.json'
+    path.write_text(json.dumps({'secret':'synthetic', 'inbound_url':'https://server.invalid/inbound/sms', 'bind':address, 'port':8767, 'ca':'/synthetic/ca.pem'}))
+    path.chmod(0o600)
+    monkeypatch.setattr(sf, 'Path', lambda value: path)
+    with pytest.raises(ValueError, match='IPv4'): sf.load_phone_config()
 
 
-def test_forward_deletes_on_any_2xx(monkeypatch):
-    monkeypatch.setattr(sf, "SECRET", "s")
-    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
-    monkeypatch.setattr(sf, "read_sms", lambda idx: {
-        "sms.content.number": "+1555", "sms.content.text": "hi", "sms.properties.state": "received"})
-    deleted = []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=204))
-    sf._forward_one("0", "7")
-    assert deleted == ["7"]                     # 204 (a 2xx) acks -> delete, not retry-forever
-
-
-def test_send_sms_raises_on_create_failure(monkeypatch):
-    monkeypatch.setattr(sf, "modem_index", lambda: "0")
-    # mmcli create returns nonzero even though stdout has a /SMS/ path
-    monkeypatch.setattr(sf, "_mmcli", lambda *a, **k: _cp(stdout="/SMS/5", returncode=1, stderr="boom"))
-    import pytest
-    with pytest.raises(RuntimeError):
-        sf.send_sms("+15551234567", "hi")
-
-
-def test_forward_deletes_on_400(monkeypatch):
-    monkeypatch.setattr(sf, "SECRET", "s")
-    monkeypatch.setattr(sf, "INBOUND_URL", "http://assist/inbound/sms")
-    monkeypatch.setattr(sf, "read_sms", lambda idx: {
-        "sms.content.number": "+1555", "sms.content.text": "hi", "sms.properties.state": "received"})
-    deleted = []
-    monkeypatch.setattr(sf, "delete_sms", lambda modem, idx: deleted.append(idx))
-    monkeypatch.setattr(sf.requests, "post", lambda *a, **k: SimpleNamespace(status_code=400))
-    sf._forward_one("0", "8")
-    assert deleted == ["8"]                     # 400 = definitive reject -> delete, not retry-forever
-
-
-def test_send_sms_preserves_apostrophes(monkeypatch):
-    monkeypatch.setattr(sf, "modem_index", lambda: "0")
-    calls = []
-    def fake_mmcli(*args, **k):
-        calls.append(args)
-        return _cp(stdout="/SMS/1") if "--send" not in args else _cp(returncode=0)
-    monkeypatch.setattr(sf, "_mmcli", fake_mmcli)
-    monkeypatch.setattr(sf, "delete_sms", lambda m, i: None)
-    sf.send_sms("+15551234567", "don't forget")
-    create = " ".join(calls[0])
-    assert "don't forget" in create            # apostrophe preserved (double-quoted text)
-    assert 'text="' in create                  # uses double quotes for the mmcli value
+@pytest.mark.parametrize('failure', ['timeout', 'json', 'shape'])
+def test_one_failed_receipt_does_not_block_later_batch_rows(monkeypatch, failure):
+    rows=[receipt(id='first'),receipt(id='later')];calls=[];offered=[]
+    monkeypatch.setattr(sf,'helper',lambda payload,**kw:calls.append(payload) or SimpleNamespace(stdout=json.dumps({'receipts':rows})))
+    monkeypatch.setattr(sf,'INBOUND_URL','https://server.invalid/inbound/sms')
+    def post(url,**kwargs):
+        identity=kwargs['json']['message_id'];offered.append(identity)
+        if identity=='first':
+            if failure=='timeout': raise requests.Timeout('synthetic lost response')
+            def invalid():
+                if failure=='json': raise ValueError('synthetic malformed JSON')
+                return []
+            return SimpleNamespace(status_code=200,json=invalid)
+        return SimpleNamespace(status_code=200,json=lambda:{'status':'accepted'})
+    monkeypatch.setattr(sf.requests,'post',post)
+    sf.sync_once()
+    assert offered==['first','later']
+    assert calls==[{'operation':'receipts'},{'operation':'ack','message_id':'later','status':'received'}]
