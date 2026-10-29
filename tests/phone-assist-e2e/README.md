@@ -43,10 +43,10 @@ The nine sequential scenarios use a fresh synthetic Git-backed thread:
 6. In one resident buffer, replace its token, Refresh, require canonical denial
    and an increased auth epoch; restore the token and Refresh the same buffer.
    Require a newly rendered canonical snapshot and a new successful Git receipt.
-7. In one resident buffer, send `Hold observer`, close the entry's actual SSE
-   process and await its production sentinel's accepted-unobserved state. Release
+7. In one resident buffer, send `Hold observer`, close the current observer's actual SSE
+   process and await its production sentinel's detached state. Release
    inference, require exact Run GET success, then interactive Refresh with result
-   visible and the queue cleared. This does not reproduce an open stalled SSE.
+   visible and the transient observer retired. This does not reproduce an open stalled SSE.
 8. Send `Hold restart`, durably accept `Accepted before restart`, kill only the
    fixture's real server PID and restart its container/private daemon. Require
    original accepted Run/work identity, release the hold and observe exactly one

@@ -28,8 +28,7 @@ class DriverTests(unittest.TestCase):
                     flows.append((action, kind))
                     return {'approval_kind': kind, 'preview_fields_verified': True,
                             'two_taps': True, 'draft_preserved': True, 'discovery_used': True,
-                            'discovery_control': 'header-review' if kind in {
-                                'send_email', 'email_archive', 'email_delete'} else 'thread-review',
+                            'discovery_control': 'thread-review',
                             'original_run': 'original', 'original_run_reconciled': True}
 
                 def api(method, _path, body=None):
@@ -171,34 +170,30 @@ class DriverTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_stopped_approval_uses_visible_header_when_snapshot_is_still_ready(self):
+    def test_approval_uses_canonical_visible_action_after_queue_removal(self):
         repo = Path(__file__).resolve().parents[2]
         expression = """(with-temp-buffer
           (emacsos-assist-web-mode)
-          (setq emacsos-assist-web--thread-id "thread-1"
-                emacsos-assist-web--snapshot '((thread . ((status . "ready")))))
-          (let ((entry (emacsos-assist-web--entry "Synthetic approval:send_email"
-                                                'accepted-unobserved "synthetic-key")))
-            (setf (plist-get entry :run-id) "run-original"
-                  (plist-get entry :approval-stopped) t
-                  (plist-get entry :requires-reobserve) t)
-            (setq emacsos-assist-web--queue (list entry)
-                  emacsos-assist-web--stopped-reobserve (list :kind 'approval :entry entry))
-            (cl-letf (((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
+          (setq emacsos-assist-web--thread-id "thread-1")
+          (let ((snapshot '((thread . ((id . "thread-1") (description . "Synthetic")
+                                      (status . "awaiting_approval")
+                                      (workspace . ((repo_label . "fixture")))))
+                            (messages . nil))))
+            (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) t))
+                      ((symbol-function 'emacsos-assist-web--replace-input) #'ignore)
                       ((symbol-function 'emacsos-assist-web-send) #'ignore)
                       ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore)
-                      ((symbol-function 'phone-e2e-wait)
-                       (lambda (predicate) (unless (funcall predicate) (error "Unmet condition"))))
+                      ((symbol-function 'phone-e2e-wait) (lambda (predicate)
+                        (unless (funcall predicate) (error "Unmet condition"))))
                       ((symbol-function 'emacsos-assist-web--request)
                        (lambda (method path _body _callback &rest _)
                          (unless (and (equal method "GET")
-                                      (equal path "threads/thread-1/approvals")
-                                      (eq entry (emacsos-assist-web--queue-head))
-                                      (equal (plist-get entry :run-id) "run-original"))
-                           (error "Discovery lost its original Run or exact request"))
+                                      (equal path "threads/thread-1/approvals"))
+                           (error "Wrong approval discovery request"))
                          (throw 'discovered t))))
-              (unless (catch 'discovered (phone-e2e-approval "send_email") nil)
-                (error "Visible approval action did not request the collection"))))))"""
+              (emacsos-assist-web--render snapshot)
+              (unless (catch 'discovered (phone-e2e-approval "send_reply") nil)
+                (error "Canonical visible action did not request approvals")))))"""
         result = subprocess.run(['emacs', '-Q', '--batch', '-L', str(repo),
             '-l', str(Path(__file__).with_name('client.el')), '--eval', expression],
             env={**os.environ, 'ASSIST_E2E_URL': 'https://assist:8443'},

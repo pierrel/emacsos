@@ -630,7 +630,9 @@ while a server thread is busy. Assist owns admission and its next available
 execution step; the client does not retain an accepted-Run queue. While one
 HTTP submission waits for its response, the editable text remains available.
 A failed request retains or restores its exact text for an explicit retry and
-reports connection or acceptance uncertainty. Unchanged text reuses its request
+reports connection or acceptance uncertainty. Edits appended to still-visible
+submitted text are retained without duplicating that text; after acceptance only
+the unsent suffix remains editable. Unchanged text reuses its request
 key; edited text gets a new key, with a status warning when an earlier response
 was uncertain. There is no automatic retry or acknowledgment gate.
 
@@ -642,7 +644,9 @@ continues independently when another message is accepted. After a restart,
 =Refresh= reads canonical server history and status; it does not reconstruct a
 local accepted-Run queue or automatically attach a previous SSE observer.
 A newly created thread keeps its current buffer and adopts its canonical title
-when the server snapshot arrives.
+when the server snapshot arrives. If a timed-out creation is already open from
+the catalog, that canonical view and its draft remain untouched; any additional
+text stays in the original separate local draft, identified by a status notice.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second

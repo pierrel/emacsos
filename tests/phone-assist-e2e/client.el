@@ -1,6 +1,6 @@
 ;;; client.el --- Actual phone client against the isolated E2E server -*- lexical-binding: t; -*-
 ;;; Commentary:
-;; Test control supplies user actions; HTTPS, SSE, recovery and Git remain real.
+;; Test control supplies user actions; HTTPS, SSE, canonical refresh and Git remain real.
 ;;; Code:
 (require 'assist-web)
 (setq emacsos-assist-web-api-url (concat (getenv "ASSIST_E2E_URL") "/api/v1/phone")
@@ -16,10 +16,10 @@
       (accept-process-output nil 0.05)
       (set-buffer (window-buffer (selected-window))))
     (unless finished
-      (error "E2E client deadline: stage=%s buffer=%s snapshot=%s requests=%s git-process=%s queue=%s"
+      (error "E2E client deadline: stage=%s buffer=%s snapshot=%s requests=%s git-process=%s posting=%s observing=%s"
              phone-e2e-stage (buffer-name) (and emacsos-assist-web--snapshot t)
              (length emacsos-assist-web--requests) emacsos-assist-web-git--process
-             (mapcar (lambda (e) (plist-get e :state)) emacsos-assist-web--queue)))))
+             (plist-get emacsos-assist-web--http-draft :posting) emacsos-assist-web--in-flight))))
 
 (defun phone-e2e-request (method path &optional body)
   "Make a real client METHOD request to PATH with BODY and await its receipt."
@@ -82,16 +82,14 @@
     (emacsos-assist-web-send)
     (setq phone-e2e-stage "wait-live-observer")
     (phone-e2e-wait
-     (lambda () (let ((entry (car emacsos-assist-web--queue)))
-                  (and (eq (plist-get entry :state) 'observing)
-                       (process-live-p (plist-get entry :stream-process))))))
-    (let* ((entry (car emacsos-assist-web--queue))
-           (run-id (plist-get entry :run-id)))
+     (lambda () (and emacsos-assist-web--in-flight
+                     (process-live-p emacsos-assist-web--stream-process))))
+    (let ((run-id emacsos-assist-web--run-id))
       (setq phone-e2e-stage "close-observer")
-      (delete-process (plist-get entry :stream-process))
+      (delete-process emacsos-assist-web--stream-process)
       (phone-e2e-wait
-       (lambda () (and (eq (plist-get entry :state) 'accepted-unobserved)
-                       (not (plist-get entry :stream-process)))))
+       (lambda () (and (equal emacsos-assist-web--run-id run-id)
+                       (not emacsos-assist-web--stream-process))))
       (setq phone-e2e-stage "release-exact-model-hold")
       (phone-e2e-wait
        (lambda ()
@@ -111,9 +109,12 @@
                          "success")))
       (setq phone-e2e-stage "refresh-terminal-run")
       (call-interactively #'emacsos-assist-web-refresh-thread)
-      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--queue)
-                                     (not emacsos-assist-web--requests))))
-      `((observer_lost . t) (queue_cleared . t)
+      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--http-draft)
+                                     (not emacsos-assist-web--requests)
+                                     (not emacsos-assist-web--run-id)
+                                     (not emacsos-assist-web--pending-accepted-p)
+                                     (not emacsos-assist-web--in-flight))))
+      `((observer_lost . t) (observer_retired . t)
         (same_buffer . ,(eq buffer (current-buffer)))))))
 
 (defun phone-e2e-button (predicate)
@@ -141,8 +142,9 @@
     (when (member kind '("send_email" "email_archive" "email_delete"))
       (emacsos-assist-web--replace-input (concat "Synthetic approval:" kind))
       (emacsos-assist-web-send)
-      (phone-e2e-wait #'emacsos-assist-web--approval-stopped-p)
-      (setq original-run (plist-get (emacsos-assist-web--queue-head) :run-id))
+      (phone-e2e-wait (lambda () emacsos-assist-web--run-id))
+      (setq original-run emacsos-assist-web--run-id)
+      (phone-e2e-wait (lambda () (not emacsos-assist-web--in-flight)))
       (unless original-run (error "Stopped approval lost its original Run receipt"))
       (emacsos-assist-web-refresh-thread)
       (phone-e2e-wait (lambda () (not emacsos-assist-web--requests))))
@@ -150,17 +152,8 @@
       (unless (equal (alist-get 'status (alist-get 'thread emacsos-assist-web--snapshot)) "ready")
         (error "Independent approval fixture did not reach ready Run state")))
     (emacsos-assist-web--replace-input "Synthetic unsent draft")
-    (if (emacsos-assist-web--approval-stopped-p)
-        (let* ((header (emacsos-assist-web--thread-header))
-               (position (string-match "\\[Review\\]" header))
-               (map (and position (get-text-property position 'local-map header)))
-               (command (and map (lookup-key map [header-line mouse-1]))))
-          (unless (commandp command)
-            (error "Stopped Run has no visible Review header action"))
-          (setq discovery "header-review")
-          (call-interactively command))
-      (setq discovery "thread-review")
-      (button-activate (phone-e2e-button (lambda (label) (equal label "Review pending action")))))
+    (setq discovery "thread-review")
+    (button-activate (phone-e2e-button (lambda (label) (equal label "Review pending action"))))
     (phone-e2e-wait
      (lambda () (and (setq preview (get-buffer (format "*assist Approval %s*"
                                                       (buffer-local-value 'emacsos-assist-web--thread-id source))))
@@ -189,8 +182,8 @@
                                    (not (buffer-local-value 'emacsos-assist-web--requests source)))))
     (set-buffer source)
     (when original-run
-      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--queue)
-                                     (not (emacsos-assist-web--approval-stopped-p)))))
+      (phone-e2e-wait (lambda () (and (not emacsos-assist-web--http-draft)
+                                     (not emacsos-assist-web--in-flight))))
       (unless (equal (alist-get 'status
                                (phone-e2e-request "GET" (format "threads/%s/runs/%s"
                                                                emacsos-assist-web--thread-id original-run)))
@@ -240,12 +233,10 @@
           (if (equal action "accepted")
               (phone-e2e-wait
                (lambda ()
-                 (seq-some (lambda (entry)
-                             (and (equal (plist-get entry :text) text)
-                                  (plist-get entry :run-id)))
-                           emacsos-assist-web--queue)))
+                 (and (not emacsos-assist-web--http-draft)
+                      emacsos-assist-web--run-id)))
             (phone-e2e-wait
-             (lambda () (and (not emacsos-assist-web--queue)
+             (lambda () (and (not emacsos-assist-web--http-draft)
                              (not emacsos-assist-web--in-flight)
                              emacsos-assist-web--thread-id)))))
         (when (member action '("new" "send" "refresh"))

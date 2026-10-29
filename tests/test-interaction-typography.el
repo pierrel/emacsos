@@ -373,10 +373,12 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
   "Failed persistence retains input undo; acceptance moves input to the transcript."
   (interaction-test--editing
     (goto-char (point-max)) (insert "unsent") (undo-boundary)
-    (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) nil))
-              ((symbol-function 'emacsos-assist-web--request)
-               (lambda (&rest _) (ert-fail "Failed persistence submitted text"))))
-      (call-interactively #'emacsos-assist-web-send))
+    (let (requests)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) nil))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (&rest args) (push args requests))))
+        (call-interactively #'emacsos-assist-web-send))
+      (should-not requests))
     (should (equal (emacsos-assist-web--input) "unsent"))
     (should-not emacsos-assist-web--http-draft)
     (interaction-test--native-undo #'undo)

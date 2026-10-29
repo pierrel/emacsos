@@ -2807,6 +2807,7 @@ interrupted."
                     "Too many Assist Web requests are already running"
                   "token missing or invalid"))
       (with-current-buffer buffer
+        (emacsos-assist-web--sync-active-surface)
         (condition-case error
             (let* ((generation (cl-incf emacsos-assist-web--stream-generation))
                    (thread-id (emacsos-assist-web--require-id emacsos-assist-web--thread-id))
@@ -4323,7 +4324,7 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
                              (and thread-id (not (equal tid thread-id)))
                              (not (equal target (emacsos-assist-web--draft-target))))
                          (progn
-                           (unless (equal text (emacsos-assist-web--input))
+                           (unless (string-prefix-p text (emacsos-assist-web--input))
                              (emacsos-assist-web--replace-input
                               (concat text "\n\n" (emacsos-assist-web--input))))
                            (emacsos-assist-web--save-draft)
@@ -4332,19 +4333,35 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
                                 (format "Send rejected (HTTP %d); text retained; retry explicitly"
                                         (alist-get 'http_status value))
                               "Send failed; connection or acceptance unconfirmed. Text retained; retry explicitly")))
+                       (if-let ((existing (and (not thread-id)
+                                               (emacsos-assist-web--thread-buffer tid))))
+                           ;; A timed-out creation may already be open from the catalog.
+                           ;; Keep that canonical owner and its editable draft untouched.
+                           (let ((tail (string-remove-prefix text (emacsos-assist-web--input))))
+                             (if (not (let ((emacsos-assist-web--http-draft nil))
+                                        (emacsos-assist-web--save-draft tail)))
+                                 (emacsos-assist-web--set-status
+                                  "Server accepted; local draft save failed; retry identity retained")
+                               (setq emacsos-assist-web--http-draft nil)
+                               (emacsos-assist-web--replace-input tail)
+                               (emacsos-assist-web--set-status
+                                "Message accepted; additional text remains a separate local draft")
+                               (display-buffer existing)
+                               (message "Accepted thread already open; unsent text retained in %s"
+                                        (buffer-name buffer))))
+                         (progn
                        (cl-incf emacsos-assist-web--refresh-generation)
                        (unless thread-id
                          (setq emacsos-assist-web--thread-id tid
                                emacsos-assist-web--draft-id nil)
                          (setf (plist-get request :target) tid))
-                       (let* ((unchanged (equal text (emacsos-assist-web--input)))
-                              (tail (if unchanged "" (emacsos-assist-web--input))))
+                       (let ((tail (string-remove-prefix text (emacsos-assist-web--input))))
                          (if (not (let ((emacsos-assist-web--http-draft nil))
                                     (emacsos-assist-web--save-draft tail)))
                              (emacsos-assist-web--set-status
                               "Server accepted; local draft save failed. Unchanged retry keeps its key")
                            (setq emacsos-assist-web--http-draft nil)
-                           (when unchanged (emacsos-assist-web--replace-input ""))
+                           (emacsos-assist-web--replace-input tail)
                            (when (and (not thread-id) source-cache)
                              (emacsos-assist-web--delete-cache source-cache))))
                        (if emacsos-assist-web--in-flight
@@ -4358,7 +4375,7 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
                                emacsos-assist-web--pending-accepted-p t
                                emacsos-assist-web--in-flight t)
                          (emacsos-assist-web--append-pending text)
-                         (emacsos-assist-web--observe-run buffer)))))))))
+                         (emacsos-assist-web--observe-run buffer)))))))))))
            `(("Idempotency-Key" . ,(plist-get request :key))) t)
 ((error quit)
  (when (eq request emacsos-assist-web--http-draft)
