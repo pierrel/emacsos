@@ -2,6 +2,7 @@
 
 (require 'ert)
 (require 'assist-web)
+(require 'url-http)
 
 (defconst test-assist-web--snapshot
   '((thread . ((id . "thread-1") (description . "Thread")
@@ -9472,3 +9473,82 @@ server clears only flags for a view that is still current."
         (should (equal endpoint "https://assist.invalid/api/v1/phone/threads/thread-1/open"))
         (should (eq (not (null emacsos-assist-web--denied))
                     (not (null (memq status '(401 403))))))))))
+
+(ert-deftest test-assist-web-unicode-request-is-byte-exact-with-restored-headers ()
+  "The stock HTTP builder accepts file credentials and restored JSON keys."
+  (require 'url-http)
+  (dolist (line-ending '("\nsecond line" "\r\nsecond line\r\n" "\r\nsecond\nthird\rfourth"))
+  (dolist (preencoded '(nil t))
+  (let* ((emacsos-assist-web-token-file (make-temp-file "assist-synthetic-token-"))
+         (emacsos-assist-web-api-url "https://assist.invalid/api/v1/phone")
+         (emacsos-assist-web--requests nil)
+         (text (concat "café — 🐟" line-ending))
+         (key (alist-get 'key (json-parse-string
+                              "{\"key\":\"emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+                              :object-type 'alist)))
+         (nested (make-hash-table :test #'equal))
+         (response (generate-new-buffer " *unicode-wire*"))
+         request problem (attempts 0))
+    (unwind-protect
+        (progn
+          (with-temp-file emacsos-assist-web-token-file (insert "synthetic-only\n"))
+          (should (multibyte-string-p (emacsos-assist-web--read-token)))
+          (should (multibyte-string-p key))
+          (puthash "values" (vector t :json-false nil 7
+                                    (if preencoded (encode-coding-string text 'utf-8) text)) nested)
+          (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                    ((symbol-function 'url-retrieve)
+                     (lambda (url &rest _)
+                       (cl-incf attempts)
+                       (cl-progv
+                           '(url-http-target-url url-http-method url-http-extra-headers
+                             url-http-data url-http-proxy url-http-referer
+                             url-http-version url-privacy-level)
+                           (list (url-generic-parse-url url) url-request-method
+                                 url-request-extra-headers url-request-data nil nil
+                                 "1.1" 'paranoid)
+                         (setq request (url-http-create-request)))
+                       response)))
+            (emacsos-assist-web--request
+             "POST" "threads/synthetic/messages"
+             `(("message" . ,(if preencoded (encode-coding-string text 'utf-8) text))
+               (metadata . ,nested))
+             (lambda (_value error) (setq problem error))
+             `(("Idempotency-Key" . ,key)
+               ("X-Synthetic-Text" . ,(if preencoded (encode-coding-string "Résumé" 'utf-8)
+                                        "Résumé")))))
+          ;; Do not print the builder's request-bearing exception on failure.
+          (should-not (not (null problem)))
+          (should (= attempts 1))
+          (should (= (length request) (string-bytes request)))
+          (let* ((boundary (string-match "\r\n\r\n" request))
+                 (body (substring request (+ boundary 4)))
+                 (decoded (json-parse-string (decode-coding-string body 'utf-8)
+                                             :object-type 'alist :array-type 'array
+                                             :null-object :json-null :false-object :json-false)))
+            (should (equal (alist-get 'message decoded) text))
+            (should (equal (alist-get 'values (alist-get 'metadata decoded))
+                           (vector t :json-false :json-null 7 text)))
+            (should (string-match-p
+                     (concat "X-Synthetic-Text: " (encode-coding-string "Résumé" 'utf-8) "\r\n")
+                     request))
+            (should (string-match
+                     (format "Content-length: %d\r\n" (string-bytes body)) request))
+            (should (string-match-p (concat "Idempotency-Key: " key "\r\n") request))))
+      (delete-file emacsos-assist-web-token-file)
+      (when (buffer-live-p response) (kill-buffer response)))))))
+
+(ert-deftest test-assist-web-unicode-invalid-json-text-fails-privately-before-transport ()
+  "Invalid UTF-8 invokes the callback without a request-bearing exception."
+  (let ((emacsos-assist-web--requests nil) problem contacted)
+    (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
+               (lambda () "synthetic-private-token"))
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _) (setq contacted t))))
+      (emacsos-assist-web--request
+       "POST" "threads/synthetic/messages"
+       `((message . ,(unibyte-string #xff)))
+       (lambda (_value error) (setq problem error))))
+    (should-not contacted)
+    (should (equal problem "Assist Web JSON text must be valid UTF-8"))
+    (should-not (string-match-p "synthetic-private-token" problem))))
