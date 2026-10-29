@@ -11,7 +11,7 @@ snapshot=
 reference_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=7c8d9ca2a6fd62448f1c1dc94f1d431bf9489a2f9763cf105721364a1cf07011
+manifest_hash=43b0c1b572a45f43f45ed21ff25887cabbf89bf368cb1b46cf2ccfd0dd1b3408
 committed=0
 mutating=0
 lab_group_created=0
@@ -147,6 +147,7 @@ cleanup() {
                     /usr/local/sbin/emacsos-openrc-suspend \
                     /usr/local/sbin/emacsos-openrc-call \
                     /usr/local/sbin/emacsos-openrc-sms \
+                    /usr/local/share/emacsos-openrc/sms-forward \
                     /usr/local/sbin/emacsos-openrc-network \
                     /usr/local/sbin/emacsos-openrc-device \
                     /usr/local/sbin/emacsos-openrc-boot-mode \
@@ -219,7 +220,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -233,7 +234,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 49 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 50 ] || fail 'staging directory is incomplete'
 
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-install.XXXXXX)
 chown root:root "$snapshot"
@@ -246,7 +247,7 @@ for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf je
     waydroid-container.conf waydroid-container-wrapper \
     os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
     EMACSOS-COMMANDS.org \
-    openrc-call-root openrc-sms-root \
+    openrc-call-root openrc-sms-root sms_forward.py \
     openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
     openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
     assist-web-token assist-web-ca.pem wvkbd-emacsos wvkbd-notice; do
@@ -385,7 +386,7 @@ mutating=1
 set -- sway swayidle emacs-pgtk emacs-magit emacs-vterm git openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox \
     mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils \
     doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc \
-    mobile-broadband-provider-info pinephone-callaudiod alsa-utils py3-dbus
+    mobile-broadband-provider-info pinephone-callaudiod alsa-utils py3-dbus py3-requests
 apk add --simulate "$@"
 apk add "$@"
 for package do
@@ -398,7 +399,7 @@ for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     /usr/sbin/nft; do
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
-/usr/bin/python3 -I -c 'import dbus' || fail 'Python D-Bus binding is absent'
+/usr/bin/python3 -I -c 'import dbus, sqlite3, requests' || fail 'SMS Python dependencies are absent'
 for directory in /usr /usr/local /usr/local/sbin /etc /etc/doas.d; do
     check_safe_root_directory "$directory"
 done
@@ -500,6 +501,8 @@ install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
 install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \
     /usr/local/sbin/emacsos-openrc-sms
+install -o root -g root -m 0644 "$snapshot/sms_forward.py" \
+    /usr/local/share/emacsos-openrc/sms-forward
 install -o root -g root -m 0755 "$snapshot/openrc-network-root" \
     /usr/local/sbin/emacsos-openrc-network
 install -o root -g root -m 0755 "$snapshot/openrc-wifi-connect-root" \
@@ -575,6 +578,7 @@ cmp -s "$snapshot/wvkbd-notice" \
     /usr/local/share/licenses/wvkbd-emacsos/wordninja.txt
 cmp -s "$snapshot/openrc-call-root" /usr/local/sbin/emacsos-openrc-call
 cmp -s "$snapshot/openrc-sms-root" /usr/local/sbin/emacsos-openrc-sms
+cmp -s "$snapshot/sms_forward.py" /usr/local/share/emacsos-openrc/sms-forward
 cmp -s "$snapshot/openrc-network-root" /usr/local/sbin/emacsos-openrc-network
 cmp -s "$snapshot/openrc-wifi-connect-root" \
     /usr/local/sbin/emacsos-openrc-wifi-connect

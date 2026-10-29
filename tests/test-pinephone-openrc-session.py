@@ -18,7 +18,7 @@ runtime=$1
 probe_file=$runtime/probe
 keyboard_pid=1; emacs_pid=2; sway_pid=3; power_pid=4; idle_pid=5
 pipewire_pid=6; wireplumber_pid=7; pulse_pid=8; dbus_pid=9
-timer_pid=; sway_socket=; wayland_socket=; dbus_address_file=; power_fifo=
+timer_pid=; sms_pid=; sway_socket=; wayland_socket=; dbus_address_file=; power_fifo=
 fail() { printf '%s\\n' "$1"; exit 1; }
 kill() { [ "$1" != -0 ]; }
 wait() { printf '%s\\n' "$1" >>"$runtime/waited"; }

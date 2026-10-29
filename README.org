@@ -794,3 +794,48 @@ is the worked example: it greps the user's files for a number via elisp, then
 stages it via =emacsos-call=; two local phone actions perform the dial.) New
 capabilities slot in the same way — a deterministic command plus a skill that
 routes to it — not as bespoke tools.
+
+
+* PinePhone SMS journal and transport
+The fixed root SMS helper journals every exact outgoing attempt before calling
+ModemManager, including sends confirmed locally on the phone. A repeated attempt
+id reads its recorded outcome and never sends again. =sent= means ModemManager
+accepted the message, not carrier delivery. =unknown= must not be retried as a new
+send to repair the archive.
+
+The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
+source checkout. It also records incoming ModemManager observations. Retries of
+one owner/boot/object observation retain one id; identical independent objects
+retain separate ids. A new ModemManager owner can expose an old physical SMS as a
+new observation. Physical deduplication across re-enumeration is not established.
+
+An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the
+unprivileged transport inside the existing UI service. It requires exactly
+=secret=, =inbound_url= (HTTPS ending in =/inbound/sms=), =bind= (an explicit private IPv4
+interface address), =port= (an available unprivileged port) and =ca= (absolute path
+to the trusted server CA). Keep this file and the journal out of Git. The server
+uses the same =ASSIST_SMS_SECRET=, =ASSIST_SMS_OUTBOUND_URL= pointing to that listener's =/outbound/sms/v1= path,
+and a private =ASSIST_SMS_ARCHIVE_DIR= outside every Git repository and thread root.
+Configure actual addresses and secrets only in private runtime files.
+
+The transport waits for its interface and restarts independently of the UI after
+an exit. =M-x emacsos-sms-transport-status= reports its local state. Network failure
+retains journal receipts with fair retry selection; receipt retries never replay SMS sends. The bridge
+acknowledges only a server-confirmed durable handoff. Incoming modem messages are
+retained for the current SMS UI. Verify actual storage location, capacity and
+full-store behavior before relying on indefinite retention in daily use.
+
+The OpenRC installer supplies Python D-Bus, SQLite and requests support. The older
+standalone root systemd SMS bridge is superseded by this UI-owned PinePhone
+transport; do not enable both. Existing server inbound JSON history is not
+migrated or removed automatically. Operator migration must preserve original
+records and must not send messages.
+
+
+Received-SMS events also request one finite quiet-profile =feedbackd= vibration
+through the existing verified ModemManager observer. This adds no independent
+wake channel. Verify the installed =fbcli= options, session activation, theme and
+EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
+Incoming sender addresses (including brand names and unknown senders) and empty
+texts are preserved exactly. Received bodies share the server's bounded multipart-text envelope;
+serialized receipt batches stay below the transport cap even with escaped text.
