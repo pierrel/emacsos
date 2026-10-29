@@ -621,6 +621,11 @@ A connected send is a separate live check.  Package references: [[https://formul
 
 Assist Web thread buffers use the authenticated HTTPS phone API and SSE only as
 a provisional observation: the final canonical Assist snapshot remains truth.
+JSON requests normalize Unicode text and already encoded UTF-8 string values
+without newline conversion at their shared request boundary, including nested objects and arrays. Header
+and body bytes remain byte-oriented for the HTTP builder and its Content-Length.
+Invalid UTF-8 fails through the request callback before transport with a generic
+text diagnostic that includes neither credentials nor message contents.
 =C-c a l= opens a native, touch-sized thread list, while =C-c a t= opens the
 filtered catalog completion chooser when threads exist and otherwise falls back
 to that list.  The list renders the validated local catalog immediately,
