@@ -32,6 +32,7 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Open an Assist Web thread | =emacsos-assist-web-open-thread= |
 | Start an Assist Web thread | =emacsos-assist-web-new-thread= |
 | Send from an Assist Web thread | =emacsos-assist-web-send= |
+| Clear waiting local messages in this thread, keeping input and submitted/uncertain work | =assist-thread-queue-clear= |
 | Refresh an Assist Web thread | =emacsos-assist-web-refresh-thread= |
 | Refresh the Assist Web thread list | =emacsos-assist-web-refresh-threads= |
 | Conversation actions available in this buffer | =emacsos-conversation-command= |

@@ -9472,3 +9472,135 @@ server clears only flags for a view that is still current."
         (should (equal endpoint "https://assist.invalid/api/v1/phone/threads/thread-1/open"))
         (should (eq (not (null emacsos-assist-web--denied))
                     (not (null (memq status '(401 403))))))))))
+
+(defmacro test-assist-web--with-clear-queue (&rest body)
+  "Run BODY with private real persistence and forbidden transport."
+  `(let ((emacsos-assist-web-cache-directory (make-temp-file "assist-clear-" t))
+         (emacsos-assist-web--thread-safety (make-hash-table :test #'equal)))
+     (unwind-protect
+         (with-temp-buffer
+           (emacsos-assist-web-mode)
+           (setq emacsos-assist-web--thread-id "clear-thread"
+                 emacsos-assist-web--queue-model-p t)
+           (emacsos-assist-web--write-prompt)
+           (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                      (lambda (&rest _) (ert-fail "Queue clear contacted server")))
+                     ((symbol-function 'emacsos-assist-web--pump-posts)
+                      (lambda (&rest _) (ert-fail "Queue clear resumed sending"))))
+             ,@body))
+       (delete-directory emacsos-assist-web-cache-directory t))))
+
+(ert-deftest test-assist-web-queue-clear-persists-empty-queue-and-exact-input ()
+  (test-assist-web--with-clear-queue
+   (setq emacsos-assist-web--queue
+         (list (emacsos-assist-web--entry "waiting one")
+               (emacsos-assist-web--entry "waiting two")))
+   (dolist (entry emacsos-assist-web--queue) (emacsos-assist-web--entry-render entry))
+   (emacsos-assist-web--replace-input "editable café\nnext line")
+   (should (= (call-interactively #'assist-thread-queue-clear) 2))
+   (should-not emacsos-assist-web--queue)
+   (should-not (string-match-p "waiting" (buffer-string)))
+   (should (equal (emacsos-assist-web--input) "editable café\nnext line"))
+   (let ((saved (emacsos-assist-web--read-cache (emacsos-assist-web--draft-cache-name))))
+     (should-not (alist-get 'queue saved))
+     (should (equal (alist-get 'text saved) "editable café\nnext line")))
+   ;; Reopen the actual saved record through the ordinary draft restore path.
+   (with-temp-buffer
+     (emacsos-assist-web-mode)
+     (setq emacsos-assist-web--thread-id "clear-thread")
+     (emacsos-assist-web--write-prompt)
+     (emacsos-assist-web--restore-draft)
+     (should-not emacsos-assist-web--queue)
+     (should (equal (emacsos-assist-web--input) "editable café\nnext line")))))
+
+(ert-deftest test-assist-web-queue-clear-retains-every-submitted-or-uncertain-head ()
+  (dolist (state '(posting acceptance-unknown accepted-unobserved observing
+                  recovered-head retryable-rejected rejected identity-conflict
+                  terminal-unreconciled reconciling))
+    (test-assist-web--with-clear-queue
+     (let* ((head (emacsos-assist-web--entry "keep head" state
+                                          "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+            (waiting (emacsos-assist-web--entry "remove waiting"))
+            (before (copy-tree head)))
+       (setq emacsos-assist-web--queue (list head waiting))
+       (dolist (entry emacsos-assist-web--queue) (emacsos-assist-web--entry-render entry))
+       (setq before (copy-sequence head))
+       (emacsos-assist-web--replace-input "still editing")
+       (should (= (assist-thread-queue-clear) 1))
+       (should (eq (car emacsos-assist-web--queue) head))
+       (should (equal head before))
+       (should (string-match-p "keep head" (buffer-string)))
+       (should-not (string-match-p "remove waiting" (buffer-string)))
+       (should (equal (emacsos-assist-web--input) "still editing"))))))
+
+(ert-deftest test-assist-web-queue-clear-save-failure-keeps-resident-and-durable-state ()
+  (dolist (failure '(nil error quit))
+    (test-assist-web--with-clear-queue
+     (setq emacsos-assist-web--queue (list (emacsos-assist-web--entry "waiting")))
+     (emacsos-assist-web--entry-render (car emacsos-assist-web--queue))
+     (emacsos-assist-web--replace-input "editable")
+     (should (emacsos-assist-web--save-draft))
+     (let ((original emacsos-assist-web--queue)
+           (image (buffer-string))
+           (saved (emacsos-assist-web--read-cache (emacsos-assist-web--draft-cache-name))))
+       (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                  (lambda () (if failure (signal failure nil) nil))))
+         (should-error (assist-thread-queue-clear) :type 'user-error))
+       (should (eq emacsos-assist-web--queue original))
+       (should (equal (buffer-string) image))
+       (should (equal (emacsos-assist-web--read-cache
+                       (emacsos-assist-web--draft-cache-name)) saved))))))
+
+(ert-deftest test-assist-web-queue-clear-empty-and-wrong-buffer ()
+  (test-assist-web--with-clear-queue
+   (emacsos-assist-web--replace-input "keep this")
+   (should (= (assist-thread-queue-clear) 0))
+   (should (equal (emacsos-assist-web--input) "keep this"))
+   (with-temp-buffer
+     (should-error (assist-thread-queue-clear) :type 'user-error))))
+
+(ert-deftest test-assist-web-queue-clear-legacy-followups-preserves-pending-tuple ()
+  (test-assist-web--with-clear-queue
+   (setq emacsos-assist-web--queue-model-p nil
+         emacsos-assist-web--follow-ups '(((text . "waiting") (key . "saved-followup")))
+         emacsos-assist-web--pending-key "saved-active-key"
+         emacsos-assist-web--submitted-text "submitted"
+         emacsos-assist-web--run-id "active-run"
+         emacsos-assist-web--in-flight t)
+   (emacsos-assist-web--replace-input "editable")
+   (should (= (assist-thread-queue-clear) 1))
+   (should-not emacsos-assist-web--follow-ups)
+   (should (equal emacsos-assist-web--pending-key "saved-active-key"))
+   (should (equal emacsos-assist-web--run-id "active-run"))
+   (should emacsos-assist-web--in-flight)
+   (should (equal (emacsos-assist-web--input) "editable"))))
+
+(ert-deftest test-assist-web-queue-clear-does-not-touch-another-thread ()
+  (test-assist-web--with-clear-queue
+   (let ((origin (current-buffer)))
+     (setq emacsos-assist-web--queue (list (emacsos-assist-web--entry "current waiting")))
+     (with-temp-buffer
+       (emacsos-assist-web-mode)
+       (setq emacsos-assist-web--thread-id "other-thread"
+             emacsos-assist-web--queue-model-p t
+             emacsos-assist-web--queue (list (emacsos-assist-web--entry "other waiting")))
+       (emacsos-assist-web--write-prompt)
+       (emacsos-assist-web--replace-input "other draft")
+       (should (emacsos-assist-web--save-draft))
+       (let ((queue emacsos-assist-web--queue)
+             (saved (emacsos-assist-web--read-cache (emacsos-assist-web--draft-cache-name))))
+         (with-current-buffer origin (should (= (assist-thread-queue-clear) 1)))
+         (should (eq emacsos-assist-web--queue queue))
+         (should (equal (emacsos-assist-web--input) "other draft"))
+         (should (equal (emacsos-assist-web--read-cache
+                         (emacsos-assist-web--draft-cache-name)) saved)))))))
+
+(ert-deftest test-assist-web-queue-clear-rejects-invalid-recovery-without-saving ()
+  (test-assist-web--with-clear-queue
+   (setq emacsos-assist-web--queue (list (emacsos-assist-web--entry "waiting"))
+         emacsos-assist-web--passive-recovery-invalid-p t)
+   (let ((original emacsos-assist-web--queue))
+     (cl-letf (((symbol-function 'emacsos-assist-web--save-draft)
+                (lambda () (ert-fail "Invalid recovery must not save"))))
+       (should-error (assist-thread-queue-clear) :type 'user-error))
+     (should (eq emacsos-assist-web--queue original)))))
