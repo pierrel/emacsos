@@ -389,8 +389,7 @@ do not clear unread state; a newer server notification survives a stale receipt.
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
 =M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
 you return to the present.  Recall never sends a message.  Ordinary undo and
-redo affect input edits across transcript refreshes; accepting input into the
-submission queue starts a new undo history.  =M-g i= opens the standard Imenu
+redo affect input edits across transcript refreshes; submitting input starts a new undo history.  =M-g i= opens the standard Imenu
 index of loaded messages, while =C-c b/f= retain their message-boundary motion.
 
 =C-c a h= shows the
@@ -415,9 +414,8 @@ untracked and locally committed-but-unpushed changes are excluded. A failed
 status request labels any prior observation stale; an unconfirmed POST outcome
 is never retried automatically. Complete server conflict, busy, and stale
 responses are shown distinctly; a transport failure remains unconfirmed.
-After a verified merge, the client observes the originating thread when no
-message queue is resident; a queued message is left untouched and is never
-retried by the Git action. The client then fetches
+After a verified merge, the client refreshes the originating canonical thread
+without submitting any draft. The client then fetches
 the normal checkout (including published main), and observes fresh server Git
 facts so the next =C-c a d= uses the updated main comparison. The minibuffer
 reports merge and refresh progress; a blocked local checkout stays visibly
@@ -627,10 +625,24 @@ to that list.  The list renders the validated local catalog immediately,
 refreshes it asynchronously, and exposes visible refresh or retry rows.  Each
 two-line row opens its exact thread with mouse-1 or RET.  Both entry points
 share the same complete thread, repository, and harness catalog.
-In the entry-owned queue flow, a new thread keeps its draft buffer when its
-first Run is accepted. Once the canonical title arrives, that same buffer
-adopts it and follows later title updates without losing its draft or queued
-message.
+Send submits the editable text directly through the existing phone API, even
+while a server thread is busy. Assist owns admission and its next available
+execution step; the client does not retain an accepted-Run queue. While one
+HTTP submission waits for its response, the editable text remains available.
+A failed request retains or restores its exact text for an explicit retry and
+reports connection or acceptance uncertainty. Unchanged text reuses its request
+key; edited text gets a new key, with a status warning when an earlier response
+was uncertain. There is no automatic retry or acknowledgment gate.
+
+Send and =C-x C-s= save the editable draft. Ordinary reopening restores that
+text without submitting or resuming work. Existing unsent queue/follow-up and
+retained-source text is recovered into the editable area, separated by blank
+lines; already accepted Runs remain server history. A current response observer
+continues independently when another message is accepted. After a restart,
+=Refresh= reads canonical server history and status; it does not reconstruct a
+local accepted-Run queue or automatically attach a previous SSE observer.
+A newly created thread keeps its current buffer and adopts its canonical title
+when the server snapshot arrives.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second
@@ -638,17 +650,14 @@ final-send grace period.  A reserved ordinary
 busy follower or initializing run returns =live_text=true=, but its SSE is a
 delta-empty status observation until the eventual worker starts.  Pi and
 journal saturation return =live_text=false=; an older Assist server visibly
-falls back to status-only observation.  ABORT before POST acceptance leaves an
-acceptance-unknown committed turn; Send reuses its exact idempotency key to
-re-observe it.  Afterwards, only HTTP 200 =cancelled= confirms cancellation;
+falls back to status-only observation.  Abort controls the currently observed server Run, not a pending HTTP submission.
+Only HTTP 200 =cancelled= confirms cancellation;
 structured HTTP 409 =running= or =transitioning= truthfully detaches, and other
 terminal outcomes reconcile the canonical snapshot.  =awaiting_approval= is a
 nonterminal Run state, but it ends this finite live-text observation. Its exact
-status check exposes the compact =Review= header action without discarding the accepted
-Run receipt or saved draft. After a decision, the same logical Run handle follows
-the approval resume and reconciles its completed canonical snapshot.
-Tap =Review= in a stopped Run header or =Review pending action= in a canonical
-snapshot to fetch all supported proposals. The =Status= buffer puts a prominent
+status is reflected by canonical history and its =Review pending action= link.
+Approval decisions refresh the thread without resubmitting editable text.
+Tap =Review pending action= in a canonical snapshot to fetch all supported proposals. The =Status= buffer puts a prominent
 =Pending approvals: Review= link first whenever the thread has pending approvals,
 including independent requests while the ordinary Run is ready. It opens the
 same approval list; Git fact availability does not gate the notice. Network and
@@ -680,9 +689,9 @@ validation rather than gaining an action from the renderer.
 
 Every decision uses two taps; another action or window disarms confirmation.
 Tokens bind the exact displayed proposal and scope. An in-flight decision fences
-peer previews until acknowledgment settles. Replies and Email keep accepted Run
-receipts; independent service acknowledgments carry their own exact kind/token
-and actual status instead of inventing a Run. A failed or unconfirmed POST hides
+peer previews until acknowledgment settles. Replies and Email resume server-owned
+Runs; independent service acknowledgments carry their own exact kind/token and
+actual status instead of inventing a Run. A failed or unconfirmed POST hides
 controls until explicit refresh, without automatically repeating the effect.
 Refresh can close a disappeared proposal even if it was selected from a chooser
 while the request was in flight. Access denials fence all peers and close previews;
@@ -691,17 +700,18 @@ an old callback cannot reopen them.
 The Email editor and preview share canonical body text with CRLF normalized to LF.
 Oversized edits stay in the editor: To allows 320 characters, subject 998 UTF-8
 bytes and body 65536 UTF-8 bytes; the encoded request is capped at 512 KiB.
-An accepted decision rechecks stopped Run owners even if another view refreshed
+An accepted decision refreshes live thread views even if another view refreshed
 the preview while the decision was in flight. Previews are fetched afresh and
 are not stored in the local snapshot cache. Headers remain single-line; bodies
 wrap and scroll. New request kinds reuse the existing server owners, without
 an independent desktop implementation or client-owned approval authority.
 
 If Assist confirms that the thread was deleted while an observer is open, the
-client retains visible partial text and the next draft, clears the accepted
-retry identity, and starts the next submission as a new thread.  If the durable
-Run store becomes unavailable, it instead preserves that identity and reports
-that an operator must repair observation; it never retries automatically.  The
+client retains visible partial text and the editable draft, retires the transient
+observer identity, and lets the next explicit Send create a new thread. If the
+durable Run store becomes unavailable, the transient observer remains unverified
+and the client reports that observation needs repair. The separate HTTP retry
+tuple is preserved independently; neither path automatically retries a send.  The
 current closure corrections are [[file:docs/2026-09-09-conversation-observation-closure-amendment.org][the observation closure amendment]],
 [[file:docs/2026-09-09-conversation-deletion-closure-amendment.org][the deleted-thread closure amendment]],
 and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the stream-batching amendment]].

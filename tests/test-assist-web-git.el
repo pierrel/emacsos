@@ -37,9 +37,8 @@
   "Narrow headers retain the original Run-details link in recovery states."
   (with-temp-buffer
     (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 40)))
-      (dolist (state '(source-adoption other-owner))
-        (cl-letf (((symbol-function 'emacsos-assist-web--shared-recovery-state)
-                   (lambda () state)))
+      (let ((emacsos-assist-web--thread-id "thread-1")
+            (emacsos-assist-web--run-outcome-uncertain '(unverified)))
           (let* ((header (emacsos-assist-web--thread-header))
                  (details (string-match (regexp-quote "[?]") header))
                  (map (and details
@@ -52,7 +51,7 @@
                         #'emacsos-assist-web-status-details))
             (should (eq (get-text-property details 'mouse-face header)
                         'highlight))
-            (should (get-text-property (1- details) 'display header))))))))
+            (should (get-text-property (1- details) 'display header)))))))
 
 (ert-deftest test-assist-web-git-pending-merge-keeps-outcome-buffer ()
   "Do not lose the in-flight POST callback by killing its status buffer."
@@ -650,7 +649,7 @@
             (setq-local emacsos-assist-web-git--status-source source
                         emacsos-assist-web-git--status-identity
                         '("thread-1" . "aaaaaaaaaaaaaaaaaaaa")))
-          (cl-letf (((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
+          (cl-letf (((symbol-function 'emacsos-assist-web-refresh-thread)
                      (lambda (&rest _) (cl-incf thread-refreshes)))
                     ((symbol-function 'emacsos-assist-web-git--enqueue)
                      (lambda (&rest _) (cl-incf fetches)))
@@ -731,18 +730,18 @@
           (with-current-buffer source
             (setq-local emacsos-assist-web--thread-id "thread-1"
                         emacsos-assist-web--denied nil
-                        emacsos-assist-web--queue '((:state retryable-rejected :key "old"))
+                        emacsos-assist-web--http-draft '(:text "unsent" :key "old" :posting nil)
                         emacsos-assist-web-git--metadata test-assist-web-git--metadata))
           (with-current-buffer view (special-mode))
-          (cl-letf (((symbol-function 'emacsos-assist-web--start-post)
+          (cl-letf (((symbol-function 'emacsos-assist-web-send)
                      (lambda (&rest _) (cl-incf posts)))
-                    ((symbol-function 'emacsos-assist-web--legacy-refresh-thread)
+                    ((symbol-function 'emacsos-assist-web-refresh-thread)
                      (lambda (&rest _) (cl-incf observations)))
                     ((symbol-function 'emacsos-assist-web-git--enqueue) #'ignore))
             (with-current-buffer view
               (emacsos-assist-web-git--refresh-after-merge source view)))
           (should (= posts 0))
-          (should (= observations 0)))
+          (should (= observations 1)))
       (when (buffer-live-p view) (kill-buffer view))
       (when (buffer-live-p source) (kill-buffer source)))))
 
@@ -1178,7 +1177,7 @@
 
 (ert-deftest test-assist-web-git-status-pending-approvals-open-existing-list ()
   "Status exposes pending independent approvals before Git facts on both clients."
-  (dolist (pending '(("ready" 2) ("awaiting_approval" nil) ("ready" 0 t)))
+  (dolist (pending '(("ready" 2) ("awaiting_approval" nil)))
       (let ((source (generate-new-buffer " *status-approval-source*"))
             (view (generate-new-buffer " *status-approval-view*"))
             (emacsos-assist-web--thread-safety (make-hash-table :test 'equal))

@@ -98,62 +98,43 @@
 (defun interaction-test--native-undo (command)
   "Call native undo COMMAND with command-loop bookkeeping between callbacks.
 Separate keyboard macros reset `last-command'; a background refresh does not."
-  (let ((this-command command))
+  (let ((this-command command) (current-prefix-arg nil))
     (undo-boundary)
     (call-interactively command)
     (run-hooks 'post-command-hook)
     (setq last-command this-command)))
 
 (ert-deftest interaction-control-enter-submits-draft-from-transcript-and-prompt ()
-  "C-enter appends the draft without splitting or relabeling an old reply."
+  "C-enter preserves the old reply and clears input only after HTTP acceptance."
   (dolist (location '(mid-bot transcript prompt input))
     (interaction-test--editing
-      (let* ((emacsos--assist-active-surface nil)
-             (tail (marker-position emacsos-assist-web--prompt-marker))
-             (transcript (buffer-substring (point-min) tail))
-             (old-bot (alist-get 'text (cadr (alist-get 'messages interaction-test--snapshot))))
-             requests)
+      (let ((emacsos--assist-active-surface nil) callback requests)
         (goto-char (point-max)) (insert "send this draft")
         (goto-char (pcase location
-                     ('mid-bot
-                      (goto-char (point-min))
-                      (search-forward old-bot)
-                      (- (point) (/ (length old-bot) 2)))
+                     ('mid-bot (+ (point-min) 4))
                      ('transcript (point-min))
                      ('prompt (1- (emacsos-assist-web--prompt-start)))
                      ('input (+ 3 (emacsos-assist-web--prompt-start)))))
-        (should (eq (key-binding (kbd "C-<return>")) #'emacsos-conversation-send))
-        (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                   (lambda (method path payload _callback &rest _)
-                     (push (list method path payload) requests))))
-          (execute-kbd-macro (kbd "C-<return>")))
-        (should (equal requests '(("POST" "threads/thread-1/messages"
-                                 ((message . "send this draft"))))))
-        (should (equal (emacsos-assist-web--input) ""))
-        ;; The old final newline becomes the boundary of the appended message.
-        ;; Expect only its exact cosmetic separator properties to change.
-        (add-text-properties (1- (length transcript)) (length transcript)
-                             '(face emacsos-chat-message-separator-face
-                                    line-prefix nil wrap-prefix nil)
-                             transcript)
-        (let ((entry (car emacsos-assist-web--queue)))
-          (should (equal-including-properties
-                   (buffer-substring (point-min) tail) transcript))
-          (should (= (marker-position (plist-get entry :user-start)) tail))
-          (should-not (get-text-property tail 'emacsos-assist-web-message-id))
-          (should (equal (plist-get entry :text) "send this draft"))
-          (should (< (plist-get entry :user-start) (plist-get entry :assistant-start)))
-          (should (<= (plist-get entry :assistant-end)
-                      (marker-position emacsos-assist-web--prompt-marker)))
-          (emacsos-assist-web--entry-reset-assistant entry 1)
-          (emacsos-assist-web--entry-append-rendered-delta entry "new streamed reply")
-          (should (equal-including-properties
-                   (buffer-substring (point-min) tail) transcript))
-          (should (equal (buffer-substring-no-properties
-                          (plist-get entry :assistant-start) (plist-get entry :assistant-end))
-                         "new streamed reply"))
-          (should (<= (plist-get entry :assistant-end)
-                      (marker-position emacsos-assist-web--prompt-marker))))))))
+        (let* ((tail (copy-marker emacsos-assist-web--prompt-marker))
+               (start (save-excursion
+                        (goto-char (point-min)) (search-forward "you> First")
+                        (copy-marker (match-beginning 0))))
+               (transcript (buffer-substring-no-properties start tail)))
+          (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                     (lambda (method path payload response &rest _)
+                       (setq callback response)
+                       (push (list method path payload) requests)))
+                    ((symbol-function 'emacsos-assist-web--observe-run) #'ignore))
+            (execute-kbd-macro (kbd "C-<return>"))
+            (should (equal (emacsos-assist-web--input) "send this draft"))
+            (should (equal requests '(("POST" "threads/thread-1/messages" ((message . "send this draft"))))))
+            (funcall callback '((thread_id . "thread-1") (run_id . "accepted-run")) nil))
+          (should (equal (emacsos-assist-web--input) ""))
+          (should (equal (buffer-substring-no-properties start tail) transcript))
+          (should-not emacsos-assist-web--http-draft)
+          (emacsos-assist-web--reset-assistant 1)
+          (emacsos-assist-web--append-delta 1 1 "new streamed reply")
+          (should (equal (buffer-substring-no-properties start tail) transcript)))))))
 
 (ert-deftest interaction-thread-refresh-feedback-waits-for-valid-current-display ()
   "Refresh reports completion only after a current response renders successfully."
@@ -190,61 +171,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
             (should-not (member "Thread refreshed" messages)))
           (should (equal (emacsos-assist-web--input) "keep draft")))))))
 
-(ert-deftest interaction-queued-refresh-feedback-covers-run-and-canonical-get ()
-  "Public Refresh reports exact Run status and only a rendered canonical result."
-  (dolist (outcome '(running terminal network-error network-cache-error invalid stale canonical-error canonical-invalid canonical-cache-error))
-    (interaction-test--editing
-      (let ((entry (emacsos-assist-web--entry "sent" 'accepted-unobserved "key"))
-            callbacks messages)
-        (setf (plist-get entry :run-id) "run-1")
-        (setq emacsos-assist-web--queue (list entry)
-              emacsos-assist-web--queue-model-p t)
-        (emacsos-assist-web--entry-render entry)
-        (goto-char (point-max)) (insert "keep next draft")
-        (cl-letf (((symbol-function 'message)
-                   (lambda (format &rest args) (push (apply #'format format args) messages)))
-                  ((symbol-function 'emacsos-assist-web--start-observation) #'ignore)
-                  ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
-                  ((symbol-function 'emacsos-assist-web--request)
-                   (lambda (method path _payload callback &rest _)
-                     (should (equal method "GET"))
-                     (push (cons path callback) callbacks))))
-          (call-interactively #'emacsos-assist-web-refresh-thread)
-          (should (equal messages '("Refreshing run…")))
-          (should (equal (caar callbacks) "threads/thread-1/runs/run-1"))
-          (when (eq outcome 'stale) (cl-incf (plist-get entry :reobserve-generation)))
-          (if (eq outcome 'network-cache-error)
-              (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil)))
-                (funcall (cdar callbacks) nil "offline"))
-            (funcall (cdar callbacks)
-                     (unless (eq outcome 'invalid)
-                       `((id . "run-1") (thread_id . "thread-1")
-                         (status . ,(if (memq outcome '(terminal canonical-error canonical-invalid canonical-cache-error))
-                                        "success" "running"))))
-                     (and (eq outcome 'network-error) "offline")))
-          (pcase outcome
-            ('running (should (equal (car messages) "Run refreshed: running")))
-            ('network-error (should (equal (car messages) "Run refresh failed; Refresh retries")))
-            ('network-cache-error
-             (should emacsos-assist-web--reconcile-recovery-paused)
-             (should (equal (car messages) "local recovery could not be saved; restart to recover")))
-            ('invalid (should (equal (car messages) "Run refresh rejected; Refresh retries")))
-            ('stale (should (equal messages '("Refreshing run…"))))
-            (_
-             (should (equal (caar callbacks) "threads/thread-1"))
-             (should (equal (car messages) "Refreshing thread…"))
-             (should-not (member "Thread refreshed" messages))
-             (if (eq outcome 'canonical-cache-error)
-                 (cl-letf (((symbol-function 'emacsos-assist-web--try-write-cache) (lambda (&rest _) nil)))
-                   (funcall (cdar callbacks) interaction-test--snapshot nil))
-               (funcall (cdar callbacks) (unless (eq outcome 'canonical-invalid) interaction-test--snapshot)
-                        (and (eq outcome 'canonical-error) "offline")))
-             (should (equal (car messages)
-                            (pcase outcome
-                              ('terminal "Thread refreshed")
-                              ('canonical-cache-error "local recovery could not be saved; restart to recover")
-                              (_ "Thread refresh failed; Refresh retries"))))))
-          (should (equal (emacsos-assist-web--input) "keep next draft")))))))
+
 
 (ert-deftest interaction-catalog-refresh-feedback-waits-for-response ()
   "Catalog progress precedes its existing validated success or failure message."
@@ -267,69 +194,29 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
         (should (equal (car messages) (if failed "Thread refresh failed: offline" "Threads updated")))))))
 
 (ert-deftest interaction-send-feedback-and-retry-follow-acknowledgements ()
-  "Acceptance is announced after acknowledgement; retry retains the exact key."
+  "A failed HTTP send remains editable and an explicit retry keeps its key."
   (interaction-test--editing
-    (let ((emacsos--assist-active-surface nil) callbacks requests messages)
-      (cl-letf (((symbol-function 'message)
-                 (lambda (format &rest args) (push (apply #'format format args) messages)))
-                ((symbol-function 'emacsos-assist-web--start-observation) #'ignore)
+    (let ((emacsos--assist-active-surface nil) callbacks requests)
+      (cl-letf (((symbol-function 'emacsos-assist-web--observe-run) #'ignore)
                 ((symbol-function 'emacsos-assist-web--request)
-                 (lambda (method path payload callback &rest options)
+                 (lambda (method path payload callback headers &rest _)
                    (push callback callbacks)
-                   (push (list method path payload options) requests))))
+                   (push (list method path payload headers) requests))))
         (goto-char (point-max)) (insert "send once")
         (emacsos-assist-web-send)
-        (should (equal messages '("Sending…" "Message queued")))
         (funcall (car callbacks) nil "offline")
-        (should (equal (car messages) "Acceptance unknown; Send retries safely"))
-        (should-not (member "Message accepted" messages))
+        (should (equal (emacsos-assist-web--input) "send once"))
+        (should (string-match-p "acceptance unconfirmed" emacsos-assist-web--stream-status))
         (emacsos-assist-web-send)
-        (should (equal (car messages) "Sending…"))
-        (should (= 2 (length requests)))
+        (should (= (length requests) 2))
         (should (equal (car requests) (cadr requests)))
-        (funcall (car callbacks) '((thread_id . "thread-1") (run_id . "run-1")) nil)
-        (should (equal (car messages) "Message accepted"))
-        (let ((before messages))
+        (funcall (car callbacks) '((thread_id . "thread-1") (run_id . "accepted-run")) nil)
+        (should-not emacsos-assist-web--http-draft)
+        (let ((image (buffer-string)))
           (funcall (cadr callbacks) '((thread_id . "thread-1") (run_id . "stale-run")) nil)
-          (should (eq before messages)))
-        (let ((entry (car emacsos-assist-web--queue)) (before messages))
-          (emacsos-assist-web--entry-reset-assistant entry 1)
-          (emacsos-assist-web--entry-append-rendered-delta entry "streamed text")
-          (should (eq before messages)))))))
+          (should (equal image (buffer-string))))))))
 
-(ert-deftest interaction-cancel-feedback-distinguishes-confirmed-and-uncertain ()
-  "Cancellation success requires the matching cancelled receipt, never just DELETE."
-  (dolist (outcome '(cancelled running network-error cache-error stale))
-    (interaction-test--editing
-      (let ((entry (emacsos-assist-web--entry "sent" 'accepted-unobserved "key"))
-            callback messages)
-        (setf (plist-get entry :run-id) "run-1")
-        (setq emacsos-assist-web--queue (list entry))
-        (emacsos-assist-web--entry-render entry)
-        (cl-letf (((symbol-function 'message)
-                   (lambda (format &rest args) (push (apply #'format format args) messages)))
-                  ((symbol-function 'emacsos-assist-web--save-draft)
-                   (lambda () (not (eq outcome 'cache-error))))
-                  ((symbol-function 'emacsos-assist-web--reconcile-when-settled) #'ignore)
-                  ((symbol-function 'emacsos-assist-web--request)
-                   (lambda (method path _payload cb &rest _)
-                     (should (equal (list method path) '("DELETE" "threads/thread-1/runs/run-1")))
-                     (setq callback cb))))
-          (emacsos-assist-web--abort-entry "key")
-          (if (eq outcome 'cache-error)
-              (progn
-                (should-not callback)
-                (should (equal messages '("Cancellation not requested; local cache write failed"))))
-            (should (equal messages '("Requesting cancellation…")))
-            (when (eq outcome 'stale) (cl-incf (plist-get entry :cancellation-generation)))
-            (funcall callback `((http_status . 200) (outcome . ,(if (eq outcome 'running) "running" "cancelled")))
-                     (and (eq outcome 'network-error) "offline"))
-            (pcase outcome
-              ('cancelled (should (equal (car messages) "Run cancelled")))
-              ('running (should (equal (car messages) "stopped watching; Assist is running")))
-              ('network-error (should (equal (car messages) "stopped watching; cancellation unconfirmed")))
-              ('stale (should (equal messages '("Requesting cancellation…")))))
-            (unless (eq outcome 'cancelled) (should-not (member "Run cancelled" messages)))))))))
+
 
 (ert-deftest interaction-accepted-run-failure-is-visible-beside-draft ()
   (interaction-test--editing
@@ -345,7 +232,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
                        (text . "accepted request") (state . "final")))))
       (goto-char (point-max)) (insert "accepted request")
       (goto-char (point-min))
-      (cl-letf (((symbol-function 'emacsos-assist-web--start-observation) #'ignore)
+      (cl-letf (((symbol-function 'emacsos-assist-web--observe-run) #'ignore)
                 ((symbol-function 'emacsos-assist-web--request)
                  (lambda (method path payload callback &rest _)
                    (push (list method path payload) requests)
@@ -358,16 +245,16 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
                     (t (error "Unexpected synthetic request"))))))
         (execute-kbd-macro (kbd "C-<return>"))
         (funcall post-callback '((thread_id . "thread-1") (run_id . "run-failed")) nil)
-        (let ((entry (car emacsos-assist-web--queue)))
-          (should (equal (plist-get entry :run-id) "run-failed"))
+        (progn
+          (should (equal emacsos-assist-web--run-id "run-failed"))
           (goto-char (point-max)) (insert "keep next\nunfinished") (undo-boundary)
-          (emacsos-assist-web--reobserve-entry entry)
+          (emacsos-assist-web--refresh-observed-run (current-buffer))
           (funcall run-callback '((id . "run-failed") (thread_id . "thread-1")
                                  (status . "error") (error . "synthetic private failure")
                                  (result . nil)) nil)
           (should snapshot-callback)
           (funcall snapshot-callback failed nil))
-        (should-not emacsos-assist-web--queue)
+        (should-not emacsos-assist-web--http-draft)
         (should (equal (emacsos-assist-web--input) "keep next\nunfinished"))
         (let ((start (emacsos-assist-web--prompt-start)))
           (goto-char start)
@@ -436,42 +323,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
     (should (equal buffer-undo-list '((apply ignore 11 12 identity)
                                       (apply 0 16 17 ignore))))))
 
-(ert-deftest interaction-recovery-adoption-preserves-destination-undo ()
-  (interaction-test--editing
-    (let ((destination (current-buffer))
-          (source (generate-new-buffer " *interaction-adoption*")))
-      (goto-char (point-max)) (insert "destination draft") (undo-boundary)
-      (unwind-protect
-          (progn
-            (with-current-buffer source
-              (emacsos-assist-web-mode)
-              (setq emacsos-assist-web--draft-id "new-thread"
-                    emacsos-assist-web--draft-repository "repo"
-                    emacsos-assist-web--draft-harness "harness")
-              (emacsos-assist-web--write-prompt)
-              (let ((entry (emacsos-assist-web--entry
-                            "source sent" 'accepted-unobserved
-                            "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
-                (setf (plist-get entry :run-id) "run-source")
-                (emacsos-assist-web--write-cache
-                 "drafts/new-thread.json"
-                 `((text . "") (thread_id . "thread-1")
-                   (repo_key . "repo") (harness . "harness")
-                   (queue . ,(list (emacsos-assist-web--entry-cache-value entry))))))
-              (cl-letf (((symbol-function 'emacsos-assist-web--start-next-observation)
-                         #'ignore)
-                        ((symbol-function 'emacsos-assist-web--reconcile-when-settled)
-                         #'ignore)
-                        ((symbol-function 'emacsos-assist-web--pump-posts) #'ignore))
-                (emacsos-assist-web--restore-draft)))
-            (should-not (buffer-live-p source))
-            (with-current-buffer destination
-              (should (equal (emacsos-assist-web--input) "destination draft"))
-              (interaction-test--native-undo #'undo)
-              (should (equal (emacsos-assist-web--input) ""))
-              (should (equal (plist-get (car emacsos-assist-web--queue) :text)
-                             "source sent"))))
-        (when (buffer-live-p source) (kill-buffer source))))))
+
 
 (ert-deftest interaction-regional-undo-retains-native-pending-ownership ()
   (interaction-test--editing
@@ -506,34 +358,38 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
           (should (equal (buffer-string) "a")))))))
 
 (ert-deftest interaction-output-and-queue-actions-stay-out-of-draft-undo ()
+  "Remote output and status changes stay outside editable input undo."
   (interaction-test--editing
-    (let ((entry (emacsos-assist-web--entry "sent" 'accepted-unobserved "key")))
-      (setq emacsos-assist-web--queue (list entry)
-            emacsos-assist-web--queue-model-p t)
-      (emacsos-assist-web--entry-render entry)
-      (goto-char (point-max)) (insert "local edit") (undo-boundary)
-      (emacsos-assist-web--set-status "working; a longer status")
-      (emacsos-assist-web--entry-set-assistant-status entry "new remote body")
-      (emacsos-assist-web--entry-add-action entry "Retry" #'ignore)
-      (emacsos-assist-web--rerender-queue)
-      (interaction-test--native-undo #'undo)
-      (should (equal (emacsos-assist-web--input) ""))
-      (should (equal (plist-get entry :text) "sent")))))
+    (emacsos-assist-web--append-pending "accepted text")
+    (emacsos-assist-web--reset-assistant 1)
+    (goto-char (point-max)) (insert "local edit") (undo-boundary)
+    (emacsos-assist-web--set-status "working; a longer status")
+    (emacsos-assist-web--append-delta 1 1 "new remote body")
+    (interaction-test--native-undo #'undo)
+    (should (equal (emacsos-assist-web--input) ""))
+    (should (string-match-p "new remote body" (buffer-string)))))
 
 (ert-deftest interaction-rejected-local-send-preserves-undo-but-enqueue-consumes-it ()
+  "Failed persistence retains input undo; acceptance moves input to the transcript."
   (interaction-test--editing
     (goto-char (point-max)) (insert "unsent") (undo-boundary)
-    (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda () nil)))
-      (should-not (emacsos-assist-web--enqueue-text "unsent")))
+    (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) nil))
+              ((symbol-function 'emacsos-assist-web--request)
+               (lambda (&rest _) (ert-fail "Failed persistence submitted text"))))
+      (call-interactively #'emacsos-assist-web-send))
     (should (equal (emacsos-assist-web--input) "unsent"))
-    (should-not emacsos-assist-web--queue)
+    (should-not emacsos-assist-web--http-draft)
     (interaction-test--native-undo #'undo)
     (should (equal (emacsos-assist-web--input) ""))
     (goto-char (point-max)) (insert "new submission") (undo-boundary)
-    (should (emacsos-assist-web--enqueue-text "new submission"))
+    (cl-letf (((symbol-function 'emacsos-assist-web--request)
+               (lambda (_method _path _payload callback &rest _)
+                 (funcall callback '((thread_id . "thread-1") (run_id . "accepted-run")) nil)))
+              ((symbol-function 'emacsos-assist-web--observe-run) #'ignore))
+      (call-interactively #'emacsos-assist-web-send))
     (should (equal (emacsos-assist-web--input) ""))
     (should-error (undo-only 1) :type 'user-error)
-    (should (equal (plist-get (car emacsos-assist-web--queue) :text) "new submission"))))
+    (should (string-match-p "new submission" (buffer-string)))))
 
 (ert-deftest interaction-history-restores-multiline-draft-without-requests ()
   (interaction-test--editing
@@ -550,7 +406,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
         (should (equal (emacsos-assist-web--input) "Older input"))
         (execute-kbd-macro (kbd "M-n M-n"))
         (should (equal (emacsos-assist-web--input) "pending\nmultiline")))
-      (should-not emacsos-assist-web--queue)
+      (should-not emacsos-assist-web--http-draft)
       (should (equal (alist-get 'messages emacsos-assist-web--snapshot)
                      (alist-get 'messages snapshot))))))
 
@@ -584,9 +440,11 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
     (execute-kbd-macro (kbd "M-- M-p"))
     (should (equal (emacsos-assist-web--input) "draft"))
     (should-error (emacsos-assist-web-next-input 1) :type 'user-error)
-    (cl-letf (((symbol-function 'emacsos-assist-web--dormant-stop-p) (lambda () t))
-              ((symbol-function 'emacsos-assist-web--owned-stops) (lambda () nil)))
-      (should-error (emacsos-assist-web-previous-input 1) :type 'user-error))
+    (let ((pending '(:text "pending HTTP" :posting t)))
+      (setq emacsos-assist-web--http-draft pending)
+      (emacsos-assist-web-previous-input 1)
+      (emacsos-assist-web-next-input 1)
+      (should (eq pending emacsos-assist-web--http-draft)))
     (should (equal (emacsos-assist-web--input) "draft"))
     (should-not emacsos-assist-web--input-history-id)))
 
@@ -608,18 +466,16 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
     (should (equal (emacsos-assist-web--input) "first draft"))))
 
 (ert-deftest interaction-history-never-recalls-an-optimistic-queue-record ()
+  "Input history comes from canonical messages, not the one pending HTTP text."
   (interaction-test--editing
-    (let ((entry (emacsos-assist-web--entry "not accepted" 'acceptance-unknown "key")))
-      (setq emacsos-assist-web--queue-model-p t
-            emacsos-assist-web--queue (list entry))
-      (emacsos-assist-web--entry-render entry)
-      (goto-char (point-max)) (insert "follow-up")
+    (let ((pending '(:text "not accepted" :key "key" :posting t)))
+      (setq emacsos-assist-web--http-draft pending)
+      (goto-char (point-max)) (insert "editable text")
       (execute-kbd-macro (kbd "M-p"))
       (should (equal (emacsos-assist-web--input) "First"))
-      (should (eq entry (car emacsos-assist-web--queue)))
-      (should (equal (plist-get entry :key) "key"))
+      (should (eq pending emacsos-assist-web--http-draft))
       (execute-kbd-macro (kbd "M-n"))
-      (should (equal (emacsos-assist-web--input) "follow-up")))))
+      (should (equal (emacsos-assist-web--input) "editable text")))))
 
 (ert-deftest interaction-imenu-jumps-to-loaded-messages-and-invalidates-on-refresh ()
   (interaction-test--editing
@@ -701,50 +557,9 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
       (when (and process (process-live-p process)) (delete-process process))
       (delete-directory root t))))
 
-(ert-deftest interaction-terminal-error-retires-status-and-preserves-compose ()
-  (interaction-test--thread
-    (let* ((snapshot (copy-tree interaction-test--snapshot))
-           (thread (alist-get 'thread snapshot))
-           (entry (emacsos-assist-web--entry
-                   "failed submission" 'terminal-unreconciled
-                   "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
-      (setf (alist-get 'status thread) "error"
-            (alist-get 'error thread) "Unsupported Git object directory"
-            (plist-get entry :run-id) "run-error"
-            (plist-get entry :verified-outcome) "error"
-            (alist-get 'thread snapshot) thread)
-      (setq emacsos-assist-web--queue-model-p t
-            emacsos-assist-web--queue (list entry))
-      (emacsos-assist-web--entry-render entry)
-      (goto-char (point-max)) (insert "unsent follow-up")
-      (emacsos-assist-web--stop-reobserve entry 'terminal-verified t)
-      (should (equal emacsos-assist-web--lifecycle-notice "Run reconciling"))
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (method _path _payload callback &rest _)
-                   (should (equal method "GET"))
-                   (funcall callback snapshot nil))))
-        (emacsos-assist-web--reconcile-when-settled))
-      (should-not emacsos-assist-web--queue)
-      (should-not emacsos-assist-web--stopped-reobserve)
-      (should-not emacsos-assist-web--lifecycle-notice)
-      (should-not (string-match-p "Run reconcil"
-                                 (emacsos-assist-web--thread-header)))
-      (should (string-match-p "\\[error: Unsupported Git object directory\\]"
-                             (buffer-string)))
-      (should (equal (emacsos-assist-web--input) "unsent follow-up")))))
 
-(ert-deftest interaction-retirement-keeps-a-different-run-or-later-warning ()
-  (interaction-test--thread
-    (let ((entry (emacsos-assist-web--entry "failed" 'terminal-unreconciled "key")))
-      (setf (plist-get entry :run-id) "run-error")
-      (emacsos-assist-web--stop-reobserve entry 'terminal-verified t)
-      (emacsos-assist-web--retire-stopped-reobserve "thread-1" "other-run")
-      (should emacsos-assist-web--stopped-reobserve)
-      (should (equal emacsos-assist-web--lifecycle-notice "Run reconciling"))
-      (emacsos-assist-web--lifecycle-warning "Later warning")
-      (emacsos-assist-web--retire-stopped-reobserve "thread-1" "run-error")
-      (should-not emacsos-assist-web--stopped-reobserve)
-      (should (equal emacsos-assist-web--lifecycle-notice "Later warning")))))
+
+
 
 (ert-deftest interaction-new-draft-refreshes-catalog-without-sending ()
   (interaction-test--thread
@@ -930,22 +745,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
       (should (eq major-mode 'text-mode)))))
 
 
-(ert-deftest interaction-real-queued-messages-have-separate-boundaries ()
-  (interaction-test--thread
-    (goto-char (point-max)) (insert "retain draft")
-    (let ((entry (emacsos-assist-web--entry "Queued question" 'queued "key-q")))
-      (emacsos-assist-web--entry-append-pending entry)
-      (goto-char (point-max))
-      (emacsos-assist-web-previous-message)
-      (should (looking-at "bot> "))
-      (let ((prefix (point)))
-        (emacsos-assist-web-previous-message)
-        (should (looking-at "you> Queued question"))
-        (emacsos-assist-web-next-message)
-        (should (= (point) prefix))
-        (emacsos-assist-web-next-message)
-        (should (= (point) (emacsos-assist-web--prompt-start))))
-      (should (equal (emacsos-assist-web--input) "retain draft")))))
+
 
 (ert-deftest interaction-unresolved-thread-does-not-inherit-another-checkout ()
   (let ((other (make-temp-file "interaction-other-thread-" t)))

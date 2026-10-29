@@ -31,7 +31,8 @@ chat with =M-x emacsos--chat-show-top-buffer=.
 | Browse Assist Web threads | =emacsos-assist-web-show-thread-list= |
 | Open an Assist Web thread | =emacsos-assist-web-open-thread= |
 | Start an Assist Web thread | =emacsos-assist-web-new-thread= |
-| Send from an Assist Web thread | =emacsos-assist-web-send= |
+| Send from an Assist Web thread, including while the server is busy | =emacsos-assist-web-send= |
+| Save editable Assist text without sending (=C-x C-s=) | =emacsos-assist-web-save-draft= |
 | Refresh an Assist Web thread | =emacsos-assist-web-refresh-thread= |
 | Refresh the Assist Web thread list | =emacsos-assist-web-refresh-threads= |
 | Conversation actions available in this buffer | =emacsos-conversation-command= |
