@@ -2796,16 +2796,20 @@ addressed by the stock chunk decoder."
 
 Response headers and each individual event are bounded; the stream remains
 open until the run reaches a terminal state, awaits approval, or observation is
-interrupted."
+interrupted.  If local chat owns the active surface, retain the accepted Run
+for explicit Refresh without opening another stream."
   (let ((token (condition-case nil (emacsos-assist-web--read-token)
                  (error nil))))
-    (if (or (not (emacsos-assist-web--safe-token-p token))
+    (if (or (eq emacsos--assist-active-surface 'chat)
+            (not (emacsos-assist-web--safe-token-p token))
             (>= (length emacsos-assist-web--requests)
                 emacsos-assist-web-max-concurrent-requests))
         (emacsos-assist-web--stream-interrupted
-         buffer (if (emacsos-assist-web--safe-token-p token)
-                    "Too many Assist Web requests are already running"
-                  "token missing or invalid"))
+         buffer (cond ((eq emacsos--assist-active-surface 'chat)
+                       "Local chat response active; Refresh checks the accepted Run later")
+                      ((emacsos-assist-web--safe-token-p token)
+                       "Too many Assist Web requests are already running")
+                      (t "token missing or invalid")))
       (with-current-buffer buffer
         (emacsos-assist-web--sync-active-surface)
         (condition-case error
@@ -4035,6 +4039,7 @@ Refresh action and replaces only this view’s transient observer."
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
                    (when (and (not handled)
+                              (equal tid emacsos-assist-web--thread-id)
                               (= generation emacsos-assist-web--refresh-generation)
                               (= send-generation emacsos-assist-web--send-generation))
                      (setq handled t)
@@ -4384,7 +4389,8 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
    "Send interrupted; text retained; retry unchanged to check acceptance")))))))))))
 
 (defun emacsos-assist-web--append-pending (text)
-  "Commit sent TEXT to this transcript while preserving a newly typed draft."
+  "Commit sent TEXT to the transcript, preserving current editable input verbatim.
+The Send callback owns separation of the accepted prefix from unsent input."
   (let* ((input-start (emacsos-assist-web--prompt-start))
          (draft (emacsos-assist-web--input))
          (input-offset (and input-start (>= (point) input-start)
@@ -4414,7 +4420,7 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
         (add-text-properties transcript-start (point)
                              '(read-only t front-sticky t rear-nonsticky t)))
       (emacsos-assist-web--write-prompt)
-      (when (and draft (not (equal draft text))) (insert draft))
+      (when draft (insert draft))
       (setq emacsos-assist-web--pending-rendered-p t)
       (if input-offset
           (goto-char (min (point-max)
