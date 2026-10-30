@@ -36,6 +36,28 @@
      (should-not emacsos-assist-web--http-draft)
      (should (equal (emacsos-assist-web--input) "")))))
 
+(ert-deftest test-send-draft-idle-acceptance-is-announced-before-observation ()
+  (test-send-draft--with-thread
+   (emacsos-assist-web--replace-input "synthetic request")
+   (let (callback notices observed)
+     (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                (lambda (_method _path _payload response &rest _)
+                  (setq callback response)))
+               ((symbol-function 'message)
+                (lambda (format-string &rest args)
+                  (push (apply #'format format-string args) notices)))
+               ((symbol-function 'emacsos-assist-web--observe-run)
+                (lambda (_buffer)
+                  (should (member "Message accepted" notices))
+                  (setq observed t))))
+       (call-interactively #'emacsos-assist-web-send)
+       (should-not (member "Message accepted" notices))
+       (funcall callback '((thread_id . "draft-thread")
+                           (run_id . "accepted-run") (status . "pending")) nil)
+       (should observed)
+       (should (= (cl-count "Message accepted" notices :test #'equal) 1))
+       (should-not emacsos-assist-web--http-draft)))))
+
 (ert-deftest test-send-draft-failure-save-reopen-and-retry-preserve-unicode-and-key ()
   (test-send-draft--with-thread
    (emacsos-assist-web--replace-input "exact café — 🐟\nnext line")

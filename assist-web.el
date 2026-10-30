@@ -4388,6 +4388,7 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
                                emacsos-assist-web--pending-accepted-p t
                                emacsos-assist-web--in-flight t)
                          (emacsos-assist-web--append-pending text)
+                         (message "Message accepted")
                          (emacsos-assist-web--observe-run buffer)))))))))))
            `(("Idempotency-Key" . ,(plist-get request :key))) t)
 ((error quit)
