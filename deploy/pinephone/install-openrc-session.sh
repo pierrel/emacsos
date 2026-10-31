@@ -85,6 +85,7 @@ scp -q "$@" \
     "$deploy_dir/wvkbd-transaction-root" \
     "$deploy_dir/openrc-call-root" \
     "$deploy_dir/openrc-sms-root" \
+    "$repo_dir/server/emacsos_server/sms_forward.py" \
     "$deploy_dir/openrc-network-root" \
     "$deploy_dir/openrc-wifi-connect-root" \
     "$deploy_dir/openrc-device-root" \

@@ -4,10 +4,15 @@ set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
+# Real Python/BusyBox admission proof runs before the transaction fixture stubs.
+docker run --rm --network none -e EMACSOS_QUIESCENCE_FIXTURE=1 \
+    -v "$repo_dir:/repo:ro" python:3.13-alpine \
+    python3 -B /repo/tests/test_pinephone_quiescence.py
+
 docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone:/source:ro" \
     -v "$repo_dir:/repo:ro" \
-alpine:3.22 /bin/sh -s <<'CONTAINER'
+python:3.13-alpine /bin/sh -s <<'CONTAINER'
 set -eu
 
 refresh_keyboard_digests() {
@@ -42,6 +47,8 @@ for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el 
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
+install -o user -g user -m 0600 /repo/server/emacsos_server/sms_forward.py \
+    /home/user/.cache/emacsos-openrc-stage/sms_forward.py
 printf '%s\n' test-assist-web-token \
     >/home/user/.cache/emacsos-openrc-stage/assist-web-token
 chown user:user /home/user/.cache/emacsos-openrc-stage/assist-web-token
@@ -258,7 +265,10 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
-    'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus" ]; then' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = - ] && [ "$#" -eq 3 ]; then' \
+    '  exec /usr/local/bin/python3 "$@"' \
+    'fi' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus, sqlite3, requests" ]; then' \
     '  [ -e /tmp/py3-dbus-present ]' \
     '  exit $?' \
     'fi' \
@@ -370,7 +380,7 @@ if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=use
     exit 1
 fi
 grep -F 'rollback preserved UI recovery files because processes remain' \
-    /tmp/stuck-error >/dev/null
+    /tmp/stuck-error >/dev/null || { cat /tmp/stuck-error >&2; exit 1; }
 [ -x /etc/init.d/emacsos-ui ]
 [ -x /usr/local/share/emacsos-openrc/session ]
 [ -x /usr/local/sbin/emacsos-openrc-suspend ]
@@ -1008,7 +1018,7 @@ rm -f /tmp/py3-dbus-present
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -e /tmp/py3-dbus-present ]
-dbus_install_line=$(grep -nFx 'apk add py3-dbus emacs-magit git openssh-client-default' /tmp/transaction-log | cut -d: -f1)
+dbus_install_line=$(grep -nFx 'apk add py3-dbus py3-requests emacs-magit git openssh-client-default' /tmp/transaction-log | cut -d: -f1)
 ui_stop_line=$(grep -nFx 'rc-service emacsos-ui stop' /tmp/transaction-log | cut -d: -f1)
 [ "$dbus_install_line" -lt "$ui_stop_line" ]
 if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; then

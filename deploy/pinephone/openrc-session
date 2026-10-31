@@ -21,6 +21,7 @@ wayland_socket=
 dbus_address_file=
 probe_file=
 timer_pid=
+sms_pid=
 
 fail() {
     printf 'emacsos-openrc: %s\n' "$1" >&2
@@ -42,6 +43,8 @@ fail() {
 cleanup() {
     rm -f -- "$runtime/ready"
     [ -z "$probe_file" ] || rm -f -- "$probe_file"
+    [ -z "$sms_pid" ] || kill "$sms_pid" 2>/dev/null || true
+    [ -z "$sms_pid" ] || wait "$sms_pid" 2>/dev/null || true
     [ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true
     [ -z "$timer_pid" ] || wait "$timer_pid" 2>/dev/null || true
     if output=$(timeout -s TERM -k 1 3 dbus-send --system --print-reply \
@@ -232,6 +235,13 @@ power_pid=$!
 timeout -s TERM -k 1 3 sh -c ': >"$1"' sh "$runtime/power-events" ||
     fail 'power monitor did not become ready'
 "$root/session-power" wake
+# Optional configured SMS transport shares the existing UI service cgroup.
+# The root helper captures local sends even while this network transport is off.
+if [ -f "$HOME/.config/emacsos/sms.json" ]; then
+    /usr/bin/python3 -I "$root/sms-forward" &
+    sms_pid=$!
+fi
+
 "$root/process-group" /usr/bin/swayidle -w \
     timeout 60 "$root/session-power idle-blank" \
     resume "$root/session-power resume" &
@@ -245,6 +255,12 @@ mv -- "$runtime/.ready.tmp" "$runtime/ready"
 rm -f -- "$runtime/failure"
 
 while :; do
+    if [ -n "$sms_pid" ] && ! kill -0 "$sms_pid" 2>/dev/null; then
+        wait "$sms_pid" 2>/dev/null || true
+        printf '%s\n' 'SMS transport stopped; restarting.' >"$runtime/sms-status"
+        /usr/bin/python3 -I "$root/sms-forward" &
+        sms_pid=$!
+    fi
     for pid in "$sway_pid" "$emacs_pid" "$keyboard_pid" "$idle_pid" "$power_pid" \
         "$pipewire_pid" "$wireplumber_pid" "$pulse_pid" "$dbus_pid"; do
         kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
