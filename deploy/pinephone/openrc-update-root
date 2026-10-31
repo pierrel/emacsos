@@ -18,7 +18,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=bba02321f683588f8ff8c9ad01c73dccbd1d02e230b371f097f495d4a082bfba
+manifest_hash=3c3fd87b07d02a8f0923e0be2cfe5e77af640e10c352f3e32cac3034b8c909d2
 mutating=0
 committed=0
 restart_only=0
@@ -61,6 +61,7 @@ legacy-wvkbd:/usr/local/bin/wvkbd-emacos
 legacy-wvkbd-notice:/usr/local/share/licenses/wvkbd-emacos/wordninja.txt
 phone-sms-chat.el:/usr/local/share/emacsos-openrc/phone-sms-chat.el
 phone-notifications.el:/usr/local/share/emacsos-openrc/phone-notifications.el
+phone-assist-notifications.el:/usr/local/share/emacsos-openrc/phone-assist-notifications.el
 swipe-learning.el:/usr/local/share/emacsos-openrc/swipe-learning.el
 swipe-learning-collector.py:/usr/local/share/emacsos-openrc/swipe-learning-collector.py
 emacsos-wvkbd-launch:/usr/local/libexec/emacsos-wvkbd-launch
@@ -605,6 +606,7 @@ cleanup() {
             restore_file phone-sms.el /usr/local/share/emacsos-openrc/phone-sms.el 0644
             restore_file phone-sms-chat.el /usr/local/share/emacsos-openrc/phone-sms-chat.el 0644
             restore_file phone-notifications.el /usr/local/share/emacsos-openrc/phone-notifications.el 0644
+            restore_file phone-assist-notifications.el /usr/local/share/emacsos-openrc/phone-assist-notifications.el 0644
             restore_file swipe-learning.el /usr/local/share/emacsos-openrc/swipe-learning.el 0644
             restore_file swipe-learning-collector.py \
                 /usr/local/share/emacsos-openrc/swipe-learning-collector.py 0755
@@ -740,7 +742,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|phone-notifications.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|phone-notifications.el|phone-assist-notifications.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -754,7 +756,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 51 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 52 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
@@ -771,7 +773,7 @@ for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf je
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
     waydroid-container.conf waydroid-container-wrapper os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py \
-    emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el swipe-learning.el EMACSOS-COMMANDS.org \
+    emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root sms_forward.py \
     openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
     openrc-chat-url openrc-assist-web-url openrc-emacs-server.nft \
@@ -942,7 +944,7 @@ cmp -s "$snapshot/openrc-doas.conf" /etc/doas.d/95-emacsos-ui.conf
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el swipe-learning.el \
+for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
     dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
@@ -1052,7 +1054,7 @@ cmp -s "$snapshot/openrc-emacs-server.nft" \
     [ ! -L /etc/nftables.d/95-emacsos-callback.nft ]
 [ ! -e /etc/doas.d/95-emacsos-ui-suspend.conf ] &&
     [ ! -L /etc/doas.d/95-emacsos-ui-suspend.conf ]
-for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el swipe-learning.el \
+for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
     dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done

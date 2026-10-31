@@ -2,6 +2,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
+(require 'seq)
 
 (defvar emacsos-notifications-file
   (expand-file-name "emacsos/notifications.jsonl"
@@ -26,12 +27,18 @@
                 (json-parse-string line :object-type 'alist :array-type 'list))
               (split-string (buffer-string) "\n" t)))))
 
+(defun emacsos-notifications-valid-reason-p (reason)
+  "Require a bounded single-line reason without Unicode control characters."
+  (and (stringp reason) (<= (length reason) 200)
+       (not (string-empty-p (string-trim reason)))
+       (not (seq-some (lambda (character)
+                        (memq (get-char-code-property character 'general-category)
+                              '(Cc Zl Zp))) reason))))
+
 (defun emacsos-notifications--record (source reason event id)
   "Persist a lifecycle EVENT with SOURCE, explicit REASON and correlation ID."
   (unless (and (symbolp source) (<= (length (symbol-name source)) 40)
-               (not (string-match-p "[[:cntrl:]]" (symbol-name source))) (stringp reason)
-               (not (string-empty-p (string-trim reason)))
-               (<= (length reason) 200) (not (string-match-p "[[:cntrl:]]" reason)))
+               (not (string-match-p "[[:cntrl:]]" (symbol-name source))) (emacsos-notifications-valid-reason-p reason))
     (error "Notification source and reason are required"))
   (let* ((rows (emacsos-notifications--rows))
          (directory (file-name-directory emacsos-notifications-file))
@@ -77,7 +84,7 @@ recorded separately. Storage failure suppresses the feedback request."
   (condition-case nil
       (let* ((id (or id (emacsos-notifications-record source reason)))
              (command (pcase source
-                        ('sms '("message-new-sms" "1" "4" 5))
+                        ((or 'sms 'assist) '("message-new-sms" "1" "4" 5))
                         ('call '("phone-incoming-call" "2" "3" 4))
                         (_ (error "Unsupported feedback source"))))
              process output timer)
