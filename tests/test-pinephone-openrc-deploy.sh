@@ -588,7 +588,8 @@ grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
 grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "grep -Fx 'populated 0'" "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'pgrep -u "$lab_uid"' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'result = subprocess.run(["pgrep", "-u", sys.argv[1]]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'fd = os.pidfd_open(int(value))' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'rollback refused while UI remains active' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F '/etc/nftables.d/49-emacsos-callback.nft' \
