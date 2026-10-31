@@ -1403,8 +1403,7 @@
                  '((text . "draft") (pending_key . "bad\r\nInjected: yes")
                    (submitted_text . "draft")))))
       (emacsos-assist-web--restore-draft))
-    (should-not emacsos-assist-web--pending-key)
-    (should-not emacsos-assist-web--submitted-text)
+    (should-not emacsos-assist-web--http-draft)
     (should (equal (emacsos-assist-web--input) "draft"))))
 
 (ert-deftest test-assist-web-does-not-duplicate-canonical-incomplete-message-on-restore ()
@@ -1430,21 +1429,6 @@
                    (pending_accepted . t)))))
       (emacsos-assist-web--restore-draft))
     (should (= (how-many "you> already accepted" (point-min) (point-max)) 1))))
-
-(ert-deftest test-assist-web-interrupted-observation-retains-the-exact-retry ()
-  (with-temp-buffer
-    (emacsos-assist-web-mode)
-    (emacsos-assist-web--write-prompt)
-    (setq emacsos-assist-web--pending-key "retry-key"
-          emacsos-assist-web--submitted-text "message"
-          emacsos-assist-web--in-flight t
-          emacsos--assist-active-surface (current-buffer))
-    (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) nil)))
-      (emacsos-assist-web--stream-interrupted (current-buffer) "observation disconnected"))
-    (should (equal emacsos-assist-web--pending-key "retry-key"))
-    (should (equal emacsos-assist-web--submitted-text "message"))
-    (should-not emacsos-assist-web--in-flight)
-    (should (equal emacsos-assist-web--stream-status "observation disconnected"))))
 
 (ert-deftest test-assist-web-truncation-and-interruption-keep-streamed-partial ()
   "A nonterminal notice or failed observer must not erase visible evidence."
@@ -2434,21 +2418,25 @@
       (should (equal emacsos-assist-web--run-id "run-1"))
       (should (equal emacsos-assist-web--pending-key "retry-key")))))
 
-(ert-deftest test-assist-web-ready-refresh-keeps-an-unconfirmed-retry-key ()
+(ert-deftest test-assist-web-ready-refresh-keeps-an-unconfirmed-http-draft ()
   (with-temp-buffer
     (emacsos-assist-web-mode)
-    (setq emacsos-assist-web--thread-id "thread-1"
-          emacsos-assist-web--pending-key "emacsos-0123456789abcdef0123456789abcdef"
-          emacsos-assist-web--submitted-text "hello"
-          emacsos-assist-web--pending-accepted-p nil)
-    (cl-letf (((symbol-function 'emacsos-assist-web--request)
-               (lambda (_method _path _payload callback &rest _)
-                 (funcall callback test-assist-web--snapshot nil)))
-              ((symbol-function 'emacsos-assist-web--write-cache) #'ignore)
-              ((symbol-function 'emacsos-assist-web--render) #'ignore))
-      (emacsos-assist-web-refresh-thread))
-    (should emacsos-assist-web--pending-key)
-    (should (equal emacsos-assist-web--submitted-text "hello"))))
+    (emacsos-assist-web--write-prompt)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (emacsos-assist-web--replace-input "hello")
+    (let ((request (list :key "emacsos-0123456789abcdef0123456789abcdef"
+                         :text "hello" :target (emacsos-assist-web--draft-target)))
+          methods)
+      (setq emacsos-assist-web--http-draft request)
+      (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method _path _payload callback &rest _)
+                   (push method methods)
+                   (funcall callback test-assist-web--snapshot nil)))
+                ((symbol-function 'emacsos-assist-web--write-cache) #'ignore))
+        (call-interactively #'emacsos-assist-web-refresh-thread))
+      (should (equal methods '("GET")))
+      (should (eq emacsos-assist-web--http-draft request))
+      (should (equal (emacsos-assist-web--input) "hello")))))
 
 (ert-deftest test-assist-web-newer-refresh-cannot-be-overwritten-by-an-older-response ()
   (let (callbacks written rendered)

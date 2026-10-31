@@ -608,3 +608,36 @@
                (should (equal emacsos-assist-web--lifecycle-notice
                               (unless matching "Run recheck pending; Refresh")))))
          (kill-buffer peer))))))
+
+(ert-deftest test-send-draft-terminal-history-renders-despite-editable-save-failure ()
+  "Exact server completion is independent of saving the unchanged editable tail."
+  (test-send-draft--with-thread
+   (emacsos-assist-web--append-pending "accepted message")
+   (setq emacsos-assist-web--run-id "finished-run"
+         emacsos-assist-web--pending-accepted-p t
+         emacsos-assist-web--in-flight t)
+   (emacsos-assist-web--replace-input "editable café — 🐟\nnext line")
+   (let (notices methods)
+     (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                (lambda (method path _payload callback &rest _)
+                  (push method methods)
+                  (funcall callback
+                           (if (string-match-p "/runs/" path)
+                               '((thread_id . "draft-thread") (id . "finished-run") (status . "success"))
+                             '((thread . ((id . "draft-thread") (description . "Final canonical")
+                                          (status . "ready") (workspace . ((repo_label . "Synthetic")))))
+                               (messages . nil))) nil)))
+               ((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) nil))
+               ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
+               ((symbol-function 'message)
+                (lambda (format-string &rest args)
+                  (push (apply #'format format-string args) notices))))
+       (call-interactively #'emacsos-assist-web-refresh-thread))
+     (should (equal methods '("GET" "GET")))
+     (should-not emacsos-assist-web--run-id)
+     (should-not emacsos-assist-web--pending-accepted-p)
+     (should-not emacsos-assist-web--in-flight)
+     (should (string-match-p "Final canonical" (buffer-string)))
+     (should (equal (emacsos-assist-web--input) "editable café — 🐟\nnext line"))
+     (should (emacsos-assist-web--read-cache "threads/draft-thread.json"))
+     (should (member "Thread refreshed; local draft save failed" notices)))))

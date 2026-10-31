@@ -1188,8 +1188,6 @@
                 (emacsos-assist-web-mode)
                 (setq-local emacsos-assist-web--thread-id "thread-1"
                             emacsos-assist-web-git--metadata test-assist-web-git--metadata
-                            emacsos-assist-web--stopped-reobserve
-                            (and (nth 2 pending) '(:kind approval))
                             emacsos-assist-web--snapshot
                             `((thread . ((id . "thread-1") (status . ,(car pending))
                                          (approval_count . ,(cadr pending))))))
@@ -1234,8 +1232,7 @@
               (with-current-buffer source
                 (should (equal (buffer-string) "unsent Status draft")))
               (with-current-buffer source
-                (setq emacsos-assist-web--stopped-reobserve nil
-                      emacsos-assist-web--snapshot
+                (setq emacsos-assist-web--snapshot
                       '((thread . ((id . "thread-1") (status . "ready")
                                    (approval_count . 0) (approval_results . t))))))
               (with-current-buffer view

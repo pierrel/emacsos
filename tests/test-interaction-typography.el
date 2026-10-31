@@ -138,7 +138,7 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
 
 (ert-deftest interaction-thread-refresh-feedback-waits-for-valid-current-display ()
   "Refresh reports completion only after a current response renders successfully."
-  (dolist (outcome '(success network-error invalid stale display-error cache-error))
+  (dolist (outcome '(success network-error invalid stale display-error cache-error draft-error))
     (interaction-test--editing
       (let (callback messages)
         (goto-char (point-max)) (insert "keep draft")
@@ -150,7 +150,11 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
                      (setq callback cb)))
                   ((symbol-function 'emacsos-assist-web--git-note-safely) #'ignore)
                   ((symbol-function 'emacsos-assist-web--try-write-cache)
-                   (lambda (&rest _) (not (eq outcome 'cache-error)))))
+                   (lambda (name &rest _)
+                     (not (or (and (eq outcome 'cache-error)
+                                   (not (string-prefix-p "drafts/" name)))
+                              (and (eq outcome 'draft-error)
+                                   (string-prefix-p "drafts/" name)))))))
           (emacsos-assist-web-refresh-thread)
           (should (equal messages '("Refreshing thread…")))
           (when (eq outcome 'stale) (cl-incf emacsos-assist-web--refresh-generation))
@@ -164,10 +168,12 @@ Separate keyboard macros reset `last-command'; a background refresh does not."
             ('success (should (equal (car messages) "Thread refreshed")))
             ('cache-error
              (should (equal (car messages) "Thread refreshed; local cache write failed")))
+            ('draft-error
+             (should (equal (car messages) "Thread refreshed; local draft save failed")))
             ('stale (should (equal messages '("Refreshing thread…"))))
             ('display-error (should (equal (car messages) "Saved; Refresh to display")))
             (_ (should (string-prefix-p "Thread refresh " (car messages)))))
-          (unless (memq outcome '(success cache-error))
+          (unless (memq outcome '(success cache-error draft-error))
             (should-not (member "Thread refreshed" messages)))
           (should (equal (emacsos-assist-web--input) "keep draft")))))))
 
