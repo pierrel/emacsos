@@ -850,6 +850,19 @@ migrated or removed automatically. Operator migration must preserve original
 records and must not send messages.
 
 
+The phone notification log opens with =C-c e n= and refreshes with =g=.
+It retains up to 256 newest local reason events within 128 KiB in private
+=$XDG_STATE_HOME/emacsos/notifications.jsonl= (normally
+=~/.local/state/emacsos/notifications.jsonl=), mode 0600. Each SMS
+feedback client request is recorded before it starts; a storage failure suppresses
+that new request. Client failures and intentional stops are separate entries.
+A recorded request does not prove physical vibration. Reasons omit SMS bodies,
+numbers and caller details. Call-specific feedback wiring is maintained with
+the separate incoming-call feature; this journal change does not add it. Raw modem SMS events explicitly have unverified
+novelty/completion; this log does not itself fix duplicate notifications or cover
+external applications/direct hardware writers. Local SMS continues to use the same finite feedback client, independent of
+server configuration.
+
 Received-SMS events also request one finite quiet-profile =feedbackd= vibration
 through the existing verified ModemManager observer. This adds no independent
 wake channel. Verify the installed =fbcli= options, session activation, theme and
@@ -857,3 +870,18 @@ EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
 Incoming sender addresses (including brand names and unknown senders) and empty
 texts are preserved exactly. Received bodies share the server's bounded multipart-text envelope;
 serialized receipt batches stay below the transport cap even with escaped text.
+
+* Reasoned Assist phone alerts
+
+The OpenRC phone session polls Assist's authenticated notifications endpoint every
+30 seconds. =notify= queues a bounded reason for the current urgent cycle; it
+never sends an SMS. Opening the thread clears that urgent cycle. An acknowledgment
+only marks phone handling and does not clear the urgent indicator.
+
+The phone records the reason in the private notification journal and saves the
+alert identity in its existing private Assist cache before attempting finite
+feedback. Restart or acknowledgment loss does not repeat that attempt. A queued
+or handled result does not establish physical vibration or wake from deep sleep.
+This consumer depends on the notification journal feature. It uses the shared HTTP encoding boundary included in the current client.
+
+Reasons reject Unicode control characters and line/paragraph separators while preserving ordinary Unicode, including joined emoji. Malformed asynchronous server responses release only their matching poll so a later timer tick can continue. Both user-facing upload scripts stage the required consumer module.

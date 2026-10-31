@@ -4,6 +4,11 @@ Swipe downward from =x= on the modifier-swipe keyboard to type =Meta+x=, then
 type a command name and press =RET=.  Run =M-x emacsos-open-command-reference=
 to return to this file.
 
+* Notification log
+
+=C-c e n= opens the persistent private notification reasons read-only.
+Press =g= to refresh. Requests and client outcomes are not physical buzz proof.
+
 * PinePhone/OpenRC applications
 
 These commands are installed only by the PinePhone/OpenRC deployment; the

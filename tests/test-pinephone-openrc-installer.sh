@@ -4,10 +4,15 @@ set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
+# Real Python/BusyBox admission proof runs before the transaction fixture stubs.
+docker run --rm --network none -e EMACSOS_QUIESCENCE_FIXTURE=1 \
+    -v "$repo_dir:/repo:ro" python:3.13-alpine \
+    python3 -B /repo/tests/test_pinephone_quiescence.py
+
 docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone:/source:ro" \
     -v "$repo_dir:/repo:ro" \
-alpine:3.22 /bin/sh -s <<'CONTAINER'
+python:3.13-alpine /bin/sh -s <<'CONTAINER'
 set -eu
 
 refresh_keyboard_digests() {
@@ -37,7 +42,7 @@ for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf je
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -261,6 +266,9 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
 done
 printf '%s\n' '#!/bin/sh' \
     'if [ "${3-}" = provider-check ]; then [ ! -e /tmp/native-provider-invalid ]; exit $?; fi' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = - ] && [ "$#" -eq 3 ]; then' \
+    '  exec /usr/local/bin/python3 "$@"' \
+    'fi' \
     'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus, sqlite3, requests" ]; then' \
     '  [ -e /tmp/py3-dbus-present ]' \
     '  exit $?' \
@@ -575,6 +583,8 @@ rm -f /usr/local/share/emacsos-openrc/os.el \
     /usr/local/share/emacsos-openrc/phone-call.el \
     /usr/local/share/emacsos-openrc/phone-sms.el \
     /usr/local/share/emacsos-openrc/phone-sms-chat.el \
+    /usr/local/share/emacsos-openrc/phone-notifications.el \
+    /usr/local/share/emacsos-openrc/phone-assist-notifications.el \
     /usr/local/sbin/emacsos-openrc-call \
     /usr/local/sbin/emacsos-openrc-sms \
     /usr/local/sbin/emacsos-openrc-network \
