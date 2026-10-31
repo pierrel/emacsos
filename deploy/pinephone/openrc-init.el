@@ -1182,6 +1182,8 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
         server-name "emacsos-openrc")
   (emacsos-pinephone-apply-typography)
   (server-start)
+  (require 'phone-assist-notifications)
+  (emacsos-phone-notifications-start)
   (require 'os)
   (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-feedback)
   (require 'swipe-learning)

@@ -858,3 +858,18 @@ EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
 Incoming sender addresses (including brand names and unknown senders) and empty
 texts are preserved exactly. Received bodies share the server's bounded multipart-text envelope;
 serialized receipt batches stay below the transport cap even with escaped text.
+
+* Reasoned Assist phone alerts
+
+The OpenRC phone session polls Assist's authenticated notifications endpoint every
+30 seconds. =notify= queues a bounded reason for the current urgent cycle; it
+never sends an SMS. Opening the thread clears that urgent cycle. An acknowledgment
+only marks phone handling and does not clear the urgent indicator.
+
+The phone records the reason in the private notification journal and saves the
+alert identity in its existing private Assist cache before attempting finite
+feedback. Restart or acknowledgment loss does not repeat that attempt. A queued
+or handled result does not establish physical vibration or wake from deep sleep.
+This consumer depends on the notification journal feature. It uses the shared HTTP encoding boundary included in the current client.
+
+Reasons reject Unicode control characters and line/paragraph separators while preserving ordinary Unicode, including joined emoji. Malformed asynchronous server responses release only their matching poll so a later timer tick can continue. Both user-facing upload scripts stage the required consumer module.
