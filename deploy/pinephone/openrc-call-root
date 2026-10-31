@@ -25,6 +25,41 @@ trap 'exit 1' HUP INT TERM
 [ "$#" -ge 1 ] || fail 'missing operation'
 [ -x /usr/bin/mmcli ] || fail 'mmcli is unavailable'
 
+# Suspend holds the call mutation lock while this fresh snapshot vetoes unknown state.
+if [ "$#" -eq 1 ] && [ "$1" = idle-check ]; then
+    if /usr/bin/timeout -s TERM -k 1 4 /usr/bin/python3 -I - <<'CALLSTATE'
+import sys
+import re
+import dbus
+try:
+    bus = dbus.SystemBus()
+    owner = str(bus.get_name_owner('org.freedesktop.ModemManager1'))
+    objects = dbus.Interface(bus.get_object(owner, '/org/freedesktop/ModemManager1'),
+                             'org.freedesktop.DBus.ObjectManager').GetManagedObjects(timeout=2)
+    voice = 'org.freedesktop.ModemManager1.Modem.Voice'
+    call = 'org.freedesktop.ModemManager1.Call'
+    modems = [interfaces[voice] for interfaces in objects.values() if voice in interfaces]
+    if len(modems) != 1 or 'Calls' not in modems[0]:
+        sys.exit(75)
+    # Calls are leaf objects listed by Voice, not assumed ObjectManager entries.
+    for path in modems[0]['Calls']:
+        path = str(path)
+        if not re.fullmatch(r'/org/freedesktop/ModemManager1/Call/[0-9]+', path):
+            sys.exit(75)
+        properties = dbus.Interface(bus.get_object(owner, path),
+                                    'org.freedesktop.DBus.Properties').GetAll(call, timeout=1)
+        if int(properties.get('State', 0)) != 7:
+            sys.exit(75)
+    if str(bus.get_name_owner('org.freedesktop.ModemManager1')) != owner:
+        sys.exit(75)
+except Exception:
+    sys.exit(75)
+sys.exit(0)
+CALLSTATE
+    then :; else exit 75; fi
+    exit 0
+fi
+
 touch "$lock"
 chown root:root "$lock"
 chmod 0600 "$lock"

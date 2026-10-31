@@ -11,7 +11,7 @@ snapshot=
 reference_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=52b9cbc1e0a2ee7c230d05db01eab21718e2af2607af6b237e6e520b83a89d49
+manifest_hash=91a7f6c589b51c55d4d6062afa58da2f3956d0ad997534bdfbb9dd50d436511f
 committed=0
 mutating=0
 lab_group_created=0
@@ -269,6 +269,8 @@ done
 [ "$(sha256sum "$snapshot/openrc-manifest.sha256")" = \
     "$manifest_hash  $snapshot/openrc-manifest.sha256" ] || fail 'manifest hash mismatch'
 (cd "$snapshot" && sha256sum -c openrc-manifest.sha256) || fail 'payload hash mismatch'
+timeout -s TERM -k 1 15 /usr/bin/python3 -I "$snapshot/openrc-power-monitor" provider-check ||
+    fail 'native sleep dependency is not ready'
 [ "$(sha256sum "$snapshot/wvkbd-emacsos")" = \
     "$wvkbd_sha256  $snapshot/wvkbd-emacsos" ] || fail 'keyboard digest mismatch'
 [ "$(sha256sum "$snapshot/wvkbd-notice")" = \
