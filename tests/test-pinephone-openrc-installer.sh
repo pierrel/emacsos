@@ -4,10 +4,15 @@ set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
+# Real Python/BusyBox admission proof runs before the transaction fixture stubs.
+docker run --rm --network none -e EMACSOS_QUIESCENCE_FIXTURE=1 \
+    -v "$repo_dir:/repo:ro" python:3.13-alpine \
+    python3 -B /repo/tests/test_pinephone_quiescence.py
+
 docker run --rm --network none -i \
     -v "$repo_dir/deploy/pinephone:/source:ro" \
     -v "$repo_dir:/repo:ro" \
-alpine:3.22 /bin/sh -s <<'CONTAINER'
+python:3.13-alpine /bin/sh -s <<'CONTAINER'
 set -eu
 
 refresh_keyboard_digests() {
@@ -260,6 +265,9 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = - ] && [ "$#" -eq 3 ]; then' \
+    '  exec /usr/local/bin/python3 "$@"' \
+    'fi' \
     'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus, sqlite3, requests" ]; then' \
     '  [ -e /tmp/py3-dbus-present ]' \
     '  exit $?' \
