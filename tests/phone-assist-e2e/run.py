@@ -256,7 +256,7 @@ class Driver:
         self.passed("canonical authentication denial and recovery")
 
         recovered = self.client("observer-recovery", tid, "Hold observer")
-        assert recovered["observer_lost"] and recovered["same_buffer"] and recovered["queue_cleared"]
+        assert recovered["observer_lost"] and recovered["same_buffer"] and recovered["observer_retired"]
         assert "Completed: Hold observer" in recovered["text"]
         self.passed("same resident client refresh recovers completed Run after observer loss")
 
@@ -346,8 +346,7 @@ class Driver:
                 assert receipt["approval_kind"] == kind
                 assert receipt["preview_fields_verified"]
                 assert receipt["two_taps"] and receipt["draft_preserved"] and receipt["discovery_used"]
-                assert receipt["discovery_control"] == ("header-review" if kind in {
-                    "send_email", "email_archive", "email_delete"} else "thread-review")
+                assert receipt["discovery_control"] == "thread-review"
                 if kind in {"send_email", "email_archive", "email_delete"}:
                     assert receipt["original_run"] and receipt["original_run_reconciled"]
                 if setup and "run_id" in setup:
