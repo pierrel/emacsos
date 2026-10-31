@@ -838,6 +838,19 @@ migrated or removed automatically. Operator migration must preserve original
 records and must not send messages.
 
 
+The phone notification log opens with =C-c e n= and refreshes with =g=.
+It retains up to 256 newest local reason events within 128 KiB in private
+=$XDG_STATE_HOME/emacsos/notifications.jsonl= (normally
+=~/.local/state/emacsos/notifications.jsonl=), mode 0600. Each SMS
+feedback client request is recorded before it starts; a storage failure suppresses
+that new request. Client failures and intentional stops are separate entries.
+A recorded request does not prove physical vibration. Reasons omit SMS bodies,
+numbers and caller details. Call-specific feedback wiring is maintained with
+the separate incoming-call feature; this journal change does not add it. Raw modem SMS events explicitly have unverified
+novelty/completion; this log does not itself fix duplicate notifications or cover
+external applications/direct hardware writers. Local SMS continues to use the same finite feedback client, independent of
+server configuration.
+
 Received-SMS events also request one finite quiet-profile =feedbackd= vibration
 through the existing verified ModemManager observer. This adds no independent
 wake channel. Verify the installed =fbcli= options, session activation, theme and

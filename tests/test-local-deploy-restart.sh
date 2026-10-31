@@ -34,7 +34,7 @@ set -eu
 
 for source in os.el chat.el emacsos-typography.el assist-web.el assist-web-git.el \
     assist-web-git-helper.py emacsos-assist.el network.el \
-    phone-call.el phone-sms.el phone-sms-chat.el; do
+    phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el; do
     cp -- "$EMACSOS_TEST_REPO_DIR/$source" "$EMACSOS_TEST_DEPLOY_DIR/"
 done
 emacsclient -s "$EMACSOS_TEST_DAEMON" --eval '(kill-emacs)' >/dev/null
