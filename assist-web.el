@@ -3106,7 +3106,8 @@ before serialization and turn headers/body into bytes at this boundary."
                       (setq-local url-max-redirections 0
                                   url-http-no-retry t
                                   url-debug nil
-                                  url-automatic-caching nil))
+                                  url-automatic-caching nil
+                                  emacsos-assist-web--request-origin origin))
                     (push response emacsos-assist-web--requests))
                   (setq process (and (buffer-live-p response)
                                      (get-buffer-process response)))
@@ -5444,7 +5445,7 @@ VERIFIED-START-EPOCH fences later Run access denial."
              `(("Idempotency-Key" . ,key))))))))))
 
 (defun emacsos-assist-web--append-pending (text)
-  "Commit sent TEXT to this transcript while preserving a newly typed draft."
+  "Append sent TEXT, or only an observed assistant when nil, preserving input."
   (let* ((input-start (emacsos-assist-web--prompt-start))
          (draft (emacsos-assist-web--input))
          (input-offset (and input-start (>= (point) input-start)
@@ -5456,11 +5457,12 @@ VERIFIED-START-EPOCH fences later Run access denial."
       (delete-region prompt-start (point-max))
       (let ((transcript-start (point))
             (start (point)) body-start)
-        (insert "you> ")
-        (setq body-start (point))
-        (insert text)
-        (emacsos-conversation-commit-user start body-start (point))
-        (insert "\n\n")
+        (when text
+          (insert "you> ")
+          (setq body-start (point))
+          (insert text)
+          (emacsos-conversation-commit-user start body-start (point))
+          (insert "\n\n"))
         (setq start (point))
         (insert "bot> ")
         (setq body-start (point))
@@ -9107,6 +9109,126 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
                     emacsos-assist-web--restore-recovery-draft
                     emacsos-assist-web--enqueue-text))
   (advice-add function :around #'emacsos-assist-web--preserve-input-undo))
+
+(defvar-local emacsos-assist-web--request-origin nil
+  "Thread buffer owning an asynchronous HTTP response buffer.")
+(defvar-local emacsos-assist-web--thread-observation-timer nil
+  "The visible thread view's periodic canonical observation.")
+(defvar-local emacsos-assist-web--thread-observation-request nil
+  "Identity of the current automatic canonical read, never a Send receipt.")
+
+(defun emacsos-assist-web--stop-thread-observation ()
+  "Stop this view's timer and invalidate its pending canonical read."
+  (when (timerp emacsos-assist-web--thread-observation-timer)
+    (cancel-timer emacsos-assist-web--thread-observation-timer))
+  (setq emacsos-assist-web--thread-observation-timer nil
+        emacsos-assist-web--thread-observation-request nil))
+
+(defun emacsos-assist-web--start-thread-observation ()
+  "Keep one modest observation timer for this editable-draft thread view."
+  (unless (timerp emacsos-assist-web--thread-observation-timer)
+    (setq emacsos-assist-web--thread-observation-timer
+          (run-at-time 5 5 #'emacsos-assist-web--observe-thread (current-buffer))))
+  (add-hook 'kill-buffer-hook #'emacsos-assist-web--stop-thread-observation nil t)
+  (add-hook 'change-major-mode-hook #'emacsos-assist-web--stop-thread-observation nil t))
+
+(defun emacsos-assist-web--snapshot-observed-run (snapshot)
+  "Validate SNAPSHOT's optional public running-work identity."
+  (when-let ((run (alist-get 'active_run (alist-get 'thread snapshot))))
+    (unless (and (emacsos-assist-web--object-p run)
+                 (= (length run) 3)
+                 (= (cl-count 'id run :key #'car) 1)
+                 (= (cl-count 'work_id run :key #'car) 1)
+                 (= (cl-count 'status run :key #'car) 1)
+                 (emacsos-assist-web--valid-id-p (alist-get 'id run))
+                 (emacsos-assist-web--valid-id-p (alist-get 'work_id run))
+                 (equal (alist-get 'status run) "running"))
+      (error "Assist Web returned an invalid active Run"))
+    (alist-get 'id run)))
+
+(defun emacsos-assist-web--observe-thread (buffer)
+  "Observe BUFFER's visible thread without submitting or retrying a message.
+
+The editable-draft client keeps accepted server work transiently in `run-id'.
+A discovered Run uses that same exact-Run verification and stream; it creates
+no HTTP draft, retry key or user-message placeholder."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'emacsos-assist-web-mode)
+                 emacsos-assist-web--thread-id
+                 (get-buffer-window buffer 'visible)
+                 (not emacsos-assist-web--denied)
+                 (or (not (emacsos-assist-web--run-gated-p))
+                     (and emacsos-assist-web--pending-accepted-p
+                          emacsos-assist-web--run-id))
+                 (not emacsos-assist-web--in-flight)
+                 (< (length emacsos-assist-web--requests)
+                    emacsos-assist-web-max-concurrent-requests)
+                 (not (seq-some
+                       (lambda (response)
+                         (and (buffer-live-p response)
+                              (eq (buffer-local-value
+                                   'emacsos-assist-web--request-origin response) buffer)))
+                       emacsos-assist-web--requests))
+                 (not emacsos-assist-web--thread-observation-request)
+                 (not (eq emacsos--assist-active-surface 'chat)))
+        (if (and emacsos-assist-web--pending-accepted-p
+                 emacsos-assist-web--run-id)
+            ;; A disconnected or ended observer still needs its exact outcome.
+            (emacsos-assist-web--refresh-observed-run buffer)
+          (let* ((tid emacsos-assist-web--thread-id)
+                 (refresh (cl-incf emacsos-assist-web--refresh-generation))
+                 (send emacsos-assist-web--send-generation)
+                 (auth emacsos-assist-web--auth-epoch)
+                 (request (list tid refresh send auth)))
+            (setq emacsos-assist-web--thread-observation-request request)
+            (emacsos-assist-web--request
+             "GET" (concat "threads/" (emacsos-assist-web--require-id tid)) nil
+             (lambda (value problem)
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (when (eq request emacsos-assist-web--thread-observation-request)
+                     (setq emacsos-assist-web--thread-observation-request nil)
+                     (when (and (not problem)
+                                (equal tid emacsos-assist-web--thread-id)
+                                (= refresh emacsos-assist-web--refresh-generation)
+                                (= send emacsos-assist-web--send-generation)
+                                (= auth emacsos-assist-web--auth-epoch)
+                                (not emacsos-assist-web--denied)
+                                (not emacsos-assist-web--in-flight)
+                                (get-buffer-window buffer 'visible))
+                       (condition-case error
+                           (progn
+                             (emacsos-assist-web--require-snapshot value tid)
+                             (emacsos-assist-web--snapshot-active-p value)
+                             (let ((run (emacsos-assist-web--snapshot-observed-run value)))
+                               (emacsos-assist-web--canonical-authorized auth)
+                               ;; Revision omits some display fields. Compare the
+                               ;; complete validated snapshot before redrawing.
+                               (unless (equal (emacsos-assist-web--retain-loaded-history
+                                               value emacsos-assist-web--snapshot)
+                                              emacsos-assist-web--snapshot)
+                                 (emacsos-assist-web--try-write-cache
+                                  (emacsos-assist-web--snapshot-cache-name tid) value)
+                                 (setq emacsos-assist-web--stream-status nil)
+                                 (unless (emacsos-assist-web--render value)
+                                   (message "Thread updated; local draft save failed"))
+                                 (emacsos-assist-web--git-note-safely value nil auth)
+                                 (emacsos-assist-web--ack-rendered-thread value))
+                               (when (and run
+                                          (not (emacsos-assist-web--run-gated-p)))
+                                 ;; These are observation fields, not local Send
+                                 ;; acceptance. Keep any real HTTP draft intact.
+                                 (setq emacsos-assist-web--run-id run
+                                       emacsos-assist-web--pending-accepted-p t
+                                       emacsos-assist-web--pending-key nil
+                                       emacsos-assist-web--submitted-text nil)
+                                 (emacsos-assist-web--refresh-observed-run buffer))))
+                         (error
+                          (message "Thread observation unavailable: %s"
+                                   (error-message-string error))))))))))))))))
+
+(add-hook 'emacsos-assist-web-mode-hook #'emacsos-assist-web--start-thread-observation)
 
 (provide 'assist-web)
 ;;; assist-web.el ends here
