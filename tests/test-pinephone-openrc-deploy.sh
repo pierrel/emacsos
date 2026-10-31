@@ -59,7 +59,7 @@ for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt ph
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el swipe-learning.el \
+for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
@@ -90,7 +90,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 50 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 51 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -180,6 +180,7 @@ openrc-wifi-connect-root
 os.el
 phone-call.el
 phone-fonts.conf
+phone-notifications.el
 phone-sms-chat.el
 phone-sms.el
 sms_forward.py
@@ -339,7 +340,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 50 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 51 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
@@ -587,7 +588,8 @@ grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
 grep -F 'timeout -s TERM -k 5 30 env -u EMACSOS_WVKBD_CANDIDATE_SHA256' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F "grep -Fx 'populated 0'" "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'pgrep -u "$lab_uid"' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'result = subprocess.run(["pgrep", "-u", sys.argv[1]]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F 'fd = os.pidfd_open(int(value))' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'rollback refused while UI remains active' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F '/etc/nftables.d/49-emacsos-callback.nft' \
