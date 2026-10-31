@@ -330,7 +330,7 @@ render_ipv4_template() {
     address=$3
     rendered=$snapshot/.rendered
     count=$(grep -Fo "$marker" "$source" | wc -l)
-    [ "$count" -eq 2 ] || fail "invalid deployment-address template: ${source##*/}"
+    [ "$count" -eq 1 ] || fail "invalid deployment-address template: ${source##*/}"
     install -o root -g root -m 0600 /dev/null "$rendered"
     timeout -s TERM -k 1 10 sh -c \
         'ulimit -f 2048; exec sed "s/$1/$2/g" "$3"' sh \
