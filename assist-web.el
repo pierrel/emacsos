@@ -4262,6 +4262,7 @@ Dormant stopped buffers remain passive recovery views.  Both ordinary refresh
 and queue reconciliation use this path; hidden, cached and failed views do not."
   (when (and (get-buffer-window (current-buffer) 'visible)
              (not (emacsos-assist-web--dormant-stop-p))
+             (not emacsos-assist-web--display-recovery)
              (member (alist-get 'status (alist-get 'thread snapshot))
                      emacsos-assist-web--settled-snapshot-statuses))
     (emacsos-assist-web--ack-thread-read
@@ -5079,7 +5080,8 @@ VERIFIED-START-EPOCH fences later Run access denial."
                                     (retiring
                                      (and (member verified-outcome
                                                   '("success" "error" "timeout"
-                                                    "interrupted" "cancelled"))
+                                                    "interrupted" "cancelled"
+                                                    "awaiting_approval"))
                                           completed-run-id
                                           (equal completed-run-id
                                                  emacsos-assist-web--run-id)
@@ -9238,15 +9240,19 @@ no HTTP draft, retry key or user-message placeholder."
                                (emacsos-assist-web--canonical-presentation-current value)
                                ;; Revision omits some display fields. Compare the
                                ;; complete validated snapshot before redrawing.
-                               (unless (equal (emacsos-assist-web--retain-loaded-history
-                                               value emacsos-assist-web--snapshot)
-                                              emacsos-assist-web--snapshot)
+                               (when (or emacsos-assist-web--display-recovery
+                                         (not (equal (emacsos-assist-web--retain-loaded-history
+                                                      value emacsos-assist-web--snapshot)
+                                                     emacsos-assist-web--snapshot)))
                                  (emacsos-assist-web--try-write-cache
                                   (emacsos-assist-web--snapshot-cache-name tid) value)
+                                 ;; Snapshot metadata can advance before drawing fails.
+                                 (setq emacsos-assist-web--display-recovery t)
                                  (unless (emacsos-assist-web--render value)
                                    (message "Thread updated; local draft save failed"))
-                                 (emacsos-assist-web--git-note-safely value nil auth)
-                                 (emacsos-assist-web--ack-rendered-thread value))
+                                 (setq emacsos-assist-web--display-recovery nil)
+                                 (emacsos-assist-web--git-note-safely value nil auth))
+                               (emacsos-assist-web--ack-rendered-thread value)
                                (when (and run
                                           (not (emacsos-assist-web--run-gated-p)))
                                  ;; These are observation fields, not local Send

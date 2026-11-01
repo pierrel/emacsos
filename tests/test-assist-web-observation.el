@@ -364,6 +364,98 @@
        (should (= observed 0))
        (should-not emacsos-assist-web--run-id)))))
 
+(ert-deftest test-observation-live-approval-stop-keeps-identical-history-idle ()
+  (test-observation--with-thread
+   (let ((snapshot (test-observation--snapshot "Review required"))
+         (render (symbol-function 'emacsos-assist-web--render))
+         (cache (symbol-function 'emacsos-assist-web--try-write-cache))
+         (renders 0) (writes 0) (observed 0) (status "awaiting_approval")
+         (draft '(:key "emacsos-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  :text "unsent café 🐟\nsecond line" :target "observed-thread")))
+     (setf (alist-get 'status (alist-get 'thread snapshot)) "awaiting_approval"
+           (alist-get 'approval_count (alist-get 'thread snapshot)) 1)
+     (setq emacsos-assist-web--run-id "approval-run"
+           emacsos-assist-web--pending-accepted-p t
+           emacsos-assist-web--in-flight t
+           emacsos-assist-web--http-draft draft)
+     (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                (lambda (_method path _payload callback &rest _)
+                  (funcall callback
+                           (if (equal path "threads/observed-thread")
+                               (copy-tree snapshot)
+                             `((id . "approval-run") (thread_id . "observed-thread")
+                               (status . ,status))) nil)))
+               ((symbol-function 'emacsos-assist-web--observe-run)
+                (lambda (&rest _) (cl-incf observed)))
+               ((symbol-function 'emacsos-assist-web--render)
+                (lambda (&rest args) (cl-incf renders) (apply render args)))
+               ((symbol-function 'emacsos-assist-web--try-write-cache)
+                (lambda (&rest args) (cl-incf writes) (apply cache args))))
+       ;; Follow the real terminal SSE -> exact Run -> canonical approval path.
+       (emacsos-assist-web--dispatch-event
+        (current-buffer) "terminal" "{\"status\":\"awaiting_approval\"}")
+       (should (string-match-p "Review pending action" (buffer-string)))
+       (setq renders 0 writes 0)
+       (emacsos-assist-web--observe-thread (current-buffer))
+       (emacsos-assist-web--observe-thread (current-buffer))
+       (should (= renders 0))
+       (should (= writes 0))
+       (should-not emacsos-assist-web--run-id)
+       (should (equal emacsos-assist-web--http-draft draft))
+       ;; An approval resume is rediscovered through canonical server truth.
+       (setq status "running")
+       (setf (alist-get 'status (alist-get 'thread snapshot)) "processing"
+             (alist-get 'active_run (alist-get 'thread snapshot))
+             '((id . "approval-run") (work_id . "approval-run") (status . "running")))
+       (emacsos-assist-web--observe-thread (current-buffer)))
+     (should (= observed 1))
+     (should (equal emacsos-assist-web--run-id "approval-run"))
+     (should (equal emacsos-assist-web--http-draft draft))
+     (should (equal (emacsos-assist-web--input) "unsent café 🐟\nsecond line")))))
+
+(ert-deftest test-observation-identical-settled-read-retries-the-failed-receipt ()
+  (let ((acknowledge (symbol-function 'emacsos-assist-web--ack-rendered-thread)))
+    (test-observation--with-thread
+     (let ((snapshot (copy-tree emacsos-assist-web--snapshot)) receipts)
+       (cl-letf (((symbol-function 'emacsos-assist-web--ack-rendered-thread) acknowledge)
+                 ((symbol-function 'emacsos-assist-web--request)
+                  (lambda (method path payload callback &rest _)
+                    (if (equal method "POST")
+                        (progn (push (list path payload) receipts)
+                               (funcall callback nil "offline"))
+                      (funcall callback (copy-tree snapshot) nil)))))
+         (emacsos-assist-web--ack-rendered-thread snapshot)
+         (should (= (length receipts) 1))
+         (emacsos-assist-web--observe-thread (current-buffer)))
+       (should (= (length receipts) 2))
+       (should (equal (car receipts)
+                      '("threads/observed-thread/open" ((revision . "same-revision")))))
+       (should (equal (emacsos-assist-web--input) "unsent café 🐟\nsecond line"))))))
+
+(ert-deftest test-observation-failed-display-retries-before-acknowledging ()
+  (let ((acknowledge (symbol-function 'emacsos-assist-web--ack-rendered-thread))
+        (flush (symbol-function 'emacsos-conversation--flush-images)))
+    (test-observation--with-thread
+     (let ((snapshot (test-observation--snapshot "New unseen answer"))
+           (fail t) (receipts 0))
+       (cl-letf (((symbol-function 'emacsos-assist-web--ack-rendered-thread) acknowledge)
+                 ((symbol-function 'emacsos-conversation--flush-images)
+                  (lambda () (if fail (error "synthetic display failure") (funcall flush))))
+                 ((symbol-function 'emacsos-assist-web--request)
+                  (lambda (method _path _payload callback &rest _)
+                    (if (equal method "POST") (cl-incf receipts)
+                      (funcall callback (copy-tree snapshot) nil)))))
+         (emacsos-assist-web--observe-thread (current-buffer))
+         (should emacsos-assist-web--display-recovery)
+         (should-not (string-match-p "New unseen answer" (buffer-string)))
+         (should (= receipts 0))
+         (setq fail nil)
+         (emacsos-assist-web--observe-thread (current-buffer)))
+       (should-not emacsos-assist-web--display-recovery)
+       (should (string-match-p "New unseen answer" (buffer-string)))
+       (should (= receipts 1))
+       (should (equal (emacsos-assist-web--input) "unsent café 🐟\nsecond line"))))))
+
 (ert-deftest test-observation-auth-denial-invalidates-an-earlier-thread-read ()
   (test-observation--with-thread
    (let (callback)
