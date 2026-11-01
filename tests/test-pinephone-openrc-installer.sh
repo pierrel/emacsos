@@ -265,6 +265,7 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
+    'if [ "${3-}" = provider-check ]; then [ ! -e /tmp/native-provider-invalid ]; exit $?; fi' \
     'if [ "${1-}" = -I ] && [ "${2-}" = - ] && [ "$#" -eq 3 ]; then' \
     '  exec /usr/local/bin/python3 "$@"' \
     'fi' \
@@ -320,6 +321,19 @@ printf '%s\n' \
     'tty2::respawn:/sbin/getty 38400 tty2' >/etc/inittab
 chown root:root /etc/inittab
 chmod 0644 /etc/inittab
+
+# Native dependency failure rejects fresh installation before UI activation.
+touch /tmp/native-provider-invalid
+: >/tmp/rc-service-log
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /source/openrc-install-root >/tmp/native-install-reject.out 2>&1; then
+    printf '%s\n' 'fresh installer accepted missing native dependency' >&2
+    exit 1
+fi
+grep -F 'native sleep dependency is not ready' /tmp/native-install-reject.out >/dev/null
+[ ! -e /etc/init.d/emacsos-ui ]
+! grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null
+rm /tmp/native-provider-invalid
 
 # Caller-supplied reviewed digests bind the root snapshot to the build that
 # was verified before transfer, not merely to the user-writable stage.
@@ -551,7 +565,7 @@ touch /tmp/require-new-keyboard
 install -o root -g root -m 0755 /bin/true \
     /usr/local/sbin/emacsos-openrc-suspend
 printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args request' \
     >/etc/doas.d/95-emacsos-ui-suspend.conf
 chown root:root /etc/doas.d/95-emacsos-ui-suspend.conf
 chmod 0600 /etc/doas.d/95-emacsos-ui-suspend.conf
@@ -820,6 +834,11 @@ awk '
                current < snapshot && legacy < snapshot)
     }
 ' /tmp/openrc-update-root
+
+# An absent/wrong native provider/config cannot reach UI stop or payload change.
+touch /tmp/native-provider-invalid
+assert_preflight_rejection native-provider
+rm /tmp/native-provider-invalid
 
 # A modified pinned font must fail digest validation before the UI stops.
 printf '%s\n' tampered-font >/home/user/.cache/emacsos-openrc-update/inter.ttf

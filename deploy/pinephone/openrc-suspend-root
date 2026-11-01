@@ -11,7 +11,6 @@ power_key=/sys/devices/platform/gpio-keys/power/wakeup
 axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
 modem_controller=/sys/devices/platform/soc/1c1b000.usb
 external_power=/sys/class/power_supply/axp20x-usb/online
-lock=/run/emacsos-openrc-suspend.lock
 
 fail() {
     /usr/bin/logger -t emacsos-openrc-suspend "$1" || true
@@ -46,12 +45,15 @@ trap 'exit 1' HUP INT TERM
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
 case $# in
     0)
-        exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor handoff
+        exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor entry
         ;;
     1)
         case $1 in
             monitor)
                 exec /usr/bin/python3 -I /usr/local/share/emacsos-openrc/power-monitor monitor
+                ;;
+            request)
+                exec /usr/bin/loginctl --no-ask-password suspend
                 ;;
             guarded-suspend) ;;
             wake|press) ;;
@@ -113,26 +115,26 @@ enable_wakeup "$axp_power_key"
 enable_wakeup "$modem/power/wakeup"
 enable_wakeup "${external_power%/online}/power/wakeup"
 
-: >"$lock"
-chown root:root "$lock"
-chmod 0600 "$lock"
-exec 9>"$lock"
-flock -n -x 9 || fail 'suspend is already in progress'
+# These exact locks were opened safely by the synchronous entry process.
+[ /proc/$$/fd/8 -ef /run/emacsos-openrc-call.lock ] && flock -n -x 8 || exit 75
+[ /proc/$$/fd/6 -ef /run/emacsos-ui/power-state.lock ] && flock -n -x 6 || exit 75
 
-wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
+wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 6>&- 8>&-) || exit 75
 case $wakeup_count in
     ''|*[!0-9]*) fail 'invalid wakeup counter' ;;
 esac
 
-# Queued hardware input or a guarded request blocks the bounded counter read while it waits for the
-# display lock. Timeout releases that lock; a later kernel wake event rejects the
-# transition. Exit 75 so the display owner treats it as a normal wake race.
+/usr/local/sbin/emacsos-openrc-call idle-check 3>&- 4>&- 5>&- 6>&- 8>&- || exit 75
+
+# A queued wake action keeps its kernel source active while waiting for our
+# display lock. The bounded counter read then vetoes; later input changes the
+# armed count. This native job never falls back to another sleep writer.
 printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
 # A plug during counter sampling must still veto this admission. Later USB
 # IRQs participate in the kernel wakeup-count handshake.
 external_power_present && exit 77
 if ! printf '%s\n' mem >"$power/state"; then
-    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 9>&-) || exit 75
+    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 6>&- 8>&-) || exit 75
     [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75
     exit 1
 fi

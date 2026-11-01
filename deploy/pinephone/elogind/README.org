@@ -1,0 +1,70 @@
+* Native suspend dependency
+
+This directory extends the Alpine 252.24-r1 aport to 252.24-r2. It preserves
+upstream source checksums and adds =owned-sleep.patch=. The patch makes the
+single configured external mechanism synchronous and authoritative, retains
+native busy ownership until its sleep child is reaped, and fixes terminal
+child accounting. It adds no controller or provider state.
+
+Build with ordinary abuild in an isolated aarch64 Alpine builder. Fetch the
+source URLs declared in APKBUILD and verify their checksums. Sign the resulting
+APKs; binaries and private signing keys do not belong in source control. A
+rebuild is not promised to be byte-identical across repository/toolchain or
+signing-key changes.
+
+Install the matched installed split-package set together: =busctl=, =elogind=,
+=elogind-common=, =elogind-lang=, =elogind-openrc=, and =libelogind=. Verify
+architecture, signatures and exact package hashes before installation. Use a
+temporary per-invocation =apk --keys-dir= containing existing trusted distro
+keys and the reviewed build's public key. Never use =--allow-untrusted= or
+install a permanent publisher key for this operation.
+
+Install the same =native-sleep.conf= at BOTH
+=/etc/elogind/logind.conf.d/50-emacsos-native-sleep.conf= and
+=/etc/elogind/sleep.conf.d/50-emacsos-native-sleep.conf=. Check for conflicting
+configuration before cutover. =AllowSuspendInterrupts=no= ensures existing
+PrepareForSleep delay-inhibitor preparation happens before launching the sleep
+child; the stock interruptible path postpones that preparation. The child reparses sleep.conf and clears its prior helper selection, so the
+sleep.conf.d copy is mandatory even when startup parsed logind.conf.d. Configure
+only the fixed synchronous helper; no fallback entry command is supported.
+The UI installer/updater checks the selected active provider executable and
+both exact configuration inputs before changing or stopping the UI. Competing
+active helper or sleep-interrupt settings are rejected conservatively.
+
+* Ordered activation
+
+Before stopping anything, preserve the exact old installed package set, its
+signed APKs, current configuration and three existing helper files. Confirm
+no active call, no pending native sleep operation, and external power or
+adequate battery. Stop and positively quiesce the old UI/direct sleep writer.
+Do not bypass a failed quiescence check.
+
+While the UI is stopped, install the reviewed new =openrc-suspend-root=,
+=openrc-power-monitor= and =openrc-call-root= helpers to their normal fixed
+locations. Install the native configuration and matched package bundle before
+restarting elogind. Verify its executable and fresh ModemManager/eg25-manager
+delay inhibitors; old inhibitor descriptors cannot survive a provider restart.
+Only then run the normal complete UI updater, which starts the new session.
+
+If activation fails, stop any partial UI before restoring the old three
+helpers, old provider packages and configuration. The complete UI updater's
+own rollback remains responsible for its remaining payload. Keep the UI stopped
+if old native ownership or package rollback cannot be established. Do not
+release a potentially active old sleep owner by guessing its completion.
+
+* Off-device checks
+
+The native fixture sources live in =tests/elogind-native-proof/=. Copy that
+directory as =proof/= into a patched elogind source tree and append its Meson
+target to the upstream root meson.build. Build =proof-provider= using the same
+configured native build, then run =python3 tests/elogind-native-proof/run.py
+BUILD_DIR=. Its wrapped system sinks are synthetic; its fork, wait, reaping,
+parent-death and configured-tool behavior execute actual provider code.
+
+With that build available, run
+=ELOGIND_PROOF_BUILD_DIR=BUILD_DIR tests/test-pinephone-native-sleep.sh=.
+This runs actual acquisition and the shell guard in an isolated container.
+Eventfds substitute for hardware input; fake sysfs substitutes for kernel
+sleep. The blocked-write case is interruptible, not a physical D-state model.
+Real-device identity, capabilities and exact registration must be verified
+before activation. Passing these tests does not demonstrate carrier wake.

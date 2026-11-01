@@ -307,9 +307,9 @@ grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
 grep -F '"$root/process-group" "$root/session-power" monitor' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'DELAY = 120' "$deploy_dir/openrc-power-monitor" >/dev/null
+grep -F "timeout 180 'doas -n /usr/local/sbin/emacsos-openrc-suspend request'" "$deploy_dir/openrc-session" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'suspend) flock -w 2 -x 9' "$deploy_dir/openrc-session-power" >/dev/null
+grep -F 'guard = import_input_guard(user.pw_uid)' "$deploy_dir/openrc-power-monitor" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
     "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'expected EG25 modem is absent' "$deploy_dir/openrc-suspend-root" >/dev/null
@@ -604,7 +604,7 @@ grep -F 'updated UI did not become ready: $detail' \
 grep -F 'restore_file openrc-session' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file openrc-process-group' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file openrc-suspend-root' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args request' \
     "$deploy_dir/openrc-update-root" "$deploy_dir/openrc-install-root" \
     "$deploy_dir/openrc-boot-mode" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/openrc-suspend-root"' \

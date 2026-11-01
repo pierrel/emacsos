@@ -18,7 +18,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=3c3fd87b07d02a8f0923e0be2cfe5e77af640e10c352f3e32cac3034b8c909d2
+manifest_hash=98c0153aca8ec17b1a6cd0b26bc4b4d95bf4d7a640703ab0e58e8c0a5a36f997
 mutating=0
 committed=0
 restart_only=0
@@ -792,6 +792,8 @@ done
 [ "$(sha256sum "$snapshot/openrc-manifest.sha256")" = \
     "$manifest_hash  $snapshot/openrc-manifest.sha256" ] || fail 'manifest hash mismatch'
 (cd "$snapshot" && sha256sum -c openrc-manifest.sha256) || fail 'payload hash mismatch'
+timeout -s TERM -k 1 15 /usr/bin/python3 -I "$snapshot/openrc-power-monitor" provider-check ||
+    fail 'native sleep dependency is not ready'
 /bin/sh "$snapshot/wvkbd-transaction-root" validate-upgrade ||
     fail 'keyboard transaction cannot be safely upgraded'
 LC_ALL=C awk 'NR == 1 && length($0) >= 1 && length($0) <= 512 && $0 !~ /[^A-Za-z0-9._~-]/ { ok = 1 } END { exit !(NR == 1 && ok) }' \

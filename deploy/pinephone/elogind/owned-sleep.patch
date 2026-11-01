@@ -1,0 +1,144 @@
+--- a/src/sleep/sleep.c
++++ b/src/sleep/sleep.c
+@@ -129,43 +129,29 @@
+ }
+ #endif // 1
+ 
+-#if 1 /// If an external program is configured to suspend/hibernate, elogind calls that one first.
++#if 1 /// A configured external entry mechanism runs synchronously and is authoritative.
+ static int execute_external(Manager *m, SleepOperation operation) {
+-        int r = -1;
+         char **tools = NULL;
+-
+-        if ( (SLEEP_SUSPEND == operation) && !strv_isempty(m->suspend_by_using) )
++        pid_t pid;
++        int r;
++
++        if ((SLEEP_SUSPEND == operation) && !strv_isempty(m->suspend_by_using))
+                 tools = m->suspend_by_using;
+-
+-        if ( ( (SLEEP_HIBERNATE == operation) || (SLEEP_HYBRID_SLEEP == operation) ) && !strv_isempty(m->hibernate_by_using) )
++        if (((SLEEP_HIBERNATE == operation) || (SLEEP_HYBRID_SLEEP == operation)) && !strv_isempty(m->hibernate_by_using))
+                 tools = m->hibernate_by_using;
+-
+-        if ( tools ) {
+-                STRV_FOREACH(tool, tools) {
+-                        int k;
+-
+-                        log_debug_elogind("Calling '%s' to '%s'...", *tool, sleep_operation_to_string(operation));
+-                        k = safe_fork(*tool, FORK_LOG|FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS, &m->tool_fork_pid);
+-
+-                        if ( k < 0 ) {
+-                                r = log_error_errno(errno, "Failed to fork run %s: %m", *tool);
+-                                continue;
+-                        }
+-
+-                        if ( 0 == k ) {
+-                                /* Child */
+-                                execlp( *tool, *tool, NULL );
+-                                log_error_errno( errno, "Failed to execute %s: %m", *tool );
+-                                _exit( EXIT_FAILURE );
+-                        }
+-
+-                        log_debug_elogind( "Forking off '%s' returned %d and set PID %d", *tool, k, m->tool_fork_pid );
+-
+-                        return 0;
+-                }
+-        }
+-
+-        return r;
++        if (strv_isempty(tools))
++                return -ENOENT;
++
++        /* A configured entry mechanism is authoritative, including a veto. */
++        r = safe_fork(tools[0], FORK_LOG|FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_CLOSE_ALL_FDS, &pid);
++        if (r < 0)
++                return r;
++        if (r == 0) {
++                execlp(tools[0], tools[0], NULL);
++                _exit(EXIT_FAILURE);
++        }
++        r = wait_for_terminate_and_check(tools[0], pid, WAIT_LOG);
++        return r == 0 ? 0 : r < 0 ? r : -EPROTO;
+ }
+ #endif // 1
+ 
+@@ -513,8 +499,10 @@
+ #if 0 /// Instead of only writing to /sys/power/state, elogind offers the possibility to call an extra program instead
+         r = write_state(&f, states);
+ #else // 0
+-        r = execute_external(m, operation);
+-        if (r < 0)
++        if ((operation == SLEEP_SUSPEND && !strv_isempty(m->suspend_by_using)) ||
++            (IN_SET(operation, SLEEP_HIBERNATE, SLEEP_HYBRID_SLEEP) && !strv_isempty(m->hibernate_by_using)))
++                r = execute_external(m, operation);
++        else
+                 r = write_state(&f, states);
+ #endif // 0
+         if (r < 0)
+--- a/src/login/elogind.c
++++ b/src/login/elogind.c
+@@ -88,25 +88,23 @@
+         r = sd_event_get_state( m->event );
+ 
+         if ( r != SD_EVENT_FINISHED ) {
+-                /* Wait for tool PID if set (might have been spawned alone or from sleep/hibernate forker) */
++                /* Reap a tracked auxiliary shutdown helper, if one was spawned. */
+                 if ( m->tool_fork_pid > 0 ) {
+-                        waitpid(m->tool_fork_pid, &status, WNOHANG | WUNTRACED);
+-                        log_debug_elogind( "tool_fork PID %d waitpid() set status %d", m->tool_fork_pid, status );
+-                        if ( WIFEXITED(status) || WIFSIGNALED(status) )
++                        pid_t reaped = waitpid(m->tool_fork_pid, &status, WNOHANG);
++                        if (reaped == m->tool_fork_pid && (WIFEXITED(status) || WIFSIGNALED(status)))
+                                 m->tool_fork_pid = 0;
+                 }
+ 
+                 /* The sleep forker PID is always "the outer one", so wait for it second. */
+                 if ( m->sleep_fork_pid > 0 ) {
+                         a = m->sleep_fork_action;
+-                        waitpid(m->sleep_fork_pid, &status, WNOHANG | WUNTRACED);
+-                        log_debug_elogind( "sleep_fork PID %d waitpid() set status %d", m->sleep_fork_pid, status );
+-                        if ( WIFEXITED(status) || WIFSIGNALED(status) )
++                        pid_t reaped = waitpid(m->sleep_fork_pid, &status, WNOHANG);
++                        if (reaped == m->sleep_fork_pid && (WIFEXITED(status) || WIFSIGNALED(status))) {
+                                 m->sleep_fork_pid = 0;
+-                        /* Tell people that they now may take a lock again */
+-                        if ( a && a->sleep_operation != _SLEEP_OPERATION_INVALID ) {
+-                                (void) send_prepare_for( m, a->inhibit_what, false );
+-                                m->sleep_fork_action = NULL; /* All done */
++                                if (a && a->sleep_operation != _SLEEP_OPERATION_INVALID)
++                                        (void) send_prepare_for(m, a->inhibit_what, false);
++                                m->delayed_action = NULL;
++                                m->sleep_fork_action = NULL;
+                         }
+                 }
+         }
+--- a/src/login/logind-dbus.c
++++ b/src/login/logind-dbus.c
+@@ -1756,12 +1756,14 @@
+         m->sleep_fork_action = a; /* Remember this for the SIGCHLD handler */
+         forker = strjoina( "e-", handle_action_to_string( a->handle ) );
+         t = safe_fork( forker,
+-                       FORK_LOG|FORK_REOPEN_LOG|FORK_DEATHSIG|FORK_CLOSE_ALL_FDS,
++                       FORK_LOG|FORK_REOPEN_LOG|FORK_DEATHSIG|FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS,
+                        &m->sleep_fork_pid );
+ 
+         if ( t ) {
+-                /* no more pending actions, whether this failed or not */
+-                m->delayed_action = NULL;
++                /* Keep the action busy until the owned sleep child is reaped. */
++                m->delayed_action = t < 0 ? NULL : a;
++                if (t < 0)
++                        m->sleep_fork_action = NULL;
+                 log_debug_elogind( "Forking off '%s' returned %d and set PID %d", forker, t, m->sleep_fork_pid );
+                 return t < 0 ? log_error_errno( t, "Failed to fork %s: %m", forker ) : t;
+         }
+@@ -1849,7 +1851,7 @@
+ #if 0 /// elogind has no action_job
+         if (!manager->delayed_action || manager->action_job)
+ #else // 0
+-        if (!manager->delayed_action)
++        if (!manager->delayed_action || manager->sleep_fork_pid > 0)
+ #endif // 0
+                 return 0;
+ 
