@@ -9153,6 +9153,9 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
 (defun emacsos-assist-web--canonical-presentation-current (snapshot)
   "Clear cached/failed-read presentation after validating canonical SNAPSHOT.
 Keep unrelated local warnings and leave transcript, cache and draft untouched."
+  (when (equal emacsos-assist-web--lifecycle-notice
+               "canonical refresh unavailable; existing chat only; Retry")
+    (emacsos-assist-web--lifecycle-warning nil))
   (when (and (markerp emacsos-assist-web--status-start)
              (eq (marker-buffer emacsos-assist-web--status-start) (current-buffer)))
     (let ((inhibit-read-only t) (inhibit-modification-hooks t))

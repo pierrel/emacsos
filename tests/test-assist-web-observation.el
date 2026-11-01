@@ -212,6 +212,53 @@
      (let ((inhibit-message t)) (undo-only 1))
      (should (equal (emacsos-assist-web--input) draft)))))
 
+(ert-deftest test-observation-real-http-recovery-clears-only-canonical-notice ()
+  (test-observation--with-thread
+   (let ((emacsos-assist-web--requests nil)
+         (emacsos-assist-web-api-url "https://assist.invalid/api/v1/phone")
+         (snapshot (copy-tree emacsos-assist-web--snapshot))
+         response complete responses)
+     (unwind-protect
+         (cl-letf (((symbol-function 'emacsos-assist-web--read-token) (lambda () "synthetic-token"))
+                   ((symbol-function 'emacsos-assist-web--trustfiles) (lambda () nil))
+                   ((symbol-function 'url-retrieve)
+                    (lambda (_url callback &rest _)
+                      (setq response (generate-new-buffer " *canonical-recovery-response*")
+                            complete callback)
+                      (push response responses)
+                      (make-pipe-process :name "canonical-recovery" :buffer response :noquery t)
+                      response)))
+           (emacsos-assist-web--observe-thread (current-buffer))
+           (with-current-buffer response
+             (setq-local url-http-response-status nil)
+             (funcall complete '(:error (error synthetic-transport))))
+           (should (equal emacsos-assist-web--lifecycle-notice
+                          "canonical refresh unavailable; existing chat only; Retry"))
+           ;; The real HTTP wrapper, decoder and authorization path recover.
+           (emacsos-assist-web--observe-thread (current-buffer))
+           (with-current-buffer response
+             (set-buffer-multibyte nil)
+             (insert (encode-coding-string (json-encode snapshot) 'utf-8-unix))
+             (setq-local url-http-response-status 200
+                         url-http-content-type "application/json"
+                         url-http-end-of-headers (copy-marker (point-min)))
+             (funcall complete nil))
+           (should-not emacsos-assist-web--lifecycle-notice)
+           (should (equal (emacsos-assist-web--input) "unsent café 🐟\nsecond line"))
+           (emacsos-assist-web--lifecycle-warning "local recovery could not be saved; restart to recover")
+           (emacsos-assist-web--observe-thread (current-buffer))
+           (with-current-buffer response
+             (set-buffer-multibyte nil)
+             (insert (encode-coding-string (json-encode snapshot) 'utf-8-unix))
+             (setq-local url-http-response-status 200
+                         url-http-content-type "application/json"
+                         url-http-end-of-headers (copy-marker (point-min)))
+             (funcall complete nil))
+           (should (equal emacsos-assist-web--lifecycle-notice
+                          "local recovery could not be saved; restart to recover")))
+       (dolist (buffer responses)
+         (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (ert-deftest test-observation-compares-visible-text-not-only-revision ()
   (test-observation--with-thread
    (cl-letf (((symbol-function 'emacsos-assist-web--request)
