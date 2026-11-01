@@ -4331,7 +4331,10 @@ and queue reconciliation use this path; hidden, cached and failed views do not."
               (plist-get entry :assistant-end) nil))
       (setq emacsos-assist-web--recovery-action-marker nil)
       (let ((transcript-start (point)))
-        (insert (format "%s%s\n" thread-label (if stale " [cached]" "")))
+        (insert thread-label
+                (if stale (propertize " [cached]" 'emacsos-assist-web-cached t
+                                      'rear-nonsticky '(emacsos-assist-web-cached)) "")
+                "\n")
         (setq emacsos-assist-web--status-start (copy-marker (point) nil))
         (insert (format "[%s%s]" (or emacsos-assist-web--stream-status
                                      (alist-get 'status thread))
@@ -9092,7 +9095,8 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
 
 ;; These are presentation/restore boundaries, including complete rollback paths.
 ;; Nested writers share the outer input comparison and native undo transaction.
-(dolist (function '(emacsos-assist-web--render
+(dolist (function '(emacsos-assist-web--canonical-presentation-current
+                    emacsos-assist-web--render
                     emacsos-conversation-replace-marked
                     emacsos-assist-web--write-prompt
                     emacsos-assist-web--replace-input
@@ -9145,6 +9149,31 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
                  (equal (alist-get 'status run) "running"))
       (error "Assist Web returned an invalid active Run"))
     (alist-get 'id run)))
+
+(defun emacsos-assist-web--canonical-presentation-current (snapshot)
+  "Clear cached/failed-read presentation after validating canonical SNAPSHOT.
+Keep unrelated local warnings and leave transcript, cache and draft untouched."
+  (when (and (markerp emacsos-assist-web--status-start)
+             (eq (marker-buffer emacsos-assist-web--status-start) (current-buffer)))
+    (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+      (save-excursion
+        (when-let ((start (text-property-any
+                          (point-min) emacsos-assist-web--status-start
+                          'emacsos-assist-web-cached t)))
+          (delete-region start (next-single-property-change
+                                start 'emacsos-assist-web-cached nil
+                                emacsos-assist-web--status-start))))))
+  (when (member emacsos-assist-web--stream-status
+                '("refresh failed; cached; C-c C-r retries"
+                  "refresh failed; C-c C-r retries"
+                  "refresh rejected; cached; C-c C-a g retries"
+                  "refresh rejected; C-c C-a g retries"))
+    (setq emacsos-assist-web--stream-status nil)
+    (let ((thread (alist-get 'thread snapshot)))
+      (emacsos-assist-web--display-status
+       (concat (alist-get 'status thread)
+               (when-let ((problem (alist-get 'error thread)))
+                 (concat ": " problem)))))))
 
 (defun emacsos-assist-web--observe-thread (buffer)
   "Observe BUFFER's visible thread without submitting or retrying a message.
@@ -9203,6 +9232,7 @@ no HTTP draft, retry key or user-message placeholder."
                              (emacsos-assist-web--snapshot-active-p value)
                              (let ((run (emacsos-assist-web--snapshot-observed-run value)))
                                (emacsos-assist-web--canonical-authorized auth)
+                               (emacsos-assist-web--canonical-presentation-current value)
                                ;; Revision omits some display fields. Compare the
                                ;; complete validated snapshot before redrawing.
                                (unless (equal (emacsos-assist-web--retain-loaded-history
@@ -9210,7 +9240,6 @@ no HTTP draft, retry key or user-message placeholder."
                                               emacsos-assist-web--snapshot)
                                  (emacsos-assist-web--try-write-cache
                                   (emacsos-assist-web--snapshot-cache-name tid) value)
-                                 (setq emacsos-assist-web--stream-status nil)
                                  (unless (emacsos-assist-web--render value)
                                    (message "Thread updated; local draft save failed"))
                                  (emacsos-assist-web--git-note-safely value nil auth)
