@@ -640,6 +640,9 @@ submitted text are retained without duplicating that text; after acceptance only
 the unsent suffix remains editable. Unchanged text reuses its request
 key; edited text gets a new key, with a status warning when an earlier response
 was uncertain. There is no automatic retry or acknowledgment gate.
+Every valid HTTP acceptance echoes =Message accepted=, including a follow-up
+sent while an earlier response is still observed; that acknowledgment does not
+switch or restart the earlier observer.
 
 Send and =C-x C-s= save the editable draft. Ordinary reopening restores that
 text without submitting or resuming work. Existing unsent queue/follow-up and

@@ -4185,6 +4185,7 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
                                 (format "Send rejected (HTTP %d); text retained; retry explicitly"
                                         (alist-get 'http_status value))
                               "Send failed; connection or acceptance unconfirmed. Text retained; retry explicitly")))
+                       (message "Message accepted")
                        (if-let ((existing (and (not thread-id)
                                                (emacsos-assist-web--thread-buffer tid))))
                            ;; A timed-out creation may already be open from the catalog.
@@ -4227,7 +4228,6 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
                                emacsos-assist-web--pending-accepted-p t
                                emacsos-assist-web--in-flight t)
                          (emacsos-assist-web--append-pending text)
-                         (message "Message accepted")
                          (emacsos-assist-web--observe-run buffer)))))))))))
            `(("Idempotency-Key" . ,(plist-get request :key))) t)
 ((error quit)

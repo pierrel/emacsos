@@ -18,21 +18,34 @@
 
 (ert-deftest test-send-draft-busy-post-keeps-existing-observer-and-accepts-server-work ()
   (test-send-draft--with-thread
-   (setq emacsos-assist-web--in-flight t emacsos-assist-web--run-id "existing-run")
+   (setq emacsos-assist-web--in-flight t emacsos-assist-web--run-id "existing-run"
+         emacsos-assist-web--pending-accepted-p t
+         emacsos-assist-web--pending-key "existing-key"
+         emacsos-assist-web--submitted-text "existing accepted text")
    (emacsos-assist-web--replace-input "Unicode café — 🐟\nnext line")
-   (let (posted)
+   (let ((generation emacsos-assist-web--send-generation)
+         posted callback notices)
      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                (lambda (method path payload callback &rest _)
-                  (setq posted (list method path payload))
-                  (funcall callback '((thread_id . "draft-thread")
-                                      (run_id . "server-pending") (status . "pending")) nil)))
+                (lambda (method path payload response &rest _)
+                  (push (list method path payload) posted)
+                  (setq callback response)))
+               ((symbol-function 'message)
+                (lambda (format-string &rest args)
+                  (push (apply #'format format-string args) notices)))
                ((symbol-function 'emacsos-assist-web--observe-run)
                 (lambda (&rest _) (push "Existing response must continue" test-send-draft--unexpected-requests))))
-       (call-interactively #'emacsos-assist-web-send))
-     (should (equal posted '("POST" "threads/draft-thread/messages"
-                            ((message . "Unicode café — 🐟\nnext line")))))
+       (call-interactively #'emacsos-assist-web-send)
+       (should-not (member "Message accepted" notices))
+       (funcall callback '((thread_id . "draft-thread")
+                           (run_id . "server-pending") (status . "pending")) nil))
+     (should (= (cl-count "Message accepted" notices :test #'equal) 1))
+     (should (equal posted '(("POST" "threads/draft-thread/messages"
+                             ((message . "Unicode café — 🐟\nnext line"))))))
      (should (equal emacsos-assist-web--run-id "existing-run"))
      (should emacsos-assist-web--in-flight)
+     (should (= emacsos-assist-web--send-generation generation))
+     (should (equal emacsos-assist-web--pending-key "existing-key"))
+     (should (equal emacsos-assist-web--submitted-text "existing accepted text"))
      (should-not emacsos-assist-web--http-draft)
      (should (equal (emacsos-assist-web--input) "")))))
 
