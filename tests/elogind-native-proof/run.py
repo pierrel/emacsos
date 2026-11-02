@@ -67,7 +67,8 @@ def reaps():
 def parent_death(pre):
  c=Case('owner',pre)
  try:
-  c.event('ready');outer=c.value('outerpid');tool=None if pre else c.value('toolpid')
+  c.event('ready');os.write(c.fds['control'],b'r');c.event('ack')
+  outer=c.value('outerpid');tool=None if pre else c.value('toolpid')
   os.write(c.fds['control'],b'q');assert c.p.wait(timeout=2)==0
   fd=os.pidfd_open(outer)
   try:assert select.select([fd],[],[],2)[0],'sleep child remained alive after provider death'

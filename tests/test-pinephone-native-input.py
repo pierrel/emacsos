@@ -1,5 +1,6 @@
 """Real pidfd/epoll ownership tests with synthetic eventfds, not phone hardware."""
 import ctypes
+import errno
 import importlib.machinery
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ for n in (3,5):
  ep.register(n,select.EPOLLIN | (0 if os.environ.get('NO_WAKEUP') else 1<<29))
 os.dup2(ep.fileno(),4);ep.close()
 if os.environ.get('WRONG_DESCRIPTION'):
+ original=os.dup(3) # Retain the registered description while replacing its fd slot.
  fd=os.eventfd(0,os.EFD_NONBLOCK);os.dup2(fd,3);os.close(fd)
 if not os.environ.get('WRONG_UID'):
  os.setgroups([]);os.setresgid(int(os.environ['TEST_GID']),int(os.environ['TEST_GID']),int(os.environ['TEST_GID']))
@@ -136,8 +138,10 @@ class InputOwnership(unittest.TestCase):
 
     def test_same_inode_different_open_description_vetoes(self):
         self.child(WRONG_DESCRIPTION='1')
-        with self.assertRaises((SystemExit, OSError)):
+        with self.assertRaises(OSError) as error:
             self.acquire()
+        # Metadata passed; only epoll MOD rejects this unregistered description.
+        self.assertEqual(error.exception.errno, errno.ENOENT)
 
     def test_unread_input_survives_monitor_death(self):
         process = self.child()
@@ -207,9 +211,39 @@ class ProviderDependency(unittest.TestCase):
     def test_competing_sleep_config_rejected(self):
         (self.root/'sleep.conf.d/99-override.conf').write_text('[Sleep]\nSuspendByUsing=/bin/true\n')
         with self.assertRaises(SystemExit):self.module.provider_check()
+    def test_continued_setting_cannot_reset_helper(self):
+        (self.root/'sleep.conf.d/99-override.conf').write_text('[Sleep]\nSuspendByUsing\\\n=\n')
+        with self.assertRaises(SystemExit):self.module.provider_check()
     def test_stock_or_different_provider_rejected(self):
         self.daemon.write_bytes(b'different-provider')
         with self.assertRaises(SystemExit):self.module.provider_check()
+
+
+class PersistentDisplayLock(unittest.TestCase):
+    """Run the actual initd create-once block against root-owned fixture paths."""
+    def test_restart_preserves_owned_inode_and_rejects_unsafe_existing_files(self):
+        import fcntl
+        user=pwd.getpwnam('emacsos-lab')
+        block=Path('/source/emacsos-ui.initd').read_text().split('    # Never replace the lock inode',1)[1].split('    runtime=/run/emacsos-ui',1)[0]
+        block='    # Never replace the lock inode'+block
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);lock=root/'lock'
+            code='uid='+str(user.pw_uid)+'; group='+str(user.pw_gid)+'\nprepare() {\n'+block.replace('/run/emacsos-power-state.lock',str(lock))+'\n}\nprepare\n'
+            def run():return subprocess.run(['/bin/sh','-c',code],capture_output=True,text=True,timeout=2)
+            self.assertEqual(run().returncode,0)
+            lock.write_text('retained')
+            with lock.open('r+') as held:
+                fcntl.flock(held,fcntl.LOCK_EX)
+                inode=os.fstat(held.fileno()).st_ino
+                self.assertEqual(run().returncode,0)
+                self.assertEqual(lock.stat().st_ino,inode)
+                self.assertEqual(lock.read_text(),'retained')
+            os.link(lock,root/'alias')
+            self.assertNotEqual(run().returncode,0)
+            (root/'alias').unlink();lock.unlink()
+            target=root/'untouched';target.write_text('untouched');lock.symlink_to(target)
+            self.assertNotEqual(run().returncode,0)
+            self.assertEqual(target.read_text(),'untouched')
 
 
 if __name__ == '__main__':

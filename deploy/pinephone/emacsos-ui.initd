@@ -35,7 +35,7 @@ runtime_safe_to_remove() {
 }
 
 start_pre() {
-    local cgroup uid group groups runtime
+    local cgroup uid group groups runtime file
     /usr/local/sbin/emacsos-wvkbd-transaction prepare-start || return 1
     cgroup=/sys/fs/cgroup/openrc.emacsos-ui
     [ -d "$cgroup" ] && [ ! -L "$cgroup" ] || return 1
@@ -51,6 +51,16 @@ start_pre() {
     group=$(id -g emacsos-lab) || return 1
     groups=$(id -Gn emacsos-lab | tr ' ' '\n' | sort) || return 1
     [ "$groups" = "$(printf '%s\n' audio emacsos-lab seat video)" ] || return 1
+    # Never replace the lock inode that an elogind sleep writer may still own.
+    [ "$(stat -c '%u:%a:%F' /run)" = '0:755:directory' ] || return 1
+    file=/run/emacsos-power-state.lock
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+        (set -C; : >"$file") || return 1
+        chown "$uid:$group" "$file" || return 1
+        chmod 0600 "$file" || return 1
+    fi
+    [ -f "$file" ] && [ ! -L "$file" ] &&
+        [ "$(stat -c '%u:%g:%a:%h' "$file")" = "$uid:$group:600:1" ] || return 1
     runtime=/run/emacsos-ui
     if [ -e "$runtime" ] || [ -L "$runtime" ]; then
         [ -d "$runtime" ] && [ ! -L "$runtime" ] || return 1

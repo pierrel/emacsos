@@ -4,13 +4,13 @@ exec(compile(pathlib.Path('/input-test.py').read_bytes(), '/input-test.py', 'exe
 P=pathlib.Path
 uid=pwd.getpwnam('emacsos-lab').pw_uid
 source=P('/source');results=[]
-for name in ['logind-only','idle','call','usb','nonblank','unknown','symlink','no-monitor','queued-input','wrong-modem','ambiguous-modem','modem-bus2','race-before-read','race-before-accept','race-before-mem','blocked-entry']:
+for name in ['logind-only','idle','call','usb','nonblank','unknown','symlink','no-monitor','queued-input','wrong-modem','ambiguous-modem','modem-bus2','race-before-read','race-before-accept','race-before-mem','blocked-entry','runtime-replaced']:
  with tempfile.TemporaryDirectory(prefix='native-guard-') as directory:
   monitor_fixture=fixture.InputOwnership();monitor_fixture.setUp()
   if name!='no-monitor':monitor_fixture.child()
   root=P(directory);runtime=root/'runtime';runtime.mkdir(mode=0o700);os.chown(runtime,uid,uid)
   for file,text in [('power-state.lock',''),('power-state','blank\n')]:
-   p=runtime/file;p.write_text(text);p.chmod(0o600);os.chown(p,uid,uid)
+   p=(root if file.endswith('.lock') else runtime)/file;p.write_text(text);p.chmod(0o600);os.chown(p,uid,uid)
   power=root/'power';power.mkdir()
   for file,text in [('mem_sleep','s2idle [deep]\n'),('sync_on_suspend','1\n'),('wakeup_count','3\n'),('state','')]: (power/file).write_text(text)
   for folder in ['key','axp','supply/axp20x-usb','modem/usb1/1-1/power']:(root/folder).mkdir(parents=True,exist_ok=True)
@@ -25,15 +25,22 @@ for name in ['logind-only','idle','call','usb','nonblank','unknown','symlink','n
   text=text.replace("CGROUP = Path('/sys/fs/cgroup/openrc.emacsos-ui/cgroup.procs')", 'CGROUP = Path('+repr(str(monitor_fixture.module.CGROUP))+')').replace("MONITOR = '/usr/local/share/emacsos-openrc/power-monitor'", 'MONITOR = '+repr(str(monitor_fixture.child_script)))
   a=text.index('def verify_input(');b=text.index('def verify_guard()',a)
   text=text[:a]+"def verify_input(fd, name, key):\n    assert os.readlink('/proc/self/fd/'+str(fd)) == 'anon_inode:[eventfd]'\n\n\n"+text[b:]
+  text=text.replace("RUNTIME / 'power-state.lock'", 'Path('+repr(str(root/'power-state.lock'))+')').replace("RUNTIME / 'power-state'", 'Path('+repr(str(runtime/'power-state'))+')')
+  text=text.replace("'/run/emacsos-power-state.lock'", repr(str(root/'power-state.lock'))).replace("'/run/emacsos-power-state'", repr(str(runtime/'power-state')))
   monitor.write_text(text);monitor.chmod(0o755)
   text=(source/'openrc-suspend-root').read_text().replace('power=/sys/power','power='+str(power))
-  replacements={'/sys/devices/platform/gpio-keys/power/wakeup':str(root/'key/wakeup'),'/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup':str(root/'axp/wakeup'),'/sys/devices/platform/soc/1c1b000.usb':str(root/'modem'),'/sys/class/power_supply':str(root/'supply'),'/usr/local/share/emacsos-openrc/power-monitor':str(monitor),'/run/emacsos-openrc-call.lock':str(root/'call.lock'),'/run/emacsos-ui/power-state.lock':str(runtime/'power-state.lock'),'/usr/local/sbin/emacsos-openrc-call':str(call)}
+  replacements={'/sys/devices/platform/gpio-keys/power/wakeup':str(root/'key/wakeup'),'/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup':str(root/'axp/wakeup'),'/sys/devices/platform/soc/1c1b000.usb':str(root/'modem'),'/sys/class/power_supply':str(root/'supply'),'/usr/local/share/emacsos-openrc/power-monitor':str(monitor),'/run/emacsos-openrc-call.lock':str(root/'call.lock'),'/run/emacsos-power-state.lock':str(root/'power-state.lock'),'/run/emacsos-ui/power-state.lock':str(root/'power-state.lock'),'/usr/local/sbin/emacsos-openrc-call':str(call)}
   for old,new in replacements.items():text=text.replace(old,new)
+  if name=='runtime-replaced':
+   root.chmod(0o755)
+   marker=root/'reached';barrier=root/'barrier';os.mkfifo(barrier)
+   barrier_fd=os.open(barrier,os.O_RDWR|os.O_NONBLOCK)
+   text=text.replace('wakeup_count=$(timeout', 'touch '+str(marker)+'; read answer <'+str(barrier)+'\n'+'wakeup_count=$(timeout',1)
   race=name.startswith('race-')
   if race:
    root.chmod(0o755)
    display=P('/usr/local/share/emacsos-openrc/session-power');display.parent.mkdir(parents=True,exist_ok=True)
-   display.write_text('#!/bin/sh\nexec 9<>'+str(runtime/'power-state.lock')+'\nflock -x 9\nprintf "active\\n" >'+str(runtime/'power-state')+'\n');display.chmod(0o755)
+   display.write_text('#!/bin/sh\nexec 9<>'+str(root/'power-state.lock')+'\nflock -x 9\nprintf "active\\n" >'+str(runtime/'power-state')+'\n');display.chmod(0o755)
    barrier=root/'barrier';os.mkfifo(barrier);barrier_fd=os.open(barrier,os.O_RDWR|os.O_NONBLOCK)
    phase=name.removeprefix('race-')
    marker='touch '+str(root/'reached')+'; read answer <'+str(barrier)+'\n'
@@ -62,7 +69,7 @@ for name in ['logind-only','idle','call','usb','nonblank','unknown','symlink','n
   if name=='nonblank':(runtime/'power-state').write_text('active\n')
   if name=='unknown':calls.unlink()
   if name=='symlink':
-   (runtime/'power-state.lock').unlink();(root/'untouched').write_text('preserve');(runtime/'power-state.lock').symlink_to(root/'untouched')
+   (root/'power-state.lock').unlink();(root/'untouched').write_text('preserve');(root/'power-state.lock').symlink_to(root/'untouched')
   provider=root/'provider';provider.mkdir()
   env=os.environ|{'PROOF_DIR':str(provider),'PROOF_GUARD':str(shell),'LD_LIBRARY_PATH':'/native/src/shared'}
   # Execute the real sleep.conf parser, not only its internal execute helper.
@@ -100,6 +107,36 @@ for name in ['logind-only','idle','call','usb','nonblank','unknown','symlink','n
    assert (power/'state').read_text()==''
    assert (provider/'kernel').read_text()==''
    results.append({'case':name,'wake_source_vetoed':True,'no_mem':True,'wake_completed_after_lock_release':True})
+  elif name=='runtime-replaced':
+   import shutil
+   provider_process=subprocess.Popen(['/native/proof-provider','parsed-guard'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+   deadline=time.monotonic()+5
+   while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
+   assert marker.exists(),'native writer never reached held-lock seam'
+   lock_inode=(root/'power-state.lock').stat().st_ino
+   shutil.rmtree(runtime);runtime.mkdir(mode=0o700);os.chown(runtime,uid,uid)
+   # Execute the real session's pre-Sway transition, including direct respawns.
+   session=(source/'openrc-session').read_text()
+   prefix=session.split("trap 'exit 1' HUP INT TERM\n",1)[1].split('# Explicit starts create',1)[0]
+   transition=(source/'openrc-session-power').read_text().replace('/run/emacsos-power-state.lock',str(root/'power-state.lock')).replace('/run/emacsos-power-state',str(runtime/'power-state')).replace('XDG_RUNTIME_DIR=/run/emacsos-ui','XDG_RUNTIME_DIR='+str(runtime))
+   transition=transition.replace("[ \"$(stat -c '%u:%a:%F' /run)\" = '0:755:directory' ]", "[ \"$(stat -c '%u:%a:%F' "+str(root)+")\" = '0:755:directory' ]")
+   (root/'session-power').write_text(transition);(root/'session-power').chmod(0o755)
+   command='set -eu\nroot='+str(root)+'\n'+prefix+'\nprintf sway-started >'+str(runtime/'sway-started')+'\n'
+   argv=['su','-s','/bin/sh','emacsos-lab','-c',command]
+   first=subprocess.run(argv,capture_output=True,text=True,timeout=3)
+   assert first.returncode!=0 and not (runtime/'sway-started').exists(),('Sway started while old native writer owned display',first.stderr)
+   assert (root/'power-state.lock').stat().st_ino==lock_inode,'runtime replacement replaced stable lock'
+   os.write(barrier_fd,b'go\n');os.close(barrier_fd)
+   assert provider_process.wait(timeout=5)==0
+   provider_process.stdout.close();provider_process.stderr.close()
+   second=subprocess.run(argv,capture_output=True,text=True,timeout=3)
+   assert second.returncode==0 and (runtime/'sway-started').exists(),second.stderr
+   assert (runtime/'power-state').read_text()=='waking\n'
+   (power/'state').write_text('')
+   retry=subprocess.run(['/native/proof-provider','parsed-guard'],env=env,capture_output=True,text=True,timeout=5)
+   assert retry.returncode==0 and int((provider/'result').read_text())!=0,'startup-wins permitted native entry'
+   assert (power/'state').read_text()==''
+   results.append({'case':name,'old_writer_blocks_sway':True,'runtime_preserves_lock':True,'startup_wins_vetoes_entry':True})
   elif name=='blocked-entry':
    # Fill a real FIFO so the actual shell builtin blocks at its mem write.
    # This is an interruptible syscall seam, not a claim to simulate kernel sleep.
@@ -130,7 +167,7 @@ for name in ['logind-only','idle','call','usb','nonblank','unknown','symlink','n
    monitor_fixture.child()
    # Remove dead producer from the synthetic membership list, as cgroup.procs does.
    monitor_fixture.module.CGROUP.write_text(str(monitor_fixture.children[-1][0].pid)+'\n')
-   for lock in (root/'call.lock',runtime/'power-state.lock'):
+   for lock in (root/'call.lock',root/'power-state.lock'):
     fd=os.open(lock,os.O_RDWR)
     try:
      try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)

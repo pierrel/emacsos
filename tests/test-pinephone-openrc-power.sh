@@ -19,6 +19,9 @@ adduser -S -D -H -h /var/lib/emacsos-lab -s /sbin/nologin \
     -G emacsos-lab emacsos-lab
 install -d -o emacsos-lab -g emacsos-lab -m 0700 \
     /run/emacsos-ui /var/lib/emacsos-lab /usr/local/share/emacsos-openrc
+touch /run/emacsos-ui/power-state /run/emacsos-power-state.lock
+chown emacsos-lab:emacsos-lab /run/emacsos-ui/power-state /run/emacsos-power-state.lock
+chmod 0600 /run/emacsos-ui/power-state /run/emacsos-power-state.lock
 cp /source/session-power /tmp/session-power.test
 install -o root -g root -m 0755 /tmp/session-power.test \
     /usr/local/share/emacsos-openrc/session-power

@@ -135,6 +135,17 @@ kernel entry. It rejects unknown call state, active display, USB power and
 pending input. The modem is identified by its internal controller, port and
 EG25 hardware IDs, without relying on its boot-assigned USB bus number.
 
+The existing display lock lives at =/run/emacsos-power-state.lock=, outside
+replaceable UI runtime. Every supervised session first takes that lock and
+publishes =waking= before launching Sway. Native admission takes the call and
+display locks before reading runtime or importing inputs, and holds them through
+kernel entry. A still-running sleep writer therefore blocks new UI startup;
+startup that wins first makes subsequent admission fail closed. The state and
+idle generation remain session runtime files. The lock inode is created once
+per boot and is never replaced by ordinary UI restart, update or rollback.
+Moving from the earlier runtime-local lock requires verified old-writer
+quiescence before activating these helpers; see the native dependency README.
+
 This route requires the patched elogind 252.24 package and fixed configuration
 in =deploy/pinephone/elogind/=. Install that provider and configuration before
 starting this UI version; see that directory's README for cutover and rollback

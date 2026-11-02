@@ -1,0 +1,61 @@
+#+title: Native suspend and UI restart boundary
+#+date: 2026-11-02
+
+* Correction
+
+A native sleep writer belongs to elogind, not the UI service cgroup. Removing
+UI runtime could replace the display-lock inode while that writer still owned
+the old lock. A replacement compositor could then start before the old writer
+entered sleep. Direct supervise-daemon respawn also reached Sway before the
+normal guarded wake, even without replacing the runtime directory.
+
+The existing display lock now lives at =/run/emacsos-power-state.lock= under
+the root-owned, non-user-writable parent. Root creates it only if absent and
+checks its regular-file, owner, mode and link-count contract. Ordinary restart,
+update and rollback never unlink or replace it. State and generation remain
+session runtime files.
+
+Every session invocation takes that same lock and publishes the existing
+=waking= state before any Sway launch. It returns before the later ordinary
+guarded wake, so there is no nested flock or descriptor handoff. Native entry
+acquires the existing call lock and then the stable display lock before any
+runtime, input or state observation, retaining both through kernel entry. If an
+old writer wins, new compositor startup fails closed until the writer finishes.
+If startup wins, subsequent admission observes a fresh nonblank state and is
+vetoed. Missing runtime or state likewise fails closed. No controller or new
+lifecycle state is introduced.
+
+The native dependency checker also rejects backslash continuations in competing
+configuration files. It does not emulate the provider's logical-line parser;
+a continued assignment must not evade the check and clear the fixed helper.
+
+* Activation and evidence limits
+
+The first migration from runtime-local locks requires verified completion of
+all old native jobs and guarded writers before changing helpers or starting the
+new UI. A new lock cannot exclude an old writer holding the old inode. A later
+downgrade to the old lock protocol has the same quiescence requirement. A drained
+UI cgroup alone is insufficient; the ordered provider transaction must verify
+this activation check.
+
+The causal fixture executes the actual provider, helper, persistent lock and
+session pre-Sway prefix against private files and synthetic input sources. The
+old code reaches compositor startup while the writer is held; the corrected
+code blocks it. It also verifies that runtime replacement preserves the lock
+and that a startup winning first vetoes a subsequent native admission. Existing
+input, call/display ordering and blocked-entry controls remain. Separate fixtures
+execute the real call-idle D-Bus branch, retain the original eventfd to reach the
+actual epoll MOD rejection, and fence native test PID publication through the
+existing control/ack exchange.
+
+These checks do not establish physical sleep/resume, carrier SMS/call wake or
+the cause of unrelated inbound-message nonarrival. No phone test follows from
+this source correction alone.
+
+* Historical supersessions
+
+This replaces the UI-runtime lifetime assumption in the ownership and
+activation discussion of =2026-10-31-native-phone-suspend.org=: retained input
+and display descriptors protect a native writer only when a replacement UI
+shares the same display-lock inode and enters its nonblank state before Sway.
+The native provider's single-owner and completion contracts are unchanged.

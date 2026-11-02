@@ -90,8 +90,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+# This also runs on direct supervise-daemon respawn, before any display process.
+"$root/session-power" startup
+
 # Explicit starts create a private runtime directory. Cleanup removes this
-# attempt's sockets and FIFO before a supervised respawn.
+# attempt's sockets before a supervised respawn.
 for candidate in "$runtime"/wayland-* "$runtime"/sway-ipc.*.sock; do
     [ ! -e "$candidate" ] && [ ! -L "$candidate" ] ||
         fail 'stale compositor socket exists'

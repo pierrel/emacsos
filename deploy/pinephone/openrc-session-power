@@ -12,7 +12,7 @@ umask 077
 runtime=$XDG_RUNTIME_DIR
 state=$runtime/power-state
 generation_file=$runtime/power-generation
-lock=$runtime/power-state.lock
+lock=/run/emacsos-power-state.lock
 sway_socket=
 wayland_socket=
 
@@ -25,7 +25,7 @@ trap 'exit 1' HUP INT TERM
 
 [ "$#" -ge 1 ] || fail 'an action is required'
 case $1 in
-    press|idle-blank|resume|wake|monitor|guarded-press|guarded-wake)
+    startup|press|idle-blank|resume|wake|monitor|guarded-press|guarded-wake)
         [ "$#" -eq 1 ] || fail 'arguments are not accepted' ;;
     *) fail 'unknown action' ;;
 esac
@@ -49,6 +49,19 @@ esac
 [ -d "$runtime" ] && [ ! -L "$runtime" ] || fail 'invalid runtime directory'
 [ "$(stat -c '%U:%G:%a:%F' "$runtime")" = \
     'emacsos-lab:emacsos-lab:700:directory' ] || fail 'unsafe runtime directory'
+
+# Root creates this once per boot; replacing UI runtime cannot replace the lock.
+[ "$(stat -c '%u:%a:%F' /run)" = '0:755:directory' ] || fail 'unsafe power-state parent'
+[ -f "$lock" ] && [ ! -L "$lock" ] &&
+    [ "$(stat -c '%U:%G:%a:%h' "$lock")" = 'emacsos-lab:emacsos-lab:600:1' ] ||
+    fail 'unsafe persistent power lock'
+if [ "$1" = startup ]; then
+    exec 9<>"$lock"
+    flock -n -x 9 || fail 'native sleep still owns the display'
+    # Every supervised invocation becomes ineligible for sleep before Sway starts.
+    printf '%s\n' waking >"$state"
+    exit 0
+fi
 
 for candidate in "$runtime"/sway-ipc.*.sock; do
     [ -S "$candidate" ] || continue
@@ -74,9 +87,7 @@ if [ "$1" = monitor ]; then
     exec doas -n /usr/local/sbin/emacsos-openrc-suspend monitor
 fi
 
-: >"$lock"
-chmod 0600 "$lock"
-exec 9>"$lock"
+exec 9<>"$lock"
 case $1 in
     press|resume|wake) flock -x 9 || fail 'power transition lock failed' ;;
     idle-blank) flock -n -x 9 || fail 'power transition is busy' ;;

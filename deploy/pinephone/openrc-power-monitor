@@ -120,6 +120,8 @@ def provider_check():
                 if config in selected or not config.exists():
                     continue
                 for line in read_limited(config, 65536).decode().splitlines():
+                    if line.rstrip().endswith('\\'):
+                        fail('native sleep configuration continuation is unsupported')
                     key = line.strip().partition('=')[0].strip()
                     if (key == 'SuspendByUsing' or key == 'AllowSuspendInterrupts'
                             and config != Path('/etc/elogind/logind.conf')):
@@ -215,15 +217,18 @@ def locked_file(path, uid, target, create=False):
 
 def entry():
     user = pwd.getpwnam('emacsos-lab')
+    # The stable locks precede every runtime and input observation.
+    locked_file('/run/emacsos-openrc-call.lock', 0, 8, create=True)
+    parent = Path('/run').lstat()
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_mode & 0o022:
+        fail('unsafe power-lock parent')
+    locked_file('/run/emacsos-power-state.lock', user.pw_uid, 6)
     runtime = RUNTIME.lstat()
     if (not stat.S_ISDIR(runtime.st_mode) or runtime.st_uid != user.pw_uid
             or stat.S_IMODE(runtime.st_mode) != 0o700):
         fail('unsafe power runtime')
     guard = import_input_guard(user.pw_uid)
     # Retain guard3/4/5 and call/display locks through exec and the mem syscall.
-    # Match call mutations: call lock before display lock, held until mem returns.
-    locked_file('/run/emacsos-openrc-call.lock', 0, 8, create=True)
-    locked_file(RUNTIME / 'power-state.lock', user.pw_uid, 6)
     fd = os.open(RUNTIME / 'power-state', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     state = os.fstat(fd)
     if (not stat.S_ISREG(state.st_mode) or state.st_uid != user.pw_uid

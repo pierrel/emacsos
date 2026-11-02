@@ -39,6 +39,14 @@ no active call, no pending native sleep operation, and external power or
 adequate battery. Stop and positively quiesce the old UI/direct sleep writer.
 Do not bypass a failed quiescence check.
 
+When upgrading from runtime-local display locks, also prove the old native job
+and guarded writer have finished before installing or starting the new helpers.
+The new persistent lock cannot retroactively exclude an old writer holding the
+old inode. Preserve =/run/emacsos-power-state.lock= on subsequent restarts,
+updates and rollback; never recreate it to bypass a busy writer. Returning to an
+older lock protocol likewise requires native-job quiescence, not only a drained
+UI cgroup. Session state and generation files remain in the UI runtime.
+
 While the UI is stopped, install the reviewed new =openrc-suspend-root=,
 =openrc-power-monitor= and =openrc-call-root= helpers to their normal fixed
 locations. Install the native configuration and matched package bundle before

@@ -117,7 +117,7 @@ enable_wakeup "${external_power%/online}/power/wakeup"
 
 # These exact locks were opened safely by the synchronous entry process.
 [ /proc/$$/fd/8 -ef /run/emacsos-openrc-call.lock ] && flock -n -x 8 || exit 75
-[ /proc/$$/fd/6 -ef /run/emacsos-ui/power-state.lock ] && flock -n -x 6 || exit 75
+[ /proc/$$/fd/6 -ef /run/emacsos-power-state.lock ] && flock -n -x 6 || exit 75
 
 wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 6>&- 8>&-) || exit 75
 case $wakeup_count in
