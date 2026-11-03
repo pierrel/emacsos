@@ -2857,6 +2857,34 @@ cache bytes; failure keeps an existing complete copy. No retries are scheduled."
                     (when validator (list (cons "If-None-Match" validator))) nil nil nil nil t)))))))
       (next paths))))
 
+(defun emacsos-assist-web--json-text-value (value)
+  "Return JSON VALUE with Unicode text, decoding pre-encoded UTF-8 strings.
+Preserve JSON container shapes and scalar values.  Reject invalid text without
+including credentials or payload contents in the diagnostic."
+  (cond
+   ((stringp value)
+    (let ((text (if (multibyte-string-p value) value
+                  (decode-coding-string value 'utf-8-unix))))
+      (when (seq-some (lambda (character)
+                        (or (> character #x10ffff)
+                            (<= #xd800 character #xdfff))) text)
+        (error "Assist Web JSON text must be valid UTF-8"))
+      text))
+   ((consp value)
+    (if (proper-list-p value)
+        (mapcar #'emacsos-assist-web--json-text-value value)
+      (cons (emacsos-assist-web--json-text-value (car value))
+            (emacsos-assist-web--json-text-value (cdr value)))))
+   ((vectorp value) (vconcat (mapcar #'emacsos-assist-web--json-text-value value)))
+   ((hash-table-p value)
+    (let ((result (copy-hash-table value)))
+      (clrhash result)
+      (maphash (lambda (key item)
+                 (puthash (emacsos-assist-web--json-text-value key)
+                          (emacsos-assist-web--json-text-value item) result)) value)
+      result))
+   (t value)))
+
 (defun emacsos-assist-web--request
     (method path payload callback &optional headers allow-status array-type object-type
             git-typed-error raw-response)
@@ -2869,7 +2897,9 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
 GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
 error instead of the legacy string.  A Git probe's nondiagnostic failure
 does not downgrade a separate chat-accepted Git observation.
-RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
+RAW-RESPONSE reads bounded asset bytes/validators instead of JSON.
+JSON strings may be Unicode text or pre-encoded UTF-8 bytes; normalize text
+before serialization and turn headers/body into bytes at this boundary."
   (let* ((emacsos-assist-web-max-response-bytes
           (if raw-response (+ emacsos-assist-web--asset-max-bytes emacsos-assist-web-max-header-bytes)
             emacsos-assist-web-max-response-bytes))
@@ -2934,12 +2964,17 @@ RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
                        "Too many Assist Web requests are already running")))
         (let* ((url-request-method method)
                (url-request-extra-headers
-		(append `(("Authorization" . ,(concat "Bearer " token))
-                          ("Accept" . ,(if raw-response "application/octet-stream" "application/json")))
-			(when payload '(("Content-Type" . "application/json")))
-			headers))
-               (url-request-data
-		(and payload (encode-coding-string (json-encode payload) 'utf-8)))
+                ;; url-http concatenates these with the UTF-8 body.  Even
+                ;; multibyte ASCII from token/cache files would promote its
+                ;; bytes to characters and expose the request in an error.
+                (mapcar (lambda (header)
+                          (cons (encode-coding-string (car header) 'utf-8-unix)
+                                (encode-coding-string (cdr header) 'utf-8-unix)))
+                        (append `(("Authorization" . ,(concat "Bearer " token))
+                                  ("Accept" . ,(if raw-response "application/octet-stream" "application/json")))
+                                (when payload '(("Content-Type" . "application/json")))
+                                headers)))
+               (url-request-data nil)
                (url nil)
                (origin (current-buffer))
                (observed-http-status nil)
@@ -2996,6 +3031,10 @@ RAW-RESPONSE reads bounded asset bytes/validators instead of JSON."
                            (emacsos-assist-web--refresh-assets))))))))
             (condition-case error
 		(progn
+                  (setq url-request-data
+                        (and payload
+                             (encode-coding-string
+                              (json-encode (emacsos-assist-web--json-text-value payload)) 'utf-8-unix)))
                   (setq url (emacsos-assist-web--endpoint path))
                   (setq response
 			(let ((url-mime-encoding-string "identity")

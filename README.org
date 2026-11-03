@@ -621,6 +621,11 @@ A connected send is a separate live check.  Package references: [[https://formul
 
 Assist Web thread buffers use the authenticated HTTPS phone API and SSE only as
 a provisional observation: the final canonical Assist snapshot remains truth.
+JSON requests normalize Unicode text and already encoded UTF-8 string values
+without newline conversion at their shared request boundary, including nested objects and arrays. Header
+and body bytes remain byte-oriented for the HTTP builder and its Content-Length.
+Invalid UTF-8 fails through the request callback before transport with a generic
+text diagnostic that includes neither credentials nor message contents.
 =C-c a l= opens a native, touch-sized thread list, while =C-c a t= opens the
 filtered catalog completion chooser when threads exist and otherwise falls back
 to that list.  The list renders the validated local catalog immediately,
@@ -811,13 +816,19 @@ The fixed root SMS helper journals every exact outgoing attempt before calling
 ModemManager, including sends confirmed locally on the phone. A repeated attempt
 id reads its recorded outcome and never sends again. =sent= means ModemManager
 accepted the message, not carrier delivery. =unknown= must not be retried as a new
-send to repair the archive.
+send to repair the archive. If the journal cannot be opened or the prior attempt
+cannot be read, the result is also =unknown=: a definite negative requires a
+positively new durable claim with no modem effect begun.
 
 The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
 source checkout. It also records incoming ModemManager observations. Retries of
 one owner/boot/object observation retain one id; identical independent objects
 retain separate ids. A new ModemManager owner can expose an old physical SMS as a
 new observation. Physical deduplication across re-enumeration is not established.
+Incoming collection reuses a durable rotating cursor and a four-object read
+budget. Progress commits before each leaf, including failed or incomplete ones;
+a later deadline does not discard it. Subsequent polls wrap around and revisit
+a completed multipart object even if its completion signal was missed.
 
 An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the
 unprivileged transport inside the existing UI service. It requires exactly
@@ -842,6 +853,19 @@ migrated or removed automatically. Operator migration must preserve original
 records and must not send messages.
 
 
+The phone notification log opens with =C-c e n= and refreshes with =g=.
+It retains up to 256 newest local reason events within 128 KiB in private
+=$XDG_STATE_HOME/emacsos/notifications.jsonl= (normally
+=~/.local/state/emacsos/notifications.jsonl=), mode 0600. Each SMS
+feedback client request is recorded before it starts; a storage failure suppresses
+that new request. Client failures and intentional stops are separate entries.
+A recorded request does not prove physical vibration. Reasons omit SMS bodies,
+numbers and caller details. Call-specific feedback wiring is maintained with
+the separate incoming-call feature; this journal change does not add it. Raw modem SMS events explicitly have unverified
+novelty/completion; this log does not itself fix duplicate notifications or cover
+external applications/direct hardware writers. Local SMS continues to use the same finite feedback client, independent of
+server configuration.
+
 Received-SMS events also request one finite quiet-profile =feedbackd= vibration
 through the existing verified ModemManager observer. This adds no independent
 wake channel. Verify the installed =fbcli= options, session activation, theme and
@@ -849,3 +873,18 @@ EG25 ring-indicator deep wake on the actual phone before relying on asleep buzz.
 Incoming sender addresses (including brand names and unknown senders) and empty
 texts are preserved exactly. Received bodies share the server's bounded multipart-text envelope;
 serialized receipt batches stay below the transport cap even with escaped text.
+
+* Reasoned Assist phone alerts
+
+The OpenRC phone session polls Assist's authenticated notifications endpoint every
+30 seconds. =notify= queues a bounded reason for the current urgent cycle; it
+never sends an SMS. Opening the thread clears that urgent cycle. An acknowledgment
+only marks phone handling and does not clear the urgent indicator.
+
+The phone records the reason in the private notification journal and saves the
+alert identity in its existing private Assist cache before attempting finite
+feedback. Restart or acknowledgment loss does not repeat that attempt. A queued
+or handled result does not establish physical vibration or wake from deep sleep.
+This consumer depends on the notification journal feature. It uses the shared HTTP encoding boundary included in the current client.
+
+Reasons reject Unicode control characters and line/paragraph separators while preserving ordinary Unicode, including joined emoji. Malformed asynchronous server responses release only their matching poll so a later timer tick can continue. Both user-facing upload scripts stage the required consumer module.

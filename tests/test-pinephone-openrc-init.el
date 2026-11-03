@@ -1243,22 +1243,16 @@
 
 
 
-(ert-deftest emacsos-openrc-sms-feedback-rejects-stale-owner-and-uses-finite-client ()
+(ert-deftest emacsos-openrc-sms-feedback-requires-owner-and-recorded-reason ()
   (let ((emacsos-call--current-owner ":1.7")
-        (emacsos-call--owner-generation 9)
-        calls timers)
-    (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest args) (push args calls) 'fake-process))
-              ((symbol-function 'run-at-time)
-               (lambda (&rest args) (push args timers))))
+        (emacsos-call--owner-generation 9) requests)
+    (cl-letf (((symbol-function 'emacsos-notifications-feedback)
+               (lambda (&rest args) (push args requests))))
       (emacsos-pinephone-sms-feedback ":1.old" 9 "/org/freedesktop/ModemManager1/SMS/1")
       (emacsos-pinephone-sms-feedback ":1.7" 8 "/org/freedesktop/ModemManager1/SMS/1")
-      (should-not calls)
+      (should-not requests)
       (emacsos-pinephone-sms-feedback ":1.7" 9 "/org/freedesktop/ModemManager1/SMS/1")
-      (should (= (length calls) 1))
-      (should (equal (plist-get (car calls) :command)
-                     '("/usr/bin/fbcli" "--event=message-new-sms" "--profile=quiet" "--timeout=1" "--watch=4")))
-      (should (equal (caar timers) 5)))))
+      (should (equal requests '((sms "Raw modem message event; novelty and completion unverified")))))))
 
 (ert-run-tests-batch-and-exit)
 
