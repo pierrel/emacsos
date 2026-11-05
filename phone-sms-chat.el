@@ -492,13 +492,19 @@ When QUIET is non-nil, leave rerendering to the caller."
                                      :unread (and emacsos-sms-chat--history-loaded
                                                   (equal direction "incoming"))))))
           (cond
-           ((and (eq emacsos-sms--state 'sending) (equal id emacsos-sms--attempt-id))
-            (setf (emacsos-sms-chat-record-state record) 'sending))
+           ((and (memq emacsos-sms--state '(sending sent failed unknown))
+                 (equal id emacsos-sms--attempt-id))
+            (setf (emacsos-sms-chat-record-state record) emacsos-sms--state))
            ;; A reader may have captured the write-ahead unknown before the
            ;; existing terminal callback completed. Never regress that result.
            ((and existing (equal status "unknown")
                  (memq (emacsos-sms-chat-record-state existing) '(sent failed))))
-           ((not (and existing (emacsos-sms-chat--protected-p existing)))
+           ;; Eviction protection does not freeze an unowned historical
+           ;; Unknown when the same durable journal attempt becomes terminal.
+           ((or (and existing
+                     (eq (emacsos-sms-chat-record-state existing) 'unknown)
+                     (member status '("sent" "not_sent")))
+                (not (and existing (emacsos-sms-chat--protected-p existing))))
             (setf (emacsos-sms-chat-record-state record)
                   (if (equal status "not_sent") 'failed (intern status)))))
           (push record incoming))))

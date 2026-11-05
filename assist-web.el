@@ -8832,7 +8832,8 @@ Desktop Assist leaves phone SMS proposals for review on the phone."
                  (when observed
                    ;; Project the verified journal result through the existing
                    ;; terminal presenter; no transport is started here.
-                   (setq emacsos-sms--state 'sending)
+                   (setq emacsos-sms--attempt-id (alist-get 'id proposal)
+                         emacsos-sms--state 'sending)
                    (let ((status (alist-get 'status observed)))
                      (emacsos-sms--finished emacsos-sms--proposal-id
                                            (pcase status ("sent" "sent") ("not_sent" "not-sent:send-failed") (_ "unknown:dbus-unavailable")))

@@ -523,3 +523,28 @@
     (should (string-match-p "no sender" (with-current-buffer test-sms-chat--window-buffer (buffer-string))))
     (should (emacsos-sms-chat-open ""))
     (should (string-match-p "notice" (with-current-buffer test-sms-chat--window-buffer (buffer-string))))))
+
+(ert-deftest emacsos-sms-chat-direct-terminal-precedes-first-history ()
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (setq emacsos-sms-chat--records nil
+            emacsos-sms--attempt-id "direct"
+            emacsos-sms--state terminal)
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "direct" "outgoing" "unknown"))) (truncated)))
+      (should (eq (emacsos-sms-chat-record-state (car emacsos-sms-chat--records)) terminal)))))
+
+(ert-deftest emacsos-sms-chat-historical-unknown-resolves-without-ui-callback ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "external" "outgoing" "unknown"))) (truncated)))
+    (let ((record (car emacsos-sms-chat--records)))
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "external" "outgoing" "sent"))) (truncated)))
+      (should (eq (emacsos-sms-chat-record-state record) 'sent))
+      ;; A real UI-owned Unknown still requires explicit acknowledgment.
+      (setq emacsos-sms--attempt-id "external" emacsos-sms--state 'unknown)
+      (setf (emacsos-sms-chat-record-state record) 'unknown)
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "external" "outgoing" "sent"))) (truncated)))
+      (should (eq (emacsos-sms-chat-record-state record) 'unknown)))))

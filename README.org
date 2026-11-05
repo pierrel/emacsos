@@ -825,7 +825,7 @@ No separate deletion queue or worker is added. A unique
 SHA256 key over exact sender, UTC-normalized original Timestamp and Text/Data
 maps repeated observations to one durable UUID. Local outgoing proposals also
 carry one exact durable attempt identity; active Sending and known terminal
-results cannot be replaced by an older write-ahead Unknown history read. Equal messages within the source
+results cannot be replaced by an older write-ahead Unknown history read. Journal recovery binds the same verified attempt identity before presenting its result, so native acknowledgment clears the matching pending status. Unowned historical Unknown rows can accept later terminal journal results. Equal messages within the source
 timestamp resolution deliberately collapse. Exported paths, owner changes and raw
 Added signals do not establish novelty. See
 [[file:docs/2026-10-28-sms-platform-identity-simplification.org][the pinned platform contract]] and
