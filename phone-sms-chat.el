@@ -101,7 +101,7 @@
 
 (defun emacsos-sms-chat--conversation-buffer-name (number)
   "Return the canonical conversation buffer name for validated NUMBER."
-  (format "*SMS %s*" (emacsos-sms-chat--display-correspondent number)))
+  (format "*SMS conversation: %s*" (emacsos-sms-chat--display-correspondent number)))
 
 (defun emacsos-sms-chat--conversation-buffers ()
   "Return all live SMS conversation buffers."
@@ -463,8 +463,8 @@ When QUIET is non-nil, leave rerendering to the caller."
               (equal proposal-id (emacsos-sms-chat-record-id record)))
             emacsos-sms-chat--records))
 
-(defun emacsos-sms-chat--apply-history (value)
-  "Merge bounded local VALUE by durable identity, preserving live UI ownership."
+(defun emacsos-sms-chat--apply-history (value &optional revision)
+  "Merge local VALUE, preserving UI ownership and edits newer than REVISION."
   (let ((rows (alist-get 'messages value))
         (saved-records emacsos-sms-chat--records)
         (saved-values (mapcar (lambda (r) (cons r (copy-emacsos-sms-chat-record r)))
@@ -508,10 +508,13 @@ When QUIET is non-nil, leave rerendering to the caller."
             (setf (emacsos-sms-chat-record-state record)
                   (if (equal status "not_sent") 'failed (intern status)))))
           (push record incoming))))
-    ;; A confirmed send/proposal or unacknowledged unknown remains owned by its
-    ;; existing lifecycle, even if outside the bounded historical page.
+    ;; Preserve lifecycle-owned records and changes made after this reader
+    ;; started. A later fresh page can replace ordinary completed records.
     (dolist (record emacsos-sms-chat--records)
-      (when (and (emacsos-sms-chat--protected-p record)
+      (when (and (or (emacsos-sms-chat--protected-p record)
+                     (and (integerp revision)
+                          (integerp (emacsos-sms-chat-record-revision record))
+                          (> (emacsos-sms-chat-record-revision record) revision)))
                  (not (memq record incoming)))
         (push record incoming)))
     (setq emacsos-sms-chat--records (nreverse incoming))
@@ -540,7 +543,8 @@ When QUIET is non-nil, leave rerendering to the caller."
                 (emacsos-sms-chat--apply-history
                  (with-current-buffer buffer
                    (json-parse-string (buffer-string) :object-type 'alist
-                                      :array-type 'list :false-object nil :null-object nil))))
+                                      :array-type 'list :false-object nil :null-object nil))
+                 (process-get process 'revision)))
             (error
              (setq emacsos-sms-chat--refresh-state "Local history unavailable; tap Refresh")
              (emacsos-sms-chat--rerender-all)))
@@ -554,7 +558,8 @@ When QUIET is non-nil, leave rerendering to the caller."
   (interactive)
   (if emacsos-sms-chat--refresh
       (setq emacsos-sms-chat--refresh-again t)
-    (let ((buffer (generate-new-buffer " *SMS archive*")) process)
+    (let ((buffer (generate-new-buffer " *SMS archive*"))
+          (revision emacsos-sms-chat--revision) process)
       (condition-case nil
           (progn
             (setq process
@@ -569,6 +574,7 @@ When QUIET is non-nil, leave rerendering to the caller."
                                  (if (> size (* 128 1024))
                                      (progn (process-put proc 'overflow t) (delete-process proc))
                                    (with-current-buffer (process-buffer proc) (insert text))))))))
+            (process-put process 'revision revision)
             (setq emacsos-sms-chat--refresh process
                   emacsos-sms-chat--refresh-state "Reading local history...")
             (process-send-string process "{\"operation\":\"history\"}")

@@ -237,7 +237,7 @@
   (test-sms-chat--with-state
     (cl-letf (((symbol-function 'emacsos--target) (lambda () nil)))
       (emacsos-sms-chat-open "+14155550123")
-      (should-not (get-buffer "*SMS +14155550123*"))
+      (should-not (get-buffer "*SMS conversation: +14155550123*"))
       (emacsos-sms-chat-catalog)
       (should-not (get-buffer "*SMS conversations*")))))
 
@@ -253,7 +253,7 @@
         (search-forward "+14155550123")
         (button-activate (button-at (1- (point)))))
       (should (equal (buffer-name test-sms-chat--window-buffer)
-                     "*SMS +14155550123*")))))
+                     "*SMS conversation: +14155550123*")))))
 
 (ert-deftest emacsos-sms-chat-utility-rows-are-target-aware-and-touchable ()
   (test-sms-chat--with-state
@@ -548,3 +548,51 @@
       (emacsos-sms-chat--apply-history
        `((messages . (,(test-sms-chat--history-row "external" "outgoing" "sent"))) (truncated)))
       (should (eq (emacsos-sms-chat-record-state record) 'unknown)))))
+
+(ert-deftest emacsos-sms-chat-correspondent-cannot-alias-catalog-draft ()
+  (test-sms-chat--with-state
+    (let* ((catalog (emacsos-sms-chat-catalog))
+           (conversation (emacsos-sms-chat-open "conversations")))
+      (should-not (eq catalog conversation))
+      (with-current-buffer conversation
+        (goto-char (point-max)) (insert "editable fixture")
+        (emacsos-sms-chat--rerender-all)
+        (should (derived-mode-p 'emacsos-sms-chat-mode))
+        (should (equal (emacsos-sms-chat--draft) "editable fixture")))
+      (with-current-buffer catalog
+        (should (derived-mode-p 'emacsos-sms-chat-catalog-mode))))))
+
+(ert-deftest emacsos-sms-chat-old-empty-reader-keeps-new-terminal-result ()
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (let ((real-status (symbol-function 'process-status)) process buffer)
+        (unwind-protect
+            (cl-letf (((symbol-function 'make-process)
+                       (lambda (&rest args)
+                         (setq buffer (plist-get args :buffer)
+                               process (make-pipe-process :name "old-history" :buffer buffer :noquery t))))
+                      ((symbol-function 'process-send-string) #'ignore)
+                      ((symbol-function 'process-send-eof) #'ignore))
+              (setq emacsos-sms-chat--records nil)
+              (emacsos-sms-chat-refresh)
+              (let ((record (make-emacsos-sms-chat-record
+                             :id "new-attempt" :number "+14155550123" :body "new fixture"
+                             :direction 'outgoing :origin 'local :state 'sending
+                             :revision (emacsos-sms-chat--next-revision))))
+                (setq emacsos-sms-chat--records (list record))
+                (emacsos-sms-chat--on-lifecycle
+                 (list :event 'terminal :message-id "new-attempt" :state terminal))
+                (with-current-buffer buffer (insert "{\"messages\":[],\"truncated\":false}"))
+                (cl-letf (((symbol-function 'process-status)
+                           (lambda (p) (if (eq p process) 'exit (funcall real-status p))))
+                          ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                  (emacsos-sms-chat--history-finished process "finished"))
+                (should (eq (car emacsos-sms-chat--records) record))
+                (should (eq (emacsos-sms-chat-record-state record) terminal))
+                ;; A fresh bounded page remains authoritative after this cutoff.
+                (emacsos-sms-chat--apply-history '((messages) (truncated))
+                                                 emacsos-sms-chat--revision)
+                (should-not emacsos-sms-chat--records)))
+          (setq emacsos-sms-chat--refresh nil)
+          (when process (set-process-sentinel process #'ignore) (delete-process process))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
