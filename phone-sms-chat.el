@@ -540,11 +540,14 @@ When QUIET is non-nil, leave rerendering to the caller."
                 (unless (and (zerop (process-exit-status process))
                              (not (process-get process 'overflow)))
                   (error "Archive read failed"))
-                (emacsos-sms-chat--apply-history
-                 (with-current-buffer buffer
-                   (json-parse-string (buffer-string) :object-type 'alist
-                                      :array-type 'list :false-object nil :null-object nil))
-                 (process-get process 'revision)))
+                ;; A recordless terminal event invalidates an older page; its
+                ;; ordinary completion starts the already-coalesced fresh read.
+                (when (integerp (process-get process 'revision))
+                  (emacsos-sms-chat--apply-history
+                   (with-current-buffer buffer
+                     (json-parse-string (buffer-string) :object-type 'alist
+                                        :array-type 'list :false-object nil :null-object nil))
+                   (process-get process 'revision))))
             (error
              (setq emacsos-sms-chat--refresh-state "Local history unavailable; tap Refresh")
              (emacsos-sms-chat--rerender-all)))
@@ -634,6 +637,12 @@ When QUIET is non-nil, leave rerendering to the caller."
                    (set-window-buffer window buffer))))
              (emacsos-sms-chat--rerender-all)))))
       ('terminal
+       ;; Direct/server-linked sends need not reserve a native record. Do not
+       ;; let their pre-commit page recreate Unknown after Done or restaging.
+       (when (and emacsos-sms-chat--refresh
+                  (not (emacsos-sms-chat--find-id record-id)))
+         (process-put emacsos-sms-chat--refresh 'revision nil)
+         (setq emacsos-sms-chat--refresh-again t))
        (when-let ((record (emacsos-sms-chat--find-id record-id)))
          (when (eq (emacsos-sms-chat-record-state record) 'sending)
            (setf (emacsos-sms-chat-record-state record) (plist-get event :state)

@@ -596,3 +596,79 @@
           (setq emacsos-sms-chat--refresh nil)
           (when process (set-process-sentinel process #'ignore) (delete-process process))
           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(defun test-sms-chat--recordless-terminal-after-action (action &optional full)
+  "Check ACTION and optional FULL model cannot lose a direct terminal result."
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (let ((emacsos-sms-operation-function
+             (lambda (_number _body completion)
+               (funcall completion (if (eq terminal 'sent) "sent" "not-sent:busy"))
+               "pending: synthetic"))
+            (real-status (symbol-function 'process-status)) processes buffers)
+        (setq emacsos-sms-chat--records nil emacsos-sms--state nil)
+        (when full
+          (dotimes (index 100)
+            (push (make-emacsos-sms-chat-record :id (format "old%d" index)
+                   :number "+14155550123" :body "prior unknown" :direction 'outgoing
+                   :origin 'local :state 'unknown) emacsos-sms-chat--records)))
+        (unwind-protect
+            (cl-letf (((symbol-function 'emacsos-sms--show) (lambda () t))
+                      ((symbol-function 'emacsos-sms--visible-p) (lambda () t))
+                      ((symbol-function 'make-process)
+                       (lambda (&rest args)
+                         (let ((buffer (plist-get args :buffer)))
+                           (push buffer buffers)
+                           (push (make-pipe-process :name "recordless-reader" :buffer buffer
+                                                    :noquery t) processes)
+                           (car processes))))
+                      ((symbol-function 'process-send-string) #'ignore)
+                      ((symbol-function 'process-send-eof) #'ignore))
+              (emacsos-sms-chat-refresh)
+              (let ((old-reader emacsos-sms-chat--refresh))
+                (emacsos-send-message "+14155550123" "terminal fixture")
+                (let ((identity emacsos-sms--attempt-id))
+                  (emacsos-sms--start-send)
+                  (should (eq emacsos-sms--state terminal))
+                  (if (eq action 'done)
+                      (emacsos-sms--dismiss)
+                    (emacsos-send-message "+14155550123" "next editable fixture"))
+                  (when full
+                    (let ((emacsos-sms-chat--number "+14155550123"))
+                      (emacsos-sms-chat-acknowledge)))
+                  (with-current-buffer (process-buffer old-reader)
+                    (insert (json-encode
+                             `((messages . [,(test-sms-chat--history-row
+                                               identity "outgoing" "unknown"
+                                               "+14155550123" "terminal fixture")]) (truncated)))))
+                  (cl-letf (((symbol-function 'process-status)
+                             (lambda (p) (if (eq p old-reader) 'exit (funcall real-status p))))
+                            ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                    (emacsos-sms-chat--history-finished old-reader "finished"))
+                  (should-not (emacsos-sms-chat--find-id identity))
+                  (should (= (length processes) 2))
+                  (let ((fresh emacsos-sms-chat--refresh))
+                    (with-current-buffer (process-buffer fresh)
+                      (insert (json-encode
+                               `((messages . [,(test-sms-chat--history-row
+                                                 identity "outgoing" (if (eq terminal 'sent) "sent" "not_sent")
+                                                 "+14155550123" "terminal fixture")]) (truncated)))))
+                    (cl-letf (((symbol-function 'process-status)
+                               (lambda (p) (if (eq p fresh) 'exit (funcall real-status p))))
+                              ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                      (emacsos-sms-chat--history-finished fresh "finished")))
+                  (should (eq (emacsos-sms-chat-record-state
+                               (emacsos-sms-chat--find-id identity)) terminal))
+                  (should (<= (length emacsos-sms-chat--records) 100)))))
+          (setq emacsos-sms-chat--refresh nil emacsos-sms-chat--refresh-again nil)
+          (dolist (p processes) (set-process-sentinel p #'ignore) (delete-process p))
+          (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))))
+
+(ert-deftest emacsos-sms-chat-done-keeps-recordless-terminal-before-old-history ()
+  (test-sms-chat--recordless-terminal-after-action 'done))
+
+(ert-deftest emacsos-sms-chat-restaging-keeps-recordless-terminal-before-old-history ()
+  (test-sms-chat--recordless-terminal-after-action 'restage))
+
+(ert-deftest emacsos-sms-chat-full-model-recordless-terminal-does-not-regress ()
+  (test-sms-chat--recordless-terminal-after-action 'done t))
