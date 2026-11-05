@@ -281,6 +281,8 @@ this finite client creates no separate network notification channel."
                     (error "Capture query failed"))))
             (error (message "Local SMS capture query unavailable.")))
         (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (when (fboundp 'emacsos-sms-chat-refresh)
+        (emacsos-sms-chat-refresh))
       (when emacsos-pinephone-sms-capture-paths
         (emacsos-pinephone-sms-capture-sync)))))
 
@@ -427,8 +429,9 @@ this finite client creates no separate network notification channel."
         (encoded-context emacsos-sms--context)
         (context (and (fboundp 'emacsos-assist-web--sms-context)
                       (emacsos-assist-web--sms-context emacsos-sms--context))))
+    (setq emacsos-sms--attempt-id (if context (alist-get 'id context) proposal-id))
     (if (not context)
-        (emacsos-pinephone-sms-operation-local number body completion)
+        (emacsos-pinephone-sms-operation-local number body completion proposal-id)
       (if (not (and (equal number (alist-get 'number context))
                     (equal body (alist-get 'text context))))
           "not-sent:invalid-input"

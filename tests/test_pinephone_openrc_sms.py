@@ -783,4 +783,118 @@ print(json.dumps({'result': json.loads(output.getvalue()), 'reads': reads}))
         self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_cutover').fetchone()[0],cutoff)
 
 
+
+class LocalArchiveBufferTests(unittest.TestCase):
+    setUp = RetainedInventoryTests.setUp
+    tearDown = RetainedInventoryTests.tearDown
+    messages = RetainedInventoryTests.messages
+    collect = RetainedInventoryTests.collect
+
+    def supported(self):
+        path = self.messages([20])[0]
+        self.bus.message_properties[path].update(PduType=1, Storage=2)
+        return path
+
+    def test_local_commit_frees_buffer_without_server_ack_and_history_survives_reopen(self):
+        path = self.supported()
+        deleted = []
+        def remove(target, timeout):
+            self.assertEqual((target, timeout), (path, 2))
+            with sqlite3.connect(SMS.JOURNAL_PATH) as durable:
+                self.assertEqual(durable.execute('SELECT status,ack_status FROM messages').fetchone(), ('received', None))
+            deleted.append(target)
+            self.bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'] = []
+        self.bus.messaging.Delete = remove
+        receipt = self.collect()[0]
+        self.assertEqual(deleted, [path])
+        self.connection.close(); self.connection = SMS.journal()
+        with mock.patch.object(SMS.dbus, 'SystemBus', side_effect=AssertionError('modem offline')):
+            history = SMS.history(self.connection)
+        self.assertEqual(history['messages'][0]['id'], receipt['id'])
+        self.assertEqual(history['messages'][0]['text'], 'identical')
+
+    def test_failed_commit_never_deletes(self):
+        self.supported(); deleted = []
+        self.bus.messaging.Delete = lambda *a, **k: deleted.append(a)
+        underlying = self.connection
+        class FailReceiptCommit:
+            def __getattr__(self, name): return getattr(underlying, name)
+            def commit(self):
+                if underlying.execute('SELECT COUNT(*) FROM messages').fetchone()[0]:
+                    raise sqlite3.OperationalError('synthetic disk failure')
+                underlying.commit()
+        with self.assertRaises(sqlite3.OperationalError):
+            SMS.collect_incoming(FailReceiptCommit(), self.bus)
+        self.connection.rollback()
+        self.assertEqual(deleted, [])
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 0)
+
+    def test_incomplete_and_binary_copies_remain(self):
+        path = self.supported(); deleted = []
+        self.bus.messaging.Delete = lambda *a, **k: deleted.append(a)
+        self.bus.message_properties[path]['State'] = 2
+        self.collect()
+        self.bus.message_properties[path].update(State=3, Data=[1, 2])
+        self.collect()
+        self.assertEqual(deleted, [])
+
+    def test_surviving_copy_reuses_receipt_when_cleanup_is_reobserved(self):
+        path = self.supported(); attempts = []
+        def remove(target, timeout):
+            attempts.append(target)
+            if len(attempts) == 1: raise RuntimeError('synthetic delete failure')
+        self.bus.messaging.Delete = remove
+        first = self.collect()[0]['id']
+        self.assertEqual(self.collect()[0]['id'], first)
+        self.assertEqual(attempts, [path, path])
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 1)
+
+    def test_history_suppresses_known_aliases_but_preserves_unlinked_history(self):
+        content = json.dumps(['+15555550100', 'legacy', [], '2026-10-26T01:00:00+00:00', '', 1, -1])
+        self.connection.execute('CREATE TABLE incoming_inventory(content TEXT,ordinal INTEGER,message_id TEXT)')
+        for identity in ['canonical', 'alias', 'orphan']:
+            self.connection.execute("INSERT INTO messages(id,direction,number,text,status,occurred_at,ack_status) VALUES(?,'incoming','+15555550100','legacy','received','2026-10-20T00:00:00+00:00','received')", (identity,))
+        self.connection.execute('INSERT INTO incoming_keys VALUES(?,?)', (SMS.incoming_key(content), 'canonical'))
+        for ordinal, identity in enumerate(['canonical', 'alias']):
+            self.connection.execute('INSERT INTO incoming_inventory VALUES(?,?,?)', (content, ordinal, identity))
+        self.connection.commit()
+        ids = [row['id'] for row in SMS.history(self.connection)['messages']]
+        self.assertEqual(ids, ['canonical', 'orphan'])
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 3)
+
+    def test_history_exact_wire_budget_includes_false_and_newline(self):
+        row = {'id': 'boundary', 'direction': 'incoming', 'number': '+15555550100',
+               'text': '', 'status': 'received', 'occurred_at': '2026-01-01T00:00:00+00:00'}
+        overhead = len(json.dumps({'messages': [row], 'truncated': False}, ensure_ascii=False).encode()) + 1
+        row['text'] = 'x' * (128 * 1024 - overhead + 1)
+        self.connection.execute('INSERT INTO messages(id,direction,number,text,status,occurred_at) VALUES(?,?,?,?,?,?)', tuple(row[k] for k in ['id','direction','number','text','status','occurred_at']))
+        self.connection.commit()
+        response = SMS.history(self.connection)
+        self.assertLessEqual(len((json.dumps(response, ensure_ascii=False)+'\n').encode()), 128 * 1024)
+        self.assertTrue(response['truncated'])
+
+    def test_delete_failure_does_not_starve_other_committed_leaves(self):
+        paths = self.messages([20, 21, 22, 23]); attempts = []
+        for i, path in enumerate(paths): self.bus.message_properties[path].update(Storage=2, PduType=1, Text=str(i))
+        def remove(path, timeout):
+            attempts.append(path)
+            if path == paths[0]: raise RuntimeError('synthetic first delete failure')
+        self.bus.messaging.Delete = remove
+        self.assertEqual(len(self.collect()), 4)
+        self.assertEqual(attempts, paths)
+
+    def test_legacy_source_proof_allows_cleanup_without_rewriting_rows(self):
+        path = self.supported()
+        content = json.dumps(['+15555550100', 'identical', [], '2026-10-26T01:00:00+00:00', '', 1, -1])
+        self.connection.execute('CREATE TABLE incoming_inventory(content TEXT,ordinal INTEGER,message_id TEXT)')
+        self.connection.execute("INSERT INTO messages(id,direction,number,text,status,occurred_at,ack_status) VALUES('old','incoming','+15555550100','identical','received','2026-10-20T00:00:00+00:00',NULL)")
+        self.connection.execute('INSERT INTO incoming_keys VALUES(?,?)', (SMS.incoming_key(content), 'old'))
+        self.connection.execute("INSERT INTO incoming_inventory VALUES(?,1,'old')", (content,));self.connection.commit()
+        before = tuple(self.connection.execute("SELECT * FROM messages WHERE id='old'").fetchone());deleted=[]
+        self.bus.messaging.Delete = lambda path, timeout: deleted.append(path)
+        self.collect()
+        self.assertEqual(deleted, [path])
+        self.assertEqual(tuple(self.connection.execute("SELECT * FROM messages WHERE id='old'").fetchone()), before)
+
+
 if __name__ == '__main__': unittest.main()
