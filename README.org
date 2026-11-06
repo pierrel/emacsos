@@ -821,13 +821,22 @@ cannot be read, the result is also =unknown=: a definite negative requires a
 positively new durable claim with no modem effect begun.
 
 The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
-source checkout. Received modem history is retained for the offline UI. A unique
+source checkout and is the phone's SMS source of truth. Native conversations read
+this archive even when the modem or Assist is unavailable. The modem is a finite
+transport buffer: supported completed incoming messages are removed only after
+the local FULL-synchronous commit, independently of server availability or ACK.
+Incomplete, binary, unrepresentable or unsuccessfully archived messages remain
+on the modem. Existing retained copies may be cleaned after the same exact
+durable-content proof; a failed cleanup is revisited by the existing scan.
+No separate deletion queue or worker is added. A unique
 SHA256 key over exact sender, UTC-normalized original Timestamp and Text/Data
-maps repeated observations to one durable UUID. Equal messages within the source
+maps repeated observations to one durable UUID. Local outgoing proposals also
+carry one exact durable attempt identity; active Sending and known terminal
+results cannot be replaced by an older write-ahead Unknown history read. Journal recovery binds the same verified attempt identity before presenting its result, so native acknowledgment clears the matching pending status. Unowned historical Unknown rows can accept later terminal journal results. A delayed history page retains records changed after its read began; later fresh pages remain authoritative. For a direct or server-linked send without a native record, terminal completion discards a pending older page and coalesces one fresh journal read, so Done or restaging cannot revive its earlier Unknown result. Conversation buffers use a separate namespace from the catalog, including for alphanumeric correspondents. Equal messages within the source
 timestamp resolution deliberately collapse. Exported paths, owner changes and raw
 Added signals do not establish novelty. See
 [[file:docs/2026-10-28-sms-platform-identity-simplification.org][the pinned platform contract]] and
-[[file:docs/2026-10-28-sms-ingestion-only-scope.org][the current ingestion-only scope]].
+[[file:docs/2026-11-05-local-sms-archive-buffer.org][the local archive and transport-buffer contract]].
 
 Collection reads at most four objects per poll. A durable cursor advances before
 each read, including unreadable/incomplete objects. Each completed content key
@@ -835,12 +844,17 @@ and receipt commits atomically. A deadline retains earlier progress and the next
 poll starts beyond the failed leaf. Trusted Added and multipart State3 completion
 signals supply bounded transient priority hints, so new completions do not wait
 behind an entire retained-history sweep. Hints are not durable identity and
-never directly request vibration. No cached payload inventory or multiplicity
-reconciliation remains; repeated reads are safe through SQLite uniqueness.
-The local =collect= operation returns only a completion boolean and performs no
-notification, alert claim, acknowledgment or send. The original finite SMS
+never directly request vibration. No new cached payload inventory or multiplicity
+reconciliation is created; repeated reads are safe through SQLite uniqueness.
+The local =collect= operation returns only a completion boolean, may remove
+redundant modem copies after local durability, and performs no notification,
+alert claim, server acknowledgment or send. A bounded =history= operation reads
+only the local journal, preserving stable identities and existing local UI
+unread/user-acknowledgment state across refresh. Legacy aliases are hidden only
+when their canonical representative is known; stored old rows remain unchanged.
+Alphanumeric correspondents are viewable without relaxing Send validation. The original finite SMS
 feedback remains unchanged; novelty-gated feedback and the notification center
-are independent changes, not guarantees of this ingestion-only source.
+are independent changes, not guarantees of this archive source.
 
 Incoming =occurred_at= uses the original timezone-aware ModemManager SMS
 =Timestamp=, never rediscovery time. The host admits a subscription only if that

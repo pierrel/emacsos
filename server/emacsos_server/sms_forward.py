@@ -60,7 +60,7 @@ def send_sms(to, text, message_id, occurred_at):
 
 
 def sync_once():
-    """Retry archive handoff only. Incoming modem history stays available to UI."""
+    """Retry server handoff only; the phone journal owns durable SMS history."""
     receipts = json.loads(helper({"operation": "receipts"}, timeout=35).stdout)["receipts"]
     if not isinstance(receipts, list) or len(receipts) > 20:
         raise ValueError("invalid receipts")

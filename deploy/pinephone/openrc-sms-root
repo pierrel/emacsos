@@ -247,6 +247,21 @@ def collect_incoming(connection, bus, hint=None):
         connection.execute("BEGIN IMMEDIATE")
         capture_incoming(connection, content, occurred_at)
         connection.commit()
+        # The local FULL commit is the durability boundary, not server ACK.
+        if (int(properties.get("Storage", 0)) in (1, 2)
+                and int(properties.get("PduType", 0)) == 1
+                and archived_plaintext(connection, content, occurred_at)):
+            try:
+                if str(bus.get_name_owner(MM_NAME)) != owner:
+                    continue
+                modem_path = next(path for path, fields in objects.items() if MESSAGING in fields)
+                dbus.Interface(bus.get_object(owner, modem_path), MESSAGING).Delete(
+                    dbus.ObjectPath(path), timeout=2)
+            except InputTimeout:
+                raise
+            except Exception:
+                # A surviving transport copy is revisited by the existing scan.
+                pass
 
 
 def incoming_key(content):
@@ -277,11 +292,55 @@ def capture_incoming(connection, content, occurred_at):
     connection.execute("INSERT INTO incoming_keys VALUES (?,?)", (key, identity))
 
 
+def archived_plaintext(connection, content, occurred_at):
+    """Prove exact supported content is local before removing its modem copy."""
+    number, text, data, _source = json.loads(content)[:4]
+    if data or occurred_at is None or len(text.encode()) > 4096:
+        return False
+    key = incoming_key(content)
+    row = connection.execute("SELECT m.* FROM incoming_keys k JOIN messages m ON m.id=k.message_id WHERE k.content_key=?", (key,)).fetchone()
+    if row is None or row["direction"] != "incoming" or row["status"] != "received" or row["number"] != number or row["text"] != text:
+        return False
+    try:
+        original = datetime.fromisoformat(occurred_at).astimezone(timezone.utc)
+        recorded = datetime.fromisoformat(row["occurred_at"])
+        if recorded.utcoffset() is not None and recorded.astimezone(timezone.utc) == original:
+            return True
+    except (TypeError, ValueError):
+        pass
+    # Legacy receipt times remain unchanged; their original payload is already
+    # durable in the existing inventory, when present.
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_inventory'").fetchone():
+        return any(incoming_key(old["content"]) == key for old in connection.execute(
+            "SELECT content FROM incoming_inventory WHERE message_id=?", (row["id"],)))
+    return False
+
+
+def history(connection):
+    """Read bounded local history without contacting the modem or a server."""
+    where = ""
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_inventory'").fetchone():
+        connection.create_function("sms_source_key", 1, incoming_key, deterministic=True)
+        where = " WHERE id NOT IN (SELECT i.message_id FROM incoming_inventory i JOIN incoming_keys k ON sms_source_key(i.content)=k.content_key WHERE i.message_id != k.message_id)"
+    rows = connection.execute("SELECT id,direction,number,text,status,occurred_at FROM messages" + where + " ORDER BY rowid DESC LIMIT 101").fetchall()
+    selected = []
+    truncated = len(rows) > 100
+    for row in rows[:100]:
+        trial = selected + [dict(row)]
+        if len(json.dumps({"messages": trial, "truncated": False}, ensure_ascii=False).encode()) + 1 > 128 * 1024:
+            truncated = True
+            continue
+        selected = trial
+    return {"messages": list(reversed(selected)), "truncated": truncated}
+
+
 def receipt_operation(value):
     """Collect incoming receipts, read one attempt, or acknowledge status."""
     connection = journal()
     try:
-        if (value == {"operation": "collect"} or
+        if value == {"operation": "history"}:
+            print(json.dumps(history(connection), ensure_ascii=False))
+        elif (value == {"operation": "collect"} or
                 set(value) == {"operation", "path"} and value["operation"] == "collect"
                 and isinstance(value["path"], str) and SMS_PATH_RE.fullmatch(value["path"])):
             try:

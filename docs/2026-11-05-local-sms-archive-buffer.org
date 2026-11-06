@@ -1,0 +1,47 @@
+#+TITLE: Local SMS archive and modem buffer
+#+DATE: 2026-11-05
+
+* Contract
+The phone's existing private SQLite journal is the SMS source of truth. The
+modem is a transport buffer. After a supported complete incoming message is
+committed locally with FULL synchronization, the existing collector may delete
+that exact modem copy through ModemManager. Thinky availability and server ACK
+are not deletion prerequisites. Failed commits, incomplete or unsupported
+representations retain their modem copies. Failed cleanup leaves the committed
+receipt intact and is revisited through the existing bounded scan.
+
+Native conversations read bounded local history without a modem or server.
+They keep the existing editable draft and unread/user-acknowledgment behavior;
+server ACK remains a different concept. Alphanumeric senders are viewable but
+cannot bypass numeric Send validation. Existing legacy alias metadata suppresses
+only known duplicate views; original rows, IDs, timestamps and ACKs remain.
+Legacy recorded times keep their original semantics.
+
+Local sends share one durable attempt identity with the root helper. The
+existing active send lifecycle owns Sending and terminal results over an older
+archive snapshot. Historical Unknown is honest and never triggers a resend.
+Server-linked confirmation retains its exact server identity and approval path.
+
+* Verification
+Synthetic real-SQLite fixtures check local durability before managed deletion
+without server ACK, failed commits with no deletion, incomplete/binary retention,
+cleanup failure without duplicate receipts, preserved legacy rows and exact
+encoded history bounds. Client fixtures cover offline archive refresh/reopen,
+unchanged drafts, inert sender/body rendering, exact outgoing identities,
+active/terminal results versus delayed Unknown snapshots, unread/ACK behavior
+and atomic refresh failure. Packaging pins include the changed runtime files.
+Live reception and installation are checked separately; unit evidence does not
+claim carrier delivery or hardware wake.
+
+* Deferred work
+Thinky backup and recovery are a later milestone. The existing server handoff
+continues unchanged; this change adds no backup service, database, daemon or
+background outgoing retry.
+
+* Historical supersessions
+The retained-modem-history assumption in the Migration and delivery section of
+=2026-10-28-sms-platform-identity-simplification.org= is replaced by local archive
+history and managed transport cleanup after local durability. The capture-only
+side-effect boundary in Capture-only hints of
+=2026-10-28-sms-ingestion-only-scope.org= now additionally permits this cleanup;
+its source identity, bounded cursor and server routing contracts remain.
