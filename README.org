@@ -852,9 +852,10 @@ alert claim, server acknowledgment or send. A bounded =history= operation reads
 only the local journal, preserving stable identities and existing local UI
 unread/user-acknowledgment state across refresh. Legacy aliases are hidden only
 when their canonical representative is known; stored old rows remain unchanged.
-Alphanumeric correspondents are viewable without relaxing Send validation. The original finite SMS
-feedback remains unchanged; novelty-gated feedback and the notification center
-are independent changes, not guarantees of this archive source.
+Alphanumeric correspondents are viewable without relaxing Send validation. Completed incoming messages use durable local alert claims and the existing
+private notification journal before requesting finite feedback. Raw Added signals
+never directly request feedback. Claims are independent of server handoff; an
+uncertain feedback attempt is not replayed or proof of physical vibration.
 
 Incoming =occurred_at= uses the original timezone-aware ModemManager SMS
 =Timestamp=, never rediscovery time. The host admits a subscription only if that
@@ -873,7 +874,8 @@ archive-only, even if ModemManager publishes them later under new paths. This
 explicit migration baseline avoids replaying history to older subscriptions;
 post-cutoff timestamps use the normal subscription rule. Fresh journals have no
 migration cutoff. Outgoing rows and pending send outcomes retain their existing paths.
-No received modem messages are deleted, and no server identities are rewritten.
+Eligible complete modem copies may be deleted after the local FULL-synchronous
+archive commit. Existing server identities are not rewritten.
 Deploy matching host cutoff/archive-only support first. Collection rollback requires a reviewed compatibility procedure; never restore
 an older journal snapshot to repair history. Host downgrade while the new
 transport is active rejects its metadata and retains receipts unacknowledged.
