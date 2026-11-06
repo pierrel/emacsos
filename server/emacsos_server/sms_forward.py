@@ -70,6 +70,7 @@ def sync_once():
         body = {"message_id": row["id"], "text": row["text"], "occurred_at": row["occurred_at"]}
         if incoming:
             body["sender"] = row["number"]
+            body["archive_only"] = bool(row.get("archive_only", False))
         else:
             body.update(number=row["number"], status=row["status"])
         try:
