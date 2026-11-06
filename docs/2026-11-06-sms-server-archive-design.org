@@ -29,6 +29,14 @@ It does not monitor a Run or repeat a physical send. The root helper records
 incoming observations and outgoing attempts in local SQLite; the native SMS view
 can read that journal offline.
 
+These phone archive, modem cleanup and native-history observations refer to the
+deployed phone composition represented publicly by
+[[https://github.com/pierrel/emacsos/pull/94][EmacsOS PR #94]]. That PR is still separate from this design. The =c4cf9d9=
+main commit on which this design branch started predates its phone changes; its
+older helper retains modem objects and its native view reads the modem. A later
+implementation must verify the then-current phone source before changing the
+handoff. This proposal does not alter PR #94 or its closeout.
+
 Assist's =/inbound/sms= currently writes a private SQLite archive row with the
 incoming identity, content, time, and first routing choice. It then creates or
 finds the ordinary Run for a matching subscription before returning success.
@@ -209,7 +217,10 @@ stored times, statuses and terminal outcomes. Assist's =occurred_at= can be its
 own recording time when the phone supplied no source timestamp. Join by immutable
 ID with a consistent phone-journal snapshot to recover the nullable source time
 and archive-only flag; never infer them from Assist's substituted timestamp.
-Where phone evidence is unavailable, retain each frozen historical decision;
+PR #94 marks legacy incoming journal rows archive-only while retaining their old
+timestamps, which may be collection times. Treat their archive-only disposition
+as authoritative and never use those timestamps as source-time eligibility.
+Where phone provenance is unavailable, retain each frozen historical decision;
 only a verified pending handoff may retry against that decision, never enter
 fresh subscription matching. Do not regenerate
 historical identities. Transfer incoming frozen route/no-route decisions and
