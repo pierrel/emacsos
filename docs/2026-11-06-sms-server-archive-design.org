@@ -1,0 +1,250 @@
+#+TITLE: Server ownership of SMS history
+#+DATE: 2026-11-06
+#+STATUS: FUTURE DESIGN — no migration or runtime change
+
+* Problem
+
+Today the PinePhone keeps its own durable SMS journal and offline history, while
+Assist owns the remote archive that its history tools search. The local journal
+already protects the finite modem buffer: a complete modem copy is removed only
+after the phone has committed it. Moving the remote archive will not repair a
+known failure in that path. The proposed reason to move it is ownership: phone
+history should remain a phone service even when Assist's application changes.
+
+The desired future owner is the existing EmacsOS server. The phone still owns
+ModemManager, its local journal, offline history, and every physical send. Assist
+still owns subscriptions, a frozen admission decision for each incoming event,
+ordinary Runs, approvals, execution, and recovery. Assist asks EmacsOS for SMS
+history and search results. This document defines that boundary for a later
+implementation; it does not change current SMS closeout, its provisional
+approvals, device behavior, deployment, or merge decisions.
+
+* Evidence and current behavior
+
+The phone's unprivileged =sms_forward.py= offers exact unacknowledged journal
+receipts, at most four per helper batch, to Assist. It ACKs the exact local status
+version only after a successful remote response. Its source file is in the
+EmacsOS server package, but that process runs on the *phone* under the UI session.
+It does not monitor a Run or repeat a physical send. The root helper records
+incoming observations and outgoing attempts in local SQLite; the native SMS view
+can read that journal offline.
+
+Assist's =/inbound/sms= currently writes a private SQLite archive row with the
+incoming identity, content, time, and first routing choice. It then creates or
+finds the ordinary Run for a matching subscription before returning success.
+An unmatched or explicitly archive-only receipt needs no Run. A retry keeps its
+first route or no-route decision even if subscriptions change. A missing frozen
+destination has a narrow positive-absence exception; storage errors are not
+treated as absence. Once admitted, ordinary Run scheduling and recovery take
+over. Outgoing phone receipts update the same archive without executing another
+send.
+
+The existing EmacsOS server is already a running service on the same host as
+Assist. Its =threads.db= is a conversation checkpoint and =ConfigRepo= is a Git
+configuration store. Neither is an SMS archive or a pending handoff record.
+The existing private SQLite archive, with immutable IDs, monotonic statuses,
+bounded search, and private filesystem checks, is the suitable part to reuse.
+This move adds a service-to-service handoff on the same host; it does not remove
+the need for an admission record in Assist or make a new host necessary.
+
+These are source and reviewed operational observations, not results of a new
+live test for this design. The current paths are
+=server/emacsos_server/sms_forward.py= and =deploy/pinephone/openrc-sms-root=
+in EmacsOS, and =assist/events/sms_archive.py=,
+=assist/events/reply.py=, =assist/events/sms_outbox.py=, and
+=manage/web/threads.py= in Assist. The EmacsOS SMS journal is described in
+=README.org= under “PinePhone SMS journal and transport.”
+
+* Cases that establish the boundary
+
+** Already observed
+
+- The phone's journal and native view survive a remote handoff failure; the
+  forwarder retains unacknowledged receipts. This establishes the local
+  durability and offline boundary, not the proposed server handoff.
+- Assist's current incoming endpoint freezes the first routing decision and
+  returns success only after required Run admission. This establishes the
+  behavior to preserve, not cross-service atomicity in the proposed layout.
+- An outgoing =unknown= may follow a phone timeout even when the modem accepted
+  a send. The phone's immutable attempt ID prevents the same physical attempt
+  from being sent twice; archive repair must not create a new attempt.
+
+** Proposed verification cases, not yet run
+
+| Setup | Intended result | Failure this detects |
+|-------+-----------------+----------------------|
+| Disconnect the phone after EmacsOS commits an incoming receipt, while Assist is unavailable | Phone ACK remains valid; EmacsOS later offers the same event to Assist until admission succeeds | Treating phone ACK as Run completion or losing the pending handoff |
+| Change or remove a subscription after the first admission attempt | A duplicate retains its original route or explicit no-work decision | Rerouting old history |
+| Fail between Assist's decision write and Run creation | The same event and dispatch key complete admission on retry, without a second Run | Marking handoff complete too early |
+| Delete a frozen destination and retry | Verified deletion yields the defined no-work disposition; an unreadable store remains an error | Recreating deleted work or hiding storage failure |
+| Lose a send-claim response or a phone send response | The same attempt is never initiated again automatically; the displayed outcome stays unknown until exact evidence arrives | Duplicate physical send or invented success |
+| Restart each service with pending incoming receipts and outgoing status updates | Exact IDs, original time, content, status version and pending handoff survive | Incomplete persistence or ACK conflation |
+
+No reduced cross-service reproduction has been run for this future design. Its
+later implementation must test these cases against the real service entry points
+and storage boundaries, not only mocked functions.
+
+* Proposed ownership and protocol
+
+** Phone to EmacsOS: archive ACK
+
+The phone keeps collecting, locally committing, showing and physically sending
+SMS exactly as today. Its forwarder changes the remote destination and uses a
+versioned archive envelope: the existing immutable message ID, correspondent,
+exact text and source timestamp (which may be absent), plus explicit direction, archive-only flag
+for incoming history, and status for outgoing attempts. Direction is currently
+selected by the Assist URL, so this explicit field is a wire change. EmacsOS authenticates
+the phone, validates the bounded body and fields, and commits or idempotently
+recognizes the exact receipt in a private SMS SQLite database. A conflicting ID
+or terminal outcome is an error. =unknown= may advance to an exact =sent= or
+=not_sent= observation, never the reverse or the other terminal outcome. A
+missing source timestamp stays missing for admission eligibility; a separate
+archive recording time may serve search order but must not make old history
+eligible for a new subscription.
+
+Only that committed receipt/status version earns a phone ACK. The phone compares
+the returned ID and status/version with the offered row before recording its
+local ACK. It does not wait for Assist or a Run. A response lost after commit
+causes a harmless retry of the same receipt. Existing fair, bounded polling and
+the local retention rule remain. The phone's existing notification and feedback
+behavior stays tied to local observations, not remote admission.
+
+** EmacsOS to Assist: admission ACK
+
+For every incoming receipt, including archive-only history, the same server
+transaction that stores a new archive row records a pending admission handoff.
+The existing EmacsOS server then offers pending events to Assist in bounded
+batches using a stable ID and the archived original payload. This is a small
+status in the SMS database and a bounded worker within the existing service,
+not a broker, separate daemon, general queue or execution monitor. A failed
+attempt leaves the event pending; another event can still progress. Outgoing
+receipt updates are archive observations and do not create Runs.
+
+Assist authenticates this machine request and binds the ID to immutable payload
+content and original-time eligibility. Under its admission lock it persists a
+first decision: frozen destination plus rendered input, explicit no-route or
+archive-only no-work, or verified deleted-destination no-work. For a routed event
+it creates or finds the ordinary Run with dispatch key =sms:<message ID>= before
+returning success. A crash after the decision but before Run creation leaves a
+retryable decision; it must not return success. A duplicate never reroutes,
+re-renders, reopens terminal work, or creates another Run. Missing/unreadable
+storage returns failure, except the established positive-absence case for a
+deleted destination. Assist returns the event ID, accepted/duplicate result
+and frozen handling disposition only after the needed decision and Run are
+persisted. EmacsOS records that disposition with its admission ACK against the
+exact archived ID only after checking this response. History can show
+=pending_admission= until then; it must not label a pending event as
+archive-only or routed. This ACK says nothing about execution outcome.
+
+The retained Assist decision is global to the SMS ID. RunService deduplicates a
+dispatch key only *within a known thread*, so it cannot itself remember which
+thread was chosen or that a message had no match. Assist retains the sender and
+immutable rendered execution input needed by the Run. Existing =Run.text= and
+checkpoint snapshots can contain SMS text; moving canonical search does not
+erase those work snapshots. An already accepted Run must remain executable
+while EmacsOS is down. No =run_id/admitted= execution tracker is added to the
+archive. Reuse Assist's existing private SMS SQLite location and transactional
+connection for this compact admission ledger; do not make the per-thread Run
+store a global event index or add a second Assist history mirror.
+
+** History, sending, and access
+
+The EmacsOS server exposes deterministic authenticated read and bounded search
+for Assist's existing SMS history tools. Those tools remain limited to their
+current trusted callers; an incoming SMS sender gains no owner history or send
+authority. The server does not route SMS archive calls through =/chat=, the
+model, =threads.db= or the config repository. A read outage is reported as
+unavailable, not as an empty result. Existing bounded result and text previews
+remain; direct read can return one exact full record.
+
+Assist keeps reply approvals, outbox drafts, checkpoints and Run execution.
+Before any new outgoing attempt, it asks the EmacsOS archive to create the
+immutable =unknown= claim for that exact ID, recipient and text. The claim
+returns its server-recorded =occurred_at=; Assist passes that exact value
+unchanged to the phone send request, so a later receipt binds to the same time.
+Only the one-time *created* response permits that
+caller to invoke the phone's existing idempotent send endpoint. A lost claim
+response, an existing claim, or archive
+unavailability permits no send. A lost phone response yields =unknown= and no
+automatic retry or replacement ID. Later exact authenticated phone receipts
+may advance the archive's observation to =sent= or =not_sent=; they do not
+automatically settle an approval or terminal draft. The current outbox
+availability check remains a pre-stage check of EmacsOS archive availability;
+the actual one-time claim occurs only before the physical send.
+This preserves the write-before-effect invariant without a second send ledger.
+
+Phone ingest and Assist history access require distinct machine credentials
+and minimum endpoint permissions. Serve phone traffic on an explicitly private
+route with authenticated TLS and a trusted CA; keep the same-host EmacsOS to
+Assist handoff on a private authenticated channel. Bound request bytes, read
+time, result count, search work and retry concurrency. Do not log bodies,
+recipients, tokens or exception strings containing them. Keep the archive in a
+private service-owned directory outside Git and thread workspaces. The server's
+ordinary chat identity is not an SMS-history authorization layer.
+
+* Failure and ownership matrix
+
+| Failure | Durable owner and visible behavior | Recovery boundary |
+|---------+------------------------------------+-------------------|
+| Phone or network offline | Local journal, offline history, physical send and notification remain on phone; remote history is stale | Phone retries receipt versions, never a send |
+| EmacsOS server unavailable | Phone keeps unacknowledged receipts; Assist history search is unavailable; admitted Runs use their snapshots | Resume archive receipt handoff when server returns |
+| Assist unavailable | EmacsOS continues accepting phone receipts and retains pending incoming events; Assist history tools cannot run | EmacsOS retries admission only |
+| Response lost at either ACK | Sender repeats the same ID/status version | Receiver deduplicates exact input; ACK follows its own commit |
+| Conflicting ID, terminal status or unreadable store | No ACK and no inferred no-work/success | Surface a bounded operator error; retain evidence and do not auto-send |
+| Unknown outgoing outcome | Display unknown; phone journal and archive preserve the same attempt ID | Reconcile from exact later evidence only |
+
+The archive's SQLite ~synchronous=FULL~ setting supports its local commit
+boundary. Today's Assist Run file write uses atomic replacement but lacks an
+independently verified file-and-directory =fsync= guarantee for sudden host power
+loss. The proposed ACK therefore inherits the existing process-restart
+durability assumption until that narrow persistence boundary is checked or
+corrected in a later implementation. This design does not claim arbitrary
+power-loss durability or introduce a recovery controller.
+
+* Migration, rollback, and validation for a later effort
+
+Transfer one consistent private snapshot of Assist's current SMS SQLite rows to
+the new EmacsOS archive, preserving IDs, direction, exact text, correspondent,
+stored times, statuses and terminal outcomes. Assist's =occurred_at= can be its
+own recording time when the phone supplied no source timestamp. Join by immutable
+ID with a consistent phone-journal snapshot to recover the nullable source time
+and archive-only flag; never infer them from Assist's substituted timestamp.
+Where phone evidence is unavailable, retain each frozen historical decision;
+only a verified pending handoff may retry against that decision, never enter
+fresh subscription matching. Do not regenerate
+historical identities. Transfer incoming frozen route/no-route decisions and
+rendered inputs into Assist's admission ledger before changing the writer.
+Verify ID and payload fingerprints, counts, status versions and the absence of
+conflicting IDs. Historical phone receipts already ACKed against Assist must be
+seeded as successful EmacsOS handoffs from verified evidence; imported history
+must not become fresh pending work. An uncertain handoff retries the same ID
+against the preserved Assist decision. Preserve the phone fields to prevent old
+modem history from
+becoming a new event.
+
+Stop the old canonical writer, copy and validate, then switch one owner and the
+phone/Assist clients together. Keep the previous stores read-only for audit
+until the new owner and a bounded live receipt/search/admission path are
+verified. Rollback must first reconcile records created after cutover; restoring
+an old database over newer sends or running two canonical writers would lose
+evidence. Pending Assist approvals/outbox and phone physical attempts stay with
+their current owners throughout. Migration scripts and live cutover are future
+work, not actions authorized by this document.
+
+The later implementation should run deterministic archive, API, admission,
+claim, outage and restart tests; check the actual EmacsOS and Assist service
+entry points; then verify the phone's offline history, exact receipt ACK,
+normal send, unknown-send handling, notifications, authenticated history search
+and one real inbound admission under Root-owned target testing. No model or
+device action is required to review this design. The architecture is expected
+to add a modest amount of code and an additional availability dependency for
+remote search; it is justified by the requested ownership boundary rather than
+by a promise of less code or faster SMS delivery.
+
+* Historical supersessions
+
+No prior record is changed by this design-only proposal. If implemented, the
+direct phone-to-Assist receipt route in “Wire contract” of Assist's
+=docs/2026-07-01-inbound-sms-interception.org= would be replaced by the two ACK
+route above. The phone's local journal, modem cleanup and physical send
+contracts remain.
