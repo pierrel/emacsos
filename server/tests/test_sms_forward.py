@@ -120,3 +120,19 @@ def test_one_failed_receipt_does_not_block_later_batch_rows(monkeypatch, failure
     sf.sync_once()
     assert offered==['first','later']
     assert calls==[{'operation':'receipts'},{'operation':'ack','message_id':'later','status':'received'}]
+
+
+@pytest.mark.parametrize('failure', ['http', 'transport', 'shape'])
+def test_handoff_failure_diagnostics_do_not_disclose_payload_or_exception(monkeypatch, caplog, failure):
+    row = receipt(id='private-identity', text='private-body')
+    calls = []
+    monkeypatch.setattr(sf, 'helper', lambda payload, **kw: calls.append(payload) or SimpleNamespace(stdout=json.dumps({'receipts':[row]})))
+    monkeypatch.setattr(sf, 'INBOUND_URL', 'https://server.invalid/inbound/sms')
+    def post(*args, **kwargs):
+        if failure == 'transport': raise requests.Timeout('private-secret private-body')
+        return SimpleNamespace(status_code=503 if failure == 'http' else 200, json=lambda:[])
+    monkeypatch.setattr(sf.requests, 'post', post)
+    sf.sync_once()
+    assert calls == [{'operation':'receipts'}]
+    assert 'sms_boundary event=handoff_' in caplog.text
+    assert all(value not in caplog.text for value in ['private-identity', 'private-body', 'private-secret', row['number']])

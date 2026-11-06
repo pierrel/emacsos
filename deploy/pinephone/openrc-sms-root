@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import sys
+import syslog
 import sqlite3
 import uuid
 from pathlib import Path
@@ -35,6 +36,16 @@ ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 # LTE variants that explicitly retain SMS service.  Do not create an SMS
 # object while the radio is searching, denied, or only emergency-capable.
 SMS_READY_REGISTRATION_STATES = frozenset((1, 5, 6, 7, 9, 10))
+
+
+def diagnostic(event, identity="", error=None, reason="none"):
+    """Send fixed metadata to syslog, never into the JSON receipt stream."""
+    correlation = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    try:
+        syslog.syslog(syslog.LOG_WARNING, "sms_boundary event=%s correlation=%s error_type=%s reason=%s" %
+                      (event, correlation, type(error).__name__ if error else "none", reason))
+    except OSError:
+        pass
 
 
 class InputTimeout(Exception):
@@ -226,7 +237,8 @@ def collect_incoming(connection, bus, hint=None):
                                         "org.freedesktop.DBus.Properties").GetAll(SMS, timeout=2)
         except InputTimeout:
             raise
-        except Exception:
+        except Exception as error:
+            diagnostic("modem_read_failed", path, error)
             continue
         if int(properties.get("State", 0)) != 3:
             continue
@@ -239,14 +251,22 @@ def collect_incoming(connection, bus, hint=None):
                               str(properties.get("Timestamp", "")), str(properties.get("SMSC", "")),
                               int(properties.get("PduType", 0)), int(properties.get("Class", -1))],
                              ensure_ascii=False, separators=(",", ":"))
+        timestamp_reason = "missing" if not properties.get("Timestamp") else "malformed"
         try:
             timestamp = datetime.fromisoformat(str(properties.get("Timestamp", "")))
+            timestamp_reason = "naive" if timestamp.tzinfo is None else "none"
             occurred_at = timestamp.isoformat() if timestamp.tzinfo is not None else None
         except (TypeError, ValueError):
             occurred_at = None
-        connection.execute("BEGIN IMMEDIATE")
-        capture_incoming(connection, content, occurred_at)
-        connection.commit()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            identity, created = capture_incoming(connection, content, occurred_at)
+            connection.commit()
+        except (OSError, sqlite3.Error) as error:
+            diagnostic("capture_commit_failed", incoming_key(content), error)
+            raise
+        if created and occurred_at is None:
+            diagnostic("timestamp_archive_only", identity, reason=timestamp_reason)
         # The local FULL commit is the durability boundary, not server ACK.
         if (int(properties.get("Storage", 0)) in (1, 2)
                 and int(properties.get("PduType", 0)) == 1
@@ -259,7 +279,8 @@ def collect_incoming(connection, bus, hint=None):
                     dbus.ObjectPath(path), timeout=2)
             except InputTimeout:
                 raise
-            except Exception:
+            except Exception as error:
+                diagnostic("modem_cleanup_failed", identity, error)
                 # A surviving transport copy is revisited by the existing scan.
                 pass
 
@@ -278,10 +299,11 @@ def incoming_key(content):
 
 
 def capture_incoming(connection, content, occurred_at):
-    """Insert a new source key and receipt atomically, preserving old receipt IDs."""
+    """Insert atomically; return the stable receipt ID and whether it was new."""
     key = incoming_key(content)
-    if connection.execute("SELECT 1 FROM incoming_keys WHERE content_key=?", (key,)).fetchone():
-        return
+    existing = connection.execute("SELECT message_id FROM incoming_keys WHERE content_key=?", (key,)).fetchone()
+    if existing:
+        return existing[0], False
     number, text = json.loads(content)[:2]
     identity = uuid.uuid4().hex
     cutover = connection.execute("SELECT occurred_at FROM incoming_cutover").fetchone()
@@ -290,6 +312,7 @@ def capture_incoming(connection, content, occurred_at):
     connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only) VALUES (?, 'incoming', ?, ?, 'received', ?, NULL, NULL, ?)",
                        (identity, number, text, occurred_at, int(archive_only)))
     connection.execute("INSERT INTO incoming_keys VALUES (?,?)", (key, identity))
+    return identity, True
 
 
 def archived_plaintext(connection, content, occurred_at):
@@ -336,7 +359,11 @@ def history(connection):
 
 def receipt_operation(value):
     """Collect incoming receipts, read one attempt, or acknowledge status."""
-    connection = journal()
+    try:
+        connection = journal()
+    except (OSError, sqlite3.Error) as error:
+        diagnostic("archive_open_failed", error=error)
+        raise
     try:
         if value == {"operation": "history"}:
             print(json.dumps(history(connection), ensure_ascii=False))
@@ -346,14 +373,16 @@ def receipt_operation(value):
             try:
                 collect_incoming(connection, dbus.SystemBus(), value.get("path"))
                 collected = True
-            except Exception:
+            except Exception as error:
+                diagnostic("collection_failed", error=error)
                 connection.rollback()
                 collected = False
             print(json.dumps({"collected": collected}))
         elif value == {"operation": "receipts"}:
             try:
                 collect_incoming(connection, dbus.SystemBus())
-            except Exception:
+            except Exception as error:
+                diagnostic("collection_failed", error=error)
                 # Outgoing journal sync does not depend on the modem being present.
                 connection.rollback()
             rows = connection.execute("SELECT id,direction,number,text,status,occurred_at,archive_only FROM messages WHERE ack_status IS NULL OR ack_status != status ORDER BY last_offered,rowid LIMIT 4").fetchall()
@@ -468,6 +497,8 @@ def main():
             status = "unknown:dbus-unavailable"
         finally:
             connection.close()
+    if status.startswith("unknown:"):
+        diagnostic("send_unknown", message_id)
     _emit(status)
     return 0 if status == "sent" else 1
 

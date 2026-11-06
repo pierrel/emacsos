@@ -909,11 +909,35 @@ class LocalArchiveBufferTests(unittest.TestCase):
                 if underlying.execute('SELECT COUNT(*) FROM messages').fetchone()[0]:
                     raise sqlite3.OperationalError('synthetic disk failure')
                 underlying.commit()
-        with self.assertRaises(sqlite3.OperationalError):
-            SMS.collect_incoming(FailReceiptCommit(), self.bus)
+        with mock.patch.object(SMS.syslog, "syslog") as log:
+            with self.assertRaises(sqlite3.OperationalError):
+                SMS.collect_incoming(FailReceiptCommit(), self.bus)
+        self.assertIn("event=capture_commit_failed", str(log.call_args_list))
+        self.assertIn("error_type=OperationalError", str(log.call_args_list))
+        self.assertNotIn("synthetic disk failure", str(log.call_args_list))
         self.connection.rollback()
         self.assertEqual(deleted, [])
         self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 0)
+
+    def test_capture_diagnostics_are_private_and_leave_stdout_json_untouched(self):
+        path = self.supported()
+        self.bus.message_properties[path]['Timestamp'] = 'private-malformed-time'
+        with mock.patch.object(SMS.syslog, 'syslog') as log, mock.patch('sys.stdout', new_callable=io.StringIO) as output:
+            self.collect(); self.collect()
+        self.assertEqual(output.getvalue(), '')
+        logged = str(log.call_args_list)
+        self.assertEqual(logged.count('event=timestamp_archive_only'), 1)
+        self.assertIn('reason=malformed', logged)
+        self.assertNotIn('private-malformed-time', logged)
+        self.assertNotIn('identical', logged)
+        self.assertNotIn('+15555550100', logged)
+        self.bus.message_properties[path]['Timestamp'] = '2026-10-26T01:00:00+00:00'
+        self.bus.messaging.Delete = mock.Mock(side_effect=RuntimeError('private-body +15555550100'))
+        with mock.patch.object(SMS.syslog, 'syslog') as log:
+            self.collect()
+        self.assertIn('event=modem_cleanup_failed', str(log.call_args_list))
+        self.assertNotIn('private-body', str(log.call_args_list))
+        self.assertNotIn('+15555550100', str(log.call_args_list))
 
     def test_incomplete_and_binary_copies_remain(self):
         path = self.supported(); deleted = []
