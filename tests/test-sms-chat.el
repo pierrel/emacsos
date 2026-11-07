@@ -17,13 +17,8 @@
          (emacsos-sms-chat--contexts (make-hash-table :test #'eql))
          (emacsos-sms-chat--notice nil)
          (emacsos-sms-chat--refresh-state nil)
-         (emacsos-sms-chat--jobs (make-hash-table :test #'equal))
-         (emacsos-sms-chat--queue nil)
-         (emacsos-sms-chat--running 0)
-         (emacsos-sms-chat--next-job-token 0)
-         (emacsos-sms-chat--next-refresh-id 0)
          (emacsos-sms-chat--refresh nil)
-         (emacsos-sms-chat--last-recovery 0.0)
+         (emacsos-sms-chat--refresh-again nil)
          (emacsos-call--current-owner ":1.mm")
          (emacsos-call--owner-generation 3)
          (emacsos-sms--state nil)
@@ -32,7 +27,8 @@
          (emacsos-sms--context nil)
          (emacsos-sms--detail nil)
          (emacsos-sms--proposal-id nil)
-         (emacsos-sms--next-proposal-id 0)
+         (emacsos-sms--attempt-id nil)
+         (emacsos-sms-chat--history-loaded nil)
          (emacsos-sms--confirm-id nil)
          (emacsos-sms--confirm-timer nil)
          (emacsos-sms--previous-buffer nil)
@@ -60,115 +56,6 @@
                      (member (buffer-name buffer)
                              '("*SMS*" "*SMS conversations*" "test-sms-home")))
              (kill-buffer buffer)))))))
-
-(defun test-sms-chat--snapshot (&optional state pdu body path)
-  "Return one real-shape mmcli fixture."
-  (format (concat "sms.dbus-path             : %s\n"
-                  "sms.content.number        : +14155550123\n"
-                  "sms.content.text          : %s\n"
-                  "sms.properties.pdu-type   : %s\n"
-                  "sms.properties.state      : %s\n")
-          (or path "/org/freedesktop/ModemManager1/SMS/7")
-          (or body "hello\\nworld: yes")
-          (or pdu "deliver")
-          (or state "received")))
-
-(ert-deftest emacsos-sms-chat-strict-utf8-rejects-noncanonical-bytes ()
-  (dolist (codepoint '(#x0 #x7f #x80 #x7ff #x800 #xd7ff
-                       #xe000 #xffff #x10000 #x10ffff))
-    (let ((character (char-to-string codepoint)))
-      (should (equal (emacsos-sms-chat--strict-utf8
-                      (encode-coding-string character 'utf-8 t))
-                     character))))
-  (dolist (bytes (list (unibyte-string #xff)
-                       (unibyte-string #xc0 #x80)
-                       (unibyte-string #xed #xa0 #x80)
-                       (unibyte-string #xf4 #x90 #x80 #x80)
-                       (unibyte-string #xe2 #x82)))
-    (should-error (emacsos-sms-chat--strict-utf8 bytes))))
-
-(ert-deftest emacsos-sms-chat-parser-pins-aligned-mmcli-and-inert-body ()
-  (let ((snapshot (emacsos-sms-chat--parse-snapshot
-                   (test-sms-chat--snapshot))))
-    (should (equal (plist-get snapshot :body) "hello\nworld: yes"))
-    (should (eq (plist-get snapshot :direction) 'incoming))
-    (should (eq (plist-get snapshot :state) 'received)))
-  (should-not
-   (emacsos-sms-chat--parse-snapshot
-    (concat (test-sms-chat--snapshot)
-            "sms.properties.state : sent\n")))
-  (should-not
-   (emacsos-sms-chat--parse-snapshot
-    (test-sms-chat--snapshot
-     nil nil (concat "hello" (string ?\\) "qworld"))))
-  (should-not
-   (emacsos-sms-chat--parse-snapshot
-    (replace-regexp-in-string "[ \t]+:" ":" (test-sms-chat--snapshot))))
-  (should-not
-   (emacsos-sms-chat--parse-snapshot
-    (replace-regexp-in-string
-     "sms.content.number"
-     "\nsms.content.number"
-     (test-sms-chat--snapshot))))
-  (should-not
-   (emacsos-sms-chat--parse-snapshot
-    (concat (test-sms-chat--snapshot)
-            "sms.properties.storage : unknown\n"
-            "sms.properties.storage : unknown\n")))
-  (should-not
-   (emacsos-sms-chat--parse-snapshot
-    (concat (test-sms-chat--snapshot)
-            "sms.properties.storage : invalid\\qescape\n"))))
-
-(ert-deftest emacsos-sms-chat-list-parser-distinguishes-empty-and-invalid ()
-  (should (equal (emacsos-sms-chat--parse-list
-                  "modem.messaging.sms.length : 0\n")
-                 '(parsed)))
-  (should
-   (equal (emacsos-sms-chat--parse-list
-           (concat "modem.messaging.sms.length : 1\n"
-                   "modem.messaging.sms.value[1] : "
-                   "/org/freedesktop/ModemManager1/SMS/8\n"))
-          '(parsed "/org/freedesktop/ModemManager1/SMS/8")))
-  (should-not (emacsos-sms-chat--parse-list
-               "modem.messaging.sms.length : 2\n"))
-  (should-not
-   (emacsos-sms-chat--parse-list
-    (concat "modem.messaging.sms.length : 2\n"
-            "modem.messaging.sms.value[1] : "
-            "/org/freedesktop/ModemManager1/SMS/8\n"
-            "modem.messaging.sms.value[2] : "
-            "/org/freedesktop/ModemManager1/SMS/8\n")))
-  (should-not
-   (emacsos-sms-chat--parse-list
-    (concat "modem.messaging.sms.length : 2\n"
-            "modem.messaging.sms.value[1] : "
-            "/org/freedesktop/ModemManager1/SMS/8\n"
-            "modem.messaging.sms.value[3] : "
-            "/org/freedesktop/ModemManager1/SMS/9\n"))))
-
-(ert-deftest emacsos-sms-chat-spawn-runs-on-emacs-without-stopped-launch ()
-  (test-sms-chat--with-state
-    (let ((fake (make-pipe-process :name "test-sms-chat-child" :noquery t))
-          arguments)
-      (unwind-protect
-          (cl-letf (((symbol-function 'make-process)
-                     (lambda (&rest args)
-                       (setq arguments args)
-                       fake))
-                    ((symbol-function 'continue-process)
-                     (lambda (&rest _)
-                       (error "A newly started process must not be continued"))))
-            (should
-             (eq fake
-                 (emacsos-sms-chat--spawn
-                  '("-m" "0" "--messaging-list-sms") 32 #'ignore)))
-            (should-not (plist-member arguments :stop))
-            (should (equal (plist-get arguments :command)
-                           (list emacsos-sms-chat--mmcli
-                                 "-m" "0" "--messaging-list-sms"))))
-        (when (process-live-p fake)
-          (delete-process fake))))))
 
 (ert-deftest emacsos-sms-chat-render-keeps-exact-draft-and-hostile-body-inert ()
   (test-sms-chat--with-state
@@ -322,435 +209,9 @@
       (should-not (emacsos-sms-chat--admit too-large))
       (should (equal emacsos-sms-chat--records (list old protected))))))
 
-(ert-deftest emacsos-sms-chat-live-read-uses-fixed-argv-and-sets-badge ()
-  (test-sms-chat--with-state
-    (let (commands)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (args _limit callback)
-                   (push args commands)
-                   (funcall callback 'ok (test-sms-chat--snapshot))
-                   nil)))
-        (emacsos-sms-chat--on-added
-         ":1.mm" 3 "/org/freedesktop/ModemManager1/SMS/7")
-        (should (equal commands
-                       '(("-s" "/org/freedesktop/ModemManager1/SMS/7"
-                          "--output-keyvalue"))))
-        (should (emacsos-sms-chat--newest-unread))
-        (should (string-match-p "SMS" (emacsos-sms-chat-mode-line-string)))
-        (emacsos-sms-chat-show-unread)
-        (should-not (emacsos-sms-chat--newest-unread))))))
 
-(ert-deftest emacsos-sms-chat-refresh-is-single-flight-and-merges-history ()
-  (test-sms-chat--with-state
-    (let (commands)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (args _limit callback)
-                   (push args commands)
-                   (if (equal (car args) "-m")
-                       (funcall callback 'ok
-                                (concat "modem.messaging.sms.length : 1\n"
-                                        "modem.messaging.sms.value[1] : "
-                                        "/org/freedesktop/ModemManager1/SMS/7\n"))
-                     (funcall callback 'ok (test-sms-chat--snapshot)))
-                   nil)))
-        (emacsos-sms-chat-refresh)
-        (should-not emacsos-sms-chat--refresh)
-        (should (= (length commands) 2))
-        (should (equal emacsos-sms-chat--refresh-state "Messages refreshed"))
-        (should (= (length emacsos-sms-chat--records) 1))
-        (should-not (emacsos-sms-chat-record-unread
-                     (car emacsos-sms-chat--records)))))))
 
-(ert-deftest emacsos-sms-chat-refresh-attaches-sole-sent-local-record ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (record
-            (make-emacsos-sms-chat-record
-             :id 1 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sent :origin 'local)))
-      (setq emacsos-sms-chat--records (list record))
-      (should
-       (eq record
-           (emacsos-sms-chat--apply-snapshot
-            (emacsos-sms-chat--parse-snapshot
-             (test-sms-chat--snapshot "sent" "submit" "same" path))
-            ":1.mm" 3 nil)))
-      (should (equal (emacsos-sms-chat-record-path record) path))
-      (should (eq (emacsos-sms-chat-record-origin record) 'local))
-      (should (= (length emacsos-sms-chat--records) 1)))))
 
-(ert-deftest emacsos-sms-chat-refresh-reconciles-local-send-on-attachment ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (record
-            (make-emacsos-sms-chat-record
-             :id 1 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sending :origin 'local)))
-      (setq emacsos-sms-chat--records (list record))
-      (emacsos-sms-chat--apply-snapshot
-       (emacsos-sms-chat--parse-snapshot
-        (test-sms-chat--snapshot "sent" "submit" "same" path))
-       ":1.mm" 3 nil)
-      (should (eq (emacsos-sms-chat-record-state record) 'sent))
-      (should (equal (emacsos-sms-chat-record-path record) path)))))
-
-(ert-deftest emacsos-sms-chat-refresh-does-not-attach-post-cutoff-send ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (record
-            (make-emacsos-sms-chat-record
-             :id 9 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sending :origin 'local
-             :owner ":1.mm" :generation 3 :revision 2)))
-      (setq emacsos-sms-chat--records (list record)
-            emacsos-sms-chat--revision 2)
-      (puthash 1 (list :record record) emacsos-sms-chat--contexts)
-      (emacsos-sms-chat--apply-snapshot
-       (emacsos-sms-chat--parse-snapshot
-        (test-sms-chat--snapshot "sent" "submit" "same" path))
-       ":1.mm" 3 nil 1)
-      (should (= (length emacsos-sms-chat--records) 2))
-      (should (eq (emacsos-sms-chat-record-state record) 'sending))
-      (should-not (emacsos-sms-chat-record-path record))
-      (emacsos-sms-chat--on-lifecycle
-       '(:event terminal :proposal-id 9 :state failed :context 1))
-      (should (eq (emacsos-sms-chat-record-state record) 'failed)))))
-
-(ert-deftest emacsos-sms-chat-refresh-does-not-rebind-an-attached-local-send ()
-  (test-sms-chat--with-state
-    (let* ((path-a "/org/freedesktop/ModemManager1/SMS/7")
-           (path-b "/org/freedesktop/ModemManager1/SMS/8")
-           (record
-            (make-emacsos-sms-chat-record
-             :id 9 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sent :origin 'local
-             :owner ":1.mm" :generation 3 :path path-b :revision 1))
-           (refresh
-            (make-emacsos-sms-chat-refresh
-             :owner ":1.mm" :generation 3 :cutoff 1
-             :paths (list path-b path-a) :pending 0 :done t
-             :results
-             (list
-              (emacsos-sms-chat--parse-snapshot
-               (test-sms-chat--snapshot "sent" "submit" "same" path-b))
-              (emacsos-sms-chat--parse-snapshot
-               (test-sms-chat--snapshot "sent" "submit" "same" path-a))))))
-      (setq emacsos-sms-chat--records (list record)
-            emacsos-sms-chat--revision 1
-            emacsos-sms-chat--refresh refresh)
-      (emacsos-sms-chat--refresh-commit refresh)
-      (should (equal (emacsos-sms-chat-record-path record) path-b))
-      (should (= (length emacsos-sms-chat--records) 2))
-      (should (emacsos-sms-chat--find-path path-a)))))
-
-(ert-deftest emacsos-sms-chat-refresh-keeps-ambiguous-local-sends-separate ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (sent
-            (make-emacsos-sms-chat-record
-             :id 8 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sent :origin 'local :revision 1))
-           (sending
-            (make-emacsos-sms-chat-record
-             :id 9 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sending :origin 'local :revision 2)))
-      (setq emacsos-sms-chat--records (list sent sending)
-            emacsos-sms-chat--revision 2)
-      (emacsos-sms-chat--apply-snapshot
-       (emacsos-sms-chat--parse-snapshot
-        (test-sms-chat--snapshot "sent" "submit" "same" path))
-       ":1.mm" 3 nil 2)
-      (should-not (emacsos-sms-chat-record-path sent))
-      (should-not (emacsos-sms-chat-record-path sending))
-      (should (eq (emacsos-sms-chat-record-state sending) 'sending))
-      (should (= (length emacsos-sms-chat--records) 3))
-      (should (emacsos-sms-chat--find-path path)))))
-
-(ert-deftest emacsos-sms-chat-refresh-reconciles-attached-local-send ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (record
-            (make-emacsos-sms-chat-record
-             :id 1 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sending :origin 'local
-             :owner ":1.mm" :generation 3 :path path :revision 1)))
-      (setq emacsos-sms-chat--records (list record)
-            emacsos-sms-chat--revision 1)
-      (emacsos-sms-chat--apply-snapshot
-       (emacsos-sms-chat--parse-snapshot
-        (test-sms-chat--snapshot "sent" "submit" "same" path))
-       ":1.mm" 3 t 1)
-      (should (eq (emacsos-sms-chat-record-state record) 'sent))
-      (should (= (emacsos-sms-chat-record-revision record) 2))
-      (should-not (emacsos-sms-chat-record-unread record)))))
-
-(ert-deftest emacsos-sms-chat-stored-snapshot-remains-locally-pending ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (record
-            (make-emacsos-sms-chat-record
-             :id 1 :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sending :origin 'local)))
-      (setq emacsos-sms-chat--records (list record))
-      (emacsos-sms-chat--apply-snapshot
-       (emacsos-sms-chat--parse-snapshot
-        (test-sms-chat--snapshot "stored" "submit" "same" path))
-       ":1.mm" 3 t)
-      (should (eq (emacsos-sms-chat-record-state record) 'sending))
-      (should-not (emacsos-sms-chat-record-unread record)))))
-
-(ert-deftest emacsos-sms-chat-refresh-preserves-modem-list-order ()
-  (test-sms-chat--with-state
-    (let* ((path-7 "/org/freedesktop/ModemManager1/SMS/7")
-           (path-8 "/org/freedesktop/ModemManager1/SMS/8")
-           (refresh (make-emacsos-sms-chat-refresh
-                     :owner ":1.mm" :generation 3 :cutoff 0
-                     :paths (list path-7 path-8) :pending 2 :done t)))
-      (setq emacsos-sms-chat--refresh refresh)
-      ;; Complete in the opposite order from the modem list.
-      (emacsos-sms-chat--refresh-consume
-       refresh (emacsos-sms-chat--parse-snapshot
-                (test-sms-chat--snapshot "received" "deliver" "later" path-8))
-       nil)
-      (emacsos-sms-chat--refresh-consume
-       refresh (emacsos-sms-chat--parse-snapshot
-                (test-sms-chat--snapshot "received" "deliver" "earlier" path-7))
-       nil)
-      (should (equal (mapcar #'emacsos-sms-chat-record-path
-                             emacsos-sms-chat--records)
-                     (list path-7 path-8))))))
-
-(ert-deftest emacsos-sms-chat-refresh-coalesces-while-list-is-running ()
-  (test-sms-chat--with-state
-    (let (callbacks)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (_args _limit callback)
-                   (push callback callbacks)
-                   'pending-process)))
-        (emacsos-sms-chat-refresh)
-        (let ((refresh emacsos-sms-chat--refresh))
-          (emacsos-sms-chat-refresh)
-          (should (eq refresh emacsos-sms-chat--refresh))
-          (should (= (length callbacks) 1))
-          (should (= emacsos-sms-chat--running 1))
-          (should (= (hash-table-count emacsos-sms-chat--jobs) 1)))))))
-
-(ert-deftest emacsos-sms-chat-scheduler-caps-running-children ()
-  (test-sms-chat--with-state
-    (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-               (lambda (&rest _) 'pending-process)))
-      (dotimes (index 6)
-        (emacsos-sms-chat--on-added
-         ":1.mm" 3
-         (format "/org/freedesktop/ModemManager1/SMS/%d" (1+ index))))
-      (should (= emacsos-sms-chat--running 4))
-      (should (= (length emacsos-sms-chat--queue) 2))
-      (should (= (hash-table-count emacsos-sms-chat--jobs) 6)))))
-
-(ert-deftest emacsos-sms-chat-scheduler-prioritizes-active-refresh-snapshots ()
-  "An explicit refresh gets the next free slot ahead of queued live traffic."
-  (test-sms-chat--with-state
-    (let* ((refresh (make-emacsos-sms-chat-refresh :id 1))
-           (live (make-emacsos-sms-chat-job :kind 'snapshot :live t))
-           (snapshot (make-emacsos-sms-chat-job
-                      :kind 'snapshot :refreshes (list refresh)))
-           (emacsos-sms-chat--refresh refresh)
-           (emacsos-sms-chat--max-processes 1)
-           (emacsos-sms-chat--queue (list live snapshot))
-           started)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--start-job)
-                 (lambda (job)
-                   (setq started job
-                         emacsos-sms-chat--running 1))))
-        (emacsos-sms-chat--scheduler-pump)
-        (should (eq started snapshot))
-        (should (equal emacsos-sms-chat--queue (list live)))))))
-
-(ert-deftest emacsos-sms-chat-receiving-snapshot-retries-with-a-bound ()
-  (test-sms-chat--with-state
-    (let (scheduled)
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (_delay _repeat function &rest args)
-                   (setq scheduled (cons function args))
-                   'retry-timer))
-                ((symbol-function 'emacsos-sms-chat--scheduler-pump) #'ignore))
-        (let ((job (make-emacsos-sms-chat-job
-                    :key '(3 "/org/freedesktop/ModemManager1/SMS/7")
-                    :kind 'snapshot :owner ":1.mm" :generation 3
-                    :path "/org/freedesktop/ModemManager1/SMS/7"
-                    :live t :attempts 0 :state 'complete)))
-          (puthash (emacsos-sms-chat-job-key job) job emacsos-sms-chat--jobs)
-          (emacsos-sms-chat--snapshot-finished
-           job 'ok (test-sms-chat--snapshot "receiving"))
-          (should (= (emacsos-sms-chat-job-attempts job) 1))
-          (should (eq (emacsos-sms-chat-job-state job) 'waiting))
-          (apply (car scheduled) (cdr scheduled))
-          (should (eq (emacsos-sms-chat-job-state job) 'queued))
-          (should (equal emacsos-sms-chat--queue (list job))))))))
-
-(ert-deftest emacsos-sms-chat-live-receiving-exhaustion-requests-recovery ()
-  (test-sms-chat--with-state
-    (let ((recoveries 0)
-          (job (make-emacsos-sms-chat-job
-                :key '(3 "/org/freedesktop/ModemManager1/SMS/7")
-                :kind 'snapshot :owner ":1.mm" :generation 3
-                :path "/org/freedesktop/ModemManager1/SMS/7"
-                :live t :attempts 5 :state 'complete)))
-      (puthash (emacsos-sms-chat-job-key job) job emacsos-sms-chat--jobs)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--request-recovery-refresh)
-                 (lambda () (setq recoveries (1+ recoveries)))))
-        (emacsos-sms-chat--snapshot-finished
-         job 'ok (test-sms-chat--snapshot "receiving"))
-        (should (= recoveries 1))))))
-
-(ert-deftest emacsos-sms-chat-refresh-listed-outgoing-keeps-cutoff ()
-  (test-sms-chat--with-state
-    (let ((path "/org/freedesktop/ModemManager1/SMS/7") requests)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (args _limit callback)
-                   (push (cons args callback) requests)
-                   'pending-process)))
-        (emacsos-sms-chat-refresh)
-        (let ((record
-               (make-emacsos-sms-chat-record
-                :id 9 :number "+14155550123" :body "same"
-                :direction 'outgoing :state 'sending :origin 'local
-                :owner ":1.mm" :generation 3
-                :revision (emacsos-sms-chat--next-revision))))
-          (setq emacsos-sms-chat--records (list record))
-          (puthash 1 (list :record record) emacsos-sms-chat--contexts)
-          (funcall (cdar requests) 'ok
-                   (concat "modem.messaging.sms.length : 1\n"
-                           "modem.messaging.sms.value[1] : " path "\n"))
-          (funcall (cdar requests) 'ok
-                   (test-sms-chat--snapshot "sent" "submit" "same" path))
-          (should (eq (emacsos-sms-chat-record-state record) 'sending))
-          (should-not (emacsos-sms-chat-record-path record))
-          (emacsos-sms-chat--on-lifecycle
-           '(:event terminal :proposal-id 9 :state failed :context 1))
-          (should (eq (emacsos-sms-chat-record-state record) 'failed)))))))
-
-(ert-deftest emacsos-sms-chat-refresh-promotes-real-received-added-unread ()
-  (test-sms-chat--with-state
-    (let ((path-p "/org/freedesktop/ModemManager1/SMS/7")
-          (path-q "/org/freedesktop/ModemManager1/SMS/8")
-          requests)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (args _limit callback)
-                   (push (cons args callback) requests)
-                   'pending-process)))
-        (emacsos-sms-chat-refresh)
-        (funcall (cdar requests) 'ok
-                 (concat "modem.messaging.sms.length : 2\n"
-                         "modem.messaging.sms.value[1] : " path-p "\n"
-                         "modem.messaging.sms.value[2] : " path-q "\n"))
-        (let ((count (length requests)))
-          (emacsos-sms-chat--on-added ":1.mm" 3 path-p)
-          (should (= (length requests) count)))
-        (let ((request-p
-              (seq-find (lambda (request)
-                           (equal (cadr (car request)) path-p))
-                         requests))
-              (request-q
-               (seq-find (lambda (request)
-                           (equal (cadr (car request)) path-q))
-                         requests)))
-          (funcall (cdr request-p) 'ok (test-sms-chat--snapshot))
-          (should-not emacsos-sms-chat--records)
-          (funcall (cdr request-q) 'ok
-                   (test-sms-chat--snapshot
-                    "received" "deliver" "other" path-q)))
-        (let ((record (emacsos-sms-chat--find-path path-p)))
-          (should record)
-          (should (emacsos-sms-chat-record-unread record)))))))
-
-(ert-deftest emacsos-sms-chat-live-received-during-unresolved-refresh-is-safe ()
-  (test-sms-chat--with-state
-    (let ((path "/org/freedesktop/ModemManager1/SMS/7") requests)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (args _limit callback)
-                   (push (cons args callback) requests)
-                   'pending-process)))
-        (emacsos-sms-chat-refresh)
-        (emacsos-sms-chat--on-added ":1.mm" 3 path)
-        (let ((live (car requests)))
-          (funcall (cdr live) 'ok (test-sms-chat--snapshot)))
-        (let ((record (emacsos-sms-chat--find-path path)))
-          (should record)
-          (should (eq (emacsos-sms-chat-record-direction record) 'incoming))
-          (should (emacsos-sms-chat-record-unread record)))))))
-
-(ert-deftest emacsos-sms-chat-live-snapshot-requires-path-and-incoming-direction ()
-  (test-sms-chat--with-state
-    (let ((path "/org/freedesktop/ModemManager1/SMS/7")
-          (other "/org/freedesktop/ModemManager1/SMS/8")
-          (recoveries 0)
-          callback)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (_args _limit completion)
-                   (setq callback completion)
-                   'pending-process))
-                ((symbol-function 'emacsos-sms-chat--request-recovery-refresh)
-                 (lambda () (cl-incf recoveries))))
-        (dolist (output
-                 (list (test-sms-chat--snapshot
-                        "received" "deliver" "hello" other)
-                       (test-sms-chat--snapshot
-                        "sent" "submit" "hello" path)))
-          (setq callback nil)
-          (emacsos-sms-chat--on-added ":1.mm" 3 path)
-          (let ((job (gethash (list 3 path) emacsos-sms-chat--jobs)))
-            (should callback)
-            (setf (emacsos-sms-chat-job-attempts job) 1)
-            (funcall callback 'ok output))))
-      (should-not emacsos-sms-chat--records)
-      (should (= recoveries 2)))))
-
-(ert-deftest emacsos-sms-chat-full-queue-coalesces-pending-redraw ()
-  (test-sms-chat--with-state
-    (let ((renders 0))
-      (cl-letf (((symbol-function 'emacsos-sms-chat--enqueue-snapshot)
-                 (lambda (&rest _) nil))
-                ((symbol-function 'emacsos-sms-chat--rerender-all)
-                 (lambda () (setq renders (1+ renders)))))
-        (dotimes (index 100)
-          (emacsos-sms-chat--on-added
-           ":1.mm" 3
-           (format "/org/freedesktop/ModemManager1/SMS/%d" index)))
-        (should (= renders 1))
-        (should (equal emacsos-sms-chat--notice
-                       "New SMS pending; tap Refresh"))))))
-
-(ert-deftest emacsos-sms-chat-owner-change-cancels-work-and-protects-send ()
-  (test-sms-chat--with-state
-    (let (callbacks)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (_args _limit callback)
-                   (push callback callbacks)
-                   'pending-process))
-                ((symbol-function 'process-live-p)
-                 (lambda (process) (eq process 'pending-process)))
-                ((symbol-function 'delete-process) #'ignore))
-        (dotimes (index 5)
-          (emacsos-sms-chat--on-added
-           ":1.mm" 3
-           (format "/org/freedesktop/ModemManager1/SMS/%d" (1+ index))))
-        (emacsos-sms-chat--admit
-         (make-emacsos-sms-chat-record
-          :id 9 :number "+14155550123" :body "sent?"
-          :direction 'outgoing :state 'sending :origin 'local
-          :owner ":1.mm" :generation 3))
-        (setq emacsos-call--current-owner ":1.new"
-              emacsos-call--owner-generation 4)
-        (emacsos-sms-chat--on-owner-changed ":1.mm" ":1.new" 4)
-        (should-not emacsos-sms-chat--queue)
-        (should (= (hash-table-count emacsos-sms-chat--jobs) 0))
-        (let ((record (car emacsos-sms-chat--records)))
-          (should (eq (emacsos-sms-chat-record-state record) 'unknown))
-          (should (emacsos-sms-chat--protected-p record)))
-        (dolist (callback callbacks)
-          (funcall callback 'error ""))
-        (should (= emacsos-sms-chat--running 0))))))
 
 (ert-deftest emacsos-sms-chat-owner-change-wins-over-delayed-send-terminal ()
   (test-sms-chat--with-state
@@ -768,185 +229,15 @@
       (should (eq (emacsos-sms-chat-record-state record) 'unknown))
       (should (emacsos-sms-chat--protected-p record)))))
 
-(ert-deftest emacsos-sms-chat-refresh-deadline-detaches-and-allows-retry ()
-  (test-sms-chat--with-state
-    (let (deleted)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (&rest _) 'pending-process))
-                ((symbol-function 'process-live-p)
-                 (lambda (process) (eq process 'pending-process)))
-                ((symbol-function 'delete-process)
-                 (lambda (process) (push process deleted))))
-      (emacsos-sms-chat-refresh)
-      (let ((expired emacsos-sms-chat--refresh))
-        (emacsos-sms-chat--refresh-deadline expired)
-        (should-not emacsos-sms-chat--refresh)
-        (should (equal deleted '(pending-process)))
-        (maphash
-         (lambda (_key job)
-           (should-not (memq expired (emacsos-sms-chat-job-refreshes job))))
-         emacsos-sms-chat--jobs)
-        (emacsos-sms-chat-refresh)
-        (should emacsos-sms-chat--refresh)
-          (should-not (eq expired emacsos-sms-chat--refresh)))))))
 
-(ert-deftest emacsos-sms-chat-refresh-replaces-stale-running-snapshot ()
-  (test-sms-chat--with-state
-    (let ((path "/org/freedesktop/ModemManager1/SMS/7") requests)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--spawn)
-                 (lambda (args _limit callback)
-                   (push (cons args callback) requests)
-                   (list 'process args)))
-                ((symbol-function 'process-live-p) (lambda (_process) t))
-                ((symbol-function 'delete-process) #'ignore))
-        (emacsos-sms-chat-refresh)
-        (funcall (cdar requests) 'ok
-                 (concat "modem.messaging.sms.length : 1\n"
-                         "modem.messaging.sms.value[1] : " path "\n"))
-        (let* ((key (list 3 path))
-               (old-job (gethash key emacsos-sms-chat--jobs))
-               (old-callback (cdar requests))
-               (expired emacsos-sms-chat--refresh))
-          (emacsos-sms-chat--refresh-deadline expired)
-          (should (emacsos-sms-chat-job-stale old-job))
-          (emacsos-sms-chat-refresh)
-          (funcall (cdar requests) 'ok
-                   (concat "modem.messaging.sms.length : 1\n"
-                           "modem.messaging.sms.value[1] : " path "\n"))
-          (let ((new-job (gethash key emacsos-sms-chat--jobs))
-                (new-callback (cdar requests)))
-            (should new-job)
-            (should-not (eq old-job new-job))
-            (funcall old-callback 'error "")
-            (should (eq (gethash key emacsos-sms-chat--jobs) new-job))
-            (funcall new-callback 'ok (test-sms-chat--snapshot))
-            (should-not emacsos-sms-chat--refresh)
-            (should (emacsos-sms-chat--find-path path))))))))
 
-(ert-deftest emacsos-sms-chat-partial-refresh-preserves-prior-history ()
-  (test-sms-chat--with-state
-    (let ((old (make-emacsos-sms-chat-record
-                :id "old" :number "+14155550123" :body "prior"
-                :direction 'incoming :state 'received :origin 'modem
-                :owner ":1.mm" :generation 3 :path
-                "/org/freedesktop/ModemManager1/SMS/1"
-                :revision 1))
-          (refresh (make-emacsos-sms-chat-refresh
-                    :owner ":1.mm" :generation 3 :cutoff 1 :pending 0
-                    :done t :failures t)))
-      (setq emacsos-sms-chat--records (list old)
-            emacsos-sms-chat--refresh refresh)
-      (emacsos-sms-chat--refresh-commit refresh)
-      (should (memq old emacsos-sms-chat--records)))))
 
-(ert-deftest emacsos-sms-chat-complete-refresh-rolls-back-on-admission-failure ()
-  (test-sms-chat--with-state
-    (let* ((emacsos-sms-chat--max-records 1)
-           (protected (make-emacsos-sms-chat-record
-                       :id 1 :number "+14155550123" :body "unknown"
-                       :direction 'outgoing :state 'unknown :origin 'local))
-           (path "/org/freedesktop/ModemManager1/SMS/7")
-           (refresh (make-emacsos-sms-chat-refresh
-                     :owner ":1.mm" :generation 3 :cutoff 0 :paths (list path)
-                     :pending 0 :done t
-                     :results (list (emacsos-sms-chat--parse-snapshot
-                                     (test-sms-chat--snapshot))))))
-      (setq emacsos-sms-chat--records (list protected)
-            emacsos-sms-chat--refresh refresh)
-      (emacsos-sms-chat--refresh-commit refresh)
-      (should (equal (mapcar #'emacsos-sms-chat-record-id
-                             emacsos-sms-chat--records)
-                     '(1)))
-      (should (emacsos-sms-chat-refresh-failures refresh))
-      (should (equal emacsos-sms-chat--notice
-                     "SMS storage full; acknowledge pending status")))))
-
-(ert-deftest emacsos-sms-chat-refresh-rollback-preserves-proposal-identity ()
-  (test-sms-chat--with-state
-    (let* ((emacsos-sms-chat--max-records 1)
-           (proposal
-            (make-emacsos-sms-chat-record
-             :id 9 :number "+14155550123" :body "pending"
-             :direction 'outgoing :state 'proposed :origin 'local))
-           (refresh
-            (make-emacsos-sms-chat-refresh
-             :owner ":1.mm" :generation 3 :cutoff 0
-             :paths '("/org/freedesktop/ModemManager1/SMS/7")
-             :pending 0 :done t
-             :results (list (emacsos-sms-chat--parse-snapshot
-                             (test-sms-chat--snapshot))))))
-      (setq emacsos-sms-chat--records (list proposal)
-            emacsos-sms-chat--refresh refresh)
-      (puthash 1 (list :record proposal) emacsos-sms-chat--contexts)
-      (emacsos-sms-chat--refresh-commit refresh)
-      (should (eq (car emacsos-sms-chat--records) proposal))
-      (emacsos-sms-chat--on-lifecycle
-       '(:event discarded :proposal-id 9 :context 1))
-      (should-not emacsos-sms-chat--records))))
-
-(ert-deftest emacsos-sms-chat-refresh-rollback-restores-every-record-field ()
-  (test-sms-chat--with-state
-    (let* ((path-7 "/org/freedesktop/ModemManager1/SMS/7")
-           (path-8 "/org/freedesktop/ModemManager1/SMS/8")
-           (record
-            (make-emacsos-sms-chat-record
-             :id path-7 :number "+14155550123" :body "before"
-             :direction 'outgoing :state 'sending :origin 'local
-             :owner ":1.mm" :generation 3 :path path-7 :revision 1
-             :unread nil :acknowledged t))
-           (saved (copy-emacsos-sms-chat-record record))
-           (refresh
-            (make-emacsos-sms-chat-refresh
-             :owner ":1.mm" :generation 3 :cutoff 1
-             :paths (list path-7 path-8) :pending 0 :done t
-             :results
-             (list
-              (emacsos-sms-chat--parse-snapshot
-               (test-sms-chat--snapshot "sent" "submit" "before" path-7))
-              (emacsos-sms-chat--parse-snapshot
-               (test-sms-chat--snapshot "received" "deliver" "new" path-8))))))
-      (setq emacsos-sms-chat--records (list record)
-            emacsos-sms-chat--revision 1
-            emacsos-sms-chat--refresh refresh)
-      (cl-letf (((symbol-function 'emacsos-sms-chat--admit)
-                 (lambda (&rest _) nil)))
-        (emacsos-sms-chat--refresh-commit refresh))
-      (should (eq (car emacsos-sms-chat--records) record))
-      (should (equal record saved))
-      (should (equal (emacsos-sms-chat-record-body record) "before"))
-      (should (eq (emacsos-sms-chat-record-state record) 'sending))
-      (should (= (emacsos-sms-chat-record-revision record) 1))
-      (should (emacsos-sms-chat-record-acknowledged record))
-      (should (= emacsos-sms-chat--revision 1))
-      (should (emacsos-sms-chat-refresh-failures refresh)))))
-
-(ert-deftest emacsos-sms-chat-partial-refresh-updates-old-modem-state ()
-  (test-sms-chat--with-state
-    (let* ((path "/org/freedesktop/ModemManager1/SMS/7")
-           (record
-            (make-emacsos-sms-chat-record
-             :id path :number "+14155550123" :body "same"
-             :direction 'outgoing :state 'sending :origin 'modem
-             :owner ":1.mm" :generation 3 :path path :revision 1))
-           (refresh
-            (make-emacsos-sms-chat-refresh
-             :owner ":1.mm" :generation 3 :cutoff 1 :paths (list path)
-             :pending 0 :done t :failures t
-             :results (list (emacsos-sms-chat--parse-snapshot
-                             (test-sms-chat--snapshot
-                              "sent" "submit" "same" path))))))
-      (setq emacsos-sms-chat--records (list record)
-            emacsos-sms-chat--revision 1
-            emacsos-sms-chat--refresh refresh)
-      (emacsos-sms-chat--refresh-commit refresh)
-      (should (eq (car emacsos-sms-chat--records) record))
-      (should (eq (emacsos-sms-chat-record-state record) 'sent)))))
 
 (ert-deftest emacsos-sms-chat-unavailable-ui-does-not-create-buffers ()
   (test-sms-chat--with-state
     (cl-letf (((symbol-function 'emacsos--target) (lambda () nil)))
       (emacsos-sms-chat-open "+14155550123")
-      (should-not (get-buffer "*SMS +14155550123*"))
+      (should-not (get-buffer "*SMS conversation: +14155550123*"))
       (emacsos-sms-chat-catalog)
       (should-not (get-buffer "*SMS conversations*")))))
 
@@ -962,7 +253,7 @@
         (search-forward "+14155550123")
         (button-activate (button-at (1- (point)))))
       (should (equal (buffer-name test-sms-chat--window-buffer)
-                     "*SMS +14155550123*")))))
+                     "*SMS conversation: +14155550123*")))))
 
 (ert-deftest emacsos-sms-chat-utility-rows-are-target-aware-and-touchable ()
   (test-sms-chat--with-state
@@ -1044,3 +335,340 @@
 
 (provide 'test-sms-chat)
 ;;; test-sms-chat.el ends here
+
+(defun test-sms-chat--history-row (id direction status &optional number body)
+  "Return a synthetic archive row."
+  `((id . ,id) (direction . ,direction) (status . ,status)
+    (number . ,(or number "+14155550123")) (text . ,(or body "same"))
+    (occurred_at . "2026-01-01T00:00:00+00:00")))
+
+(ert-deftest emacsos-sms-chat-archive-empty-is-distinct-from-invalid ()
+  (test-sms-chat--with-state
+    (let ((old (make-emacsos-sms-chat-record :id "old" :origin 'archive :state 'received)))
+      (setq emacsos-sms-chat--records (list old))
+      (should-error (emacsos-sms-chat--apply-history nil))
+      (should (eq old (car emacsos-sms-chat--records)))
+      (emacsos-sms-chat--apply-history '((messages) (truncated)))
+      (should-not emacsos-sms-chat--records))))
+
+(ert-deftest emacsos-sms-chat-archive-validates-whole-batch-before-mutation ()
+  (test-sms-chat--with-state
+    (let ((old (make-emacsos-sms-chat-record :id "one" :origin 'local :state 'sent)))
+      (setq emacsos-sms-chat--records (list old))
+      (should-error (emacsos-sms-chat--apply-history
+                     `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown")
+                                    ((id . "invalid")))) (truncated))))
+      (should (eq (emacsos-sms-chat-record-state old) 'sent)))))
+
+(ert-deftest emacsos-sms-chat-archive-does-not-terminalize-owned-send ()
+  (test-sms-chat--with-state
+    (setq emacsos-sms--state 'sending emacsos-sms--attempt-id "exact")
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "exact" "outgoing" "unknown"))) (truncated)))
+    (let ((record (car emacsos-sms-chat--records)))
+      (should (eq (emacsos-sms-chat-record-state record) 'sending))
+      (emacsos-sms-chat--on-lifecycle '(:event terminal :proposal-id "ui" :message-id "exact" :state sent))
+      (should (eq (emacsos-sms-chat-record-state record) 'sent)))))
+
+(ert-deftest emacsos-sms-chat-archive-identical-sends-use-distinct-identities ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "first" "outgoing" "sent")
+                    ,(test-sms-chat--history-row "second" "outgoing" "sent"))) (truncated)))
+    (should (equal (mapcar #'emacsos-sms-chat-record-id emacsos-sms-chat--records)
+                   '("first" "second")))))
+
+(ert-deftest emacsos-sms-chat-archive-failed-send-has-explicit-status ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "failed" "outgoing" "not_sent"))) (truncated)))
+    (should (equal (emacsos-sms-chat--status-suffix (car emacsos-sms-chat--records)) " [not sent]"))))
+
+(ert-deftest emacsos-sms-chat-archive-rollback-retains-object-and-all-fields ()
+  (test-sms-chat--with-state
+    (let* ((old (make-emacsos-sms-chat-record :id "one" :origin 'local :state 'sent :unread t :acknowledged t))
+           (saved (copy-emacsos-sms-chat-record old)))
+      (setq emacsos-sms-chat--records (list old))
+      (cl-letf (((symbol-function 'emacsos-sms-chat--trim) (lambda () nil)))
+        (emacsos-sms-chat--apply-history
+         `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown"))) (truncated))))
+      (should (eq (car emacsos-sms-chat--records) old))
+      (should (equal old saved))
+      (should-not emacsos-sms-chat--history-loaded))))
+
+(ert-deftest emacsos-sms-chat-archive-preserves-unread-and-user-ack ()
+  (test-sms-chat--with-state
+    (let ((old (make-emacsos-sms-chat-record :id "one" :number "+14155550123" :body "same" :direction 'outgoing :origin 'local :state 'unknown :unread t :acknowledged t)))
+      (setq emacsos-sms-chat--records (list old))
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown"))) (truncated)))
+      (should (emacsos-sms-chat-record-unread old))
+      (should (emacsos-sms-chat-record-acknowledged old)))))
+
+(ert-deftest emacsos-sms-chat-archive-alphanumeric-sender-is-view-only ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "service" "incoming" "received" "Service" "notice"))) (truncated)))
+    (should (emacsos-sms-chat-open "Service"))
+    (should (string-match-p "notice" (with-current-buffer test-sms-chat--window-buffer (buffer-string))))
+    (with-current-buffer test-sms-chat--window-buffer
+      (goto-char (point-max)) (insert "reply")
+      (emacsos-sms-chat-send))
+    (should-not emacsos-sms--state)))
+
+(ert-deftest emacsos-sms-chat-archive-correspondent-controls-are-inert ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "service" "incoming" "received" "Service\n[Send]"))) (truncated)))
+    (should (emacsos-sms-chat-open "Service\n[Send]"))
+    (let ((text (with-current-buffer test-sms-chat--window-buffer (buffer-string))))
+      (should (string-match-p (regexp-quote "Service\\u{000A}") text))
+      (should-not (string-match-p "Service\n\\[Send\\]" text)))))
+
+(ert-deftest emacsos-sms-chat-archive-bidi-correspondent-is-escaped ()
+  (test-sms-chat--with-state
+    (let ((sender (concat "Service" (string #x202e #x2066))))
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "bidi" "incoming" "received" sender))) (truncated)))
+      (emacsos-sms-chat-open sender)
+      (let ((text (with-current-buffer test-sms-chat--window-buffer (buffer-string))))
+        (should (string-match-p (regexp-quote "\\u{202E}\\u{2066}") text))
+        (should-not (string-match-p (string #x202e) text))))))
+
+(ert-deftest emacsos-sms-chat-archive-new-unread-is-not-reasserted-after-read ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history '((messages) (truncated)))
+    (let ((value `((messages . (,(test-sms-chat--history-row "new" "incoming" "received"))) (truncated))))
+      (emacsos-sms-chat--apply-history value)
+      (should (emacsos-sms-chat-record-unread (car emacsos-sms-chat--records)))
+      (emacsos-sms-chat-open "+14155550123")
+      (emacsos-sms-chat--apply-history value)
+      (should-not (emacsos-sms-chat-record-unread (car emacsos-sms-chat--records))))))
+
+(ert-deftest emacsos-sms-chat-delayed-archive-does-not-regress-terminal-result ()
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (let ((record (make-emacsos-sms-chat-record
+                     :id "exact" :number "+14155550123" :body "same"
+                     :origin 'local :direction 'outgoing :state 'sending))
+            (old-snapshot `((messages . (,(test-sms-chat--history-row "exact" "outgoing" "unknown"))) (truncated))))
+        (setq emacsos-sms-chat--records (list record)
+              emacsos-sms--state terminal)
+        (emacsos-sms-chat--on-lifecycle
+         (list :event 'terminal :message-id "exact" :proposal-id "ui" :state terminal))
+        (emacsos-sms-chat--apply-history old-snapshot)
+        (should (eq (emacsos-sms-chat-record-state record) terminal))))))
+
+(ert-deftest emacsos-sms-chat-archive-reader-is-fixed-single-flight-and-stale-safe ()
+  (test-sms-chat--with-state
+    (let ((emacsos-call--current-owner nil) processes buffers arguments requests
+          (real-status (symbol-function 'process-status)) first)
+      (unwind-protect
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (push args arguments)
+                       (push (plist-get args :buffer) buffers)
+                       (let ((p (make-pipe-process :name "test-archive-reader"
+                                                  :buffer (plist-get args :buffer) :noquery t)))
+                         (push p processes) p)))
+                    ((symbol-function 'process-send-string)
+                     (lambda (_ text) (push text requests)))
+                    ((symbol-function 'process-send-eof) #'ignore))
+            (emacsos-sms-chat-refresh)
+            (setq first emacsos-sms-chat--refresh)
+            (emacsos-sms-chat-refresh)
+            (should (= (length processes) 1))
+            (should (equal (plist-get (car arguments) :command)
+                           '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-sms")))
+            (should (equal requests '("{\"operation\":\"history\"}")))
+            (with-current-buffer (process-buffer first)
+              (insert "{\"messages\":[],\"truncated\":false}"))
+            (cl-letf (((symbol-function 'process-status)
+                       (lambda (p) (if (eq p first) 'exit (funcall real-status p))))
+                      ((symbol-function 'process-exit-status) (lambda (_) 0)))
+              (emacsos-sms-chat--history-finished first "finished"))
+            ;; A capture request during the first read is serviced once after it.
+            (should (= (length processes) 2))
+            (should-not (eq first emacsos-sms-chat--refresh))
+            (let ((current emacsos-sms-chat--refresh))
+              (emacsos-sms-chat--history-finished first "duplicate completion")
+              (should (eq current emacsos-sms-chat--refresh))))
+        (setq emacsos-sms-chat--refresh nil emacsos-sms-chat--refresh-again nil)
+        (dolist (p processes) (set-process-sentinel p #'ignore) (delete-process p))
+        (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b)))))))
+
+(ert-deftest emacsos-sms-chat-archive-read-failure-keeps-history-and-allows-retry ()
+  (test-sms-chat--with-state
+    (let* ((old (make-emacsos-sms-chat-record :id "old" :number "+14155550123"
+                                             :body "saved" :origin 'archive :state 'received))
+           (buffer (generate-new-buffer " *archive failure*"))
+           (process (make-pipe-process :name "test-archive-failure" :buffer buffer :noquery t)))
+      (unwind-protect
+          (progn
+            (setq emacsos-sms-chat--records (list old) emacsos-sms-chat--refresh process)
+            (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+                      ((symbol-function 'process-exit-status) (lambda (_) 1)))
+              (emacsos-sms-chat--history-finished process "failed"))
+            (should-not emacsos-sms-chat--refresh)
+            (should (eq old (car emacsos-sms-chat--records)))
+            (should (equal emacsos-sms-chat--refresh-state "Local history unavailable; tap Refresh")))
+        (set-process-sentinel process #'ignore) (delete-process process)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest emacsos-sms-chat-empty-correspondent-remains-viewable ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "empty" "incoming" "received" "" "notice"))) (truncated)))
+    (emacsos-sms-chat-catalog)
+    (should (string-match-p "no sender" (with-current-buffer test-sms-chat--window-buffer (buffer-string))))
+    (should (emacsos-sms-chat-open ""))
+    (should (string-match-p "notice" (with-current-buffer test-sms-chat--window-buffer (buffer-string))))))
+
+(ert-deftest emacsos-sms-chat-direct-terminal-precedes-first-history ()
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (setq emacsos-sms-chat--records nil
+            emacsos-sms--attempt-id "direct"
+            emacsos-sms--state terminal)
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "direct" "outgoing" "unknown"))) (truncated)))
+      (should (eq (emacsos-sms-chat-record-state (car emacsos-sms-chat--records)) terminal)))))
+
+(ert-deftest emacsos-sms-chat-historical-unknown-resolves-without-ui-callback ()
+  (test-sms-chat--with-state
+    (emacsos-sms-chat--apply-history
+     `((messages . (,(test-sms-chat--history-row "external" "outgoing" "unknown"))) (truncated)))
+    (let ((record (car emacsos-sms-chat--records)))
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "external" "outgoing" "sent"))) (truncated)))
+      (should (eq (emacsos-sms-chat-record-state record) 'sent))
+      ;; A real UI-owned Unknown still requires explicit acknowledgment.
+      (setq emacsos-sms--attempt-id "external" emacsos-sms--state 'unknown)
+      (setf (emacsos-sms-chat-record-state record) 'unknown)
+      (emacsos-sms-chat--apply-history
+       `((messages . (,(test-sms-chat--history-row "external" "outgoing" "sent"))) (truncated)))
+      (should (eq (emacsos-sms-chat-record-state record) 'unknown)))))
+
+(ert-deftest emacsos-sms-chat-correspondent-cannot-alias-catalog-draft ()
+  (test-sms-chat--with-state
+    (let* ((catalog (emacsos-sms-chat-catalog))
+           (conversation (emacsos-sms-chat-open "conversations")))
+      (should-not (eq catalog conversation))
+      (with-current-buffer conversation
+        (goto-char (point-max)) (insert "editable fixture")
+        (emacsos-sms-chat--rerender-all)
+        (should (derived-mode-p 'emacsos-sms-chat-mode))
+        (should (equal (emacsos-sms-chat--draft) "editable fixture")))
+      (with-current-buffer catalog
+        (should (derived-mode-p 'emacsos-sms-chat-catalog-mode))))))
+
+(ert-deftest emacsos-sms-chat-old-empty-reader-keeps-new-terminal-result ()
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (let ((real-status (symbol-function 'process-status)) process buffer)
+        (unwind-protect
+            (cl-letf (((symbol-function 'make-process)
+                       (lambda (&rest args)
+                         (setq buffer (plist-get args :buffer)
+                               process (make-pipe-process :name "old-history" :buffer buffer :noquery t))))
+                      ((symbol-function 'process-send-string) #'ignore)
+                      ((symbol-function 'process-send-eof) #'ignore))
+              (setq emacsos-sms-chat--records nil)
+              (emacsos-sms-chat-refresh)
+              (let ((record (make-emacsos-sms-chat-record
+                             :id "new-attempt" :number "+14155550123" :body "new fixture"
+                             :direction 'outgoing :origin 'local :state 'sending
+                             :revision (emacsos-sms-chat--next-revision))))
+                (setq emacsos-sms-chat--records (list record))
+                (emacsos-sms-chat--on-lifecycle
+                 (list :event 'terminal :message-id "new-attempt" :state terminal))
+                (with-current-buffer buffer (insert "{\"messages\":[],\"truncated\":false}"))
+                (cl-letf (((symbol-function 'process-status)
+                           (lambda (p) (if (eq p process) 'exit (funcall real-status p))))
+                          ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                  (emacsos-sms-chat--history-finished process "finished"))
+                (should (eq (car emacsos-sms-chat--records) record))
+                (should (eq (emacsos-sms-chat-record-state record) terminal))
+                ;; A fresh bounded page remains authoritative after this cutoff.
+                (emacsos-sms-chat--apply-history '((messages) (truncated))
+                                                 emacsos-sms-chat--revision)
+                (should-not emacsos-sms-chat--records)))
+          (setq emacsos-sms-chat--refresh nil)
+          (when process (set-process-sentinel process #'ignore) (delete-process process))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(defun test-sms-chat--recordless-terminal-after-action (action &optional full)
+  "Check ACTION and optional FULL model cannot lose a direct terminal result."
+  (test-sms-chat--with-state
+    (dolist (terminal '(sent failed))
+      (let ((emacsos-sms-operation-function
+             (lambda (_number _body completion)
+               (funcall completion (if (eq terminal 'sent) "sent" "not-sent:busy"))
+               "pending: synthetic"))
+            (real-status (symbol-function 'process-status)) processes buffers)
+        (setq emacsos-sms-chat--records nil emacsos-sms--state nil)
+        (when full
+          (dotimes (index 100)
+            (push (make-emacsos-sms-chat-record :id (format "old%d" index)
+                   :number "+14155550123" :body "prior unknown" :direction 'outgoing
+                   :origin 'local :state 'unknown) emacsos-sms-chat--records)))
+        (unwind-protect
+            (cl-letf (((symbol-function 'emacsos-sms--show) (lambda () t))
+                      ((symbol-function 'emacsos-sms--visible-p) (lambda () t))
+                      ((symbol-function 'make-process)
+                       (lambda (&rest args)
+                         (let ((buffer (plist-get args :buffer)))
+                           (push buffer buffers)
+                           (push (make-pipe-process :name "recordless-reader" :buffer buffer
+                                                    :noquery t) processes)
+                           (car processes))))
+                      ((symbol-function 'process-send-string) #'ignore)
+                      ((symbol-function 'process-send-eof) #'ignore))
+              (emacsos-sms-chat-refresh)
+              (let ((old-reader emacsos-sms-chat--refresh))
+                (emacsos-send-message "+14155550123" "terminal fixture")
+                (let ((identity emacsos-sms--attempt-id))
+                  (emacsos-sms--start-send)
+                  (should (eq emacsos-sms--state terminal))
+                  (if (eq action 'done)
+                      (emacsos-sms--dismiss)
+                    (emacsos-send-message "+14155550123" "next editable fixture"))
+                  (when full
+                    (let ((emacsos-sms-chat--number "+14155550123"))
+                      (emacsos-sms-chat-acknowledge)))
+                  (with-current-buffer (process-buffer old-reader)
+                    (insert (json-encode
+                             `((messages . [,(test-sms-chat--history-row
+                                               identity "outgoing" "unknown"
+                                               "+14155550123" "terminal fixture")]) (truncated)))))
+                  (cl-letf (((symbol-function 'process-status)
+                             (lambda (p) (if (eq p old-reader) 'exit (funcall real-status p))))
+                            ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                    (emacsos-sms-chat--history-finished old-reader "finished"))
+                  (should-not (emacsos-sms-chat--find-id identity))
+                  (should (= (length processes) 2))
+                  (let ((fresh emacsos-sms-chat--refresh))
+                    (with-current-buffer (process-buffer fresh)
+                      (insert (json-encode
+                               `((messages . [,(test-sms-chat--history-row
+                                                 identity "outgoing" (if (eq terminal 'sent) "sent" "not_sent")
+                                                 "+14155550123" "terminal fixture")]) (truncated)))))
+                    (cl-letf (((symbol-function 'process-status)
+                               (lambda (p) (if (eq p fresh) 'exit (funcall real-status p))))
+                              ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                      (emacsos-sms-chat--history-finished fresh "finished")))
+                  (should (eq (emacsos-sms-chat-record-state
+                               (emacsos-sms-chat--find-id identity)) terminal))
+                  (should (<= (length emacsos-sms-chat--records) 100)))))
+          (setq emacsos-sms-chat--refresh nil emacsos-sms-chat--refresh-again nil)
+          (dolist (p processes) (set-process-sentinel p #'ignore) (delete-process p))
+          (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))))
+
+(ert-deftest emacsos-sms-chat-done-keeps-recordless-terminal-before-old-history ()
+  (test-sms-chat--recordless-terminal-after-action 'done))
+
+(ert-deftest emacsos-sms-chat-restaging-keeps-recordless-terminal-before-old-history ()
+  (test-sms-chat--recordless-terminal-after-action 'restage))
+
+(ert-deftest emacsos-sms-chat-full-model-recordless-terminal-does-not-regress ()
+  (test-sms-chat--recordless-terminal-after-action 'done t))

@@ -43,8 +43,8 @@ failure to start may instead return one of those terminal results directly."
 (defvar emacsos-sms--body nil)
 (defvar emacsos-sms--detail nil)
 (defvar emacsos-sms--previous-buffer nil)
-(defvar emacsos-sms--next-proposal-id 0)
 (defvar emacsos-sms--proposal-id nil)
+(defvar emacsos-sms--attempt-id nil "Exact durable attempt identity for this proposal.")
 (defvar emacsos-sms--context nil)
 (defvar emacsos-sms-discard-function nil
   "Optional server-linked rejection function; clear only after its acknowledgment.")
@@ -56,7 +56,7 @@ failure to start may instead return one of those terminal results directly."
 
 (defvar emacsos-sms-lifecycle-functions nil
   "Functions notified of immutable SMS proposal lifecycle snapshots.
-Each function receives a fresh plist containing :event, :proposal-id,
+Each function receives a fresh plist containing :event, :proposal-id, :message-id,
 :number, :body, :context, :state, and :detail.  Observer errors are isolated
 from proposal authorization and transport.")
 
@@ -71,7 +71,8 @@ from proposal authorization and transport.")
       (condition-case err
           (funcall observer
                    (list :event event
-                         :proposal-id emacsos-sms--proposal-id
+                         :proposal-id (emacsos-sms--copy-field emacsos-sms--proposal-id)
+                         :message-id (emacsos-sms--copy-field emacsos-sms--attempt-id)
                          :number (emacsos-sms--copy-field emacsos-sms--number)
                          :body (emacsos-sms--copy-field emacsos-sms--body)
                          :context (emacsos-sms--copy-field emacsos-sms--context)
@@ -442,8 +443,9 @@ two-argument API and result are unchanged."
           (t
            (when (eq emacsos-sms--state 'proposed)
              (emacsos-sms--notify 'discarded))
-           (setq emacsos-sms--next-proposal-id (1+ emacsos-sms--next-proposal-id)
-                 emacsos-sms--proposal-id emacsos-sms--next-proposal-id
+           (setq emacsos-sms--proposal-id
+                 (secure-hash 'sha256 (format "%S:%S:%S" (emacs-pid) (current-time) (random)))
+                 emacsos-sms--attempt-id emacsos-sms--proposal-id
                  emacsos-sms--state 'proposed
                  emacsos-sms--number number
                  emacsos-sms--body body
