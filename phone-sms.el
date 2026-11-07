@@ -46,6 +46,9 @@ failure to start may instead return one of those terminal results directly."
 (defvar emacsos-sms--next-proposal-id 0)
 (defvar emacsos-sms--proposal-id nil)
 (defvar emacsos-sms--context nil)
+(defvar emacsos-sms-discard-function nil
+  "Optional server-linked rejection function; clear only after its acknowledgment.")
+(defvar emacsos-sms--rejecting nil)
 (defvar emacsos-sms--confirm-id nil)
 (defvar emacsos-sms--confirm-timer nil)
 (defvar emacsos-sms--skip-next-post-command-disarm nil)
@@ -143,6 +146,7 @@ from proposal authorization and transport.")
   (let ((buffer (get-buffer-create emacsos-sms--buffer-name)))
     (with-current-buffer buffer
       (add-hook 'kill-buffer-hook #'emacsos-sms--buffer-killed nil t)
+      (add-hook 'kill-buffer-query-functions #'emacsos-sms--may-kill nil t)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (pcase emacsos-sms--state
@@ -322,6 +326,7 @@ from proposal authorization and transport.")
 (defun emacsos-sms--send-tap ()
   "Arm or confirm Send for the one visible proposal."
   (cond
+   (emacsos-sms--rejecting (message "SMS rejection awaiting acknowledgment; retry Cancel"))
    ((not (and (eq emacsos-sms--state 'proposed)
               emacsos-sms--proposal-id
               (emacsos-sms--visible-p)))
@@ -333,7 +338,26 @@ from proposal authorization and transport.")
 
 (defun emacsos-sms--cancel ()
   "Cancel the current unsent proposal."
-  (when (eq emacsos-sms--state 'proposed) (emacsos-sms--dismiss)))
+  (when (eq emacsos-sms--state 'proposed)
+    (emacsos-sms--clear-confirm t)
+    (if (and (stringp emacsos-sms--context) (string-prefix-p "assist-sms:" emacsos-sms--context) emacsos-sms-discard-function)
+        (let ((context emacsos-sms--context))
+          (setq emacsos-sms--rejecting t)
+          (funcall emacsos-sms-discard-function context
+                   (lambda (acknowledged)
+                     (when (equal context emacsos-sms--context)
+                       (if acknowledged
+                           (progn (setq emacsos-sms--rejecting nil) (emacsos-sms--dismiss))
+                         (message "Rejection not acknowledged; retry Cancel"))))))
+      (emacsos-sms--dismiss))))
+
+(defun emacsos-sms--may-kill ()
+  "Keep a server-linked draft visible until rejection is acknowledged."
+  (if (and (eq emacsos-sms--state 'proposed)
+           (stringp emacsos-sms--context)
+           (string-prefix-p "assist-sms:" emacsos-sms--context))
+      (progn (emacsos-sms--cancel) nil)
+    t))
 
 (defun emacsos-sms--buffer-killed ()
   "Clear an unsent proposal if its authorization view is killed."
@@ -345,6 +369,7 @@ from proposal authorization and transport.")
             emacsos-sms--number nil
             emacsos-sms--body nil
             emacsos-sms--context nil
+            emacsos-sms--rejecting nil
             emacsos-sms--proposal-id nil
             emacsos-sms--previous-buffer nil))))
 
@@ -363,6 +388,7 @@ from proposal authorization and transport.")
             emacsos-sms--number nil
             emacsos-sms--body nil
             emacsos-sms--context nil
+            emacsos-sms--rejecting nil
             emacsos-sms--detail nil
             emacsos-sms--proposal-id nil
             emacsos-sms--previous-buffer nil)
@@ -386,8 +412,10 @@ from proposal authorization and transport.")
 (defun emacsos-send-message (number body &optional context)
   "Stage an exact outbound SMS to NUMBER containing BODY; never send it.
 Interactively prompt for both values, then show the immutable local proposal.
-CONTEXT may be a string, symbol, integer, or nil used only to correlate
-lifecycle events; the ordinary two-argument API and result are unchanged."
+CONTEXT correlates lifecycle events.  The reserved assist-sms: string prefix
+also binds server approval acknowledgment, cancellation, and journal identity.
+Other strings, symbols, integers, or nil retain ordinary local behavior; the
+two-argument API and result are unchanged."
   (interactive (list (read-string "SMS number (+E164): ")
                      (read-string "Message: ")))
   ;; Any restage attempt invalidates an existing arm before validation.
@@ -402,6 +430,11 @@ lifecycle events; the ordinary two-argument API and result are unchanged."
           ((not (or (null context) (stringp context) (symbolp context)
                     (integerp context)))
            "error: invalid message context")
+          ((and (eq emacsos-sms--state 'proposed)
+                (stringp emacsos-sms--context)
+                (string-prefix-p "assist-sms:" emacsos-sms--context)
+                (not (equal context emacsos-sms--context)))
+           "error: reject the current server SMS before staging another")
           ((eq emacsos-sms--state 'sending)
            "error: message send already in progress")
           ((eq emacsos-sms--state 'unknown)
