@@ -730,6 +730,18 @@ print(json.dumps({'result': json.loads(output.getvalue()), 'reads': reads}))
         self.assertEqual([dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')], captured)
         self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM incoming_keys').fetchone()[0], 2)
 
+    def alert_poll(self):
+        output = io.StringIO()
+        with mock.patch.object(SMS.dbus, 'SystemBus', return_value=self.bus), mock.patch.object(SMS.sys, 'stdout', output):
+            SMS.receipt_operation({'operation':'alerts'})
+        return json.loads(output.getvalue())['alerts']
+
+
+    def activate_alerts(self):
+        self.connection.execute("UPDATE incoming_alert_start SET occurred_at='2026-10-26T00:00:00+00:00'")
+        self.connection.commit()
+
+
     def test_multipart_completion_hint_does_not_wait_for_history_sweep(self):
         paths=self.messages(range(1000))
         for properties in self.bus.message_properties.values():
@@ -751,11 +763,11 @@ print(json.dumps({'result': json.loads(output.getvalue()), 'reads': reads}))
         output=io.StringIO()
         with mock.patch.object(SMS.dbus,'SystemBus',return_value=self.bus), \
              mock.patch.object(SMS.sys,'stdout',output), \
-             mock.patch.object(SMS,'send_sms',side_effect=AssertionError('capture attempted send')):
+             mock.patch.object(SMS,'send_sms',side_effect=AssertionError('capture attempted send')), \
+             mock.patch.object(SMS,'claim_incoming_alerts',side_effect=AssertionError('capture claimed alert')):
             SMS.receipt_operation({'operation':'collect','path':paths[0]})
         self.assertEqual(json.loads(output.getvalue()),{'collected':True})
         self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM messages').fetchone()[0],1)
-        self.assertFalse(hasattr(SMS,'claim_incoming_alerts'))
 
     def test_equivalent_source_timezone_reobservations_share_one_identity(self):
         paths=self.messages([20])
@@ -868,6 +880,57 @@ print(json.dumps({'result': json.loads(output.getvalue()), 'reads': reads}))
         self.connection.close();self.connection=SMS.journal()
         self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_cutover').fetchone()[0],cutoff)
 
+
+
+    def test_local_alerts_skip_fifteen_old_reenumerated_objects_then_claim_new_once(self):
+        self.activate_alerts()
+        self.messages(range(15))
+        for value in self.bus.message_properties.values(): value['Timestamp']='2026-10-25T23:00:00+00:00'
+        self.assertEqual([self.alert_poll() for _ in range(5)], [[]]*5)
+        original=[dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')]
+        self.assertEqual(len(original),1)
+        self.bus.owner=':1.99'
+        self.messages(range(200,215))
+        for value in self.bus.message_properties.values(): value['Timestamp']='2026-10-25T23:00:00+00:00'
+        self.assertEqual([self.alert_poll() for _ in range(5)], [[]]*5)
+        self.assertEqual([dict(row) for row in self.connection.execute('SELECT * FROM messages ORDER BY rowid')],original)
+        path='/org/freedesktop/ModemManager1/SMS/215'
+        self.bus.manager.objects['/org/freedesktop/ModemManager1/Modem/3'][SMS.MESSAGING]['Messages'].append(path)
+        self.bus.message_properties[path]={'State':3,'Number':'+15555550100','Text':'genuinely new',
+                                           'Timestamp':'2026-10-26T01:00:00+00:00'}
+        ids=[identity for _ in range(5) for identity in self.alert_poll()]
+        self.assertEqual(len(ids),1)
+        self.assertEqual(self.alert_poll(),[])
+        self.connection.execute("UPDATE messages SET ack_status=status")
+        self.connection.commit()
+        self.assertEqual(self.alert_poll(),[])
+        self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_alert_start').fetchone()[0],
+                         '2026-10-26T00:00:00+00:00')
+
+
+    def test_local_alerts_identicals_collapse_and_survive_restart_and_ack(self):
+        self.activate_alerts()
+        paths=self.messages([20,21])
+        for value in self.bus.message_properties.values(): value['State']=2
+        self.assertEqual(self.alert_poll(),[])
+        for value in self.bus.message_properties.values(): value['State']=3
+        ids=self.alert_poll()
+        self.assertEqual(len(ids),1)
+        self.connection.close()
+        self.connection=SMS.journal()
+        self.bus.owner=':1.99'
+        self.messages([30,31])
+        self.assertEqual(self.alert_poll(),[])
+        self.assertEqual(self.connection.execute('SELECT occurred_at FROM incoming_alert_start').fetchone()[0],
+                         '2026-10-26T00:00:00+00:00')
+
+
+    def test_local_alerts_missing_and_equal_source_times_stay_history(self):
+        self.activate_alerts()
+        paths=self.messages([20,21,22])
+        for path,value in zip(paths, ['', 'invalid', '2026-10-26T00:00:00+00:00']):
+            self.bus.message_properties[path]['Timestamp']=value
+        self.assertEqual(self.alert_poll(),[])
 
 
 class LocalArchiveBufferTests(unittest.TestCase):
@@ -1005,6 +1068,12 @@ class LocalArchiveBufferTests(unittest.TestCase):
         self.collect()
         self.assertEqual(deleted, [path])
         self.assertEqual(tuple(self.connection.execute("SELECT * FROM messages WHERE id='old'").fetchone()), before)
+
+
+
+
+
+
 
 
 if __name__ == '__main__': unittest.main()
