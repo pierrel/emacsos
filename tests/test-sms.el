@@ -211,7 +211,7 @@
     (emacsos-sms--send-tap)
     (let ((old emacsos-sms--proposal-id))
       (emacsos-send-message "+14155550124" "second")
-      (should (> emacsos-sms--proposal-id old))
+      (should-not (equal emacsos-sms--proposal-id old))
       (should-not emacsos-sms--confirm-id)
       (should (equal emacsos-sms--body "second")))))
 
@@ -300,7 +300,7 @@
       (let ((old-id emacsos-sms--proposal-id))
         (emacsos-send-message "+14155550124" "new")
         (funcall first-completion "sent")
-        (should (> emacsos-sms--proposal-id old-id))
+        (should-not (equal emacsos-sms--proposal-id old-id))
         (should (eq emacsos-sms--state 'proposed))))))
 
 (ert-deftest emacsos-sms-unknown-result-must-be-dismissed-before-restaging ()

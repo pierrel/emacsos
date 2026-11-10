@@ -1,0 +1,69 @@
+#+title: Whole-thread observation: E7/E8 review walkthrough
+
+* Change and scope
+
+PR #93 lets an open Assist Web conversation follow later work and reconnect
+without manual Refresh. The change is concentrated in *E7 Assist Web client*;
+*E8 Assist Web service* remains the external owner of Runs, queuing and
+approvals. Stable IDs refer to [[file:architecture.org][the component map]] and its editable
+[[file:architecture.dot][diagram source]]. No new component, queue or execution authority is added.
+
+This branch is aligned with merged baseline =06cd4763=. The observer is
+unmerged and was tested/deployed in a composition containing PR #89's
+editable-draft runtime. PR #89 remains an unmerged prerequisite. Main's
+older local queue client is not a supported standalone observer runtime.
+This maintenance adds the approved baseline and refreshes documentation;
+it does not import PR #89, change feature behavior or authorize deployment.
+
+* Walk through the boundaries
+
+1. E7's =emacsos-assist-web--start-thread-observation= owns one five-second
+   timer per view. =emacsos-assist-web--observe-thread= only polls visible
+   eligible views while their own stream/read is idle. Existing shared
+   request capacity and buffer ownership prevent overlapping work; another
+   view's stream can coexist without becoming this view's blocker.
+2. The authenticated canonical GET returns E8's history and optional
+   =active_run=. The client validates identity, response shape and existing
+   authorization/send generations before accepting it. A discovered identity
+   uses the existing =--refresh-observed-run= exact-Run verification and SSE;
+   it creates no user-message placeholder, retry key or HTTP Send receipt.
+3. Existing SSE provides provisional assistant text. Exact status plus a
+   validated canonical snapshot retires the local observer at completion or
+   an approval stop. Server approval and Run state remain authoritative;
+   resumed work can be rediscovered. Editable text and any independent
+   unconfirmed HTTP draft survive this transition.
+4. Before repainting, E7 compares complete validated snapshots after retaining
+   already-loaded older history. Identical history avoids cache/draft writes.
+   Cached/failed-read presentation can still become current. Revision-fenced
+   settled read receipts do not depend on repainting, and existing
+   =display-recovery= forces a failed paint to complete before acknowledgment.
+5. A denial or stale callback cannot revive the view or start later work.
+   Hidden views stop periodic reads; killing or changing mode invalidates the
+   owned timer/read. Observation never submits, cancels or resends a message.
+
+Implementation anchors are in [[file:../assist-web.el][assist-web.el]]: =--request=,
+=--snapshot-observed-run=, =--canonical-presentation-current=,
+=--observe-thread=, =--ack-rendered-thread= and the existing Run helpers.
+The independent Git path remains in [[file:../assist-web-git.el][assist-web-git.el]]. E3/E4 and the
+SMS/call/notification components retain their baseline responsibilities.
+
+* Evidence and practical limits
+
+[[file:../tests/test-assist-web-observation.el][The 22 deterministic observation cases]] cover later work, live interjection,
+exact-Run recovery, callback/request fences, hidden/denied views, single timer
+ownership, Unicode and HTTP draft preservation, loaded history, approval
+resumption, stale presentation, read receipts and failed display recovery.
+The test body describes each fixture and assertion; this is deterministic
+client coverage, not behavioral model evaluation.
+
+The reviewed observer plus PR #89 previously passed 437 ERT tests and 39
+Python checks in its composed runtime. Those are historical composition
+results, not new pass claims for this baseline-aligned branch. The observer
+source's prior independent review and Copilot R4 acceptance remain evidence
+for unchanged code. Any new integration checks must name the exact tree.
+
+The feature requires the existing authenticated Assist phone API and its
+optional running-work metadata. The server owns retries/admission and its
+stream resources; no network, device, model or service operation is part of
+this baseline/documentation maintenance. A phone or visible-stream test must
+be reported separately from local source/document checks.

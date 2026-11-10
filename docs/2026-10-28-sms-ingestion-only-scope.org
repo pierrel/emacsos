@@ -1,0 +1,47 @@
+#+title: SMS ingestion-only source boundary
+#+date: 2026-10-28
+
+* Scope
+
+This source changes SMS source timestamps, stable content keys, durable archive
+handoff and bounded collection. It excludes call handling/power changes, usage
+sampling, the generic notification center and novelty-gated notification clients.
+Those independent changes remain necessary when composing their full behavior.
+The existing base's finite raw-Added SMS feedback is unchanged here; this branch
+alone does not claim a phantom-buzz or hardware-wake fix.
+
+* Capture-only hints
+
+Removing the payload cache must not put a genuinely new SMS behind a full old
+store scan. Reuse bounded transient newest-64 hints and the current ModemManager
+owner/State3 observer for ingestion only. The fixed helper's collect operation
+validates any hint against the current modem list, captures at most four leaves,
+and returns only a collected boolean. It does not claim an alert, acknowledge
+an archive receipt, run a vibration client or send a message. No new daemon or
+persistent payload cache is introduced. Periodic capture is independent of the
+server connection; ordinary receipt handoff retains its existing ACK boundary.
+
+Source key insertion and capture remain transactional. A timeout retains earlier
+committed progress, and the persisted cursor advances before attempted reads.
+A trusted State3 completion can prioritize an incomplete multipart object without
+waiting for a second Added. Wrong-owner property events are ignored before
+parsing. Runtime bounds and helper credentials stay fixed.
+
+* Validation and delivery
+
+Use isolated SQLite/D-Bus/UI fixtures for original-time cutoff, key/replay and
+legacy-row preservation, fair scan progress and hint priority among retained
+history. Capture responses must contain no message content and must trigger no
+send, feedback or alert operation. Packaging verifies only the existing SMS
+payload list with refreshed hashes; no notification/call/sampler payload is added.
+This is a review-branch scope correction, not a replacement of an already running
+combined phone deployment. A later composition requires its own compatibility
+review before any installation.
+
+* Historical supersessions
+
+This narrows /Identity policy and removals/ in
+[[file:2026-10-28-sms-platform-identity-simplification.org][2026-10-28-sms-platform-identity-simplification.org]]: the local alert claim
+and notification reason journal described there belong to the combined runtime,
+not this isolated ingestion change. The pinned platform facts, source-time/key
+policy and historical data-preservation requirements remain unchanged.
