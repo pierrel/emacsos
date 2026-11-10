@@ -1,0 +1,76 @@
+#+title: EmacsOS architecture
+
+This is the EmacsOS component map at merged =main=
+=72be51f2fb9579b5ca471944ddc313ce1fbcef6e=. It follows the phone's two
+agent paths: local =/chat= through =emacsos-server=, and the client for
+canonical Assist Web threads. The client and server code share this repo, but
+the Assist package, Assist Web service and model endpoint are external
+boundaries. This is a component map, not a function call graph.
+
+[[file:architecture.svg]]
+
+Edit [[file:architecture.dot][architecture.dot]] and render with
+=dot -Tsvg docs/architecture.dot -o docs/architecture.svg=. The numbered IDs
+name the components below. Arrows carry requests, model work or device
+actions.
+
+* Component key
+
+** Phone and local chat
+
+- *E1 Phone shell.* [[file:../os.el][os.el]] starts the Emacs UI.
+  [[file:../phone-call.el][phone-call.el]], [[file:../phone-sms.el][phone-sms.el]]
+  and [[file:../network.el][network.el]] supply deterministic device commands;
+  the user can invoke them directly, and the agent can invoke them through
+  Emacs evaluation.
+- *E2 Local chat client.* [[file:../chat.el][chat.el]] sends =POST /chat= and
+  renders bounded NDJSON token/status events without blocking the UI.
+  [[file:../emacsos-assist.el][emacsos-assist.el]] also supports file-backed
+  conversations through the local server.
+- *E3 EmacsOS server.* [[file:../server/emacsos_server/app.py][app.py]] owns the
+  FastAPI =/chat= route, phone request identity, a serialized streaming worker
+  and conversation clear/rollback routes. [[file:../server/emacsos_server/stream.py][stream.py]]
+  converts agent output to stream events. It is not Assist Web's durable Run
+  admission service.
+- *E4 Assist embedder.* [[file:../server/emacsos_server/app.py][=_build_thread=]]
+  creates a fresh =AgentSpec= and =assist.Thread= per local chat turn, with a
+  shared SQLite checkpointer. Its two profiles are legacy Emacs control tools
+  for the fixed conversation and [[file:../server/emacsos_server/emacs_backend.py][EmacsBackend]]
+  for file-backed chat. The latter routes filesystem and shell operations to
+  the phone. [[file:../server/emacsos_server/channel.py][channel.py]] supplies
+  the legacy control tools and local skill sources. Agent construction and model work run off the
+  server event loop.
+- *E5 Phone callback.* [[file:../server/emacsos_server/channel.py][=eval_elisp=]]
+  and [[file:../server/emacsos_server/emacs_backend.py][EmacsBackend]] use
+  [[file:../server/emacsos_server/phone.py][phone.call_emacs]] to reach the
+  request's phone Emacs server. Agent interpretation chooses concrete Elisp;
+  E1 executes the deterministic command.
+- *E6 Config history.* [[file:../server/emacsos_server/channel.py][=get_config=,
+  =apply_config= and rollback tools]] work through
+  [[file:../server/emacsos_server/config_repo.py][ConfigRepo]] and
+  [[file:../server/emacsos_server/apply.py][apply.py]] to verify, install and
+  Git-version the phone's Emacs config. This history is server-owned state,
+  separate from the conversation checkpoint.
+
+** Shared Assist Web threads
+
+- *E7 Assist Web client.* [[file:../assist-web.el][assist-web.el]] calls the
+  authenticated HTTPS phone API, observes Run status and text over SSE, and
+  reconciles canonical snapshots. [[file:../assist-web-git.el][assist-web-git.el]]
+  handles the separate local Git/SSH thread checkout flow. This path does not
+  pass through E3 or create E4's local =assist.Thread=.
+- *E8 Assist Web service.* The external Assist service owns the canonical
+  thread, Run, approval and Git authority for E7. Its phone API and SSE are
+  the cross-repository contract; the EmacsOS client holds a local projection,
+  not durable Run truth.
+- *E9 Model endpoint.* The local server's embedded Assist Thread selects an
+  OpenAI-compatible model using =ASSIST_MODEL_URL=. Inference runs outside
+  EmacsOS; E8 has its own model path.
+
+* Other device services
+
+[[file:../server/emacsos_server/sms_forward.py][SMS forwarding]] and
+[[file:../server/emacsos_server/call_bridge.py][the call bridge]] are separate
+phone services that communicate with Assist through their own contracts.
+They are not steps in the local =/chat= stream. The call bridge's live call
+validation remains hardware-gated; this diagram does not assert it is live.

@@ -717,6 +717,8 @@ the message.
 
 * Project Structure
 
+The current component and code map is [[file:docs/architecture.org][docs/architecture.org]].
+
 - =os.el= — main init file (keyboard, frame setup)
 - =chat.el= — CHAT page, =*chat*= transcript, SEND wiring to =/chat=
 - =phone-sms.el= / =phone-sms-chat.el= — confirmed SMS transport and bounded native conversations
