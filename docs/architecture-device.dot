@@ -1,0 +1,31 @@
+digraph Device {
+  graph [label="EmacsOS · device services and Assist boundary", labelloc=t,
+         fontname="DejaVu Sans", fontsize=23, bgcolor="white",
+         rankdir=TB, pad=0.25, nodesep=0.55, ranksep=0.7,
+         splines=polyline, outputorder=edgesfirst];
+  node [shape=box, style="rounded,filled", color="#34506a",
+        fillcolor="#f2f7fc", fontname="DejaVu Sans", fontsize=15,
+        margin="0.19,0.14"];
+  edge [fontname="DejaVu Sans", fontsize=11, color="#49647d",
+        arrowsize=0.7];
+
+  E10 [label="E10  Phone SMS UI\nlocal two-tap send + server draft review"];
+  E11 [label="E11  Fixed SMS helper\nroot process · exact send/collect"];
+  E12 [label="E12  ModemManager\nSMS and call D-Bus", fillcolor="#f3f3f3"];
+  E13 [label="E13  SMS journal\nroot-private SQLite receipts", fillcolor="#fff4d7"];
+  E14 [label="E14  SMS forward\nHTTPS handoff + outbound listener"];
+  E8 [label="E8  Assist Web service\nSMS/voice/alert endpoints", fillcolor="#f3f3f3"];
+  E15 [label="E15  Call bridge\nMM ring → AT/PCM ↔ WSS"];
+  E16 [label="E16  Alert client\nAssist poll/ack + local feedback"];
+
+  { rank=same; E14; E15; E16; }
+  E10 -> E11 [label="confirmed attempt"];
+  E11 -> E12 [label="SMS D-Bus", dir=both];
+  E11 -> E13 [label="commit before effect"];
+  E13 -> E14 [label="receipts via helper"];
+  E14 -> E8 [label="receipt POST ↓ · approved SMS ↑", dir=both];
+  E14:w -> E11:w [label="fixed send", constraint=false];
+  E12 -> E15 [label="call ring signal", constraint=false];
+  E15 -> E8 [label="voice WSS", constraint=false];
+  E16 -> E8 [label="alert GET / ACK", constraint=false];
+}

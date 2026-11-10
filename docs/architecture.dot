@@ -2,7 +2,7 @@ digraph EmacsOS {
   graph [label="EmacsOS · phone and agent paths", labelloc=t,
          fontname="DejaVu Sans", fontsize=23, bgcolor="white",
          rankdir=TB, pad=0.25, nodesep=0.5, ranksep=0.62,
-         splines=polyline, outputorder=edgesfirst];
+         splines=ortho, outputorder=edgesfirst];
   node [shape=box, style="rounded,filled", color="#34506a",
         fillcolor="#f2f7fc", fontname="DejaVu Sans", fontsize=15,
         margin="0.19,0.14"];
@@ -20,12 +20,13 @@ digraph EmacsOS {
   E8 [label="E8  Assist Web service\ncanonical threads + Runs", fillcolor="#f3f3f3"];
   E9 [label="E9  Model endpoint\nOpenAI-compatible HTTP", fillcolor="#f3f3f3"];
 
-  E1 -> E2 [label="local chat"];
-  E2 -> E3 [label="POST /chat"];
-  E3 -> E4 [label="build + stream turn"];
-  E4 -> E5 [label="phone tools / backend"];
-  E4 -> E6 [label="config tools"];
-  E4 -> E9 [label="model calls"];
-  E1 -> E7 [label="shared threads"];
-  E7 -> E8 [label="submit / observe Runs"];
+  E1 -> E2 [xlabel="local chat"];
+  E2 -> E3 [xlabel="POST /chat"];
+  E3 -> E4 [xlabel="build + stream turn"];
+  E4 -> E5 [xlabel="phone tools / backend"];
+  E5:w -> E1:w [xlabel="Emacs evaluation", constraint=false];
+  E4 -> E6 [xlabel="config tools"];
+  E4 -> E9 [xlabel="model calls"];
+  E1 -> E7 [xlabel="shared threads"];
+  E7 -> E8 [xlabel="submit / observe Runs"];
 }
