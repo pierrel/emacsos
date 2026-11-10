@@ -29,17 +29,19 @@ actions.
   conversations through the local server.
 - *E3 EmacsOS server.* [[file:../server/emacsos_server/app.py][app.py]] owns the
   FastAPI =/chat= route, phone request identity, a serialized streaming worker
-  and conversation clear/rollback routes. [[file:../server/emacsos_server/stream.py][stream.py]]
-  converts agent output to stream events. It is not Assist Web's durable Run
-  admission service.
+  and state routes: =/clear= and =/forget= discard local conversation state,
+  while =/rollback= restores a prior phone Emacs config.
+  [[file:../server/emacsos_server/stream.py][stream.py]] converts agent output
+  to stream events. It is not Assist Web's durable Run admission service.
 - *E4 Assist embedder.* [[file:../server/emacsos_server/app.py][=_build_thread=]]
   creates a fresh =AgentSpec= and =assist.Thread= per local chat turn, with a
   shared SQLite checkpointer. Its two profiles are legacy Emacs control tools
   for the fixed conversation and [[file:../server/emacsos_server/emacs_backend.py][EmacsBackend]]
   for file-backed chat. The latter routes filesystem and shell operations to
   the phone. [[file:../server/emacsos_server/channel.py][channel.py]] supplies
-  the legacy control tools and local skill sources. Agent construction and model work run off the
-  server event loop.
+  legacy control tools; [[file:../server/emacsos_server/app.py][=_skill_sources=]]
+  declares the EmacsOS skill route for both profiles. Agent construction and
+  model work run off the server event loop.
 - *E5 Phone callback.* [[file:../server/emacsos_server/channel.py][=eval_elisp=]]
   and [[file:../server/emacsos_server/emacs_backend.py][EmacsBackend]] use
   [[file:../server/emacsos_server/phone.py][phone.call_emacs]] to reach the
