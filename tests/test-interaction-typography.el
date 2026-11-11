@@ -17,7 +17,8 @@
 
 (defmacro interaction-test--thread (&rest body)
   (declare (indent 0))
-  `(let ((emacsos-desktop-assist-mode t)
+  `(let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+          (emacsos-desktop-assist-mode t)
           (emacsos-assist-web-cache-directory (make-temp-file "interaction-" t)))
      (unwind-protect
          (with-temp-buffer
