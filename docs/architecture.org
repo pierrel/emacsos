@@ -65,6 +65,9 @@ actions.
   thread, Run, approval and Git authority for E7. Its phone API and SSE are
   the cross-repository contract; the EmacsOS client holds a local projection,
   not durable Run truth.
+  The [[file:phone-send-draft-review.org][editable draft review]] describes E7's
+  proposed replacement of the local accepted-Run FIFO with one editable draft
+  and an HTTP retry identity; E8 retains admission and execution authority.
 - *E9 Model endpoint.* The local server's embedded Assist Thread selects an
   OpenAI-compatible model using =ASSIST_MODEL_URL=. Inference runs outside
   EmacsOS; E8 has its own model path.

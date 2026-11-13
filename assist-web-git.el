@@ -9,12 +9,11 @@
 (require 'subr-x)
 
 (declare-function emacsos-assist-web-git--metadata-from-snapshot "assist-web")
-(declare-function emacsos-assist-web--legacy-refresh-thread "assist-web")
+(declare-function emacsos-assist-web-refresh-thread "assist-web")
 (declare-function emacsos-assist-web--canonical-authorized "assist-web")
 (declare-function emacsos-assist-web--valid-id-p "assist-web")
 (declare-function emacsos-assist-web--thread-header "assist-web")
 (declare-function emacsos-assist-web--request "assist-web")
-(declare-function emacsos-assist-web--approval-stopped-p "assist-web")
 (declare-function emacsos-assist-web-review-approval "assist-web")
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-status-setup-buffer "magit-status")
@@ -500,8 +499,7 @@ MANUAL permits a repeated status reminder."
                (with-current-buffer emacsos-assist-web-git--status-source
                  (let* ((thread (alist-get 'thread emacsos-assist-web--snapshot))
                         (count (alist-get 'approval_count thread)))
-                   (or (emacsos-assist-web--approval-stopped-p)
-                       (equal (alist-get 'status thread) "awaiting_approval")
+                   (or (equal (alist-get 'status thread) "awaiting_approval")
                        (and (integerp count) (> count 0))))))
       (insert-text-button "Pending approvals: Review"
                           'face '(bold warning) 'follow-link t
@@ -859,7 +857,7 @@ CHECKOUT-COMPLETE says whether the local checkout reached its thread tip."
 
 (defun emacsos-assist-web-git--refresh-after-merge (source view)
   "Refresh SOURCE's checkout after its verified server merge.
-Observe its thread only when no message is queued; VIEW receives the outcome."
+Observe its canonical thread; VIEW receives the outcome."
   (message "Refreshing…")
   (if (not (buffer-live-p source))
       (progn
@@ -871,10 +869,7 @@ Observe its thread only when no message is queued; VIEW receives the outcome."
       (setq emacsos-assist-web-git--post-merge-view view)
       (condition-case nil
           (progn
-            ;; Legacy rendering cannot preserve a resident queue.  Leave it
-            ;; untouched; the public Refresh command may POST its head.
-            (unless (emacsos-assist-web--queue-head)
-              (emacsos-assist-web--legacy-refresh-thread source))
+            (emacsos-assist-web-refresh-thread source)
             (unless (and (not (eq emacsos-assist-web--denied t))
                          (plist-get emacsos-assist-web-git--metadata :branch))
               (error "Git checkout refresh unavailable"))
