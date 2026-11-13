@@ -1,0 +1,89 @@
+#+title: SMS source identity and bounded ingestion
+#+date: 2026-10-28
+
+* Platform contract
+
+The target is ModemManager 1.24.2 with EG25-manager 0.5.2. EG25-manager
+manages modem power and suspend integration, not application SMS deduplication.
+
+The pinned [[https://github.com/linux-mobile-broadband/ModemManager/blob/1.24.2/introspection/org.freedesktop.ModemManager1.Sms.xml][SMS interface]] exposes sender, Text or Data, source Timestamp and
+state. Timestamp describes the first PDU's arrival at the SMSC, not arrival at
+this phone. MessageReference is a PDU reference, not a globally unique receipt
+ID. No stable carrier UUID is exposed. Timestamp validity and carrier clock
+accuracy are not guaranteed by this application.
+
+In [[https://github.com/linux-mobile-broadband/ModemManager/blob/1.24.2/src/mm-base-sms.c][mm-base-sms.c]], exported paths use process-local allocation. Multipart SMS
+remain receiving until assembled; only received state 3 is eligible here.
+The [[https://github.com/linux-mobile-broadband/ModemManager/blob/1.24.2/src/mm-iface-modem-messaging.c][messaging implementation]] reloads stored parts during enable and provides
+explicit deletion. Stored messages may therefore be advertised again after a
+modem reconnect. Neither those paths nor Added signals prove new delivery.
+We never delete incoming modem storage, preserving the offline SMS UI. This
+is not a promise of indefinite storage, capacity, or carrier exactly-once delivery.
+
+* Identity policy and removals
+
+Pierre accepts collapsing messages with equal sender, original source time and
+exact content within the timestamp resolution. SHA256 of a structured tuple of
+sender, UTC-normalized aware Timestamp, Text and Data is the durable content key.
+No body normalization or clock substitution is used. Missing/invalid/naive times
+are history-only. Other metadata such as storage and delivery state is irrelevant.
+
+Remove ordinal multiplicity allocation, boot/owner/path reconciliation and cached
+payload inventories. A unique content-key row points at the existing 32-character
+receipt UUID, so the established phone/server and notification interfaces stay
+unchanged. The UUID is durable application identity, not a platform guarantee.
+
+One durable scan cursor remains: attempt at most four leaf reads per poll,
+advance before each bounded read, and commit each successful key/message pair
+atomically. A timeout cannot starve later leaves or erase earlier progress.
+Trusted Added paths are bounded transient priority hints, validated against the
+current modem list and completed content before any eligibility claim. The newest
+hint runs first after any in-flight helper. Multipart completion is observed
+through the existing bounded D-Bus signal-registration primitive: only current
+ModemManager sender, SMS interface and State3 changes supply a transient hint.
+No second Added is assumed. Thus a newly completed message does not
+wait for an entire retained-history sweep. The newest 64 distinct hints are held;
+older overflow falls back to fair periodic collection. No hint is durable identity.
+Every completed object can be reread safely; a changed source message on a reused
+path cannot be hidden by a permanent payload cache. Scan time grows with retained
+modem history. This is bounded collection, not a second lifecycle/recovery engine.
+
+The local alert claim remains independent of server configuration and ACKs.
+Only completed, non-history messages newer than persistent activation can claim
+one logged vibration attempt. Claims precede logging/effect, so a crash can lose
+an alert but cannot automatically replay an uncertain vibration. Calls and the
+notification reason journal retain their existing behavior.
+
+* Migration and delivery
+
+Keep all old message rows, UUIDs, body/time/status/ACK and old inventory tables.
+Initialize the new key map once from original metadata in incoming_inventory,
+selecting the lowest ordinal's existing UUID for each equal key. Old duplicate
+rows remain history; they are not rewritten or redelivered merely to collapse
+them. Original metadata, not a legacy rediscovery timestamp, establishes aliases.
+Older unmatched history remains subject to the existing durable upgrade cutoff.
+
+No modem deletion, archive rewrite or send is part of migration. SQLite keeps
+key insertion and receipt insertion atomic. The phone retries only durable
+archive handoff and ACKs only server-confirmed storage/routing/Run admission.
+Existing wire fields are unchanged. operator backs up the private journal
+and verifies old rows before and after deployment. Rollback needs special care:
+old ordinal code does not know new keys; do not replay an old database snapshot
+or downgrade collection without an explicit reviewed compatibility procedure.
+
+* Outgoing boundary
+
+ModemManager refuses resending an already-sent object, but a lost method reply
+cannot establish whether a freshly created object's send succeeded. The durable
+application attempt ID therefore remains essential: record unknown before the
+modem effect; repeating that ID only reads its outcome. Report sent, not-sent or
+unknown. Unknown is a final acceptable result, not a reason to reconcile or retry.
+A new explicit user request may create a distinct attempt. Receipt handoff still
+archives actual locally confirmed sends; it never sends an SMS to repair history.
+
+* Historical supersessions
+
+No earlier dated document describes this root-helper multiplicity implementation.
+This changes the current README's retained-inventory policy. The local chat UI
+snapshot rules in [[file:2026-09-16-sms-snapshot-identity-amendment.org][2026-09-16-sms-snapshot-identity-amendment.org]] are unchanged;
+application ingestion now has an explicit separate content-collapse policy.

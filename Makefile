@@ -54,6 +54,7 @@ test-pinephone-scripts:
 	python3 tests/test-pinephone-openrc-session.py
 	python3 tests/test_pinephone_openrc_sms.py
 	emacs -Q --batch -L . -l tests/test-phone-notifications.el -l tests/test-phone-assist-notifications.el -l tests/test-pinephone-openrc-init.el
+	emacs -Q --batch -L . -L tests -l tests/test-sms-server-bridge.el -f ert-run-tests-batch-and-exit
 
 pinephone-openrc-install: test-pinephone-scripts
 	deploy/pinephone/install-openrc-session.sh
@@ -227,7 +228,9 @@ test-local-deploy-restart:
 
 test-elisp: test-install-local test-phone-assist-e2e-harness
 	python3 -B tests/test-simulation-startup.py
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-send-draft.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-dtach-shell.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
+	@test_home=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$test_home"' EXIT HUP INT TERM; \
+	HOME="$$test_home" emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-send-draft.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-dtach-shell.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
 
 .PHONY: test-desktop-assist
 test-desktop-assist: test-install-desktop

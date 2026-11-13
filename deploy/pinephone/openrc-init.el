@@ -234,14 +234,6 @@ every agent-config load."
 (defvar emacsos-call--call-owner nil
   "Unique owner of the tracked call or pathless recovery state.")
 
-(defun emacsos-pinephone-sms-feedback (owner generation _path)
-  "Record and request feedback for a trusted raw modem SMS event.
-This signal does not establish message novelty or complete multipart receipt."
-  (when (and (equal owner emacsos-call--current-owner)
-             (= generation emacsos-call--owner-generation))
-    (emacsos-notifications-feedback
-     'sms "Raw modem message event; novelty and completion unverified")))
-
 (defun emacsos-sms-transport-status ()
   "Show whether the configured SMS handoff transport is running."
   (interactive)
@@ -251,6 +243,111 @@ This signal does not establish message novelty or complete multipart receipt."
                  (insert-file-contents "/run/emacsos-ui/sms-status" nil 0 256)
                  (string-trim (buffer-string)))
              (file-error "SMS transport is not configured or has not started."))))
+
+(defvar emacsos-pinephone-sms-alert-process nil
+  "Current local completed-message eligibility query; never a server request.")
+
+(defvar emacsos-pinephone-sms-alert-paths nil
+  "Bounded transient trusted Added hints; never receipt identities.")
+
+(defun emacsos-pinephone-sms-alert-finished (process _event)
+  "Use only the current helper's committed local alert identities."
+  (when (and (eq process emacsos-pinephone-sms-alert-process)
+             (memq (process-status process) '(exit signal)))
+    (setq emacsos-pinephone-sms-alert-process nil)
+    (let ((buffer (process-buffer process)))
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (unless (zerop (process-exit-status process)) (error "Alert query failed"))
+                (let* ((value (with-current-buffer buffer
+                                (json-parse-string (buffer-string) :object-type 'alist :array-type 'list)))
+                       (ids (alist-get 'alerts value)))
+                  (unless (and (equal (mapcar #'car value) '(alerts)) (listp ids)
+                               (<= (length ids) 4)
+                               (cl-every (lambda (id) (and (stringp id)
+                                                          (string-match-p "\\`[0-9a-f]\\{32\\}\\'" id))) ids)
+                               (= (length ids) (length (delete-dups (copy-sequence ids)))))
+                    (error "Invalid alert identities"))
+                  (dolist (id ids)
+                    (condition-case nil
+                        (progn
+                          (emacsos-notifications--record 'sms "Completed incoming SMS" "recorded" id)
+                          (emacsos-notifications-feedback 'sms "Completed incoming SMS" id))
+                      (error (message "SMS alert could not be logged; vibration not requested."))))))
+            (error (message "Local SMS alert query unavailable.")))
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (when (fboundp 'emacsos-sms-chat-refresh)
+        (emacsos-sms-chat-refresh))
+      (when emacsos-pinephone-sms-alert-paths
+        (emacsos-pinephone-sms-alert-sync)))))
+
+(defun emacsos-pinephone-sms-alert-sync (&optional path)
+  "Asynchronously collect and claim completed local SMS, even without a server."
+  (when (and (stringp path)
+             (string-match-p "\\`/org/freedesktop/ModemManager1/SMS/[0-9]+\\'" path))
+    (setq emacsos-pinephone-sms-alert-paths
+          (cons path (delete path emacsos-pinephone-sms-alert-paths)))
+    (when (> (length emacsos-pinephone-sms-alert-paths) 64)
+      (setcdr (nthcdr 63 emacsos-pinephone-sms-alert-paths) nil)))
+  (unless emacsos-pinephone-sms-alert-process
+    (let ((hint (pop emacsos-pinephone-sms-alert-paths))
+          (buffer (generate-new-buffer " *emacsos-sms-alerts*")) process)
+      (condition-case nil
+          (progn
+            (setq process (make-process
+                           :name "emacsos-sms-alerts" :buffer buffer :noquery t
+                           :connection-type 'pipe :coding 'utf-8-unix :sentinel #'ignore
+                           :command '("/usr/bin/doas" "-n" "/usr/local/sbin/emacsos-openrc-sms")
+                           :filter (lambda (_ text)
+                                     (when (buffer-live-p buffer)
+                                       (with-current-buffer buffer
+                                         (insert (substring text 0 (min (length text)
+                                                                       (max 0 (- 4096 (buffer-size)))))))))))
+            (setq emacsos-pinephone-sms-alert-process process)
+            (process-send-string process (json-encode
+                                          (append '((operation . "alerts"))
+                                                  (when hint `((path . ,hint))))))
+            (process-send-eof process)
+            (set-process-sentinel process #'emacsos-pinephone-sms-alert-finished)
+            (when (memq (process-status process) '(exit signal))
+              (run-at-time 0 nil #'emacsos-pinephone-sms-alert-finished process "finished"))
+            (run-at-time 35 nil (lambda () (when (process-live-p process) (delete-process process)))))
+        (error
+         (setq emacsos-pinephone-sms-alert-process nil)
+         (when (process-live-p process) (delete-process process))
+         (when (buffer-live-p buffer) (kill-buffer buffer))
+         (message "Local SMS alert query could not start."))))))
+
+(defun emacsos-pinephone-sms-added (owner generation path)
+  "Prompt local collection for trusted SMS signals; never buzz from raw Added."
+  (when (and (equal owner emacsos-call--current-owner)
+             (= generation emacsos-call--owner-generation))
+    (emacsos-pinephone-sms-alert-sync path)))
+
+(defvar emacsos-pinephone-sms-completed-handle nil
+  "Persistent completed-SMS signal observation, not a per-message subscription.")
+
+(defun emacsos-pinephone-sms-properties-changed (interface changed _invalidated)
+  "Hint collection when the current modem completes a multipart SMS."
+  (let ((owner (emacsos-call--event-owner)))
+    (when (and (emacsos-call--valid-owner-p owner)
+               (equal owner emacsos-call--current-owner)
+               (equal interface "org.freedesktop.ModemManager1.Sms")
+               (listp changed)
+               (equal (emacsos-call--snapshot-value changed "State") 3))
+      (emacsos-pinephone-sms-added owner emacsos-call--owner-generation
+                                 (emacsos-call--event-path)))))
+
+(defun emacsos-pinephone-register-sms-completion ()
+  "Observe completion without waiting for a retained-history scan."
+  (unless emacsos-pinephone-sms-completed-handle
+    (condition-case nil
+        (setq emacsos-pinephone-sms-completed-handle
+              (emacsos-call--register-signal-bounded
+               :system nil nil "org.freedesktop.DBus.Properties" "PropertiesChanged"
+               #'emacsos-pinephone-sms-properties-changed))
+      (error (message "SMS completion observation unavailable; periodic collection remains.")))))
 
 (defun emacsos-pinephone-sms-result (status success)
   "Return the strict terminal SMS STATUS, or conservative unknown."
@@ -290,7 +387,7 @@ This signal does not establish message novelty or complete multipart receipt."
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))))))
 
-(defun emacsos-pinephone-sms-operation (number body completion)
+(defun emacsos-pinephone-sms-operation-local (number body completion &optional message-id)
   "Send NUMBER and BODY to the fixed root helper through bounded stdin."
   (let ((buffer (generate-new-buffer " *emacsos-sms*"))
         (stderr-buffer (generate-new-buffer " *emacsos-sms-stderr*"))
@@ -312,7 +409,8 @@ This signal does not establish message novelty or complete multipart receipt."
                               proc event completion stderr-buffer))))
           (process-send-string
            process
-           (json-encode `((number . ,number) (text . ,body))))
+           (json-encode (append `((number . ,number) (text . ,body))
+                                (when message-id `((message_id . ,message-id))))))
           (process-send-eof process)
           "pending: SMS requested")
       (error
@@ -320,6 +418,36 @@ This signal does not establish message novelty or complete multipart receipt."
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
        "unknown:dbus-unavailable"))))
+
+(defun emacsos-pinephone-sms-operation (number body completion)
+  "Send local SMS normally; server-linked SMS first acknowledges exact physical approval."
+  (let ((proposal-id emacsos-sms--proposal-id)
+        (encoded-context emacsos-sms--context)
+        (context (and (fboundp 'emacsos-assist-web--sms-context)
+                      (emacsos-assist-web--sms-context emacsos-sms--context))))
+    (setq emacsos-sms--attempt-id (if context (alist-get 'id context) proposal-id))
+    (if (not context)
+        (emacsos-pinephone-sms-operation-local number body completion proposal-id)
+      (if (not (and (equal number (alist-get 'number context))
+                    (equal body (alist-get 'text context))))
+          "not-sent:invalid-input"
+        (emacsos-assist-web--sms-decision
+         context "approve"
+         (lambda (value error)
+           (cond
+            ((not (and (eq emacsos-sms--state 'sending)
+                       (equal proposal-id emacsos-sms--proposal-id)
+                       (equal encoded-context emacsos-sms--context)))
+             (funcall completion "unknown:dbus-unavailable"))
+            (error (funcall completion "not-sent:busy"))
+            (t
+             (if (equal (alist-get 'state value) "approved")
+                 (let ((result (emacsos-pinephone-sms-operation-local number body completion (alist-get 'id context))))
+                   (unless (string-prefix-p "pending:" result) (funcall completion result)))
+               (funcall completion (pcase (alist-get 'state value)
+                                     ("sent" "sent") ("unknown" "unknown:dbus-unavailable")
+                                     (_ "not-sent:busy"))))))))
+        "pending: phone approval requested"))))
 
 (defun emacsos-pinephone-call-result (operation status success)
   "Normalize helper STATUS, preserving uncertain dial and answer identity."
@@ -1185,7 +1313,10 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (require 'phone-assist-notifications)
   (emacsos-phone-notifications-start)
   (require 'os)
-  (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-feedback)
+  (add-hook 'emacsos-call-sms-added-functions #'emacsos-pinephone-sms-added)
+  (emacsos-pinephone-register-sms-completion)
+  (emacsos-pinephone-sms-alert-sync)
+  (run-at-time 30 30 #'emacsos-pinephone-sms-alert-sync)
   (require 'swipe-learning)
   (define-key emacsos-command-map (kbd "k") #'emacsos-pinephone-toggle-keyboard)
   (define-key emacsos-command-map (kbd "b") #'emacsos-firefox-start)

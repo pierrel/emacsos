@@ -775,7 +775,8 @@
                    '(nil "Too many Assist Web requests are already running")))))
 
 (ert-deftest test-assist-web-git-typed-malformed-denial-precedes-json-parse ()
-  (let ((emacsos-assist-web--requests nil)
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (emacsos-assist-web--requests nil)
         (emacsos-assist-web--thread-id "thread-1")
         typed legacy observed)
     (cl-letf (((symbol-function 'emacsos-assist-web--read-token)
@@ -3515,7 +3516,18 @@ server clears only flags for a view that is still current."
               (concat
                (emacsos-assist-web--isolate-display-text "مرحبا #1") "\n"
                (emacsos-assist-web--isolate-display-text "مستودع · ready")
-               "   #2\n"))))))
+               "   #2\n\n")))
+      (let* ((metadata (length (emacsos-assist-web--isolate-display-text "مستودع · ready")))
+             (metadata-start
+              (+ (point-min) (length (emacsos-assist-web--isolate-display-text "مرحبا #1")) 1)))
+        (should
+         (equal (get-text-property metadata-start 'face)
+                'emacsos-assist-web-thread-metadata-face))
+        (should
+         (eq (get-text-property (+ metadata-start metadata) 'face)
+             nil)))
+        (should
+         (eq (get-text-property (point-min) 'face) nil)))))
 
 (ert-deftest test-assist-web-native-list-opens-the-exact-id-at-point ()
   (let* ((a '((id . "thread-a") (description . "Same")
@@ -3717,7 +3729,8 @@ server clears only flags for a view that is still current."
       (should-not emacsos-assist-web--in-flight))))
 
 (ert-deftest test-assist-web-new-thread-saves-canonical-state-before-removing-local-draft ()
-  (let ((emacsos--assist-active-surface nil) callback events)
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (emacsos--assist-active-surface nil) callback events)
     (with-temp-buffer
       (emacsos-assist-web-mode)
       (setq emacsos-assist-web--thread-id nil
@@ -4251,20 +4264,21 @@ server clears only flags for a view that is still current."
           (kill-buffer " *approval keyboard test*"))))))
 
 (ert-deftest test-assist-web-approval-old-post-callback-preserves-new-preview ()
-  (with-temp-buffer
-    (emacsos-assist-web-approval-mode)
-    (setq emacsos-assist-web--thread-id "thread-1"
-          emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
-    (let (callback)
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (_method _path _data fn &rest _) (setq callback fn))))
-        (emacsos-assist-web--submit-approval "approve"))
-      (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
-      (setf (alist-get 'token emacsos-assist-web--approval) "different-proposal-token-123456")
-      (emacsos-assist-web--render-approval)
-      (funcall callback nil "old request failed")
-      (should (string-match-p "Email awaiting approval" (buffer-string)))
-      (should-not (string-match-p "Decision not confirmed" (buffer-string))))))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (let (callback)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _data fn &rest _) (setq callback fn))))
+          (emacsos-assist-web--submit-approval "approve"))
+        (setq emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+        (setf (alist-get 'token emacsos-assist-web--approval) "different-proposal-token-123456")
+        (emacsos-assist-web--render-approval)
+        (funcall callback nil "old request failed")
+        (should (string-match-p "Email awaiting approval" (buffer-string)))
+        (should-not (string-match-p "Decision not confirmed" (buffer-string)))))))
 
 (ert-deftest test-assist-web-approval-editor-returns-to-full-review ()
   (with-temp-buffer
@@ -4342,24 +4356,25 @@ server clears only flags for a view that is still current."
       (should (equal opened "https://mail.google.com/mail/u/0/#all/opaque%20id%3F%23%C3%A9")))))
 
 (ert-deftest test-assist-web-approval-failure-requires-fresh-preview ()
-  (with-temp-buffer
-    (emacsos-assist-web-approval-mode)
-    (setq emacsos-assist-web--thread-id "thread-1"
-          emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
-    (emacsos-assist-web--render-approval)
-    (let (payload)
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (_method _path data callback &rest _)
-                   (setq payload data)
-                   (funcall callback nil "request timed out"))))
-        (emacsos-assist-web--submit-approval "approve"))
-      (should (equal (alist-get 'token payload)
-                     (alist-get 'token test-assist-web--email-approval)))
-      (should-not (plist-get (emacsos-assist-web--thread-safety-record "thread-1")
-                             :approval-pending))
-      (should (string-match-p "Decision not confirmed" (buffer-string)))
-      (should-not (string-match-p "Approve" (buffer-string)))
-      (should (test-assist-web--approval-button "Refresh proposal")))))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (emacsos-assist-web-approval-mode)
+      (setq emacsos-assist-web--thread-id "thread-1"
+            emacsos-assist-web--approval (copy-tree test-assist-web--email-approval))
+      (emacsos-assist-web--render-approval)
+      (let (payload)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path data callback &rest _)
+                     (setq payload data)
+                     (funcall callback nil "request timed out"))))
+          (emacsos-assist-web--submit-approval "approve"))
+        (should (equal (alist-get 'token payload)
+                       (alist-get 'token test-assist-web--email-approval)))
+        (should-not (plist-get (emacsos-assist-web--thread-safety-record "thread-1")
+                               :approval-pending))
+        (should (string-match-p "Decision not confirmed" (buffer-string)))
+        (should-not (string-match-p "Approve" (buffer-string)))
+        (should (test-assist-web--approval-button "Refresh proposal"))))))
 
 (ert-deftest test-assist-web-approval-rejects-spoofing-and-mismatched-message-ids ()
   (let ((proposal (copy-tree test-assist-web--email-approval)))
@@ -4378,19 +4393,20 @@ server clears only flags for a view that is still current."
 
 (ert-deftest test-assist-web-old-approval-get-cannot-clear-new-denial ()
   "An older preview response cannot reopen a proposal after canonical denial."
-  (with-temp-buffer
-    (emacsos-assist-web-mode)
-    (setq emacsos-assist-web--thread-id "thread-1")
-    (let (callback)
-      (cl-letf (((symbol-function 'emacsos-assist-web--request)
-                 (lambda (_method _path _payload cb &rest _) (setq callback cb))))
-        (emacsos-assist-web-review-approval (current-buffer)))
-      (cl-incf emacsos-assist-web--auth-epoch)
-      (setq emacsos-assist-web--denied t)
-      (funcall callback `((thread_id . "thread-1")
-                          (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
-      (should emacsos-assist-web--denied)
-      (should-not (get-buffer "*assist Approval thread-1*")))))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (emacsos-assist-web-mode)
+      (setq emacsos-assist-web--thread-id "thread-1")
+      (let (callback)
+        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload cb &rest _) (setq callback cb))))
+          (emacsos-assist-web-review-approval (current-buffer)))
+        (cl-incf emacsos-assist-web--auth-epoch)
+        (setq emacsos-assist-web--denied t)
+        (funcall callback `((thread_id . "thread-1")
+                            (proposal . ,(copy-tree test-assist-web--email-approval))) nil)
+        (should emacsos-assist-web--denied)
+        (should-not (get-buffer "*assist Approval thread-1*"))))))
 
 (ert-deftest test-assist-web-approval-rejects-multiline-headers ()
   "Email proposal headers cannot insert trusted field labels or body lines."
@@ -4404,7 +4420,8 @@ server clears only flags for a view that is still current."
 
 (ert-deftest test-assist-web-empty-refresh-closes-stale-approval ()
   "An authoritative empty preview removes the old decision controls."
-  (let ((source (generate-new-buffer " *empty approval source*"))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (source (generate-new-buffer " *empty approval source*"))
         (preview (get-buffer-create "*assist Approval thread-1*")))
     (unwind-protect
         (progn
@@ -4459,7 +4476,8 @@ server clears only flags for a view that is still current."
 
 (ert-deftest test-assist-web-empty-old-refresh-preserves-newer-peer-proposal ()
   "An empty response can close only the preview present when its read began."
-  (let ((source (generate-new-buffer " *old empty source*"))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (source (generate-new-buffer " *old empty source*"))
         (preview (get-buffer-create "*assist Approval thread-1*")) callback)
     (unwind-protect
         (progn

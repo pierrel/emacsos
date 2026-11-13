@@ -1793,16 +1793,17 @@ incoming screen."
 
 (ert-deftest emacsos-call-on-call-added-shows-already-active-call ()
   "A newly adopted active call is visible rather than badge-only."
-  (let ((emacsos-call--state nil) shown)
-    (cl-letf (((symbol-function 'emacsos-call--call-prop)
-               (lambda (_path prop)
-                 (pcase prop ("Direction" 2) ("Number" "+1999") ("State" 4))))
-              ((symbol-function 'emacsos-call--watch-call-end) #'ignore)
-              ((symbol-function 'emacsos-call--show-active)
-               (lambda (status) (setq shown status))))
-      (emacsos-call--on-call-added "/org/freedesktop/ModemManager1/Call/9")
-      (should (eq emacsos-call--state 'active))
-      (should (equal shown "In progress")))))
+  (test-call--with-ui
+    (let (shown)
+      (cl-letf (((symbol-function 'emacsos-call--call-prop)
+                 (lambda (_path prop)
+                   (pcase prop ("Direction" 2) ("Number" "+1999") ("State" 4))))
+                ((symbol-function 'emacsos-call--watch-call-end) #'ignore)
+                ((symbol-function 'emacsos-call--show-active)
+                 (lambda (status) (setq shown status))))
+        (emacsos-call--on-call-added "/org/freedesktop/ModemManager1/Call/9")
+        (should (eq emacsos-call--state 'active))
+        (should (equal shown "In progress"))))))
 
 (ert-deftest emacsos-call-on-call-added-does-not-bind-requested-attempt ()
   "Only the attempt-bound helper result may supply a requested call's path."

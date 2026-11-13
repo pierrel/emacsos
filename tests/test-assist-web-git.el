@@ -434,7 +434,8 @@
 
 (ert-deftest test-assist-web-git-denial-survives-new-request-and-dead-origin ()
   "A newer request is not authority; a live peer still receives denial."
-  (let ((origin (generate-new-buffer " *assist-git-dead-origin*"))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (origin (generate-new-buffer " *assist-git-dead-origin*"))
         (peer (generate-new-buffer " *assist-git-dead-peer*"))
         owner)
     (unwind-protect
@@ -460,52 +461,56 @@
 
 (ert-deftest test-assist-web-git-reauthorization-supersedes-old-denial ()
   "Only a validated canonical reauthorization retires the old Git GET."
-  (with-temp-buffer
-    (setq-local emacsos-assist-web--thread-id "thread-auth-renew")
-    (let* ((record (emacsos-assist-web--thread-safety-record
-                    "thread-auth-renew" t))
-           (owner (cons record 1))
-           (emacsos-assist-web--current-canonical-get-owner (cons record 2)))
-      (setf (plist-get record :denial) 403)
-      (setq emacsos-assist-web--denied t)
-      (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
-      (should-not (plist-get record :denial))
-      (should-not (emacsos-assist-web--http-access-status
-                   (current-buffer) "GET" "threads/thread-auth-renew/git"
-                   403 nil nil "thread-auth-renew" owner))
-      (should-not emacsos-assist-web--denied))))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "thread-auth-renew")
+      (let* ((record (emacsos-assist-web--thread-safety-record
+                      "thread-auth-renew" t))
+             (owner (cons record 1))
+             (emacsos-assist-web--current-canonical-get-owner (cons record 2)))
+        (setf (plist-get record :denial) 403)
+        (setq emacsos-assist-web--denied t)
+        (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
+        (should-not (plist-get record :denial))
+        (should-not (emacsos-assist-web--http-access-status
+                     (current-buffer) "GET" "threads/thread-auth-renew/git"
+                     403 nil nil "thread-auth-renew" owner))
+        (should-not emacsos-assist-web--denied)))))
 
 (ert-deftest test-assist-web-git-new-canonical-success-supersedes-old-get ()
   "A validated canonical GET supersedes an old Git denial even if none landed."
-  (with-temp-buffer
-    (setq-local emacsos-assist-web--thread-id "thread-auth-rotate")
-    (let* ((record (emacsos-assist-web--thread-safety-record
-                    "thread-auth-rotate" t))
-           (owner (cons record 1))
-           (emacsos-assist-web--current-canonical-get-owner (cons record 2)))
-      (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
-      (should-not (emacsos-assist-web--http-access-status
-                   (current-buffer) "GET" "threads/thread-auth-rotate/git"
-                   401 nil nil "thread-auth-rotate" owner))
-      (should-not emacsos-assist-web--denied))))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "thread-auth-rotate")
+      (let* ((record (emacsos-assist-web--thread-safety-record
+                      "thread-auth-rotate" t))
+             (owner (cons record 1))
+             (emacsos-assist-web--current-canonical-get-owner (cons record 2)))
+        (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
+        (should-not (emacsos-assist-web--http-access-status
+                     (current-buffer) "GET" "threads/thread-auth-rotate/git"
+                     401 nil nil "thread-auth-rotate" owner))
+        (should-not emacsos-assist-web--denied)))))
 
 (ert-deftest test-assist-web-git-newer-denial-survives-older-canonical-success ()
   "A canonical GET started first cannot retire a later Git GET denial."
-  (with-temp-buffer
-    (setq-local emacsos-assist-web--thread-id "thread-auth-later-denial")
-    (let* ((record (emacsos-assist-web--thread-safety-record
-                    "thread-auth-later-denial" t))
-           (emacsos-assist-web--current-canonical-get-owner (cons record 1))
-           (git-owner (cons record 2)))
-      (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
-      (should (emacsos-assist-web--http-access-status
-               (current-buffer) "GET" "threads/thread-auth-later-denial/git"
-               403 nil nil "thread-auth-later-denial" git-owner))
-      (should (eq emacsos-assist-web--denied t)))))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "thread-auth-later-denial")
+      (let* ((record (emacsos-assist-web--thread-safety-record
+                      "thread-auth-later-denial" t))
+             (emacsos-assist-web--current-canonical-get-owner (cons record 1))
+             (git-owner (cons record 2)))
+        (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
+        (should (emacsos-assist-web--http-access-status
+                 (current-buffer) "GET" "threads/thread-auth-later-denial/git"
+                 403 nil nil "thread-auth-later-denial" git-owner))
+        (should (eq emacsos-assist-web--denied t))))))
 
 (ert-deftest test-assist-web-git-denied-get-fences-late-status-callback ()
   "A Git GET denial fences same-thread peers before a late success arrives."
-  (let ((source (generate-new-buffer " *assist-git-auth-source*"))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (source (generate-new-buffer " *assist-git-auth-source*"))
         (peer (generate-new-buffer " *assist-git-auth-peer*"))
         (view (generate-new-buffer " *assist-git-auth-view*"))
         callback)
@@ -786,7 +791,8 @@
 
 (ert-deftest test-assist-web-git-completed-view-rerenders-on-later-denial ()
   "A later canonical denial removes fresh controls from an existing Git view."
-  (let ((source (generate-new-buffer " *assist-git-denial-source*"))
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+        (source (generate-new-buffer " *assist-git-denial-source*"))
         (view (generate-new-buffer " *assist-git-denial-view*"))
         (tid "thread-status-denial-r4")
         (repo "aaaaaaaaaaaaaaaaaaaa")
