@@ -8,12 +8,11 @@ without manual Refresh. The change is concentrated in *E7 Assist Web client*;
 approvals. Stable IDs refer to [[file:architecture.org][the component map]] and its editable
 [[file:architecture.dot][diagram source]]. No new component, queue or execution authority is added.
 
-This branch is aligned with merged baseline =06cd4763=. The observer is
-unmerged and was tested/deployed in a composition containing PR #89's
-editable-draft runtime. PR #89 remains an unmerged prerequisite. Main's
-older local queue client is not a supported standalone observer runtime.
-This maintenance adds the approved baseline and refreshes documentation;
-it does not import PR #89, change feature behavior or authorize deployment.
+This branch is aligned with merged baseline
+=2b5b02285c78c3ecb7a1f4d676590112d1d7c0b9=, including PR #89's
+editable-draft runtime. PR #93 remains a separate observer change with its
+original history. The observer was already deployed with that draft runtime;
+this alignment preserves its behavior and does not authorize device changes.
 
 * Walk through the boundaries
 
@@ -56,14 +55,20 @@ resumption, stale presentation, read receipts and failed display recovery.
 The test body describes each fixture and assertion; this is deterministic
 client coverage, not behavioral model evaluation.
 
-The reviewed observer plus PR #89 previously passed 437 ERT tests and 39
-Python checks in its composed runtime. Those are historical composition
-results, not new pass claims for this baseline-aligned branch. The observer
-source's prior independent review and Copilot R4 acceptance remain evidence
-for unchanged code. Any new integration checks must name the exact tree.
+The final branch against merged PR #89 passed the ordinary full target's
+879 ERT cases and desktop target's 437 ERT cases plus 39 Python checks.
+The 22 observation fixtures are unchanged from reviewed =08c3a35= and run
+in both ERT targets. Both targets retain Main's disposable HOME isolation.
+The complete =assist-web.el= bytes match retained verified phone source
+=d01718175e15cf9952786aeffefd55a8f507e6bd=, SHA-256
+=87b74432e083f30574b92814f67b82828988026cea4cdd9cd6038f5aeb6ddf09=.
+This establishes source equivalence, not a fresh device or visible-SSE test.
+The observer's prior independent review and Copilot R4 acceptance remain
+evidence for unchanged behavior; the current merge and docs receive a
+separate proportional review without resetting review history.
 
 The feature requires the existing authenticated Assist phone API and its
 optional running-work metadata. The server owns retries/admission and its
 stream resources; no network, device, model or service operation is part of
-this baseline/documentation maintenance. A phone or visible-stream test must
+this merge/documentation maintenance. A phone or visible-stream test must
 be reported separately from local source/document checks.

@@ -1,9 +1,8 @@
 #+title: EmacsOS architecture
 
-The merged architecture baseline is =06cd476315f6f856d6e0f355af5b1396db23e8b2=.
-This branch also maps PR #93's unmerged whole-thread observer at E7. That
-observer has been deployed in a checked composition with PR #89's unmerged
-editable-draft client; neither feature is presented as merged Main behavior.
+The merged baseline is =2b5b02285c78c3ecb7a1f4d676590112d1d7c0b9=, including
+PR #89's editable-draft client. This branch maps PR #93's unmerged
+whole-thread observer at E7, already deployed in a checked composition.
 The local =/chat= path through =emacsos-server= is unaffected. Assist Web and
 the model endpoint remain external boundaries. This is a component map, not
 a function call graph. See the [[file:phone-thread-observation-review.org][E7/E8 review walkthrough]] for the branch
@@ -65,8 +64,8 @@ actions.
   Polling cannot send messages, retry a Send or approve an action. Validated
   canonical history replaces provisional text; unchanged history avoids
   redraw/cache/draft writes while settled read receipts remain revision-fenced.
-  These additions require PR #89's editable-draft runtime, not Main's older
-  queue client. [[file:../assist-web-git.el][assist-web-git.el]] retains the separate
+  These additions use the merged PR #89 editable-draft runtime.
+  [[file:../assist-web-git.el][assist-web-git.el]] retains the separate
   local Git/SSH checkout flow. E7 does not pass through E3 or create E4's
   local =assist.Thread=.
 - *E8 Assist Web service.* The external Assist service owns canonical threads,
@@ -74,6 +73,8 @@ actions.
   snapshots and provisional SSE text over its authenticated HTTPS phone API;
   =active_run= provides discovery, not permission to submit or approve work.
   E7's editable draft and cached projection are not durable server Run truth.
+  The [[file:phone-send-draft-review.org][editable draft review]] describes the merged
+  editable input and pending HTTP identity; E8 retains execution authority.
 - *E9 Model endpoint.* The local server's embedded Assist Thread selects an
   OpenAI-compatible model using =ASSIST_MODEL_URL=. Inference runs outside
   EmacsOS; E8 has its own model path.
