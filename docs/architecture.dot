@@ -16,8 +16,8 @@ digraph EmacsOS {
   E4 [label="E4  Assist embedder\nAgentSpec + checkpointed Thread"];
   E5 [label="E5  Phone callback\nEmacsBackend / eval_elisp"];
   E6 [label="E6  Config history\napply + Git versions", fillcolor="#fff4d7"];
-  E7 [label="E7  Assist Web client\nHTTPS phone API + SSE"];
-  E8 [label="E8  Assist Web service\ncanonical threads + Runs", fillcolor="#f3f3f3"];
+  E7 [label="E7  Assist Web client\nlocal drafts + observed history\nPR93 visible observation (unmerged)"];
+  E8 [label="E8  Assist Web service\ncanonical threads + Runs (external)", fillcolor="#f3f3f3"];
   E9 [label="E9  Model endpoint\nOpenAI-compatible HTTP", fillcolor="#f3f3f3"];
 
   E1 -> E2 [xlabel="local chat"];
@@ -28,5 +28,6 @@ digraph EmacsOS {
   E4 -> E6 [xlabel="config tools"];
   E4 -> E9 [xlabel="model calls"];
   E1 -> E7 [xlabel="shared threads"];
-  E7 -> E8 [xlabel="submit / observe Runs"];
+  E7 -> E8 [xlabel="HTTPS messages / snapshots / exact Run"];
+  E8 -> E7 [xlabel="canonical history + active_run / SSE", constraint=false];
 }

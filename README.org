@@ -617,6 +617,22 @@ A connected send is a separate live check.  Package references: [[https://formul
 
 * Canonical Assist Web threads
 
+Architecture and local review: [[file:docs/phone-thread-observation-review.org][E7/E8 whole-thread observation walkthrough]].
+
+A visible editable-draft thread view checks canonical history every five seconds
+when its own stream and HTTP reads are idle. Completed replies and later
+server-selected work appear without manual Refresh, including after reopening
+the view. The existing Run stream remains the provisional text source; queued
+work and approval stops stay server-owned. Hidden views make no periodic reads,
+unchanged history is not rewritten, and a thread-access denial stops automatic
+observation. The editable draft and any unconfirmed Send identity stay separate
+from a discovered server Run. This client delta requires the editable-draft
+client from PR #89; it does not support the superseded local message queue.
+The server snapshot's optional =active_run= metadata enables discovery of
+running work. Without that metadata, canonical history can still update but a
+reopened view cannot attach to provisional text automatically.
+
+
 Assist Web thread buffers use the authenticated HTTPS phone API and SSE only as
 a provisional observation: the final canonical Assist snapshot remains truth.
 JSON requests normalize Unicode text and already encoded UTF-8 string values

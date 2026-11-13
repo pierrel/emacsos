@@ -1,11 +1,12 @@
 #+title: EmacsOS architecture
 
-This is the EmacsOS component map at merged =main=
-=72be51f2fb9579b5ca471944ddc313ce1fbcef6e=. It follows the phone's two
-agent paths: local =/chat= through =emacsos-server=, and the client for
-canonical Assist Web threads. The client and server code share this repo, but
-the Assist package, Assist Web service and model endpoint are external
-boundaries. This is a component map, not a function call graph.
+The merged baseline is =2b5b02285c78c3ecb7a1f4d676590112d1d7c0b9=, including
+PR #89's editable-draft client. This branch maps PR #93's unmerged
+whole-thread observer at E7, already deployed in a checked composition.
+The local =/chat= path through =emacsos-server= is unaffected. Assist Web and
+the model endpoint remain external boundaries. This is a component map, not
+a function call graph. See the [[file:phone-thread-observation-review.org][E7/E8 review walkthrough]] for the branch
+scope, runtime prerequisite and evidence limits.
 
 [[file:architecture.svg]]
 
@@ -56,18 +57,24 @@ actions.
 
 ** Shared Assist Web threads
 
-- *E7 Assist Web client.* [[file:../assist-web.el][assist-web.el]] calls the
-  authenticated HTTPS phone API, observes Run status and text over SSE, and
-  reconciles canonical snapshots. [[file:../assist-web-git.el][assist-web-git.el]]
-  handles the separate local Git/SSH thread checkout flow. This path does not
-  pass through E3 or create E4's local =assist.Thread=.
-- *E8 Assist Web service.* The external Assist service owns the canonical
-  thread, Run, approval and Git authority for E7. Its phone API and SSE are
-  the cross-repository contract; the EmacsOS client holds a local projection,
-  not durable Run truth.
-  The [[file:phone-send-draft-review.org][editable draft review]] describes E7's
-  proposed replacement of the local accepted-Run FIFO with one editable draft
-  and an HTTP retry identity; E8 retains admission and execution authority.
+- *E7 Assist Web client.* [[file:../assist-web.el][assist-web.el]] owns the editable
+  text, private local draft/cache and transient observation state. PR #93 adds
+  visible-view canonical polling and discovers current work through E8's
+  optional =active_run= field, then uses the existing exact-Run read and SSE.
+  Polling cannot send messages, retry a Send or approve an action. Validated
+  canonical history replaces provisional text; unchanged history avoids
+  redraw/cache/draft writes while settled read receipts remain revision-fenced.
+  These additions use the merged PR #89 editable-draft runtime.
+  [[file:../assist-web-git.el][assist-web-git.el]] retains the separate
+  local Git/SSH checkout flow. E7 does not pass through E3 or create E4's
+  local =assist.Thread=.
+- *E8 Assist Web service.* The external Assist service owns canonical threads,
+  Run execution/queuing, approvals and Git authority. E7 receives canonical
+  snapshots and provisional SSE text over its authenticated HTTPS phone API;
+  =active_run= provides discovery, not permission to submit or approve work.
+  E7's editable draft and cached projection are not durable server Run truth.
+  The [[file:phone-send-draft-review.org][editable draft review]] describes the merged
+  editable input and pending HTTP identity; E8 retains execution authority.
 - *E9 Model endpoint.* The local server's embedded Assist Thread selects an
   OpenAI-compatible model using =ASSIST_MODEL_URL=. Inference runs outside
   EmacsOS; E8 has its own model path.
@@ -75,7 +82,8 @@ actions.
 * Device services and durable handoffs
 
 This second view shows the phone-side SMS, call and notification boundaries on
-the same merged EmacsOS =main=. E8 keeps its meaning from the first view.
+the merged EmacsOS baseline. The PR #93 overlay changes only E7/E8 in the
+first view. E8 keeps its meaning from the first view.
 The SMS journal is the phone's durable authority for modem attempts and
 receipts; Assist receives a later handoff. The two directions between E14 and
 E8 are labeled separately in the key.
