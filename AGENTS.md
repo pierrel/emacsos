@@ -23,6 +23,16 @@ phone**. There is **no small-model eval harness** here — the live phone is the
   changes, plus real-phone smoke after a boot-path refactor. Unit tests do not
   catch every entry-point regression; the Assist `manage.web` package split
   crash-looped its service until `__main__.py` was added.
+- Keep tests independent of the user's HOME/cache and real devices or services.
+  `make test-elisp` runs ERT with a disposable HOME; supply synthetic caches for
+  cache-specific cases rather than removing cached/error-path assertions.
+- When adding process-wide state or asynchronous reads, update the existing
+  complete test fixtures. Bind shared state per test, including cleanup after
+  assertion failure, while preserving intentional sharing between buffers in
+  that test. Prefer those fixtures over partial ad-hoc stubs. Exercise both
+  callback success and failure/stale-owner cases. For shared-state changes, run
+  causal producer/consumer tests in both orders and the combined suite; isolated
+  passes alone do not establish test independence.
 - Load-bearing paths include `chat.el`, `os.el`, `network.el`, the phone/server
   wire protocol, `emacsos_server/app.py`, the simulator, deploy plumbing
   (`Makefile` `phone-install`/`local-deploy`, `deploy/`) and how Assist is loaded.
