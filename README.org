@@ -386,6 +386,19 @@ thread acknowledges the displayed snapshot only while its buffer has a visible
 window. Cached views, hidden-buffer rendering and background probes
 do not clear unread state; a newer server notification survives a stale receipt.
 
+=C-c s= privately adds an encrypted repository login. It masks the username,
+password and repository unlock phrase in the minibuffer. The phrase is entered
+once per thread and cached only in that thread's host-private directory; use
+=C-c u= to unlock an existing repository store in another thread.
+When the agent requests a new login using only its public site and label, the
+thread view offers an =Add requested login= button for those same masked prompts.
+The destination is fixed to the current agent request; a stale button cannot
+save to a later request. The store's ciphertext is committed in the server
+checkout and normally published on the
+thread branch. Merge the published branch through the ordinary Git flow before
+expecting a new thread to see its records. If the server reports a result branch
+after Git divergence, inspect and merge that branch instead.
+
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
 =M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
 you return to the present.  Recall never sends a message.  Ordinary undo and

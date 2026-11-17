@@ -67,7 +67,11 @@ actions.
   These additions use the merged PR #89 editable-draft runtime.
   [[file:../assist-web-git.el][assist-web-git.el]] retains the separate
   local Git/SSH checkout flow. E7 does not pass through E3 or create E4's
-  local =assist.Thread=.
+  local =assist.Thread=. E7's =C-c s= and =C-c u= commands accept masked
+  credentials and an unlock phrase, then send them through E8's authenticated
+  HTTPS phone API without adding them to the editable draft or transcript. A
+  public agent request in the authenticated thread snapshot gives E7 an Add
+  requested login button that opens those same private prompts.
 - *E8 Assist Web service.* The external Assist service owns canonical threads,
   Run execution/queuing, approvals and Git authority. E7 receives canonical
   snapshots and provisional SSE text over its authenticated HTTPS phone API;

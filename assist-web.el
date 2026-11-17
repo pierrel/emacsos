@@ -33,6 +33,75 @@
 (require 'url-util)
 (require 'wid-edit)
 
+(defun emacsos-assist-web-secret-unlock ()
+  "Privately unlock this thread's repository credentials for later use."
+  (interactive)
+  (unless emacsos-assist-web--thread-id
+    (user-error "Open a repository thread first"))
+  (let ((passphrase (read-passwd "Repository secret phrase: "))
+        (tid emacsos-assist-web--thread-id))
+    (unwind-protect
+        (emacsos-assist-web--request
+         "POST" (format "threads/%s/secrets/unlock" tid)
+         `((passphrase . ,passphrase))
+         (lambda (_value error)
+           (message "%s" (if error "Secret unlock failed"
+                            "Secrets unlocked for this thread"))))
+      (clear-string passphrase))))
+
+(defun emacsos-assist-web-secret-add (&optional request)
+  "Privately add one encrypted login, using public REQUEST when supplied."
+  (interactive)
+  (unless emacsos-assist-web--thread-id
+    (user-error "Open a repository thread first"))
+  (let ((tid emacsos-assist-web--thread-id)
+        (origin (current-buffer)))
+    (emacsos-assist-web--request
+     "GET" (format "threads/%s/secrets" tid) nil
+     (lambda (status error)
+       ;; The HTTP callback may run in a process sentinel; prompt on the next
+       ;; command-loop turn after it has released the transport buffer.
+       (run-at-time
+        0 nil
+        (lambda ()
+          (when (and (buffer-live-p origin)
+                     (equal tid (buffer-local-value
+                                 'emacsos-assist-web--thread-id origin)))
+            (with-current-buffer origin
+              (if error
+                  (message "Secret store unavailable")
+                (let ((label (if request (alist-get 'label request)
+                               (read-string "Login label: ")))
+                      (login-url (if request (alist-get 'login_page request)
+                                   (read-string "HTTPS login origin and path: ")))
+                      username password passphrase)
+                  (unwind-protect
+                      (progn
+                        (setq username (read-passwd "Username (masked): ")
+                              password (read-passwd "Password: "))
+                        (unless (alist-get 'unlocked status)
+                          (setq passphrase (read-passwd "Repository secret phrase: ")))
+                        (emacsos-assist-web--request
+                         "POST" (format "threads/%s/secrets" tid)
+                         (append `((label . ,label) (login_url . ,login-url)
+                                   (username . ,username) (password . ,password))
+                                 (when passphrase `((passphrase . ,passphrase)))
+                                 (when request `((request_id . ,(alist-get 'id request)))))
+                         (lambda (value problem)
+                           (message "%s"
+                                    (if (and (not problem) (alist-get 'id value))
+                                        (if (alist-get 'result_branch value)
+                                            "Encrypted login committed on a result branch; inspect Git status"
+                                          "Encrypted login saved to this thread's Git branch")
+                                      "Encrypted login was not confirmed; inspect Git status"))
+                           (when (and request (not problem) (alist-get 'id value)
+                                      (buffer-live-p origin))
+                             (with-current-buffer origin
+                               (emacsos-assist-web-refresh-thread))))))
+                    (when username (clear-string username))
+                    (when password (clear-string password))
+                    (when passphrase (clear-string passphrase)))))))))))))
+
 (declare-function emacsos--render-page "os")
 (declare-function emacsos--fit-pixel-width "os" (text pixels &optional face))
 (defvar url-http-content-type)
@@ -1048,6 +1117,20 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
                      (alist-get 'thread value)))
         (messages (and (emacsos-assist-web--object-p value)
                        (alist-get 'messages value))))
+    (when (emacsos-assist-web--object-p thread)
+      (let ((request (alist-get 'private_entry_request thread)))
+        (unless (or (null request)
+                    (and (emacsos-assist-web--object-p request)
+                         (stringp (alist-get 'id request))
+                         (string-match-p "\\`[0-9a-f]\\{32\\}\\'"
+                                         (alist-get 'id request))
+                         (emacsos-assist-web--valid-catalog-text-p
+                          (alist-get 'label request))
+                         (<= (length (alist-get 'label request)) 80)
+                         (let ((page (alist-get 'login_page request)))
+                           (and (stringp page) (<= (length page) 2048)
+                                (string-match-p "\\`https://[^[:space:]]+\\'" page)))))
+          (setf (alist-get 'private_entry_request thread) nil))))
     (unless (and (emacsos-assist-web--object-p thread)
                  (assq 'messages value)
                  (emacsos-assist-web--valid-id-p (alist-get 'id thread))
@@ -3280,6 +3363,17 @@ Return whether its independent editable draft was saved locally."
                  "Review pending action" "Approvals and results") 'follow-link t
              'action (lambda (_) (emacsos-assist-web-review-approval source)))
             (insert "\n\n")))
+        (when-let ((request (alist-get 'private_entry_request thread)))
+          (let ((source (current-buffer)))
+            (insert-text-button
+             (format "Add requested login: %s (%s)"
+                     (alist-get 'label request) (alist-get 'login_page request))
+             'follow-link t
+             'action (lambda (_)
+                       (when (buffer-live-p source)
+                         (with-current-buffer source
+                           (emacsos-assist-web-secret-add request)))))
+            (insert "\n\n")))
         (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) 16))
               (emacsos-conversation--image-cache (make-hash-table :test 'equal))
               (emacsos--chat-presentation-max-bytes
@@ -4563,6 +4657,10 @@ ordinary interactive `find-file' prompt and navigation."
             #'emacsos-assist-web-previous-message)
 (define-key emacsos-assist-web-mode-map (kbd "C-c f")
             #'emacsos-assist-web-next-message)
+(define-key emacsos-assist-web-mode-map (kbd "C-c s")
+            #'emacsos-assist-web-secret-add)
+(define-key emacsos-assist-web-mode-map (kbd "C-c u")
+            #'emacsos-assist-web-secret-unlock)
 
 (define-key emacsos-assist-web-mode-map (kbd "RET")
             #'emacsos-conversation-activate-or-newline)
