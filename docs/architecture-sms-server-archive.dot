@@ -1,0 +1,39 @@
+digraph SMSArchiveProposal {
+  graph [label="SMS remote archive ownership · merged vs proposed", labelloc=t,
+         fontname="DejaVu Sans", fontsize=22, bgcolor="white", rankdir=LR,
+         pad=0.25, nodesep=0.45, ranksep=0.65, splines=polyline];
+  node [shape=box, style="rounded,filled", color="#34506a",
+        fillcolor="#f2f7fc", fontname="DejaVu Sans", fontsize=13,
+        margin="0.16,0.12"];
+  edge [fontname="DejaVu Sans", fontsize=10, color="#49647d", arrowsize=0.7];
+
+  subgraph cluster_current {
+    label="Merged · 06cd476 / ecb665c";
+    color="#aab8c5";
+    c13 [label="E13 Phone journal\nlocal receipt + attempt", fillcolor="#fff4d7"];
+    c14 [label="E14 Phone forward\nreceipt + send listener"];
+    c8 [label="E8 Assist Web\nremote archive + frozen admission + Runs", fillcolor="#f3f3f3"];
+    c3 [label="E3 EmacsOS server\nlocal chat; no SMS archive", fillcolor="#f3f3f3"];
+    c13 -> c14 [label="unACKed receipt"];
+    c14 -> c8 [label="receipt POST"];
+    c8 -> c14 [label="approved send", constraint=false];
+  }
+
+  subgraph cluster_proposed {
+    label="Proposed · no code or cutover";
+    color="#4e83ad";
+    p13 [label="E13 Phone journal\nlocal receipt + attempt", fillcolor="#fff4d7"];
+    p14 [label="E14 Phone forward\nreceipt + send listener"];
+    p3 [label="E3 EmacsOS server\nSMS API + bounded handoff"];
+    p17 [label="E17 Server SMS archive\nremote history + pending admission", fillcolor="#dceeff"];
+    p8 [label="E8 Assist Web\nfrozen admission + Runs", fillcolor="#f3f3f3"];
+    p13 -> p14 [label="unACKed receipt"];
+    p14 -> p3 [label="receipt →  /  archive ACK ←\nafter commit", dir=both,
+                color="#236ca5", fontcolor="#236ca5"];
+    p3 -> p17 [label="commit + read", color="#236ca5", fontcolor="#236ca5", dir=both];
+    p3 -> p8 [label="event →  /  admission ACK ←\nafter decision + Run", dir=both,
+               color="#236ca5", fontcolor="#236ca5"];
+    p8 -> p3 [label="history / claim", color="#236ca5", fontcolor="#236ca5", constraint=false];
+    p8 -> p14 [label="approved send", constraint=false];
+  }
+}
