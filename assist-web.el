@@ -33,6 +33,9 @@
 (require 'url-util)
 (require 'wid-edit)
 
+(defvar-local emacsos-assist-web--secret-add-pending-p nil
+  "Whether this thread is waiting to open its private login form.")
+
 (defun emacsos-assist-web-secret-unlock ()
   "Privately unlock this thread's repository credentials for later use."
   (interactive)
@@ -49,58 +52,72 @@
                             "Secrets unlocked for this thread"))))
       (clear-string passphrase))))
 
+(defun emacsos-assist-web--secret-add-when-ready (origin tid request status error)
+  "Handle ORIGIN's private-form GET for TID after STATUS or ERROR."
+  (when (and (buffer-live-p origin)
+             (buffer-local-value 'emacsos-assist-web--secret-add-pending-p origin))
+    (if-let ((minibuffer-window (active-minibuffer-window)))
+        (let (resume)
+          (setq resume
+                (lambda ()
+                  (remove-hook 'minibuffer-exit-hook resume t)
+                  (run-at-time 0 nil #'emacsos-assist-web--secret-add-when-ready
+                               origin tid request status error)))
+          (with-current-buffer (window-buffer minibuffer-window)
+            (add-hook 'minibuffer-exit-hook resume nil t)))
+      (with-current-buffer origin
+        (setq emacsos-assist-web--secret-add-pending-p nil)
+        (when (and (equal tid emacsos-assist-web--thread-id)
+                   (eq (window-buffer (selected-window)) origin))
+          (if error
+              (message "Secret store unavailable")
+            (let ((label (if request (alist-get 'label request)
+                           (read-string "Login label: ")))
+                  (login-url (if request (alist-get 'login_page request)
+                               (read-string "HTTPS login origin and path: ")))
+                  username password passphrase)
+              (unwind-protect
+                  (progn
+                    (setq username (read-passwd "Username (masked): ")
+                          password (read-passwd "Password: "))
+                    (unless (alist-get 'unlocked status)
+                      (setq passphrase (read-passwd "Repository secret phrase: ")))
+                    (emacsos-assist-web--request
+                     "POST" (format "threads/%s/secrets" tid)
+                     (append `((label . ,label) (login_url . ,login-url)
+                               (username . ,username) (password . ,password))
+                             (when passphrase `((passphrase . ,passphrase)))
+                             (when request `((request_id . ,(alist-get 'id request)))))
+                     (lambda (value problem)
+                       (message "%s"
+                                (if (and (not problem) (alist-get 'id value))
+                                    (if (alist-get 'result_branch value)
+                                        "Encrypted login committed on a result branch; inspect Git status"
+                                      "Encrypted login saved to this thread's Git branch")
+                                  "Encrypted login was not confirmed; inspect Git status"))
+                       (when (and request (not problem) (alist-get 'id value)
+                                  (buffer-live-p origin))
+                         (with-current-buffer origin
+                           (emacsos-assist-web-refresh-thread))))))
+                (when username (clear-string username))
+                (when password (clear-string password))
+                (when passphrase (clear-string passphrase))))))))))
+
 (defun emacsos-assist-web-secret-add (&optional request)
   "Privately add one encrypted login, using public REQUEST when supplied."
   (interactive)
   (unless emacsos-assist-web--thread-id
     (user-error "Open a repository thread first"))
-  (let ((tid emacsos-assist-web--thread-id)
-        (origin (current-buffer)))
-    (emacsos-assist-web--request
-     "GET" (format "threads/%s/secrets" tid) nil
-     (lambda (status error)
-       ;; The HTTP callback may run in a process sentinel; prompt on the next
-       ;; command-loop turn after it has released the transport buffer.
-       (run-at-time
-        0 nil
-        (lambda ()
-          (when (and (buffer-live-p origin)
-                     (equal tid (buffer-local-value
-                                 'emacsos-assist-web--thread-id origin)))
-            (with-current-buffer origin
-              (if error
-                  (message "Secret store unavailable")
-                (let ((label (if request (alist-get 'label request)
-                               (read-string "Login label: ")))
-                      (login-url (if request (alist-get 'login_page request)
-                                   (read-string "HTTPS login origin and path: ")))
-                      username password passphrase)
-                  (unwind-protect
-                      (progn
-                        (setq username (read-passwd "Username (masked): ")
-                              password (read-passwd "Password: "))
-                        (unless (alist-get 'unlocked status)
-                          (setq passphrase (read-passwd "Repository secret phrase: ")))
-                        (emacsos-assist-web--request
-                         "POST" (format "threads/%s/secrets" tid)
-                         (append `((label . ,label) (login_url . ,login-url)
-                                   (username . ,username) (password . ,password))
-                                 (when passphrase `((passphrase . ,passphrase)))
-                                 (when request `((request_id . ,(alist-get 'id request)))))
-                         (lambda (value problem)
-                           (message "%s"
-                                    (if (and (not problem) (alist-get 'id value))
-                                        (if (alist-get 'result_branch value)
-                                            "Encrypted login committed on a result branch; inspect Git status"
-                                          "Encrypted login saved to this thread's Git branch")
-                                      "Encrypted login was not confirmed; inspect Git status"))
-                           (when (and request (not problem) (alist-get 'id value)
-                                      (buffer-live-p origin))
-                             (with-current-buffer origin
-                               (emacsos-assist-web-refresh-thread))))))
-                    (when username (clear-string username))
-                    (when password (clear-string password))
-                    (when passphrase (clear-string passphrase)))))))))))))
+  (unless emacsos-assist-web--secret-add-pending-p
+    (let ((tid emacsos-assist-web--thread-id)
+          (origin (current-buffer)))
+      (setq emacsos-assist-web--secret-add-pending-p t)
+      (emacsos-assist-web--request
+       "GET" (format "threads/%s/secrets" tid) nil
+       (lambda (status error)
+         ;; The HTTP callback may run in a process sentinel.
+         (run-at-time 0 nil #'emacsos-assist-web--secret-add-when-ready
+                      origin tid request status error))))))
 
 (declare-function emacsos--render-page "os")
 (declare-function emacsos--fit-pixel-width "os" (text pixels &optional face))
