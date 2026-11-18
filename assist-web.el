@@ -1146,6 +1146,7 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
                          (<= (length (alist-get 'label request)) 80)
                          (let ((page (alist-get 'login_page request)))
                            (and (stringp page) (<= (length page) 2048)
+                                (emacsos-conversation-valid-text-p page)
                                 (string-match-p "\\`https://[^[:space:]]+\\'" page)))))
           (setf (alist-get 'private_entry_request thread) nil))))
     (unless (and (emacsos-assist-web--object-p thread)
@@ -1610,9 +1611,9 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
        (eql (plist-get owner :terminal-generation) emacsos-assist-web--run-check-generation)))
 
 (defun emacsos-assist-web--http-access-status
-    (origin method path status &optional early-failure run-owner request-tid git-get-owner)
-  "Classify ORIGIN's thread, approval, Run GET or read-receipt access failure.
-METHOD and PATH identify the exact endpoint, including the thread Git GET.
+    (origin method path status &optional early-failure run-owner request-tid access-owner)
+  "Classify ORIGIN's thread, approval, Run, Git, or secret access failure.
+METHOD and PATH identify the exact endpoint.
 STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
@@ -1620,7 +1621,7 @@ classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
 REQUEST-TID is the trusted origin thread captured before an async request; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
-GIT-GET-OWNER binds a Git GET to shared thread request-start order. A
+ACCESS-OWNER binds a Git or secret request to shared thread request-start order. A
 definitive denial wins unless a later-started canonical GET validated access.
 Return non-nil when the access notification completed or the exact Run
 status is safely ignored as stale; nil permits a bounded later retry."
@@ -1628,14 +1629,16 @@ status is safely ignored as stale; nil permits a bounded later retry."
                  (and (equal method "POST")
                       (memq status '(401 403))
                       (stringp path)
-                      (string-match-p "\\`threads/[^/]+/open\\'" path)))
+                      (string-match-p
+                       "\\`threads/[^/]+/\\(?:open\\|secrets\\(?:/unlock\\)?\\)\\'"
+                       path)))
              (or (memq status '(401 403 404)) early-failure)
              (stringp path)
-             (or (not git-get-owner)
+             (or (not access-owner)
                  (when-let ((record (emacsos-assist-web--thread-safety-record
                                      request-tid)))
-                   (and (eq (car git-get-owner) record)
-                        (> (cdr git-get-owner)
+                   (and (eq (car access-owner) record)
+                        (> (cdr access-owner)
                            (plist-get record :git-auth-floor))))))
     (condition-case nil
         (let ((thread-get (or (and (equal method "POST")
@@ -1644,7 +1647,7 @@ status is safely ignored as stale; nil permits a bounded later retry."
                                       (string-match "\\`threads/\\([^/]+\\)/assets\\(?:\\?.*\\)?\\'" path))
                             (string-match
                            (if (memq status '(401 403 404))
-                               "\\`threads/\\([^/]+\\)\\(?:/approvals?\\|/git\\)?\\'"
+                               "\\`threads/\\([^/]+\\)\\(?:/approvals?\\|/git\\|/secrets\\(?:/unlock\\)?\\)?\\'"
                              "\\`threads/\\([^/]+\\)\\'") path)))
               (tid nil)
               (run-id nil))
@@ -1949,15 +1952,20 @@ before serialization and turn headers/body into bytes at this boundary."
         (git-thread-get
          (and git-typed-error (equal method "GET") request-tid
               (equal path (concat "threads/" request-tid "/git"))))
-        (git-access-record
-         (when (or canonical-thread-get git-thread-get)
+        (secret-access-request
+         (and request-tid
+              (member path (list (concat "threads/" request-tid "/secrets")
+                                 (concat "threads/" request-tid "/secrets/unlock")))))
+        (access-record
+         (when (or canonical-thread-get git-thread-get secret-access-request)
            (emacsos-assist-web--thread-safety-record request-tid t)))
         (request-order
-         (when git-access-record
-           (cl-incf (plist-get git-access-record :git-request-order))))
-        (git-get-owner (when git-thread-get (cons git-access-record request-order)))
+         (when access-record
+           (cl-incf (plist-get access-record :git-request-order))))
+        (access-owner (when (or git-thread-get secret-access-request)
+                        (cons access-record request-order)))
         (canonical-get-owner
-         (when canonical-thread-get (cons git-access-record request-order)))
+         (when canonical-thread-get (cons access-record request-order)))
         token token-error)
     (when canonical-thread-get (setq emacsos-assist-web--asset-refresh-pending nil))
     (condition-case error
@@ -2028,7 +2036,7 @@ before serialization and turn headers/body into bytes at this boundary."
                              (condition-case nil
                                  (emacsos-assist-web--http-access-status
                                   origin method path status (not git-typed-error)
-                                  run-owner request-tid git-get-owner)
+                                  run-owner request-tid access-owner)
                                ((error quit) nil)))
                        (when (and (not git-failure-notified)
                                   canonical-thread-get
@@ -2092,7 +2100,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                            (condition-case nil
                                                (emacsos-assist-web--http-access-status
                                                 origin method path status nil
-                                                run-owner request-tid git-get-owner)
+                                                run-owner request-tid access-owner)
                                              ((error quit) nil)))))
                                ;; url-http marks complete 4xx/5xx responses as errors.
                                (if (and (plist-get transport-status :error)
@@ -2177,7 +2185,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                   (emacsos-assist-web--http-access-status
                                    origin method path observed-http-status
                                    (not git-typed-error) run-owner
-                                   request-tid git-get-owner)))
+                                   request-tid access-owner)))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
@@ -2193,7 +2201,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                     (or git-failure-notified
                                         (emacsos-assist-web--http-access-status
                                          origin method path status nil run-owner
-                                         request-tid git-get-owner)))
+                                         request-tid access-owner)))
                             ;; A non-denial status is parsed later.  It is
                             ;; not evidence that malformed JSON or transport
                             ;; failure proves thread access denial.

@@ -4632,6 +4632,44 @@ server clears only flags for a view that is still current."
                  (current-buffer) "GET" "threads/thread-1" nil t))
         (should uncertain)))))
 
+(ert-deftest test-assist-web-secret-auth-denial-fences-thread-views ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (let (denials)
+      (cl-letf (((symbol-function 'emacsos-assist-web--canonical-denied)
+                 (lambda (status) (push status denials))))
+        (dolist (status '(401 403 404))
+          (should (emacsos-assist-web--http-access-status
+                   (current-buffer) "GET" "threads/thread-1/secrets" status)))
+        (dolist (status '(401 403))
+          (should (emacsos-assist-web--http-access-status
+                   (current-buffer) "POST" "threads/thread-1/secrets" status))
+          (should (emacsos-assist-web--http-access-status
+                   (current-buffer) "POST" "threads/thread-1/secrets/unlock" status)))
+        (should (equal denials '(403 403 401 401 404 403 401)))
+        (should-not (emacsos-assist-web--http-access-status
+                     (current-buffer) "POST" "threads/thread-1/secrets" 409))
+        (should-not (emacsos-assist-web--http-access-status
+                     (current-buffer) "POST" "threads/thread-1/secrets" 404))))))
+
+(ert-deftest test-assist-web-new-canonical-success-supersedes-old-secret-denial ()
+  (let ((emacsos-assist-web--thread-safety (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "thread-secret-auth")
+      (let* ((record (emacsos-assist-web--thread-safety-record
+                      "thread-secret-auth" t))
+             (owner (cons record 1))
+             (emacsos-assist-web--current-canonical-get-owner (cons record 2)))
+        (emacsos-assist-web--canonical-authorized emacsos-assist-web--auth-epoch)
+        (dolist (request '(("GET" "threads/thread-secret-auth/secrets" 401)
+                           ("POST" "threads/thread-secret-auth/secrets" 403)
+                           ("POST" "threads/thread-secret-auth/secrets/unlock" 401)))
+          (should-not (emacsos-assist-web--http-access-status
+                       (current-buffer) (nth 0 request) (nth 1 request)
+                       (nth 2 request) nil nil "thread-secret-auth" owner)))
+        (should-not emacsos-assist-web--denied)))))
+
 (ert-deftest test-assist-web-approval-delayed-get-after-accepted-post ()
   (let ((a (generate-new-buffer " *reviewer approval a*"))
         (b (generate-new-buffer " *reviewer approval b*"))
@@ -5483,6 +5521,13 @@ server clears only flags for a view that is still current."
           '((id . "0123456789abcdef0123456789abcdef")
             (label . "site\nother")
             (login_page . "https://synthetic.example/login")))
+    (emacsos-assist-web--require-snapshot snapshot "thread-1")
+    (should-not (alist-get 'private_entry_request (alist-get 'thread snapshot)))
+    (setf (alist-get 'private_entry_request (alist-get 'thread snapshot))
+          `((id . "0123456789abcdef0123456789abcdef")
+            (label . "Synthetic site")
+            (login_page . ,(concat "https://synthetic.example/lo"
+                                   (string #x034f) "gin"))))
     (emacsos-assist-web--require-snapshot snapshot "thread-1")
     (should-not (alist-get 'private_entry_request (alist-get 'thread snapshot)))))
 
