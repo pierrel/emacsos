@@ -21,8 +21,12 @@ The chat panel POSTs to =emacsos-chat-server-url= (default =http://localhost:876
 
 Assist Web threads show *Control the live browser* while the server offers a live
 page. The link survives refreshing or reopening the thread and opens the exact
-server-provided viewer URL in the browser. Returning control removes that offer;
+server-provided viewer URL in the browser. The same action is available from the
+existing Status view, including threads without a Git repository. Returning control removes that offer;
 cached snapshots do not advertise a live browser link.
+The existing *Status* page also exposes the current browser control action,
+including for threads without a Git repository, and explains when no live
+offer remains. Opening an old action rechecks the original thread's offer.
 
 ** Virtual Keyboard
 

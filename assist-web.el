@@ -707,6 +707,8 @@ A failed or interrupted request retains its key for an explicit unchanged retry.
 (defvar-local emacsos-assist-web--in-flight nil)
 
 (defvar-local emacsos-assist-web--snapshot nil)
+(defvar-local emacsos-assist-web--snapshot-stale-p nil
+  "Non-nil when the displayed thread snapshot came from the local cache.")
 (defvar-local emacsos-assist-web--approval-source nil)
 (defvar-local emacsos-assist-web--approval nil)
 (defvar-local emacsos-assist-web--approval-edited nil)
@@ -3213,6 +3215,17 @@ Hidden, cached and failed views do not acknowledge unread notifications."
      emacsos-assist-web--thread-id
      (alist-get 'revision (alist-get 'thread snapshot)))))
 
+(defun emacsos-assist-web-browser-control (&optional _button)
+  "Open this authorized thread's current host-issued browser control link."
+  (interactive)
+  (let* ((thread (alist-get 'thread emacsos-assist-web--snapshot))
+         (url (alist-get 'browser_control_url thread)))
+    (unless (and (not emacsos-assist-web--denied)
+                 (not emacsos-assist-web--snapshot-stale-p)
+                 (equal emacsos-assist-web--thread-id (alist-get 'id thread)) url)
+      (user-error "No live browser control offer; refresh the thread"))
+    (browse-url url)))
+
 (defun emacsos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed.
 Return whether its independent editable draft was saved locally."
@@ -3254,6 +3267,7 @@ Return whether its independent editable draft was saved locally."
           (error "Assist Web snapshot identity does not match this buffer"))
         (setq emacsos-assist-web--thread-id returned-id))
       (setq emacsos-assist-web--snapshot snapshot
+            emacsos-assist-web--snapshot-stale-p stale
             emacsos-assist-web--pending-rendered-p nil
             imenu--index-alist nil)
       (when (or emacsos-assist-web--canonical-buffer-name-p
@@ -3283,7 +3297,7 @@ Return whether its independent editable draft was saved locally."
         (when-let ((control-url (and (not stale)
                                     (alist-get 'browser_control_url thread))))
           (insert-text-button "Control the live browser" 'follow-link t
-                              'action (lambda (_) (browse-url control-url)))
+                              'action #'emacsos-assist-web-browser-control)
           (insert "\n\n"))
         (when (or (equal (alist-get 'status thread) "awaiting_approval")
                   (and (integerp (alist-get 'approval_count thread))

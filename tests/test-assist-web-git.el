@@ -9,6 +9,52 @@
   '(:tid "thread-1" :repo-key "aaaaaaaaaaaaaaaaaaaa"
     :branch "assist/thread" :status "ready"))
 
+(ert-deftest test-assist-web-status-browser-action-without-git-and-after-return ()
+  "The existing Status entry opens only the current source's live offer."
+  (let ((source (generate-new-buffer " *status-browser-source*")) view opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (setq-local emacsos-assist-web--thread-id "thread-browser"
+                        emacsos-assist-web-git--metadata nil
+                        emacsos-assist-web--snapshot
+                        '((thread . ((id . "thread-browser") (status . "paused")
+                                     (browser_control_url . "https://control.example/thread/thread-browser/browser")))))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (&rest _) (ert-fail "Status must not issue a Git request"))))
+              (emacsos-assist-web-git-status)))
+          (setq view (get-buffer "*Assist Git thread-browser*"))
+          (with-current-buffer view
+            (goto-char (point-min))
+            (should (search-forward "Control the live browser" nil t))
+            (let ((button (button-at (1- (point)))))
+              (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+                (button-activate button)
+                (should (equal opened "https://control.example/thread/thread-browser/browser"))
+                (with-current-buffer source
+                  (setf (alist-get 'browser_control_url (alist-get 'thread emacsos-assist-web--snapshot)) nil))
+                (should-error (button-activate button) :type 'user-error)))
+            (emacsos-assist-web-git--status-render)
+            (should-not (string-match-p "Control the live browser" (buffer-string)))
+            (should (string-match-p "No live browser control offer" (buffer-string)))
+            (with-current-buffer source
+              (setf (alist-get 'browser_control_url (alist-get 'thread emacsos-assist-web--snapshot))
+                    "https://control.example/thread/thread-browser/browser")
+              (setq emacsos-assist-web--snapshot-stale-p t)
+              (should-error (emacsos-assist-web-browser-control) :type 'user-error))
+            (emacsos-assist-web-git--status-render)
+            (should-not (string-match-p "Control the live browser" (buffer-string)))
+            (with-current-buffer source
+              (setq emacsos-assist-web--snapshot-stale-p nil
+                    emacsos-assist-web--thread-id "another-thread"))
+            (should-error (emacsos-assist-web-git--status-browser-control nil) :type 'user-error))
+          (with-current-buffer source
+            (setq emacsos-assist-web--thread-id "thread-browser")
+            (should-error (emacsos-assist-web-git-merge) :type 'user-error)))
+      (when (buffer-live-p view) (kill-buffer view))
+      (kill-buffer source))))
+
 (ert-deftest test-assist-web-git-phone-header-keeps-both-touch-actions-visible ()
   "Narrow phone headers preserve Status, Merge and a clickable Run action."
   (with-temp-buffer
@@ -1244,7 +1290,8 @@
               (with-current-buffer view
                 (emacsos-assist-web-git--status-render)
                 (should-not (string-match-p "Pending approvals" (buffer-string)))
-                (should (string-prefix-p "Assist Git status" (buffer-string)))))
+                (should (string-prefix-p "No live browser control offer" (buffer-string)))
+                (should (string-match-p "Assist Git status" (buffer-string)))))
           (when-let ((preview (get-buffer "*assist Approval thread-1*")))
             (kill-buffer preview))
           (kill-buffer view)
