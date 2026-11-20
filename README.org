@@ -398,8 +398,8 @@ checkout and normally published on the
 thread branch. Merge the published branch through the ordinary Git flow before
 expecting a new thread to see its records. If the server reports a result branch
 after Git divergence, inspect and merge that branch instead.
-The client retains chat drafts while a form-status or save request is pending
-in a live buffer for that thread. A save timeout ends the client's wait, not the server's
+The client retains chat drafts while a private form is open or its status/save
+request is pending in a live buffer for that thread. A save timeout ends the client's wait, not the server's
 Git operation: saving may continue and the repository can remain busy. Inspect
 Git status before retrying an unconfirmed save; no automatic retry is sent.
 

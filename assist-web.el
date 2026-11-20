@@ -34,7 +34,7 @@
 (require 'wid-edit)
 
 (defvar-local emacsos-assist-web--secret-add-pending-p nil
-  "Whether this buffer is opening a private login form or awaiting its save.")
+  "Whether this buffer is entering a private login or awaiting its save.")
 
 (defun emacsos-assist-web--secret-pending-p ()
   "Return whether a live buffer is opening or saving this thread's login."
@@ -94,43 +94,46 @@
           (with-current-buffer (window-buffer minibuffer-window)
             (add-hook 'minibuffer-exit-hook resume nil t)))
       (with-current-buffer origin
-        (setq emacsos-assist-web--secret-add-pending-p nil)
-        (when (and (equal tid emacsos-assist-web--thread-id)
-                   (eq (window-buffer (selected-window)) origin))
-          (if error
-              (message "Secret store unavailable")
-            (let ((label (if request (alist-get 'label request)
-                           (read-string "Login label: ")))
-                  (login-url (if request (alist-get 'login_page request)
-                               (read-string "HTTPS login origin and path: ")))
-                  username password passphrase)
-              (unwind-protect
-                  (progn
-                    (setq username (read-passwd "Username (masked): ")
-                          password (read-passwd "Password: "))
-                    (unless (alist-get 'unlocked status)
-                      (setq passphrase (read-passwd "Repository secret phrase: ")))
-                    (setq emacsos-assist-web--secret-add-pending-p t)
-                    (message "Saving encrypted login; Git preparation and publication may take time")
-                    (emacsos-assist-web--request
-                     "POST" (format "threads/%s/secrets" tid)
-                     (append `((label . ,label) (login_url . ,login-url)
-                               (username . ,username) (password . ,password))
-                             (when passphrase `((passphrase . ,passphrase)))
-                             (when request `((request_id . ,(alist-get 'id request)))))
-                     (lambda (value problem)
-                       (when (buffer-live-p origin)
-                         (with-current-buffer origin
-                           (setq emacsos-assist-web--secret-add-pending-p nil)))
-                       (message "%s" (emacsos-assist-web--secret-save-notice value problem))
-                       (when (and request (not problem) (alist-get 'id value)
-                                  (buffer-live-p origin))
-                         (with-current-buffer origin
-                           (emacsos-assist-web-refresh-thread))))
-                     nil nil nil nil t))
-                (when username (clear-string username))
-                (when password (clear-string password))
-                (when passphrase (clear-string passphrase))))))))))
+        (let (saving)
+          (unwind-protect
+              (when (and (equal tid emacsos-assist-web--thread-id)
+                         (eq (window-buffer (selected-window)) origin))
+                (if error
+                    (message "Secret store unavailable")
+                  (let ((label (if request (alist-get 'label request)
+                                 (read-string "Login label: ")))
+                        (login-url (if request (alist-get 'login_page request)
+                                     (read-string "HTTPS login origin and path: ")))
+                        username password passphrase)
+                    (unwind-protect
+                        (progn
+                          (setq username (read-passwd "Username (masked): ")
+                                password (read-passwd "Password: "))
+                          (unless (alist-get 'unlocked status)
+                            (setq passphrase (read-passwd "Repository secret phrase: ")))
+                          (message "Saving encrypted login; Git preparation and publication may take time")
+                          (emacsos-assist-web--request
+                           "POST" (format "threads/%s/secrets" tid)
+                           (append `((label . ,label) (login_url . ,login-url)
+                                     (username . ,username) (password . ,password))
+                                   (when passphrase `((passphrase . ,passphrase)))
+                                   (when request `((request_id . ,(alist-get 'id request)))))
+                           (lambda (value problem)
+                             (when (buffer-live-p origin)
+                               (with-current-buffer origin
+                                 (setq emacsos-assist-web--secret-add-pending-p nil)))
+                             (message "%s" (emacsos-assist-web--secret-save-notice value problem))
+                             (when (and request (not problem) (alist-get 'id value)
+                                        (buffer-live-p origin))
+                               (with-current-buffer origin
+                                 (emacsos-assist-web-refresh-thread))))
+                           nil nil nil nil t)
+                          (setq saving t))
+                      (when username (clear-string username))
+                      (when password (clear-string password))
+                      (when passphrase (clear-string passphrase))))))
+            (unless saving
+              (setq emacsos-assist-web--secret-add-pending-p nil))))))))
 
 (defun emacsos-assist-web-secret-add (&optional request)
   "Privately add one encrypted login, using public REQUEST when supplied."
@@ -4299,7 +4302,7 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
      ((eq emacsos--assist-active-surface 'chat)
       (message "Another local chat response is active; editable draft retained"))
      ((emacsos-assist-web--secret-pending-p)
-      (message "Waiting for private login save; editable draft retained"))
+      (message "Waiting for private login; editable draft retained"))
      ((plist-get emacsos-assist-web--http-draft :posting)
       (message "Waiting for HTTP acceptance; editable draft retained"))
      ((string-empty-p (string-trim text)) (message "Nothing to send"))
