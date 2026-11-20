@@ -1321,6 +1321,40 @@
           (should (string-match-p "\\[cached\\]" (buffer-string))))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
+(ert-deftest test-assist-web-browser-control-link-survives-reload-and-ends-on-return ()
+  (with-temp-buffer
+    (emacsos-assist-web-mode)
+    (setq emacsos-assist-web--thread-id "thread-1")
+    (let* ((url "https://control.example:5443/thread/thread-1/browser")
+           (snapshot (copy-tree test-assist-web--snapshot))
+           opened)
+      (setf (alist-get 'status (alist-get 'thread snapshot)) "paused"
+            (alist-get 'browser_control_url (alist-get 'thread snapshot)) url)
+      (cl-letf (((symbol-function 'emacsos-assist-web--save-draft) (lambda (&rest _) t))
+                ((symbol-function 'browse-url) (lambda (value &rest _) (setq opened value))))
+        (dotimes (_reload 2)
+          (emacsos-assist-web--render (copy-tree snapshot))
+          (goto-char (point-min))
+          (should (search-forward "Control the live browser" nil t))
+          (button-activate (button-at (1- (point))))
+          (should (equal opened url))
+          (should-not (search-forward "Control the live browser" nil t)))
+        (setf (alist-get 'browser_control_url (alist-get 'thread snapshot)) nil)
+        (emacsos-assist-web--render snapshot)
+        (should-not (string-match-p "Control the live browser" (buffer-string)))
+        (setf (alist-get 'browser_control_url (alist-get 'thread snapshot)) url)
+        (emacsos-assist-web--render snapshot t)
+        (should-not (string-match-p "Control the live browser" (buffer-string)))))))
+
+(ert-deftest test-assist-web-browser-control-rejects-noncanonical-links ()
+  (dolist (url '("javascript:alert(1)" "https://user:password@control.example/thread/thread-1/browser"
+                 "https://control.example/thread/other/browser"
+                 "https://control.example/thread/thread-1/browser?token=private"
+                 "https://control.example/thread/thread-1/browser#private"))
+    (let ((snapshot (copy-tree test-assist-web--snapshot)))
+      (setf (alist-get 'browser_control_url (alist-get 'thread snapshot)) url)
+      (should-error (emacsos-assist-web--require-snapshot snapshot "thread-1")))))
+
 (ert-deftest test-assist-web-canonical-title-does-not-rename-unrelated-buffers ()
   "Canonical rendering leaves buffers outside title-following mode alone."
   (with-temp-buffer
