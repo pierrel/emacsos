@@ -25,8 +25,9 @@ server-provided viewer URL in the browser. The same action is available from the
 existing Status view, including threads without a Git repository. That action
 fetches the original thread's current offer before opening it, so returning
 control also retires a link left in a hidden thread. Cached snapshots do not
-advertise a live link; a successful read restores the action even when the
-snapshot itself has not changed.
+advertise a live link; loading older history preserves that restriction. A
+successful canonical thread read restores the action even when the snapshot
+itself has not changed.
 
 ** Virtual Keyboard
 

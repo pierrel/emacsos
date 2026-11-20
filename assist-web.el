@@ -4145,7 +4145,9 @@ Refresh action and replaces only this view’s transient observer."
                                (alist-get 'next_before updated)
                                (and (not over-cap) (not at-cap)
                                     (alist-get 'next_before page))))
-                         (emacsos-assist-web--render updated))
+                         (emacsos-assist-web--render
+                          updated (or emacsos-assist-web--snapshot-stale-p
+                                      (not emacsos-assist-web--snapshot))))
                      (error
                       (emacsos-assist-web--set-status
                        (if (or emacsos-assist-web--snapshot cached)

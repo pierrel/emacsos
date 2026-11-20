@@ -519,6 +519,8 @@ Status can hide the source buffer, which suspends its automatic observation."
                      (progn
                        (when problem (error "%s" problem))
                        (emacsos-assist-web--require-snapshot value (car identity))
+                       (with-current-buffer source
+                         (emacsos-assist-web--canonical-authorized auth))
                        (if-let ((url (alist-get 'browser_control_url
                                                (alist-get 'thread value))))
                            (browse-url url)

@@ -1896,6 +1896,44 @@
           (should (equal (alist-get 'next_before rendered) "cursor-0")))
       (delete-directory emacsos-assist-web-cache-directory t))))
 
+(ert-deftest test-assist-web-history-preserves-browser-offer-provenance ()
+  "History-only updates cannot turn a cached browser offer into a live action."
+  (dolist (mode '(fresh cached disk))
+    (let ((emacsos-assist-web-cache-directory (make-temp-file "history-offer-" t))
+          (snapshot (copy-tree test-assist-web--snapshot))
+          (page (copy-tree test-assist-web--snapshot)))
+      (unwind-protect
+          (with-temp-buffer
+            (setf (alist-get 'browser_control_url (alist-get 'thread snapshot))
+                  "https://control.example/thread/thread-1/browser"
+                  (alist-get 'messages page)
+                  '(((id . "m-0") (role . "user") (text . "older") (state . "final")))
+                  (alist-get 'has_older_messages page) nil
+                  (alist-get 'next_before page) nil)
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--stop-thread-observation)
+            (setq emacsos-assist-web--thread-id "thread-1")
+            (if (eq mode 'disk)
+                (emacsos-assist-web--write-prompt)
+              (emacsos-assist-web--render snapshot (eq mode 'cached)))
+            (emacsos-assist-web--replace-input "unsent café")
+            (cl-letf (((symbol-function 'emacsos-assist-web--read-cache)
+                       (lambda (&rest _) snapshot))
+                      ((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _)
+                         (funcall callback page nil))))
+              (emacsos-assist-web-load-older))
+            (should (string-match-p "older" (buffer-string)))
+            (if (eq mode 'fresh)
+                (progn
+                  (should-not emacsos-assist-web--snapshot-stale-p)
+                  (should (string-match-p "Control the live browser" (buffer-string))))
+              (should emacsos-assist-web--snapshot-stale-p)
+              (should-not (string-match-p "Control the live browser" (buffer-string)))
+              (should-error (emacsos-assist-web-browser-control) :type 'user-error))
+            (should (equal (emacsos-assist-web--input) "unsent café")))
+        (delete-directory emacsos-assist-web-cache-directory t)))))
+
 (ert-deftest test-assist-web-history-union-uses-canonical-not-mixed-raw-bytes ()
   (let ((emacsos-assist-web-cache-directory (make-temp-file "assist-web-history-" t))
         (emacsos-assist-web--max-rendered-transcript-bytes 3)
