@@ -1403,3 +1403,20 @@
                   (should-not (string-match-p "Private logins" (buffer-string))))))
           (kill-buffer view)
           (when (buffer-live-p source) (kill-buffer source)))))))
+
+(ert-deftest test-assist-web-git-status-logins-require-a-repository ()
+  "Non-Git Status explains the requirement without collecting private input."
+  (let ((source (generate-new-buffer " *status-nongit-login-source*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"))
+          (with-temp-buffer
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity '("thread-1"))
+            (should (emacsos-assist-web-git--status-valid-source-p))
+            (emacsos-assist-web-git--status-secret-actions)
+            (should (equal (buffer-string)
+                           "Private logins require a repository thread.\n\n"))
+            (should-not (next-button (point-min)))))
+      (kill-buffer source))))
