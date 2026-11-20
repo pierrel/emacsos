@@ -15,6 +15,8 @@
 (declare-function emacsos-assist-web--thread-header "assist-web")
 (declare-function emacsos-assist-web--request "assist-web")
 (declare-function emacsos-assist-web-review-approval "assist-web")
+(declare-function emacsos-assist-web-secret-add "assist-web")
+(declare-function emacsos-assist-web-secret-unlock "assist-web")
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-status-setup-buffer "magit-status")
 (defvar emacsos-assist-web--denied)
@@ -488,8 +490,38 @@ MANUAL permits a repeated status reminder."
   (with-current-buffer emacsos-assist-web-git--status-source
     (emacsos-assist-web-review-approval)))
 
+(defun emacsos-assist-web-git--status-secret-actions ()
+  "Offer existing private login entry from this view's authorized thread."
+  (when (emacsos-assist-web-git--status-valid-source-p)
+    (if (not (stringp (cdr emacsos-assist-web-git--status-identity)))
+        (insert "Private logins require a repository thread.\n\n")
+      (let ((request (with-current-buffer emacsos-assist-web-git--status-source
+                       (alist-get 'private_entry_request
+                                  (alist-get 'thread emacsos-assist-web--snapshot)))))
+	(insert "Private logins\n")
+	(when request
+          (insert (alist-get 'label request) "\n" (alist-get 'login_page request) "\n"))
+	(insert-text-button
+	 (if request "Add requested login" "Add login") 'follow-link t
+	 'action (lambda (_)
+                   (unless (emacsos-assist-web-git--status-valid-source-p)
+                     (user-error "Open an authorized canonical Assist thread first"))
+                   (let ((source emacsos-assist-web-git--status-source))
+                     (pop-to-buffer source)
+                     (emacsos-assist-web-secret-add request))))
+	(insert "  ")
+	(insert-text-button
+	 "Unlock logins" 'follow-link t
+	 'action (lambda (_)
+                   (unless (emacsos-assist-web-git--status-valid-source-p)
+                     (user-error "Open an authorized canonical Assist thread first"))
+                   (let ((source emacsos-assist-web-git--status-source))
+                     (pop-to-buffer source)
+                     (emacsos-assist-web-secret-unlock))))
+        (insert "\n\n")))))
+
 (defun emacsos-assist-web-git--status-render ()
-  "Render pending approvals and factual Git status without altering local work."
+  "Render approval/private-login actions and Git facts without altering local work."
   (let ((inhibit-read-only t)
         (server emacsos-assist-web-git--status-server)
         (local emacsos-assist-web-git--status-local)
@@ -505,6 +537,7 @@ MANUAL permits a repeated status reminder."
                           'face '(bold warning) 'follow-link t
                           'action #'emacsos-assist-web-git--status-review-approval)
       (insert "\n\n"))
+    (emacsos-assist-web-git--status-secret-actions)
     (insert "Assist Git status\n\n")
     (when emacsos-assist-web-git--status-outcome
       (insert emacsos-assist-web-git--status-outcome "\n\n"))

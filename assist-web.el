@@ -33,6 +33,149 @@
 (require 'url-util)
 (require 'wid-edit)
 
+(defvar-local emacsos-assist-web--secret-add-pending-p nil
+  "Whether this buffer is entering a private login or awaiting its save.")
+
+(defun emacsos-assist-web--secret-pending-p ()
+  "Return whether a live buffer is opening or saving this thread's login."
+  (let ((tid emacsos-assist-web--thread-id))
+    (and tid
+         (seq-some
+          (lambda (buffer)
+            (with-current-buffer buffer
+              (and (equal tid emacsos-assist-web--thread-id)
+                   emacsos-assist-web--secret-add-pending-p)))
+          (buffer-list)))))
+
+(defun emacsos-assist-web--secret-access-current-p (tid auth-epoch)
+  "Whether private entry still belongs to authorized TID at AUTH-EPOCH."
+  (and (equal tid emacsos-assist-web--thread-id)
+       (eql auth-epoch emacsos-assist-web--auth-epoch)
+       (not (eq emacsos-assist-web--denied t))))
+
+(defun emacsos-assist-web--secret-save-notice (value problem)
+  "Describe private save VALUE or typed PROBLEM without exposing response text."
+  (cond
+   ((and (not problem) (alist-get 'id value))
+    (if (alist-get 'result_branch value)
+        "Encrypted login committed on a result branch; inspect Git status"
+      "Encrypted login saved to this thread's Git branch"))
+   ((eq (plist-get problem :kind) 'timeout)
+    "Login save timed out; saving may continue and chat may stay busy. Inspect Git status before retry")
+   ((eql (plist-get problem :status) 409)
+    "Login save rejected; repository may be busy or private form changed. Refresh before retry")
+   ((memq (plist-get problem :status) '(401 403 404))
+    "Login save access unavailable; reopen this thread before retry")
+   ((memq (plist-get problem :kind) '(credentials busy))
+    "Login save not submitted; check credentials or request budget")
+   (t "Login save unconfirmed; inspect Git status before retry. Saving may continue")))
+
+(defun emacsos-assist-web-secret-unlock ()
+  "Privately unlock this thread's credentials while its authorization is current."
+  (interactive)
+  (unless emacsos-assist-web--thread-id
+    (user-error "Open a repository thread first"))
+  (let ((tid emacsos-assist-web--thread-id)
+        (auth-epoch emacsos-assist-web--auth-epoch)
+        passphrase)
+    (unwind-protect
+        (if (not (emacsos-assist-web--secret-access-current-p tid auth-epoch))
+            (message "Secret entry canceled; thread access changed; refresh first")
+          (setq passphrase (read-passwd "Repository secret phrase: "))
+          (if (not (emacsos-assist-web--secret-access-current-p tid auth-epoch))
+              (message "Secret entry canceled; thread access changed; refresh first")
+            (emacsos-assist-web--request
+             "POST" (format "threads/%s/secrets/unlock" tid)
+             `((passphrase . ,passphrase))
+             (lambda (_value error)
+               (message "%s" (if error "Secret unlock failed"
+                                "Secrets unlocked for this thread"))))))
+      (when passphrase (clear-string passphrase)))))
+
+(defun emacsos-assist-web--secret-add-when-ready (origin tid auth-epoch request status error)
+  "Handle ORIGIN's private form only while TID's captured AUTH-EPOCH is current."
+  (when (and (buffer-live-p origin)
+             (buffer-local-value 'emacsos-assist-web--secret-add-pending-p origin))
+    (if-let ((minibuffer-window (active-minibuffer-window)))
+        (let (resume)
+          (setq resume
+                (lambda ()
+                  (remove-hook 'minibuffer-exit-hook resume t)
+                  (run-at-time 0 nil #'emacsos-assist-web--secret-add-when-ready
+                               origin tid auth-epoch request status error)))
+          (with-current-buffer (window-buffer minibuffer-window)
+            (add-hook 'minibuffer-exit-hook resume nil t)))
+      (with-current-buffer origin
+        (let (saving)
+          (unwind-protect
+              (catch 'secret-access-changed
+                (cl-labels ((check-access ()
+                              (unless (emacsos-assist-web--secret-access-current-p tid auth-epoch)
+                                (message "Secret entry canceled; thread access changed; refresh first")
+                                (throw 'secret-access-changed nil))))
+                  (when (and (equal tid emacsos-assist-web--thread-id)
+                             (eq (window-buffer (selected-window)) origin))
+                    (check-access)
+                    (if error
+                        (message "Secret store unavailable")
+                      (let (label login-url username password passphrase)
+                        (unwind-protect
+                            (progn
+                              (setq label (if request (alist-get 'label request)
+                                            (read-string "Login label: ")))
+                              (check-access)
+                              (setq login-url (if request (alist-get 'login_page request)
+                                                (read-string "HTTPS login origin and path: ")))
+                              (check-access)
+                              (setq username (read-passwd "Username (masked): "))
+                              (check-access)
+                              (setq password (read-passwd "Password: "))
+                              (check-access)
+                              (unless (alist-get 'unlocked status)
+                                (setq passphrase (read-passwd "Repository secret phrase: ")))
+                              (check-access)
+                              (message "Saving encrypted login; Git preparation and publication may take time")
+                              (check-access)
+                              (emacsos-assist-web--request
+                               "POST" (format "threads/%s/secrets" tid)
+                               (append `((label . ,label) (login_url . ,login-url)
+                                         (username . ,username) (password . ,password))
+                                       (when passphrase `((passphrase . ,passphrase)))
+                                       (when request `((request_id . ,(alist-get 'id request)))))
+                               (lambda (value problem)
+                                 (when (buffer-live-p origin)
+                                   (with-current-buffer origin
+                                     (setq emacsos-assist-web--secret-add-pending-p nil)))
+                                 (message "%s" (emacsos-assist-web--secret-save-notice value problem))
+                                 (when (and request (not problem) (alist-get 'id value)
+                                            (buffer-live-p origin))
+                                   (with-current-buffer origin
+                                     (emacsos-assist-web-refresh-thread))))
+                               nil nil nil nil t)
+                              (setq saving t))
+                          (when username (clear-string username))
+                          (when password (clear-string password))
+                          (when passphrase (clear-string passphrase))))))))
+            (unless saving
+              (setq emacsos-assist-web--secret-add-pending-p nil))))))))
+
+(defun emacsos-assist-web-secret-add (&optional request)
+  "Privately add one encrypted login, using public REQUEST when supplied."
+  (interactive)
+  (unless emacsos-assist-web--thread-id
+    (user-error "Open a repository thread first"))
+  (unless (emacsos-assist-web--secret-pending-p)
+    (let ((tid emacsos-assist-web--thread-id)
+          (auth-epoch emacsos-assist-web--auth-epoch)
+          (origin (current-buffer)))
+      (setq emacsos-assist-web--secret-add-pending-p t)
+      (emacsos-assist-web--request
+       "GET" (format "threads/%s/secrets" tid) nil
+       (lambda (status error)
+         ;; The HTTP callback may run in a process sentinel.
+         (run-at-time 0 nil #'emacsos-assist-web--secret-add-when-ready
+                      origin tid auth-epoch request status error))))))
+
 (declare-function emacsos--render-page "os")
 (declare-function emacsos--fit-pixel-width "os" (text pixels &optional face))
 (defvar url-http-content-type)
@@ -1048,6 +1191,21 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
                      (alist-get 'thread value)))
         (messages (and (emacsos-assist-web--object-p value)
                        (alist-get 'messages value))))
+    (when (emacsos-assist-web--object-p thread)
+      (let ((request (alist-get 'private_entry_request thread)))
+        (unless (or (null request)
+                    (and (emacsos-assist-web--object-p request)
+                         (stringp (alist-get 'id request))
+                         (string-match-p "\\`[0-9a-f]\\{32\\}\\'"
+                                         (alist-get 'id request))
+                         (emacsos-assist-web--valid-catalog-text-p
+                          (alist-get 'label request))
+                         (<= (length (alist-get 'label request)) 80)
+                         (let ((page (alist-get 'login_page request)))
+                           (and (stringp page) (<= (length page) 2048)
+                                (emacsos-conversation-valid-text-p page)
+                                (string-match-p "\\`https://[^[:space:]]+\\'" page)))))
+          (setf (alist-get 'private_entry_request thread) nil))))
     (unless (and (emacsos-assist-web--object-p thread)
                  (assq 'messages value)
                  (emacsos-assist-web--valid-id-p (alist-get 'id thread))
@@ -1510,9 +1668,9 @@ nil or a signal leaves that status unacknowledged for a later bounded retry."
        (eql (plist-get owner :terminal-generation) emacsos-assist-web--run-check-generation)))
 
 (defun emacsos-assist-web--http-access-status
-    (origin method path status &optional early-failure run-owner request-tid git-get-owner)
-  "Classify ORIGIN's thread, approval, Run GET or read-receipt access failure.
-METHOD and PATH identify the exact endpoint, including the thread Git GET.
+    (origin method path status &optional early-failure run-owner request-tid access-owner)
+  "Classify ORIGIN's thread, approval, Run, Git, or secret access failure.
+METHOD and PATH identify the exact endpoint.
 STATUS is read before JSON
 parsing, so a malformed denial body cannot hide a 401, 403, or 404.
 EARLY-FAILURE applies only to the canonical thread GET.  Approval GETs
@@ -1520,7 +1678,7 @@ classify only definitive 401, 403, or 404 access denials.
 RUN-OWNER prevents a retired or superseded exact Run GET from relatching Run denial.
 REQUEST-TID is the trusted origin thread captured before an async request; it
 lets a definitive denial fence a live same-T peer if ORIGIN was killed.
-GIT-GET-OWNER binds a Git GET to shared thread request-start order. A
+ACCESS-OWNER binds a Git or secret request to shared thread request-start order. A
 definitive denial wins unless a later-started canonical GET validated access.
 Return non-nil when the access notification completed or the exact Run
 status is safely ignored as stale; nil permits a bounded later retry."
@@ -1528,14 +1686,16 @@ status is safely ignored as stale; nil permits a bounded later retry."
                  (and (equal method "POST")
                       (memq status '(401 403))
                       (stringp path)
-                      (string-match-p "\\`threads/[^/]+/open\\'" path)))
+                      (string-match-p
+                       "\\`threads/[^/]+/\\(?:open\\|secrets\\(?:/unlock\\)?\\)\\'"
+                       path)))
              (or (memq status '(401 403 404)) early-failure)
              (stringp path)
-             (or (not git-get-owner)
+             (or (not access-owner)
                  (when-let ((record (emacsos-assist-web--thread-safety-record
                                      request-tid)))
-                   (and (eq (car git-get-owner) record)
-                        (> (cdr git-get-owner)
+                   (and (eq (car access-owner) record)
+                        (> (cdr access-owner)
                            (plist-get record :git-auth-floor))))))
     (condition-case nil
         (let ((thread-get (or (and (equal method "POST")
@@ -1544,7 +1704,7 @@ status is safely ignored as stale; nil permits a bounded later retry."
                                       (string-match "\\`threads/\\([^/]+\\)/assets\\(?:\\?.*\\)?\\'" path))
                             (string-match
                            (if (memq status '(401 403 404))
-                               "\\`threads/\\([^/]+\\)\\(?:/approvals?\\|/git\\)?\\'"
+                               "\\`threads/\\([^/]+\\)\\(?:/approvals?\\|/git\\|/secrets\\(?:/unlock\\)?\\)?\\'"
                              "\\`threads/\\([^/]+\\)\\'") path)))
               (tid nil)
               (run-id nil))
@@ -1849,15 +2009,20 @@ before serialization and turn headers/body into bytes at this boundary."
         (git-thread-get
          (and git-typed-error (equal method "GET") request-tid
               (equal path (concat "threads/" request-tid "/git"))))
-        (git-access-record
-         (when (or canonical-thread-get git-thread-get)
+        (secret-access-request
+         (and request-tid
+              (member path (list (concat "threads/" request-tid "/secrets")
+                                 (concat "threads/" request-tid "/secrets/unlock")))))
+        (access-record
+         (when (or canonical-thread-get git-thread-get secret-access-request)
            (emacsos-assist-web--thread-safety-record request-tid t)))
         (request-order
-         (when git-access-record
-           (cl-incf (plist-get git-access-record :git-request-order))))
-        (git-get-owner (when git-thread-get (cons git-access-record request-order)))
+         (when access-record
+           (cl-incf (plist-get access-record :git-request-order))))
+        (access-owner (when (or git-thread-get secret-access-request)
+                        (cons access-record request-order)))
         (canonical-get-owner
-         (when canonical-thread-get (cons git-access-record request-order)))
+         (when canonical-thread-get (cons access-record request-order)))
         token token-error)
     (when canonical-thread-get (setq emacsos-assist-web--asset-refresh-pending nil))
     (condition-case error
@@ -1928,7 +2093,7 @@ before serialization and turn headers/body into bytes at this boundary."
                              (condition-case nil
                                  (emacsos-assist-web--http-access-status
                                   origin method path status (not git-typed-error)
-                                  run-owner request-tid git-get-owner)
+                                  run-owner request-tid access-owner)
                                ((error quit) nil)))
                        (when (and (not git-failure-notified)
                                   canonical-thread-get
@@ -1992,7 +2157,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                            (condition-case nil
                                                (emacsos-assist-web--http-access-status
                                                 origin method path status nil
-                                                run-owner request-tid git-get-owner)
+                                                run-owner request-tid access-owner)
                                              ((error quit) nil)))))
                                ;; url-http marks complete 4xx/5xx responses as errors.
                                (if (and (plist-get transport-status :error)
@@ -2077,7 +2242,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                   (emacsos-assist-web--http-access-status
                                    origin method path observed-http-status
                                    (not git-typed-error) run-owner
-                                   request-tid git-get-owner)))
+                                   request-tid access-owner)))
 			  (set-process-filter active nil)
 			  (set-process-sentinel active nil)
 			  (when (process-live-p active) (delete-process active))
@@ -2093,7 +2258,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                     (or git-failure-notified
                                         (emacsos-assist-web--http-access-status
                                          origin method path status nil run-owner
-                                         request-tid git-get-owner)))
+                                         request-tid access-owner)))
                             ;; A non-denial status is parsed later.  It is
                             ;; not evidence that malformed JSON or transport
                             ;; failure proves thread access denial.
@@ -3280,6 +3445,17 @@ Return whether its independent editable draft was saved locally."
                  "Review pending action" "Approvals and results") 'follow-link t
              'action (lambda (_) (emacsos-assist-web-review-approval source)))
             (insert "\n\n")))
+        (when-let ((request (alist-get 'private_entry_request thread)))
+          (let ((source (current-buffer)))
+            (insert-text-button
+             (format "Add requested login: %s (%s)"
+                     (alist-get 'label request) (alist-get 'login_page request))
+             'follow-link t
+             'action (lambda (_)
+                       (when (buffer-live-p source)
+                         (with-current-buffer source
+                           (emacsos-assist-web-secret-add request)))))
+            (insert "\n\n")))
         (let ((emacsos-conversation--image-work-budget (cons (* 1024 1024) 16))
               (emacsos-conversation--image-cache (make-hash-table :test 'equal))
               (emacsos--chat-presentation-max-bytes
@@ -4150,6 +4326,8 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
     (cond
      ((eq emacsos--assist-active-surface 'chat)
       (message "Another local chat response is active; editable draft retained"))
+     ((emacsos-assist-web--secret-pending-p)
+      (message "Waiting for private login; editable draft retained"))
      ((plist-get emacsos-assist-web--http-draft :posting)
       (message "Waiting for HTTP acceptance; editable draft retained"))
      ((string-empty-p (string-trim text)) (message "Nothing to send"))
@@ -4563,6 +4741,10 @@ ordinary interactive `find-file' prompt and navigation."
             #'emacsos-assist-web-previous-message)
 (define-key emacsos-assist-web-mode-map (kbd "C-c f")
             #'emacsos-assist-web-next-message)
+(define-key emacsos-assist-web-mode-map (kbd "C-c s")
+            #'emacsos-assist-web-secret-add)
+(define-key emacsos-assist-web-mode-map (kbd "C-c u")
+            #'emacsos-assist-web-secret-unlock)
 
 (define-key emacsos-assist-web-mode-map (kbd "RET")
             #'emacsos-conversation-activate-or-newline)
