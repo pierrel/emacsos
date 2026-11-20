@@ -5492,6 +5492,7 @@ no HTTP draft, retry key or user-message placeholder."
                                ;; Revision omits some display fields. Compare the
                                ;; complete validated snapshot before redrawing.
                                (when (or emacsos-assist-web--display-recovery
+                                         emacsos-assist-web--snapshot-stale-p
                                          (not (equal (emacsos-assist-web--retain-loaded-history
                                                       value emacsos-assist-web--snapshot)
                                                      emacsos-assist-web--snapshot)))

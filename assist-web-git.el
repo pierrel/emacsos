@@ -14,6 +14,7 @@
 (declare-function emacsos-assist-web--valid-id-p "assist-web")
 (declare-function emacsos-assist-web--thread-header "assist-web")
 (declare-function emacsos-assist-web--request "assist-web")
+(declare-function emacsos-assist-web--require-snapshot "assist-web")
 (declare-function emacsos-assist-web-review-approval "assist-web")
 (declare-function emacsos-assist-web-browser-control "assist-web")
 (declare-function magit-diff-range "magit-diff")
@@ -71,6 +72,7 @@
 (defvar-local emacsos-assist-web-git--status-pending nil)
 (defvar-local emacsos-assist-web-git--status-outcome nil)
 (defvar-local emacsos-assist-web-git--status-generation 0)
+(defvar-local emacsos-assist-web-git--status-browser-request nil)
 (defvar-local emacsos-assist-web-git--status-prompt-after-refresh nil)
 (defvar-local emacsos-assist-web-git--status-process nil)
 (defvar-local emacsos-assist-web-git--post-merge-view nil)
@@ -491,11 +493,38 @@ MANUAL permits a repeated status reminder."
     (emacsos-assist-web-review-approval)))
 
 (defun emacsos-assist-web-git--status-browser-control (_button)
-  "Open browser control for this Status view's original authorized source."
+  "Fetch the original authorized source's current offer before opening it.
+Status can hide the source buffer, which suspends its automatic observation."
   (unless (emacsos-assist-web-git--status-valid-source-p)
     (user-error "Open an authorized canonical Assist thread first"))
-  (with-current-buffer emacsos-assist-web-git--status-source
-    (emacsos-assist-web-browser-control)))
+  (let ((view (current-buffer))
+        (source emacsos-assist-web-git--status-source)
+        (identity emacsos-assist-web-git--status-identity)
+        (request (list 'browser-control)))
+    (setq emacsos-assist-web-git--status-browser-request request)
+    (with-current-buffer source
+      (let ((auth emacsos-assist-web--auth-epoch))
+        (emacsos-assist-web--request
+         "GET" (concat "threads/" (car identity)) nil
+         (lambda (value problem)
+           (when (buffer-live-p view)
+             (with-current-buffer view
+               (when (and (eq request emacsos-assist-web-git--status-browser-request)
+                          (eq source emacsos-assist-web-git--status-source)
+                          (equal identity emacsos-assist-web-git--status-identity)
+                          (emacsos-assist-web-git--status-valid-source-p)
+                          (with-current-buffer source
+                            (eql auth emacsos-assist-web--auth-epoch)))
+                 (condition-case error
+                     (progn
+                       (when problem (error "%s" problem))
+                       (emacsos-assist-web--require-snapshot value (car identity))
+                       (if-let ((url (alist-get 'browser_control_url
+                                               (alist-get 'thread value))))
+                           (browse-url url)
+                         (message "No live browser control offer")))
+                   (error (message "Browser control unavailable: %s"
+                                   (error-message-string error)))))))))))))
 
 (defun emacsos-assist-web-git--status-browser-action ()
   "Render the original source's current browser offer without Git prerequisites."

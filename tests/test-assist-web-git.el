@@ -19,8 +19,10 @@
             (setq-local emacsos-assist-web--thread-id "thread-browser"
                         emacsos-assist-web-git--metadata nil
                         emacsos-assist-web--snapshot
-                        '((thread . ((id . "thread-browser") (status . "paused")
-                                     (browser_control_url . "https://control.example/thread/thread-browser/browser")))))
+                        '((thread . ((id . "thread-browser") (description . "Synthetic")
+                                     (status . "paused") (workspace . ((repo_label . "Synthetic")))
+                                     (browser_control_url . "https://control.example/thread/thread-browser/browser")))
+                          (messages . nil)))
             (cl-letf (((symbol-function 'emacsos-assist-web--request)
                        (lambda (&rest _) (ert-fail "Status must not issue a Git request"))))
               (emacsos-assist-web-git-status)))
@@ -29,12 +31,17 @@
             (goto-char (point-min))
             (should (search-forward "Control the live browser" nil t))
             (let ((button (button-at (1- (point)))))
-              (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+              (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url)))
+                        ((symbol-function 'emacsos-assist-web--request)
+                         (lambda (_method _path _payload callback &rest _)
+                           (funcall callback (copy-tree emacsos-assist-web--snapshot) nil))))
                 (button-activate button)
                 (should (equal opened "https://control.example/thread/thread-browser/browser"))
                 (with-current-buffer source
                   (setf (alist-get 'browser_control_url (alist-get 'thread emacsos-assist-web--snapshot)) nil))
-                (should-error (button-activate button) :type 'user-error)))
+                (setq opened nil)
+                (button-activate button)
+                (should-not opened)))
             (emacsos-assist-web-git--status-render)
             (should-not (string-match-p "Control the live browser" (buffer-string)))
             (should (string-match-p "No live browser control offer" (buffer-string)))
@@ -54,6 +61,56 @@
             (should-error (emacsos-assist-web-git-merge) :type 'user-error)))
       (when (buffer-live-p view) (kill-buffer view))
       (kill-buffer source))))
+
+(ert-deftest test-assist-web-status-browser-checks-hidden-source-again-before-opening ()
+  "A retired server offer cannot open from an unchanged hidden source snapshot."
+  (let ((source (generate-new-buffer " *status-hidden-source*"))
+        (view (generate-new-buffer " *status-hidden-view*"))
+        (snapshot (copy-tree test-assist-web--snapshot)) callback opened)
+    (unwind-protect
+        (progn
+          (setf (alist-get 'browser_control_url (alist-get 'thread snapshot))
+                "https://control.example/thread/thread-1/browser")
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--stop-thread-observation)
+            (setq-local emacsos-assist-web--thread-id "thread-1"
+                        emacsos-assist-web--snapshot (copy-tree snapshot)))
+          (with-current-buffer view
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity '("thread-1"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _payload fn &rest _)
+                         (should (equal method "GET"))
+                         (should (equal path "threads/thread-1"))
+                         (setq callback fn)))
+                      ((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+              (emacsos-assist-web-git--status-browser-control nil)
+              (should callback)
+              (should-not opened)
+              (setf (alist-get 'browser_control_url (alist-get 'thread snapshot)) nil)
+              (funcall callback snapshot nil)
+              (should-not opened)
+              ;; A fresh offer opens exactly the validated host-issued URL.
+              (setf (alist-get 'browser_control_url (alist-get 'thread snapshot))
+                    "https://other.example/thread/thread-1/browser")
+              (emacsos-assist-web-git--status-browser-control nil)
+              (funcall callback snapshot nil)
+              (should (equal opened "https://other.example/thread/thread-1/browser"))
+              (setq opened nil)
+              (emacsos-assist-web-git--status-browser-control nil)
+              (let ((older callback) (retired (copy-tree snapshot)))
+                (emacsos-assist-web-git--status-browser-control nil)
+                (setf (alist-get 'browser_control_url (alist-get 'thread retired)) nil)
+                (funcall callback retired nil)
+                (funcall older snapshot nil)
+                (should-not opened))
+              (emacsos-assist-web-git--status-browser-control nil)
+              (with-current-buffer source (cl-incf emacsos-assist-web--auth-epoch))
+              (funcall callback snapshot nil)
+              (should-not opened))))
+      (kill-buffer source)
+      (kill-buffer view))))
 
 (ert-deftest test-assist-web-git-phone-header-keeps-both-touch-actions-visible ()
   "Narrow phone headers preserve Status, Merge and a clickable Run action."
