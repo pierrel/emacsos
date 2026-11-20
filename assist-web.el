@@ -34,7 +34,35 @@
 (require 'wid-edit)
 
 (defvar-local emacsos-assist-web--secret-add-pending-p nil
-  "Whether this thread is waiting to open its private login form.")
+  "Whether this buffer is opening a private login form or awaiting its save.")
+
+(defun emacsos-assist-web--secret-pending-p ()
+  "Return whether a live buffer is opening or saving this thread's login."
+  (let ((tid emacsos-assist-web--thread-id))
+    (and tid
+         (seq-some
+          (lambda (buffer)
+            (with-current-buffer buffer
+              (and (equal tid emacsos-assist-web--thread-id)
+                   emacsos-assist-web--secret-add-pending-p)))
+          (buffer-list)))))
+
+(defun emacsos-assist-web--secret-save-notice (value problem)
+  "Describe private save VALUE or typed PROBLEM without exposing response text."
+  (cond
+   ((and (not problem) (alist-get 'id value))
+    (if (alist-get 'result_branch value)
+        "Encrypted login committed on a result branch; inspect Git status"
+      "Encrypted login saved to this thread's Git branch"))
+   ((eq (plist-get problem :kind) 'timeout)
+    "Login save timed out; saving may continue and chat may stay busy. Inspect Git status before retry")
+   ((eql (plist-get problem :status) 409)
+    "Login save rejected; repository may be busy or private form changed. Refresh before retry")
+   ((memq (plist-get problem :status) '(401 403 404))
+    "Login save access unavailable; reopen this thread before retry")
+   ((memq (plist-get problem :kind) '(credentials busy))
+    "Login save not submitted; check credentials or request budget")
+   (t "Login save unconfirmed; inspect Git status before retry. Saving may continue")))
 
 (defun emacsos-assist-web-secret-unlock ()
   "Privately unlock this thread's repository credentials for later use."
@@ -82,6 +110,8 @@
                           password (read-passwd "Password: "))
                     (unless (alist-get 'unlocked status)
                       (setq passphrase (read-passwd "Repository secret phrase: ")))
+                    (setq emacsos-assist-web--secret-add-pending-p t)
+                    (message "Saving encrypted login; Git preparation and publication may take time")
                     (emacsos-assist-web--request
                      "POST" (format "threads/%s/secrets" tid)
                      (append `((label . ,label) (login_url . ,login-url)
@@ -89,16 +119,15 @@
                              (when passphrase `((passphrase . ,passphrase)))
                              (when request `((request_id . ,(alist-get 'id request)))))
                      (lambda (value problem)
-                       (message "%s"
-                                (if (and (not problem) (alist-get 'id value))
-                                    (if (alist-get 'result_branch value)
-                                        "Encrypted login committed on a result branch; inspect Git status"
-                                      "Encrypted login saved to this thread's Git branch")
-                                  "Encrypted login was not confirmed; inspect Git status"))
+                       (when (buffer-live-p origin)
+                         (with-current-buffer origin
+                           (setq emacsos-assist-web--secret-add-pending-p nil)))
+                       (message "%s" (emacsos-assist-web--secret-save-notice value problem))
                        (when (and request (not problem) (alist-get 'id value)
                                   (buffer-live-p origin))
                          (with-current-buffer origin
-                           (emacsos-assist-web-refresh-thread))))))
+                           (emacsos-assist-web-refresh-thread))))
+                     nil nil nil nil t))
                 (when username (clear-string username))
                 (when password (clear-string password))
                 (when passphrase (clear-string passphrase))))))))))
@@ -108,7 +137,7 @@
   (interactive)
   (unless emacsos-assist-web--thread-id
     (user-error "Open a repository thread first"))
-  (unless emacsos-assist-web--secret-add-pending-p
+  (unless (emacsos-assist-web--secret-pending-p)
     (let ((tid emacsos-assist-web--thread-id)
           (origin (current-buffer)))
       (setq emacsos-assist-web--secret-add-pending-p t)
@@ -4269,6 +4298,8 @@ retry; accepted Runs and scheduling belong to the server, not a client FIFO."
     (cond
      ((eq emacsos--assist-active-surface 'chat)
       (message "Another local chat response is active; editable draft retained"))
+     ((emacsos-assist-web--secret-pending-p)
+      (message "Waiting for private login save; editable draft retained"))
      ((plist-get emacsos-assist-web--http-draft :posting)
       (message "Waiting for HTTP acceptance; editable draft retained"))
      ((string-empty-p (string-trim text)) (message "Nothing to send"))
