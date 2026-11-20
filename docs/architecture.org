@@ -71,7 +71,9 @@ actions.
   credentials and an unlock phrase, then send them through E8's authenticated
   HTTPS phone API without adding them to the editable draft or transcript. A
   public agent request in the authenticated thread snapshot gives E7 an Add
-  requested login button that opens those same private prompts.
+  requested login button that opens those same private prompts. The existing
+  Status page also offers manual Add login and Unlock logins actions, or the
+  public requested-login destination, through those same private commands.
 - *E8 Assist Web service.* The external Assist service owns canonical threads,
   Run execution/queuing, approvals and Git authority. E7 receives canonical
   snapshots and provisional SSE text over its authenticated HTTPS phone API;

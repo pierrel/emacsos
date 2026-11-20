@@ -386,7 +386,12 @@ thread acknowledges the displayed snapshot only while its buffer has a visible
 window. Cached views, hidden-buffer rendering and background probes
 do not clear unread state; a newer server notification survives a stale receipt.
 
-=C-c s= privately adds an encrypted repository login. It masks the username,
+Open a repository thread's =Status= page and choose =Add login= to create an
+encrypted repository login without asking the agent first. When a login request
+is pending, the same page shows =Add requested login= with its public label and
+HTTPS destination. =Unlock logins= opens the existing private unlock prompt.
+These actions return to the original thread before collecting private input.
+=C-c s= also privately adds a login. It masks the username,
 password and repository unlock phrase in the minibuffer. The phrase is entered
 once per thread and cached only in that thread's host-private directory; use
 =C-c u= to unlock an existing repository store in another thread.
