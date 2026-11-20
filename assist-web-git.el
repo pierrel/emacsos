@@ -503,7 +503,8 @@ Status can hide the source buffer, which suspends its automatic observation."
         (request (list 'browser-control)))
     (setq emacsos-assist-web-git--status-browser-request request)
     (with-current-buffer source
-      (let ((auth emacsos-assist-web--auth-epoch))
+      (let ((auth emacsos-assist-web--auth-epoch)
+            (refresh emacsos-assist-web--refresh-generation))
         (emacsos-assist-web--request
          "GET" (concat "threads/" (car identity)) nil
          (lambda (value problem)
@@ -514,7 +515,8 @@ Status can hide the source buffer, which suspends its automatic observation."
                           (equal identity emacsos-assist-web-git--status-identity)
                           (emacsos-assist-web-git--status-valid-source-p)
                           (with-current-buffer source
-                            (eql auth emacsos-assist-web--auth-epoch)))
+                            (and (eql auth emacsos-assist-web--auth-epoch)
+                                 (= refresh emacsos-assist-web--refresh-generation))))
                  (condition-case error
                      (progn
                        (when problem (error "%s" problem))

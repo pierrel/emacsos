@@ -27,7 +27,8 @@ fetches the original thread's current offer before opening it, so returning
 control also retires a link left in a hidden thread. Cached snapshots do not
 advertise a live link; loading older history preserves that restriction. A
 successful canonical thread read restores the action even when the snapshot
-itself has not changed.
+itself has not changed. A reply overtaken by a source-thread refresh cannot
+reopen an old offer.
 
 ** Virtual Keyboard
 

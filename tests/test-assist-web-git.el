@@ -9,6 +9,11 @@
   '(:tid "thread-1" :repo-key "aaaaaaaaaaaaaaaaaaaa"
     :branch "assist/thread" :status "ready"))
 
+(defconst test-assist-web-git--browser-snapshot
+  '((thread . ((id . "thread-1") (description . "Synthetic") (status . "ready")
+               (workspace . ((repo_label . "Synthetic")))))
+    (messages . nil) (has_older_messages . nil) (next_before . nil)))
+
 (ert-deftest test-assist-web-status-browser-action-without-git-and-after-return ()
   "The existing Status entry opens only the current source's live offer."
   (let ((source (generate-new-buffer " *status-browser-source*")) view opened)
@@ -66,7 +71,7 @@
   "A retired server offer cannot open from an unchanged hidden source snapshot."
   (let ((source (generate-new-buffer " *status-hidden-source*"))
         (view (generate-new-buffer " *status-hidden-view*"))
-        (snapshot (copy-tree test-assist-web--snapshot)) callback opened)
+        (snapshot (copy-tree test-assist-web-git--browser-snapshot)) callback opened)
     (unwind-protect
         (progn
           (setf (alist-get 'browser_control_url (alist-get 'thread snapshot))
@@ -117,7 +122,7 @@
   (let ((emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
         (source (generate-new-buffer " *browser-auth-source*"))
         (view (generate-new-buffer " *browser-auth-status*"))
-        (snapshot (copy-tree test-assist-web--snapshot)) record opened)
+        (snapshot (copy-tree test-assist-web-git--browser-snapshot)) record opened)
     (unwind-protect
         (progn
           (setf (alist-get 'browser_control_url (alist-get 'thread snapshot))
@@ -145,6 +150,45 @@
           (with-current-buffer source (should-not emacsos-assist-web--denied)))
       (kill-buffer source)
       (kill-buffer view))))
+
+(ert-deftest test-assist-web-status-browser-rejects-reply-after-source-refresh ()
+  "A real newer thread refresh clearing the offer retires a pending Status read."
+  (let ((emacsos-assist-web-cache-directory (make-temp-file "browser-read-order-" t))
+        (emacsos-assist-web--thread-safety (make-hash-table :test #'equal))
+        (source (generate-new-buffer " *browser-refresh-source*"))
+        (view (generate-new-buffer " *browser-refresh-status*"))
+        (offered (copy-tree test-assist-web-git--browser-snapshot)) pending opened)
+    (unwind-protect
+        (progn
+          (setf (alist-get 'browser_control_url (alist-get 'thread offered))
+                "https://control.example/thread/thread-1/browser")
+          (with-current-buffer source
+            (emacsos-assist-web-mode)
+            (emacsos-assist-web--stop-thread-observation)
+            (setq emacsos-assist-web--thread-id "thread-1")
+            (emacsos-assist-web--render (copy-tree offered)))
+          (with-current-buffer view
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity '("thread-1"))
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (_method _path _payload callback &rest _)
+                         (setq pending callback)))
+                      ((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+              (emacsos-assist-web-git--status-browser-control nil)
+              (with-current-buffer source
+                (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                           (lambda (_method _path _payload callback &rest _)
+                             (let ((fresh (copy-tree offered)))
+                               (setf (alist-get 'browser_control_url (alist-get 'thread fresh)) nil)
+                               (funcall callback fresh nil)))))
+                  (emacsos-assist-web-refresh-thread))
+                (should-not (alist-get 'browser_control_url
+                                       (alist-get 'thread emacsos-assist-web--snapshot))))
+              (funcall pending offered nil)
+              (should-not opened))))
+      (kill-buffer source)
+      (kill-buffer view)
+      (delete-directory emacsos-assist-web-cache-directory t))))
 
 (ert-deftest test-assist-web-git-phone-header-keeps-both-touch-actions-visible ()
   "Narrow phone headers preserve Status, Merge and a clickable Run action."
