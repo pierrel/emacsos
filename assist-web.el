@@ -47,6 +47,12 @@
                    emacsos-assist-web--secret-add-pending-p)))
           (buffer-list)))))
 
+(defun emacsos-assist-web--secret-access-current-p (tid auth-epoch)
+  "Whether private entry still belongs to authorized TID at AUTH-EPOCH."
+  (and (equal tid emacsos-assist-web--thread-id)
+       (eql auth-epoch emacsos-assist-web--auth-epoch)
+       (not (eq emacsos-assist-web--denied t))))
+
 (defun emacsos-assist-web--secret-save-notice (value problem)
   "Describe private save VALUE or typed PROBLEM without exposing response text."
   (cond
@@ -65,23 +71,29 @@
    (t "Login save unconfirmed; inspect Git status before retry. Saving may continue")))
 
 (defun emacsos-assist-web-secret-unlock ()
-  "Privately unlock this thread's repository credentials for later use."
+  "Privately unlock this thread's credentials while its authorization is current."
   (interactive)
   (unless emacsos-assist-web--thread-id
     (user-error "Open a repository thread first"))
-  (let ((passphrase (read-passwd "Repository secret phrase: "))
-        (tid emacsos-assist-web--thread-id))
+  (let ((tid emacsos-assist-web--thread-id)
+        (auth-epoch emacsos-assist-web--auth-epoch)
+        passphrase)
     (unwind-protect
-        (emacsos-assist-web--request
-         "POST" (format "threads/%s/secrets/unlock" tid)
-         `((passphrase . ,passphrase))
-         (lambda (_value error)
-           (message "%s" (if error "Secret unlock failed"
-                            "Secrets unlocked for this thread"))))
-      (clear-string passphrase))))
+        (if (not (emacsos-assist-web--secret-access-current-p tid auth-epoch))
+            (message "Secret entry canceled; thread access changed; refresh first")
+          (setq passphrase (read-passwd "Repository secret phrase: "))
+          (if (not (emacsos-assist-web--secret-access-current-p tid auth-epoch))
+              (message "Secret entry canceled; thread access changed; refresh first")
+            (emacsos-assist-web--request
+             "POST" (format "threads/%s/secrets/unlock" tid)
+             `((passphrase . ,passphrase))
+             (lambda (_value error)
+               (message "%s" (if error "Secret unlock failed"
+                                "Secrets unlocked for this thread"))))))
+      (when passphrase (clear-string passphrase)))))
 
-(defun emacsos-assist-web--secret-add-when-ready (origin tid request status error)
-  "Handle ORIGIN's private-form GET for TID after STATUS or ERROR."
+(defun emacsos-assist-web--secret-add-when-ready (origin tid auth-epoch request status error)
+  "Handle ORIGIN's private form only while TID's captured AUTH-EPOCH is current."
   (when (and (buffer-live-p origin)
              (buffer-local-value 'emacsos-assist-web--secret-add-pending-p origin))
     (if-let ((minibuffer-window (active-minibuffer-window)))
@@ -90,48 +102,60 @@
                 (lambda ()
                   (remove-hook 'minibuffer-exit-hook resume t)
                   (run-at-time 0 nil #'emacsos-assist-web--secret-add-when-ready
-                               origin tid request status error)))
+                               origin tid auth-epoch request status error)))
           (with-current-buffer (window-buffer minibuffer-window)
             (add-hook 'minibuffer-exit-hook resume nil t)))
       (with-current-buffer origin
         (let (saving)
           (unwind-protect
-              (when (and (equal tid emacsos-assist-web--thread-id)
-                         (eq (window-buffer (selected-window)) origin))
-                (if error
-                    (message "Secret store unavailable")
-                  (let ((label (if request (alist-get 'label request)
-                                 (read-string "Login label: ")))
-                        (login-url (if request (alist-get 'login_page request)
-                                     (read-string "HTTPS login origin and path: ")))
-                        username password passphrase)
-                    (unwind-protect
-                        (progn
-                          (setq username (read-passwd "Username (masked): ")
-                                password (read-passwd "Password: "))
-                          (unless (alist-get 'unlocked status)
-                            (setq passphrase (read-passwd "Repository secret phrase: ")))
-                          (message "Saving encrypted login; Git preparation and publication may take time")
-                          (emacsos-assist-web--request
-                           "POST" (format "threads/%s/secrets" tid)
-                           (append `((label . ,label) (login_url . ,login-url)
-                                     (username . ,username) (password . ,password))
-                                   (when passphrase `((passphrase . ,passphrase)))
-                                   (when request `((request_id . ,(alist-get 'id request)))))
-                           (lambda (value problem)
-                             (when (buffer-live-p origin)
-                               (with-current-buffer origin
-                                 (setq emacsos-assist-web--secret-add-pending-p nil)))
-                             (message "%s" (emacsos-assist-web--secret-save-notice value problem))
-                             (when (and request (not problem) (alist-get 'id value)
-                                        (buffer-live-p origin))
-                               (with-current-buffer origin
-                                 (emacsos-assist-web-refresh-thread))))
-                           nil nil nil nil t)
-                          (setq saving t))
-                      (when username (clear-string username))
-                      (when password (clear-string password))
-                      (when passphrase (clear-string passphrase))))))
+              (catch 'secret-access-changed
+                (cl-labels ((check-access ()
+                              (unless (emacsos-assist-web--secret-access-current-p tid auth-epoch)
+                                (message "Secret entry canceled; thread access changed; refresh first")
+                                (throw 'secret-access-changed nil))))
+                  (when (and (equal tid emacsos-assist-web--thread-id)
+                             (eq (window-buffer (selected-window)) origin))
+                    (check-access)
+                    (if error
+                        (message "Secret store unavailable")
+                      (let (label login-url username password passphrase)
+                        (unwind-protect
+                            (progn
+                              (setq label (if request (alist-get 'label request)
+                                            (read-string "Login label: ")))
+                              (check-access)
+                              (setq login-url (if request (alist-get 'login_page request)
+                                                (read-string "HTTPS login origin and path: ")))
+                              (check-access)
+                              (setq username (read-passwd "Username (masked): "))
+                              (check-access)
+                              (setq password (read-passwd "Password: "))
+                              (check-access)
+                              (unless (alist-get 'unlocked status)
+                                (setq passphrase (read-passwd "Repository secret phrase: ")))
+                              (check-access)
+                              (message "Saving encrypted login; Git preparation and publication may take time")
+                              (check-access)
+                              (emacsos-assist-web--request
+                               "POST" (format "threads/%s/secrets" tid)
+                               (append `((label . ,label) (login_url . ,login-url)
+                                         (username . ,username) (password . ,password))
+                                       (when passphrase `((passphrase . ,passphrase)))
+                                       (when request `((request_id . ,(alist-get 'id request)))))
+                               (lambda (value problem)
+                                 (when (buffer-live-p origin)
+                                   (with-current-buffer origin
+                                     (setq emacsos-assist-web--secret-add-pending-p nil)))
+                                 (message "%s" (emacsos-assist-web--secret-save-notice value problem))
+                                 (when (and request (not problem) (alist-get 'id value)
+                                            (buffer-live-p origin))
+                                   (with-current-buffer origin
+                                     (emacsos-assist-web-refresh-thread))))
+                               nil nil nil nil t)
+                              (setq saving t))
+                          (when username (clear-string username))
+                          (when password (clear-string password))
+                          (when passphrase (clear-string passphrase))))))))
             (unless saving
               (setq emacsos-assist-web--secret-add-pending-p nil))))))))
 
@@ -142,6 +166,7 @@
     (user-error "Open a repository thread first"))
   (unless (emacsos-assist-web--secret-pending-p)
     (let ((tid emacsos-assist-web--thread-id)
+          (auth-epoch emacsos-assist-web--auth-epoch)
           (origin (current-buffer)))
       (setq emacsos-assist-web--secret-add-pending-p t)
       (emacsos-assist-web--request
@@ -149,7 +174,7 @@
        (lambda (status error)
          ;; The HTTP callback may run in a process sentinel.
          (run-at-time 0 nil #'emacsos-assist-web--secret-add-when-ready
-                      origin tid request status error))))))
+                      origin tid auth-epoch request status error))))))
 
 (declare-function emacsos--render-page "os")
 (declare-function emacsos--fit-pixel-width "os" (text pixels &optional face))
