@@ -1272,8 +1272,10 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
       emacsos-platform-mode-line-segments nil)
 
 (defun emacsos-pinephone-initial-buffer ()
-  "Open the native Assist thread list and return its buffer for startup."
-  (emacsos-assist-web-show-thread-list)
+  "Prepare chat and return the native Assist list without changing caller windows."
+  (emacsos--chat-buffer)
+  (save-window-excursion
+    (emacsos-assist-web-show-thread-list))
   (get-buffer emacsos-assist-web--thread-list-buffer-name))
 
 (when (display-graphic-p)

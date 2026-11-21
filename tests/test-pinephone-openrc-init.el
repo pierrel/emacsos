@@ -6,6 +6,64 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(ert-deftest emacsos-openrc-startup-retains-initialized-manual-chat ()
+  "The documented manual buffer switch still reaches initialized chat after boot."
+  (let ((emacsos--chat-buffer-name " *startup-manual-chat*")
+        (emacsos-assist-web--thread-list-buffer-name " *startup-list-chat*")
+        (emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos--chat-rollback-pending nil)
+        (emacsos--target-window nil))
+    (save-window-excursion
+      (unwind-protect
+          (cl-letf (((symbol-function 'emacsos-assist-web--request) #'ignore)
+                    ((symbol-function 'emacsos--render-page) #'ignore))
+            (emacsos-pinephone-initial-buffer)
+            ;; C-x b creates an ordinary buffer if startup did not prepare chat.
+            (switch-to-buffer emacsos--chat-buffer-name)
+            (setq emacsos--target-window (selected-window))
+            (emacsos--chat-show-top-buffer)
+            (should (emacsos--chat-input-start (current-buffer)))
+            (should (eq (local-key-binding (kbd "RET"))
+                        #'emacsos-conversation-activate-or-newline)))
+        (dolist (name (list emacsos--chat-buffer-name
+                            emacsos-assist-web--thread-list-buffer-name))
+          (when-let ((buffer (get-buffer name))) (kill-buffer buffer)))))))
+
+(ert-deftest emacsos-openrc-controls-fallback-preserves-unrelated-selected-window ()
+  "Done replaces only the editing target when its saved parent has been killed."
+  (let ((emacsos-assist-web--thread-list-buffer-name " *startup-fallback-list*")
+        (emacsos--chat-buffer-name " *startup-fallback-chat*")
+        (emacsos--chat-rollback-pending nil)
+        (emacsos-assist-web--catalog nil)
+        (emacsos-assist-web--catalog-refreshing-p nil)
+        (emacsos--target-window nil)
+        (emacsos-initial-buffer-function #'emacsos-pinephone-initial-buffer)
+        (emacsos-pinephone-controls-active t)
+        (emacsos-pinephone-controls-parent-buffer (generate-new-buffer " *dead-parent*"))
+        (controls (generate-new-buffer " *fallback-controls*"))
+        (unrelated (generate-new-buffer " *unrelated-selected*")))
+    (save-window-excursion
+      (unwind-protect
+          (cl-letf (((symbol-function 'emacsos-assist-web--request) #'ignore)
+                    ((symbol-function 'emacsos--render-page) #'ignore))
+            (delete-other-windows)
+            (let ((target (selected-window)) (selected (split-window-right)))
+              (setq emacsos--target-window target)
+              (set-window-buffer target controls)
+              (set-window-buffer selected unrelated)
+              (select-window selected)
+              (kill-buffer emacsos-pinephone-controls-parent-buffer)
+              (emacsos-pinephone-controls-done)
+              (should (eq (window-buffer target)
+                          (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+              (should (eq (selected-window) selected))
+              (should (eq (window-buffer selected) unrelated))))
+        (dolist (buffer (list controls unrelated emacsos-pinephone-controls-parent-buffer
+                              (get-buffer emacsos--chat-buffer-name)
+                              (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (ert-deftest emacsos-openrc-startup-selects-threads-before-refresh-finishes ()
   "Normal OS initialization selects the native list, including offline startup."
   (dolist (cached '(nil t))
@@ -18,6 +76,8 @@
           (emacsos-assist-web--catalog-refreshing-p nil)
           (emacsos-assist-web--new-thread-pending-p nil)
           (emacsos-assist-web--thread-list-buffer-name " *startup-threads-test*")
+          (emacsos--chat-buffer-name " *startup-threads-chat-test*")
+          (emacsos--chat-rollback-pending nil)
           (emacsos-initial-buffer-function #'emacsos-pinephone-initial-buffer)
           (emacsos--target-window nil)
           (emacsos-pinephone-controls-parent-buffer nil)
@@ -55,8 +115,9 @@
                           (get-buffer emacsos-assist-web--thread-list-buffer-name)))
               (should (eq (lookup-key emacsos-command-map (kbd "c"))
                           #'emacsos--chat-show-top-buffer)))
-          (when-let ((buffer (get-buffer emacsos-assist-web--thread-list-buffer-name)))
-            (kill-buffer buffer)))))))
+          (dolist (name (list emacsos-assist-web--thread-list-buffer-name
+                              emacsos--chat-buffer-name))
+            (when-let ((buffer (get-buffer name))) (kill-buffer buffer))))))))
 
 (ert-deftest emacsos-openrc-distro-magit-paths-are-visible-under-q ()
   (dolist (directory '("/usr/share/emacs/site-lisp"

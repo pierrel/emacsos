@@ -119,7 +119,9 @@ For an *interactive* session in =*chat*= — scrolling, typing, watching a strea
 
 The phone opens the native Assist thread list at startup. Its existing
 asynchronous refresh keeps cached threads available when offline; chat remains
-available through the command menu.
+initialized in the background for the command menu and manual buffer switching.
+Preparing the startup buffer preserves the caller's windows, including when
+Controls falls back after its saved parent is closed.
 
 Startup waits for the Emacs window and server to become ready. Once running,
 the session watches required processes and the display. A busy Emacs command
