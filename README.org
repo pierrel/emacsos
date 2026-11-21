@@ -117,6 +117,10 @@ For an *interactive* session in =*chat*= — scrolling, typing, watching a strea
 
 * PinePhone session supervision
 
+The phone opens the native Assist thread list at startup. Its existing
+asynchronous refresh keeps cached threads available when offline; chat remains
+available through the command menu.
+
 Startup waits for the Emacs window and server to become ready. Once running,
 the session watches required processes and the display. A busy Emacs command
 does not trigger a restart; a live but wedged Emacs or broken server socket

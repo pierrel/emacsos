@@ -6,6 +6,58 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(ert-deftest emacsos-openrc-startup-selects-threads-before-refresh-finishes ()
+  "Normal OS initialization selects the native list, including offline startup."
+  (dolist (cached '(nil t))
+    (let ((emacsos-assist-web--catalog
+           (when cached
+             '((threads . (((id . "cached-thread") (description . "Saved thread")
+                            (status . "ready") (repo_label . "Synthetic"))))
+               (repositories . nil) (harnesses . nil))))
+          (emacsos-assist-web--catalog-state (when cached 'cached))
+          (emacsos-assist-web--catalog-refreshing-p nil)
+          (emacsos-assist-web--new-thread-pending-p nil)
+          (emacsos-assist-web--thread-list-buffer-name " *startup-threads-test*")
+          (emacsos-initial-buffer-function #'emacsos-pinephone-initial-buffer)
+          (emacsos--target-window nil)
+          (emacsos-pinephone-controls-parent-buffer nil)
+          (emacsos-pinephone-controls-active t)
+          callback requests)
+      (save-window-excursion
+        (unwind-protect
+            (cl-letf (((symbol-function 'emacsos-assist-web--request)
+                       (lambda (method path _payload done &rest _)
+                         (should (equal method "GET"))
+                         (should (equal path "threads"))
+                         (cl-incf requests)
+                         (setq callback done)
+                         :asynchronous-request))
+                      ((symbol-function 'emacsos--render-page) #'ignore)
+                      ((symbol-function 'emacsos-net--ensure-timer) #'ignore)
+                      ((symbol-function 'emacsos-net--refresh) #'ignore)
+                      ((symbol-function 'emacsos-call--watcher-ensure) #'ignore))
+              (setq requests 0)
+              (emacsos--init)
+              (should (eq (current-buffer)
+                          (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+              (should (derived-mode-p 'emacsos-assist-web-thread-list-mode))
+              (should callback)
+              (should (= requests 1))
+              (should emacsos-assist-web--catalog-refreshing-p)
+              (funcall callback nil "offline")
+              (should-not emacsos-assist-web--catalog-refreshing-p)
+              (should (string-match-p "Retry" (buffer-string)))
+              (when cached (should (string-match-p "Saved thread" (buffer-string))))
+              ;; Controls' missing-parent fallback obeys the same buffer contract.
+              (should (bufferp (funcall emacsos-initial-buffer-function)))
+              (emacsos-pinephone-controls-done)
+              (should (eq (window-buffer (selected-window))
+                          (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+              (should (eq (lookup-key emacsos-command-map (kbd "c"))
+                          #'emacsos--chat-show-top-buffer)))
+          (when-let ((buffer (get-buffer emacsos-assist-web--thread-list-buffer-name)))
+            (kill-buffer buffer)))))))
+
 (ert-deftest emacsos-openrc-distro-magit-paths-are-visible-under-q ()
   (dolist (directory '("/usr/share/emacs/site-lisp"
                        "/usr/share/emacs/site-lisp/compat"

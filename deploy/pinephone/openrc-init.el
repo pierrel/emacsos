@@ -1271,11 +1271,16 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
       '(:eval (emacsos-pinephone-controls-mode-line-string))
       emacsos-platform-mode-line-segments nil)
 
+(defun emacsos-pinephone-initial-buffer ()
+  "Open the native Assist thread list and return its buffer for startup."
+  (emacsos-assist-web-show-thread-list)
+  (get-buffer emacsos-assist-web--thread-list-buffer-name))
+
 (when (display-graphic-p)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
   (setq emacsos-use-internal-keyboard nil
         emacsos-control-window-percent 35
-        emacsos-initial-buffer-function #'emacsos--chat-buffer
+        emacsos-initial-buffer-function #'emacsos-pinephone-initial-buffer
         emacsos-net-cell-connection emacsos-pinephone-cell-connection
         emacsos-net-command-function #'emacsos-pinephone-network-command
         emacsos-net-connection-function #'emacsos-pinephone-wifi-operation
