@@ -393,7 +393,9 @@ HTTPS destination. =Unlock logins= opens the existing private unlock prompt.
 These actions return to the original thread before collecting private input.
 =C-c s= also privately adds a login. It masks the username,
 password and repository unlock phrase in the minibuffer. The phrase is entered
-once per thread and cached only in that thread's host-private directory; use
+once per thread and cached only in that thread's host-private directory. It must
+contain 12 to 1024 UTF-8 bytes. Rejections show fixed guidance for the failed
+validation without displaying submitted values or arbitrary response text; use
 =C-c u= to unlock an existing repository store in another thread.
 When the agent requests a new login using only its public site and label, the
 thread view offers an =Add requested login= button for those same masked prompts.

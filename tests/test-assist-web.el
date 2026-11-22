@@ -5395,7 +5395,7 @@ server clears only flags for a view that is still current."
           (switch-to-buffer (current-buffer))
           (emacsos-assist-web-secret-add)))
       (should (equal (length prompts) 3))
-      (should (equal (car prompts) "Repository secret phrase: "))
+      (should (equal (car prompts) "Repository secret phrase (12 to 1024 UTF-8 bytes): "))
       (should (equal (nth 0 request) "POST"))
       (should (equal (nth 1 request) "threads/synthetic-thread/secrets"))
       (should (string-match-p "synthetic-river-8642" (nth 2 request)))
@@ -5460,7 +5460,7 @@ server clears only flags for a view that is still current."
 
 (ert-deftest test-assist-web-secret-entry-cancels-when-authorization-changes ()
   (let ((prompts '("Login label: " "HTTPS login origin and path: "
-                   "Username (masked): " "Password: " "Repository secret phrase: ")))
+                   "Username (masked): " "Password: " "Repository secret phrase (12 to 1024 UTF-8 bytes): ")))
     (dolist (stage (append '(deferred reauthorized) prompts))
       (with-temp-buffer
         (setq-local emacsos-assist-web--thread-id "synthetic-thread")
@@ -5560,7 +5560,7 @@ server clears only flags for a view that is still current."
 
 (ert-deftest test-assist-web-secret-form-quit-clears-pending-and-private-values ()
   (dolist (cancel '("Login label: " "HTTPS login origin and path: "
-                    "Username (masked): " "Password: " "Repository secret phrase: "))
+                    "Username (masked): " "Password: " "Repository secret phrase (12 to 1024 UTF-8 bytes): "))
     (with-temp-buffer
       (setq-local emacsos-assist-web--thread-id "synthetic-thread")
       (let (values cancelled)
@@ -5757,3 +5757,36 @@ server clears only flags for a view that is still current."
       (should (string-match-p "https://synthetic.example/login" posted))
       (should refreshed)
       (should-not (string-match-p "synthetic-password" (buffer-string))))))
+
+(ert-deftest test-assist-web-private-rejections-keep-only-fixed-codes ()
+  "Actual 409 callbacks distinguish a short phrase without exposing a body."
+  (dolist (code '("invalid_phrase_length" "no_store" "repository_busy" "invented-private-body"))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "synthetic-thread")
+      (let ((emacsos-assist-web--requests nil) result)
+        (cl-letf (((symbol-function 'emacsos-assist-web--read-token) (lambda () "token"))
+                  ((symbol-function 'emacsos-assist-web--trustfiles) (lambda () nil))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (_url callback &rest _)
+                     (let ((response (generate-new-buffer " *private-409*")))
+                       (with-current-buffer response
+                         (insert "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\n\r\n")
+                         (setq-local url-http-response-status 409
+                                     url-http-content-type "application/json"
+                                     url-http-end-of-headers (copy-marker (point)))
+                         (insert (json-encode `((detail . ((code . ,code) (extra . "invented-private-body"))))))
+                         (funcall callback '(:error (error http 409))))
+                       response))))
+          (emacsos-assist-web--request
+           "POST" "threads/synthetic-thread/secrets" nil
+           (lambda (value problem) (setq result (list value problem))) nil nil nil nil t))
+        (should-not (car result))
+        (should (eql (plist-get (cadr result) :status) 409))
+        (should (equal (plist-get (cadr result) :secret-code)
+                       (and (assoc code emacsos-assist-web--secret-rejections) code)))
+        (let ((notice (emacsos-assist-web--secret-save-notice nil (cadr result))))
+          (should-not (string-match-p "invented-private-body" notice))
+          (when (equal code "invalid_phrase_length")
+            (should (string-match-p "12 to 1024 UTF-8 bytes" notice))
+            (should-not (string-match-p "busy" notice))))))))

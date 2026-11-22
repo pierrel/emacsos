@@ -53,6 +53,21 @@
        (eql auth-epoch emacsos-assist-web--auth-epoch)
        (not (eq emacsos-assist-web--denied t))))
 
+(defconst emacsos-assist-web--secret-rejections
+  '(("invalid_login_page" . "Use an HTTPS login URL without embedded credentials")
+    ("invalid_entry" . "Check label (1 to 80 characters), username (up to 320 UTF-8 bytes), and password (1 to 1024 UTF-8 bytes)")
+    ("invalid_phrase_length" . "Repository secret phrase must be 12 to 1024 UTF-8 bytes")
+    ("incorrect_phrase" . "Repository secret phrase is incorrect")
+    ("no_store" . "No secret store in this repository; use Add login to create it")
+    ("locked" . "Unlock this repository in this thread first")
+    ("request_changed" . "Private entry request changed; refresh before retry")
+    ("repository_busy" . "Repository is busy; wait for its work to finish before retry")
+    ("unlock_busy" . "Secret unlock is busy; retry when it finishes")
+    ("store_full" . "Repository secret store is full")
+    ("no_repository" . "This thread has no configured repository")
+    ("store_unavailable" . "Secret store needs verification; inspect Git status before retry"))
+  "Fixed notices for the private secret API's allowlisted failure codes.")
+
 (defun emacsos-assist-web--secret-save-notice (value problem)
   "Describe private save VALUE or typed PROBLEM without exposing response text."
   (cond
@@ -63,7 +78,10 @@
    ((eq (plist-get problem :kind) 'timeout)
     "Login save timed out; saving may continue and chat may stay busy. Inspect Git status before retry")
    ((eql (plist-get problem :status) 409)
-    "Login save rejected; repository may be busy or private form changed. Refresh before retry")
+    (concat "Login save rejected: "
+            (or (cdr (assoc (plist-get problem :secret-code)
+                            emacsos-assist-web--secret-rejections))
+                "reason unavailable; refresh before retry")))
    ((memq (plist-get problem :status) '(401 403 404))
     "Login save access unavailable; reopen this thread before retry")
    ((memq (plist-get problem :kind) '(credentials busy))
@@ -81,15 +99,20 @@
     (unwind-protect
         (if (not (emacsos-assist-web--secret-access-current-p tid auth-epoch))
             (message "Secret entry canceled; thread access changed; refresh first")
-          (setq passphrase (read-passwd "Repository secret phrase: "))
+          (setq passphrase (read-passwd "Repository secret phrase (12 to 1024 UTF-8 bytes): "))
           (if (not (emacsos-assist-web--secret-access-current-p tid auth-epoch))
               (message "Secret entry canceled; thread access changed; refresh first")
             (emacsos-assist-web--request
              "POST" (format "threads/%s/secrets/unlock" tid)
              `((passphrase . ,passphrase))
              (lambda (_value error)
-               (message "%s" (if error "Secret unlock failed"
-                                "Secrets unlocked for this thread"))))))
+               (message "%s" (if error
+                                 (concat "Secret unlock failed: "
+                                         (or (cdr (assoc (plist-get error :secret-code)
+                                                         emacsos-assist-web--secret-rejections))
+                                             "reason unavailable; refresh before retry"))
+                                "Secrets unlocked for this thread")))
+             nil nil nil nil t)))
       (when passphrase (clear-string passphrase)))))
 
 (defun emacsos-assist-web--secret-add-when-ready (origin tid auth-epoch request status error)
@@ -132,7 +155,7 @@
                               (setq password (read-passwd "Password: "))
                               (check-access)
                               (unless (alist-get 'unlocked status)
-                                (setq passphrase (read-passwd "Repository secret phrase: ")))
+                                (setq passphrase (read-passwd "Repository secret phrase (12 to 1024 UTF-8 bytes): ")))
                               (check-access)
                               (message "Saving encrypted login; Git preparation and publication may take time")
                               (check-access)
@@ -1742,9 +1765,13 @@ status is safely ignored as stale; nil permits a bounded later retry."
       ((error quit) nil))))
 
 (defun emacsos-assist-web--git-request-error (status kind &optional detail)
-  "Return a bounded typed Git error for STATUS, KIND and local DETAIL.
+  "Return a bounded typed Git error for STATUS, KIND and safe DETAIL.
+DETAIL is a local failure category or an allowlisted private rejection code.
 The ordinary chat callback continues to receive its original error string."
-  (list :kind (cond ((and (integerp status) (<= 400 status 599)) 'http)
+  (list :secret-code (and (stringp detail)
+                          (assoc detail emacsos-assist-web--secret-rejections)
+                          detail)
+        :kind (cond ((and (integerp status) (<= 400 status 599)) 'http)
                     ((memq detail '(busy timeout trust)) detail)
                     (t kind))
         :status (and (integerp status) status)
@@ -1991,6 +2018,7 @@ ARRAY-TYPE defaults to `list' and OBJECT-TYPE defaults to `alist'.
 GIT-TYPED-ERROR opts only this caller into a bounded (:kind :status :text)
 error instead of the legacy string.  A Git probe's nondiagnostic failure
 does not downgrade a separate chat-accepted Git observation.
+Private secret POST failures may also include an allowlisted :secret-code.
 RAW-RESPONSE reads bounded asset bytes/validators instead of JSON.
 JSON strings may be Unicode text or pre-encoded UTF-8 bytes; normalize text
 before serialization and turn headers/body into bytes at this boundary."
@@ -2147,7 +2175,7 @@ before serialization and turn headers/body into bytes at this boundary."
                            url
                            (lambda (transport-status)
                              (let ((response-buffer (current-buffer))
-                                   value problem
+                                   value problem secret-code
                                          (status (and (boundp 'url-http-response-status)
                                                       url-http-response-status)))
                                (unless (and (eql observed-http-status status)
@@ -2160,6 +2188,17 @@ before serialization and turn headers/body into bytes at this boundary."
                                                 run-owner request-tid access-owner)
                                              ((error quit) nil)))))
                                ;; url-http marks complete 4xx/5xx responses as errors.
+                               (if (and git-typed-error secret-access-request
+                                        (equal method "POST") (eql status 409))
+                                   (progn
+                                     (condition-case nil
+                                         (setq secret-code
+                                               (alist-get 'code
+                                                (alist-get 'detail
+                                                 (emacsos-assist-web--response-json
+                                                  response-buffer t))))
+                                       ((error quit) nil))
+                                     (setq problem "Private secret request rejected"))
                                (if (and (plist-get transport-status :error)
                                         (not (and raw-response (eql status 304)))
                                         (not (and allow-status
@@ -2176,7 +2215,7 @@ before serialization and turn headers/body into bytes at this boundary."
                                               response-buffer allow-status array-type object-type)))
 				   ((error quit)
 				    (setq problem
-					  (error-message-string parse-error)))))
+					  (error-message-string parse-error))))))
 			       ;; Buffer hooks are optional presentation cleanup.  Even if
 			       ;; one signals, finish must fence a failed canonical read and
 			       ;; deliver its callback exactly once.
@@ -2194,11 +2233,11 @@ before serialization and turn headers/body into bytes at this boundary."
 			       (finish value problem status
                                        (if (plist-get transport-status :error)
                                            'transport 'parse)
-                                       (when (memq
+                                       (or secret-code (when (memq
                                               (car-safe
                                                (plist-get transport-status :error))
                                               '(tls gnutls-error))
-                                         'trust))))
+                                         'trust)))))
                            nil t t)))
                   (when (buffer-live-p response)
                     (with-current-buffer response
