@@ -79,3 +79,31 @@
       (should (string-match-p "+12025550124" (buffer-string)))
       (should (equal (emacsos-sms-chat--conversation-buffer-name "+12025550123")
                      "*SMS conversation: +12025550123*")))))
+
+(ert-deftest contacts-disable-and-launch-failure-remove-visible-stale-labels ()
+  (dolist (configured '(nil "/synthetic/contacts.yaml"))
+    (let ((emacsos-contacts-file configured)
+          (emacsos-contacts--labels (make-hash-table :test #'equal))
+          (emacsos-contacts--process nil)
+          (emacsos-contacts--notice nil)
+          (emacsos-sms-chat--refresh nil)
+          (emacsos-sms-chat--refresh-state nil)
+          (emacsos-sms-chat--notice nil)
+          (emacsos-sms-chat--records nil)
+          (buffer (generate-new-buffer "test contacts failure")))
+      (unwind-protect
+          (progn
+            (puthash "+12025550123" "Old Name" emacsos-contacts--labels)
+            (with-current-buffer buffer
+              (emacsos-sms-chat-mode)
+              (setq emacsos-sms-chat--number "+12025550123")
+              (emacsos-sms-chat--render))
+            (cl-letf (((symbol-function 'make-process)
+                       (lambda (&rest _) (error "Synthetic launch failure"))))
+              (emacsos-sms-chat-refresh))
+            (with-current-buffer buffer
+              (should-not (string-match-p "Old Name" (buffer-string)))
+              (when configured
+                (should (string-match-p "Contacts unavailable" (buffer-string)))))
+            (should-not emacsos-contacts--process))
+        (kill-buffer buffer)))))

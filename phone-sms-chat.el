@@ -127,9 +127,11 @@
                                  (when (process-live-p process)
                                    (delete-process process)))))
         (error
-         (setq emacsos-contacts--notice "Contacts unavailable; showing numbers")
+         (setq emacsos-contacts--process nil
+               emacsos-contacts--notice "Contacts unavailable; showing numbers")
          (when (process-live-p process) (delete-process process))
-         (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+         (when (buffer-live-p buffer) (kill-buffer buffer))))))
+  (emacsos-sms-chat--rerender-all))
 
 (defun emacsos-sms-chat--next-revision ()
   "Return the next phone-global SMS model revision."
