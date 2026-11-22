@@ -982,3 +982,50 @@ or handled result does not establish physical vibration or wake from deep sleep.
 This consumer depends on the notification journal feature. It uses the shared HTTP encoding boundary included in the current client.
 
 Reasons reject Unicode control characters and line/paragraph separators while preserving ordinary Unicode, including joined emoji. Malformed asynchronous server responses release only their matching poll so a later timer tick can continue. Both user-facing upload scripts stage the required consumer module.
+
+** Local contacts
+
+Set =emacsos-contacts-file= in your persistent phone configuration to the absolute
+path of =contacts.yaml= in a local checkout of your private Life repository. The
+checkout must be readable by the account running the phone UI. OpenRC sessions
+load =emacsos-agent-file= at startup; ordinary Emacs sessions can set the variable
+in their init file. The default =nil= leaves SMS number-only.
+
+#+begin_src yaml
+contacts:
+  - name: Alex Example
+    phones: ["+12025550123"]
+    emails: ["alex@example.net"]
+    aliases: []
+#+end_src
+
+Names and all list values are strings. Each contact requires =name= and =phones=;
+=emails= and =aliases= are optional string lists. Empty =phones= is allowed.
+Numbers use the exact SMS form: optional leading =+= and 5–15 digits, without
+spaces or punctuation. There is no suffix, national-prefix or alias guessing.
+Duplicate phone entries are ambiguous and display only their number, even when
+both entries have the same name. A known correspondent displays =Name (number)=
+in SMS conversations and their catalog. The exact number still identifies the
+conversation and sending confirmation; contacts never authorize a send.
+
+Tap SMS Refresh after editing or manually pulling the checkout. The asynchronous
+reader replaces labels without restarting Emacs or changing drafts, messages or
+proposals. No Git command or network request is made by contact lookup. Missing,
+invalid or unavailable data falls back to numbers with a short notice. The reader
+uses PyYAML's safe loader (Alpine =py3-yaml=; installed by the OpenRC deploy), a
+256 KiB regular-file limit, at most 1,000 contacts and 16 values per list, and a
+three-second process deadline and 256 KiB decoded-output cap. Oversized label
+output also falls back to numbers. YAML aliases and duplicate mapping keys are
+rejected. Other installation methods need Python 3 with PyYAML available.
+
+Assist can maintain this file using its existing file tools in a thread bound to
+the Life repository. Ask it to read the current file before changing it, then use
+the existing explicit Merge & Push action. Pull the phone checkout yourself and
+refresh SMS. Unrelated repository threads do not gain this checkout through the
+contacts feature. A permitted Life thread can read the entire file with its
+ordinary file tools; this is not per-contact or field-level isolation.
+
+Keep basic names, phone numbers, emails and aliases here, rather than passwords
+or tokens. Private Git does not encrypt the checkout, history, backups or SD card.
+The phone display does not submit the contact book to a model or place it in a
+prompt. Assist reads requested data on demand in the configured repository.

@@ -672,3 +672,20 @@
 
 (ert-deftest emacsos-sms-chat-full-model-recordless-terminal-does-not-regress ()
   (test-sms-chat--recordless-terminal-after-action 'done t))
+
+(ert-deftest emacsos-sms-chat-contact-label-cannot-change-send-proposal ()
+  (test-sms-chat--with-state
+    (let ((emacsos-contacts--labels (make-hash-table :test #'equal)))
+      (puthash "+12025550123" "Alex Example" emacsos-contacts--labels)
+      (with-current-buffer (emacsos-sms-chat-open "+12025550123")
+        (goto-char (point-max))
+        (insert "exact message")
+        (should (string-prefix-p "confirmation-required:" (emacsos-sms-chat-send))))
+      (should (equal emacsos-sms--number "+12025550123"))
+      (should (equal emacsos-sms--body "exact message"))
+      (should (eq emacsos-sms--state 'proposed))
+      (let ((identity emacsos-sms--proposal-id))
+        (puthash "+12025550123" "Changed" emacsos-contacts--labels)
+        (emacsos-sms-chat--rerender-all)
+        (should (equal emacsos-sms--proposal-id identity))
+        (should (equal emacsos-sms--number "+12025550123"))))))

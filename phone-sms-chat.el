@@ -20,6 +20,14 @@
 (defvar emacsos--btn-label-scale)
 (defvar emacsos--keyboard-utility-row)
 
+(defvar emacsos-contacts-file nil
+  "Local contacts YAML path, or nil to keep number-only SMS display.")
+(defvar emacsos-contacts--labels (make-hash-table :test #'equal))
+(defvar emacsos-contacts--process nil)
+(defvar emacsos-contacts--notice nil)
+(defconst emacsos-contacts--helper
+  (expand-file-name "phone-contacts.py" (file-name-directory (or load-file-name buffer-file-name))))
+
 (defconst emacsos-sms-chat--max-records 100)
 (defconst emacsos-sms-chat--max-body-bytes (* 128 1024))
 (defconst emacsos-sms-chat--conversation-records 40)
@@ -60,8 +68,68 @@
        (<= (string-bytes number) 128)))
 
 (defun emacsos-sms-chat--display-correspondent (number)
-  "Reuse inert body escaping, making correspondent newlines visible too."
-  (string-replace "\n" "\\u{000A}" (emacsos-sms-chat--display-body number)))
+  "Return an inert contact label plus exact NUMBER, or just NUMBER."
+  (let ((name (gethash number emacsos-contacts--labels)))
+    (string-replace "\n" "\\u{000A}" (emacsos-sms-chat--display-body (if name (format "%s (%s)" name number) number)))))
+
+(defun emacsos-contacts--finished (process _event)
+  "Install display labels from the current bounded reader PROCESS."
+  (when (memq (process-status process) '(exit signal))
+    (unwind-protect
+        (when (eq process emacsos-contacts--process)
+          (setq emacsos-contacts--process nil
+                emacsos-contacts--labels (make-hash-table :test #'equal)
+                emacsos-contacts--notice "Contacts unavailable; showing numbers")
+          (when (and (= (process-exit-status process) 0)
+                     (not (process-get process 'overflow)))
+            (condition-case nil
+                (let ((labels (with-current-buffer (process-buffer process)
+                                (goto-char (point-min))
+                                (let ((json-object-type 'hash-table)) (json-read)))))
+                  (setq emacsos-contacts--labels labels
+                        emacsos-contacts--notice nil))
+              (error nil)))
+          (emacsos-sms-chat--rerender-all))
+      (when (buffer-live-p (process-buffer process))
+        (kill-buffer (process-buffer process))))))
+
+(defun emacsos-contacts-refresh ()
+  "Reload configured local YAML asynchronously; never fetch or change Git."
+  (when (process-live-p emacsos-contacts--process)
+    (delete-process emacsos-contacts--process))
+  (setq emacsos-contacts--process nil
+        emacsos-contacts--labels (make-hash-table :test #'equal)
+        emacsos-contacts--notice nil)
+  (when emacsos-contacts-file
+    (let ((buffer (generate-new-buffer " *SMS contacts*")) process)
+      (condition-case nil
+          (progn
+            (setq process
+                  (make-process
+                   :name "emacsos-contacts" :buffer buffer :noquery t
+                   :coding 'utf-8-unix :connection-type 'pipe
+                   :sentinel #'ignore
+                   :filter (lambda (proc text)
+                             (when (buffer-live-p (process-buffer proc))
+                               (with-current-buffer (process-buffer proc)
+                                 (if (> (+ (buffer-size) (length text)) 262144)
+                                     (progn (process-put proc 'overflow t)
+                                            (delete-process proc))
+                                   (insert text)))))
+                   :command (list "python3" "-I" emacsos-contacts--helper)))
+            (setq emacsos-contacts--process process)
+            (process-send-string process (expand-file-name emacsos-contacts-file))
+            (process-send-eof process)
+            (set-process-sentinel process #'emacsos-contacts--finished)
+            (when (memq (process-status process) '(exit signal))
+              (emacsos-contacts--finished process "finished"))
+            (run-at-time 3 nil (lambda ()
+                                 (when (process-live-p process)
+                                   (delete-process process)))))
+        (error
+         (setq emacsos-contacts--notice "Contacts unavailable; showing numbers")
+         (when (process-live-p process) (delete-process process))
+         (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (defun emacsos-sms-chat--next-revision ()
   "Return the next phone-global SMS model revision."
@@ -101,7 +169,8 @@
 
 (defun emacsos-sms-chat--conversation-buffer-name (number)
   "Return the canonical conversation buffer name for validated NUMBER."
-  (format "*SMS conversation: %s*" (emacsos-sms-chat--display-correspondent number)))
+  (format "*SMS conversation: %s*"
+          (string-replace "\n" "\\u{000A}" (emacsos-sms-chat--display-body number))))
 
 (defun emacsos-sms-chat--conversation-buffers ()
   "Return all live SMS conversation buffers."
@@ -213,6 +282,7 @@ When QUIET is non-nil, leave rerendering to the caller."
         (erase-buffer)
         (insert (format "SMS %s\n" (if (string-empty-p emacsos-sms-chat--number) "[no sender]"
                                   (emacsos-sms-chat--display-correspondent emacsos-sms-chat--number))))
+        (when emacsos-contacts--notice (insert emacsos-contacts--notice "\n"))
         (when emacsos-sms-chat--refresh-state
           (insert emacsos-sms-chat--refresh-state "\n"))
         (when emacsos-sms-chat--notice
@@ -392,6 +462,7 @@ When QUIET is non-nil, leave rerendering to the caller."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert "SMS conversations\n")
+    (when emacsos-contacts--notice (insert emacsos-contacts--notice "\n"))
     (when emacsos-sms-chat--refresh-state
       (insert (format "%s\n" emacsos-sms-chat--refresh-state)))
     (insert "\n")
@@ -559,6 +630,7 @@ When QUIET is non-nil, leave rerendering to the caller."
 (defun emacsos-sms-chat-refresh ()
   "Read the durable local SMS archive asynchronously, including offline."
   (interactive)
+  (emacsos-contacts-refresh)
   (if emacsos-sms-chat--refresh
       (setq emacsos-sms-chat--refresh-again t)
     (let ((buffer (generate-new-buffer " *SMS archive*"))
