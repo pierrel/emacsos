@@ -101,9 +101,10 @@ def call_emacs(
         )
     # emacsclient -e reads stdin as one expression per line. Encode source rather
     # than flattening it: newlines in strings and comments must keep their meaning.
+    # utf-8-unix also preserves literal CRLF inside strings.
     encoded = base64.b64encode(expr.encode("utf-8")).decode("ascii")
     wire_expr = (f'(eval (read (decode-coding-string (base64-decode-string "{encoded}") '
-                 "'utf-8)) t)\n")
+                 "'utf-8-unix)) t)\n")
     try:
         with _auth_file(auth_contents, phone_host) as path:
             # `-q` suppresses emacsclient's "connected to remote socket

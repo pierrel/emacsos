@@ -200,6 +200,7 @@ def test_returns_failure_when_binary_missing():
 @pytest.mark.parametrize(("expr", "expected"), [
     ("(+ 20 22)", "42"),
     ("(+\n 20\n 22)", "42"),
+    ('(string-to-list "a\r\nb")', "(97 13 10 98)"),
     (r'''(let ((text "first
 second\\path\"quoted\" ☃ 😀"))
   ;; A comment must end before the next form.
