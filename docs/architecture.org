@@ -46,7 +46,10 @@ actions.
 - *E5 Phone callback.* [[file:../server/emacsos_server/channel.py][=eval_elisp=]]
   and [[file:../server/emacsos_server/emacs_backend.py][EmacsBackend]] use
   [[file:../server/emacsos_server/phone.py][phone.call_emacs]] to reach the
-  request's phone Emacs server. The callback can inspect or change Emacs state;
+  request's phone Emacs server. Expressions are UTF-8/base64 framed into one
+  stdin line and decoded/read/evaluated on the phone, preserving multiline Lisp
+  comments and string contents without putting source in argv. The callback can
+  inspect or change Emacs state;
   when it invokes a device primitive, E1 executes that concrete command.
 - *E6 Config history.* [[file:../server/emacsos_server/channel.py][=get_config=,
   =apply_config= and rollback tools]] work through

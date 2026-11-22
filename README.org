@@ -137,6 +137,12 @@ incrementally as the agent produces them; =chat.el= renders them
 in place, never blocking the phone's main loop.  The user can tap
 ABORT on the CHAT page at any point during a stream.
 
+Phone callbacks support multiline Elisp, including comments and literal string
+newlines. The bounded UTF-8 source is base64 framed as one stdin expression for
+=emacsclient= and decoded on the phone; source is kept out of process arguments.
+This transport encoding does not encrypt the expression or alter the existing
+full-trust config and phone authorization boundaries.
+
 ** Running
 
 =ASSIST_MODEL_URL= must point at an OpenAI-compatible chat

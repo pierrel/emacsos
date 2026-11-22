@@ -9,6 +9,7 @@ the HTTP request actually came from (``request.client.host``).
 """
 from __future__ import annotations
 
+import base64
 import logging
 import subprocess
 import tempfile
@@ -98,6 +99,11 @@ def call_emacs(
             f"elisp expression is {expression_bytes} bytes; "
             f"max {MAX_EXPRESSION_BYTES}",
         )
+    # emacsclient -e reads stdin as one expression per line. Encode source rather
+    # than flattening it: newlines in strings and comments must keep their meaning.
+    encoded = base64.b64encode(expr.encode("utf-8")).decode("ascii")
+    wire_expr = (f'(eval (read (decode-coding-string (base64-decode-string "{encoded}") '
+                 "'utf-8)) t)\n")
     try:
         with _auth_file(auth_contents, phone_host) as path:
             # `-q` suppresses emacsclient's "connected to remote socket
@@ -109,7 +115,7 @@ def call_emacs(
             # and may echo the diagnostic in its reply.
             result = subprocess.run(
                 [emacsclient, "-q", "-f", path, "-e"],
-                input=expr + "\n",
+                input=wire_expr,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
