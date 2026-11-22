@@ -9,7 +9,7 @@
   (should-not emacsos-contacts--process))
 
 (ert-deftest contacts-render-real-yaml-and-refresh-with-exact-identity ()
-  (let* ((file (make-temp-file "contacts" nil ".yaml"))
+  (let* ((file (make-temp-file "contacts" nil ".yml"))
          (emacsos-contacts-file file)
          (emacsos-contacts--labels (make-hash-table :test #'equal))
          (emacsos-contacts--process nil)
@@ -21,7 +21,7 @@
     (unwind-protect
         (progn
           (with-temp-file file
-            (insert "contacts:\n- name: Alex Example\n  phones: [\"+12025550123\"]\n"))
+            (insert "Alex Example:\n  phone: \"+12025550123\"\n  phone_satellite_backup: \"2025550124\"\n  email: alex@example.net\n  email_community: alex.other@example.net\n  birthday: 1990-03-04\n  notes: |\n    A synthetic multiline note.\n    Keep this text.\n"))
           (with-current-buffer buffer
             (emacsos-sms-chat-mode)
             (setq emacsos-sms-chat--number "+12025550123")
@@ -32,13 +32,21 @@
           (emacsos-contacts-refresh)
           (test-contacts--wait)
           (should-not emacsos-contacts--notice)
+          (with-temp-buffer
+            (emacsos-sms-chat-mode)
+            (setq emacsos-sms-chat--number "2025550124")
+            (emacsos-sms-chat--render)
+            (should (string-match-p
+                     (regexp-quote "Alex Example [satellite_backup] (2025550124)")
+                     (buffer-string)))
+            (should (equal emacsos-sms-chat--number "2025550124")))
           (with-current-buffer buffer
             (should (string-match-p (regexp-quote "SMS Alex Example (+12025550123)") (buffer-string)))
             (should (equal (emacsos-sms-chat--draft) " exact draft "))
             (should (equal emacsos-sms-chat--number "+12025550123")))
           ;; A local replacement is also what a successful manual pull produces.
           (with-temp-file file
-            (insert "contacts:\n- name: Updated Example\n  phones: [\"+12025550123\"]\n"))
+            (insert "Alex Example:\n  name: Updated Example\n  phone: \"+12025550123\"\n"))
           (emacsos-contacts-refresh)
           (test-contacts--wait)
           (with-current-buffer buffer
@@ -46,7 +54,7 @@
             (should (equal (emacsos-sms-chat--draft) " exact draft "))
             (should (equal emacsos-sms-chat--number "+12025550123")))
           (with-temp-file file
-            (insert "contacts:\n- name: One\n  phones: [\"+12025550123\"]\n- name: Two\n  phones: [\"+12025550123\"]\n"))
+            (insert "One:\n  phone: \"+12025550123\"\nTwo:\n  phone: \"+12025550123\"\n"))
           (emacsos-contacts-refresh)
           (test-contacts--wait)
           (with-current-buffer buffer
@@ -81,7 +89,7 @@
                      "*SMS conversation: +12025550123*")))))
 
 (ert-deftest contacts-disable-and-launch-failure-remove-visible-stale-labels ()
-  (dolist (configured '(nil "/synthetic/contacts.yaml"))
+  (dolist (configured '(nil "/synthetic/contacts.yml"))
     (let ((emacsos-contacts-file configured)
           (emacsos-contacts--labels (make-hash-table :test #'equal))
           (emacsos-contacts--process nil)

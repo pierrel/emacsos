@@ -10,7 +10,7 @@ import sys
 
 
 def read_labels(path):
-    """Read the supported flat schema and omit every duplicated phone key."""
+    """Read contact-key mappings and omit every duplicated exact phone value."""
     import yaml
 
     # Aliases are not needed for the flat contact format. Reject them before
@@ -28,6 +28,8 @@ def read_labels(path):
         return result
 
     Loader.add_constructor("tag:yaml.org,2002:map", mapping)
+    # Birthdays are text, including date-looking YAML scalars. Never infer a date.
+    Loader.add_constructor("tag:yaml.org,2002:timestamp", Loader.construct_scalar)
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -39,35 +41,29 @@ def read_labels(path):
         if isinstance(token, (yaml.tokens.AliasToken,)):
             raise ValueError("aliases unsupported")
     data = yaml.load(raw, Loader=Loader)
-    if not isinstance(data, dict) or set(data) != {"contacts"}:
-        raise ValueError("expected contacts")
-    contacts = data["contacts"]
-    if not isinstance(contacts, list) or len(contacts) > 1000:
-        raise ValueError("expected bounded list")
+    if not isinstance(data, dict) or len(data) > 1000:
+        raise ValueError("expected bounded contact mapping")
     labels = {}
-    for contact in contacts:
-        if not isinstance(contact, dict):
-            raise ValueError("expected contact")
-        if set(contact) - {"name", "phones", "emails", "aliases"}:
-            raise ValueError("unsupported field")
-        if not isinstance(contact.get("name"), str) or not contact["name"].strip():
+    for key, contact in data.items():
+        if not key.strip() or len(key) > 128 or not isinstance(contact, dict):
+            raise ValueError("expected named contact mapping")
+        name = contact.get("name", key)
+        if not isinstance(name, str) or not name.strip() or len(name) > 128:
             raise ValueError("expected name")
-        if len(contact["name"]) > 128:
-            raise ValueError("name too long")
-        for field in ("phones", "emails", "aliases"):
-            values = contact.get(field, [])
-            if not isinstance(values, list) or len(values) > 16:
-                raise ValueError("expected bounded string list")
-            for value in values:
-                if not isinstance(value, str) or not value or len(value) > 128:
-                    raise ValueError("expected bounded string")
-        if "phones" not in contact:
-            raise ValueError("expected phones")
-        for number in contact["phones"]:
-            if not re.fullmatch(r"\+?[0-9]{5,15}", number):
-                raise ValueError("expected exact SMS number")
-            # Even two entries with the same name can be different people.
-            labels[number] = None if number in labels else contact["name"]
+        for field, value in contact.items():
+            typed = any(field.startswith(prefix) and len(field) > len(prefix)
+                        for prefix in ("phone_", "email_"))
+            if field not in {"name", "phone", "email", "birthday", "notes"} and not typed:
+                raise ValueError("unsupported field")
+            if not isinstance(value, str):
+                raise ValueError("expected string field")
+            if field == "phone" or field.startswith("phone_"):
+                if not re.fullmatch(r"\+?[0-9]{5,15}", value):
+                    raise ValueError("expected exact SMS number")
+                suffix = field[len("phone_"):] if field.startswith("phone_") else ""
+                label = f"{name} [{suffix}]" if suffix else name
+                # Two fields may identify different people or different phone types.
+                labels[value] = None if value in labels else label
     return {number: name for number, name in labels.items() if name is not None}
 
 
