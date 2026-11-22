@@ -19,6 +19,17 @@ The chat panel POSTs to =emacsos-chat-server-url= (default =http://localhost:876
 
 * Features
 
+Assist Web threads show *Control the live browser* while the server offers a live
+page. The link survives refreshing or reopening the thread and opens the exact
+server-provided viewer URL in the browser. The same action is available from the
+existing Status view, including threads without a Git repository. That action
+fetches the original thread's current offer before opening it, so returning
+control also retires a link left in a hidden thread. Cached snapshots do not
+advertise a live link; loading older history preserves that restriction. A
+successful canonical thread read restores the action even when the snapshot
+itself has not changed. A reply overtaken by a source-thread refresh cannot
+reopen an old offer.
+
 ** Virtual Keyboard
 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.
