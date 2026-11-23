@@ -24,6 +24,9 @@ actions.
   and [[file:../network.el][network.el]] supply deterministic device commands;
   the user can invoke them directly, and the agent can invoke them through
   Emacs evaluation.
+  The PinePhone bootstrap also adapts native Calendar's month geometry and
+  date movement to one month, with native month/Today controls. This phone-only
+  setup is not loaded by the ordinary desktop shell.
 - *E2 Local chat client.* [[file:../chat.el][chat.el]] sends =POST /chat= and
   renders bounded NDJSON token/status events without blocking the UI.
   [[file:../emacsos-assist.el][emacsos-assist.el]] also supports file-backed

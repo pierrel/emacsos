@@ -1271,6 +1271,68 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
       '(:eval (emacsos-pinephone-controls-mode-line-string))
       emacsos-platform-mode-line-segments nil)
 
+(defun emacsos-pinephone-calendar-generate (month year)
+  "Render only MONTH, YEAR using the native Calendar month renderer."
+  (setq displayed-month month displayed-year year)
+  (erase-buffer)
+  (calendar-generate-month month year calendar-left-margin))
+
+(defun emacsos-pinephone-calendar-date-visible-p (date)
+  "Return whether DATE belongs to the phone's displayed month."
+  (and (calendar-date-is-valid-p date)
+       (= (car date) displayed-month)
+       (= (nth 2 date) displayed-year)))
+
+(defun emacsos-pinephone-calendar-segment ()
+  "Map the phone's single month to native Calendar's central segment."
+  1)
+
+(defun emacsos-pinephone-calendar-cursor (original date)
+  "Position DATE with ORIGINAL in the phone's single native month."
+  ;; Native cursor geometry offsets the central month by one month width.
+  (let ((calendar-left-margin (- calendar-left-margin calendar-month-width)))
+    (funcall original
+             (if (emacsos-pinephone-calendar-date-visible-p date)
+                 date
+               (list displayed-month 1 displayed-year)))))
+
+(defun emacsos-pinephone-calendar-forward-day (days)
+  "Move DAYS using native date arithmetic, centering the resulting month."
+  (unless (zerop days)
+    (calendar-goto-date
+     (calendar-gregorian-from-absolute
+      (+ days (calendar-absolute-from-gregorian
+               (calendar-cursor-to-nearest-date)))))))
+
+(defun emacsos-pinephone-calendar-mode ()
+  "Keep native Calendar compact and expose its month controls on the phone."
+  (setq-local calendar-left-margin 1
+              calendar-right-margin (+ 1 (* 7 calendar-column-width))
+              calendar-month-edges (list (cons 1 (calendar-month-edges 0))))
+  (setq-local header-line-format
+              (mapconcat
+               (lambda (entry)
+                 (propertize (car entry) 'mouse-face 'highlight
+                             'keymap (let ((map (make-sparse-keymap)))
+                                       (define-key map [header-line mouse-1] (cdr entry))
+                                       map)))
+               '((" Prev " . calendar-scroll-right)
+                 (" Today " . calendar-goto-today)
+                 (" Next " . calendar-scroll-left))
+               " ")))
+
+(defun emacsos-pinephone-calendar-setup ()
+  "Install the one-month adapter only in the PinePhone Emacs session."
+  (require 'calendar)
+  (require 'cal-move)
+  (advice-add 'calendar-generate :override #'emacsos-pinephone-calendar-generate)
+  (advice-add 'calendar-date-is-visible-p :override
+              #'emacsos-pinephone-calendar-date-visible-p)
+  (advice-add 'calendar-column-to-segment :override #'emacsos-pinephone-calendar-segment)
+  (advice-add 'calendar-cursor-to-visible-date :around #'emacsos-pinephone-calendar-cursor)
+  (advice-add 'calendar-forward-day :override #'emacsos-pinephone-calendar-forward-day)
+  (add-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode))
+
 (defun emacsos-pinephone-initial-buffer ()
   "Prepare chat and return the native Assist list without changing caller windows."
   (emacsos--chat-buffer)
@@ -1279,6 +1341,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (get-buffer emacsos-assist-web--thread-list-buffer-name))
 
 (when (display-graphic-p)
+  (emacsos-pinephone-calendar-setup)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
   (setq emacsos-use-internal-keyboard nil
         emacsos-control-window-percent 35

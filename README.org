@@ -30,6 +30,15 @@ successful canonical thread read restores the action even when the snapshot
 itself has not changed. A reply overtaken by a source-thread refresh cannot
 reopen an old offer.
 
+** Phone Calendar
+
+On the PinePhone, =M-x calendar= opens one native Calendar month with compact
+*Prev*, *Today* and *Next* controls. Select a date normally or use Calendar's
+existing day, week, month and year movement commands. Month changes keep the
+selected date visible, including leap days and year boundaries. The phone
+bootstrap installs this layout only in its own Emacs session; desktop EmacsOS
+keeps the ordinary three-month Calendar.
+
 ** Virtual Keyboard
 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.

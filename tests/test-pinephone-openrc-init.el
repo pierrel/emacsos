@@ -6,6 +6,76 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(defmacro emacsos-test-with-phone-calendar (&rest body)
+  "Run BODY in a synthetic native phone Calendar, then restore desktop behavior."
+  `(let ((calendar-buffer " *phone-calendar-test*"))
+     (require 'calendar)
+     (require 'cal-move)
+     (save-window-excursion
+       (unwind-protect
+           (progn (emacsos-pinephone-calendar-setup) ,@body)
+         (dolist (entry '((calendar-generate . emacsos-pinephone-calendar-generate)
+                          (calendar-date-is-visible-p . emacsos-pinephone-calendar-date-visible-p)
+                          (calendar-column-to-segment . emacsos-pinephone-calendar-segment)
+                          (calendar-cursor-to-visible-date . emacsos-pinephone-calendar-cursor)
+                          (calendar-forward-day . emacsos-pinephone-calendar-forward-day)))
+           (advice-remove (car entry) (cdr entry)))
+         (remove-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode)
+         (when (get-buffer calendar-buffer) (kill-buffer calendar-buffer))))))
+
+(ert-deftest emacsos-openrc-calendar-one-month-native-navigation ()
+  "M-x calendar keeps native date selection, including leap and year rollover."
+  (emacsos-test-with-phone-calendar
+   (calendar)
+   (should (eq major-mode 'calendar-mode))
+   (should (equal (calendar-cursor-to-date) (calendar-current-date)))
+   (should (<= (string-width header-line-format) 24))
+   (let ((calendar-mark-holidays-flag nil))
+     (dolist (date '((2 29 2024) (12 31 2024) (1 1 2025)))
+       (calendar-goto-date date)
+       (should (equal (calendar-cursor-to-date) date))
+       (should (equal (list displayed-month displayed-year)
+                      (list (car date) (nth 2 date))))
+       (save-excursion
+         (goto-char (point-min))
+         (while (not (eobp))
+           (should (<= (current-column) 24))
+           (end-of-line)
+           (should (<= (current-column) 24))
+           (forward-line 1))))
+     (calendar-goto-date '(2 28 2024))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(2 29 2024)))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(3 1 2024)))
+     (calendar-goto-date '(12 31 2024))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(1 1 2025)))
+     (let ((last-nonmenu-event nil) (current-prefix-arg nil))
+       (call-interactively
+        (lookup-key (get-text-property 1 'keymap header-line-format)
+                    [header-line mouse-1])))
+     (should (equal (list displayed-month displayed-year) '(12 2024)))
+     (let ((last-nonmenu-event nil) (current-prefix-arg nil))
+       (call-interactively
+        (lookup-key (get-text-property 17 'keymap header-line-format)
+                    [header-line mouse-1])))
+     (should (equal (list displayed-month displayed-year) '(1 2025)))
+     (calendar-goto-today)
+     (should (equal (calendar-cursor-to-date) (calendar-current-date))))))
+
+(ert-deftest emacsos-openrc-calendar-desktop-stays-three-months ()
+  "Loading the phone bootstrap in a desktop batch does not customize Calendar."
+  (require 'calendar)
+  (should-not (advice-member-p #'emacsos-pinephone-calendar-generate 'calendar-generate))
+  (with-temp-buffer
+    (calendar-mode)
+    (let ((inhibit-read-only t)) (calendar-generate 2 2024))
+    (should (string-match-p "January" (buffer-string)))
+    (should (string-match-p "February" (buffer-string)))
+    (should (string-match-p "March" (buffer-string)))
+    (should-not header-line-format)))
+
 (ert-deftest emacsos-openrc-startup-retains-initialized-manual-chat ()
   "The documented manual buffer switch still reaches initialized chat after boot."
   (let ((emacsos--chat-buffer-name " *startup-manual-chat*")
