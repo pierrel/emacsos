@@ -549,7 +549,7 @@ grep -F 'for_window [app_id="firefox"] focus' "$deploy_dir/openrc-sway.config" >
 
 grep -F '"--new-instance" "about:blank"' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'emacsos-use-internal-keyboard nil' "$deploy_dir/openrc-init.el" >/dev/null
-grep -F 'emacsos-initial-buffer-function #'"'"'emacsos--chat-buffer' \
+grep -F 'emacsos-initial-buffer-function #'"'"'emacsos-pinephone-initial-buffer' \
     "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F '"/etc/emacsos-openrc/assist-web-url"' "$deploy_dir/openrc-init.el" >/dev/null
