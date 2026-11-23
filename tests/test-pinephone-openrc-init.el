@@ -71,21 +71,22 @@
 
 (defmacro emacsos-test-with-phone-calendar (&rest body)
   "Run BODY in a synthetic native phone Calendar, then restore desktop behavior."
-  `(let ((calendar-buffer " *phone-calendar-test*"))
+  `(progn
      (require 'calendar)
      (require 'cal-move)
-     (save-window-excursion
-       (unwind-protect
-           (progn (emacsos-pinephone-calendar-setup) ,@body)
-         (dolist (entry '((calendar-generate . emacsos-pinephone-calendar-generate)
-                          (calendar-date-is-visible-p . emacsos-pinephone-calendar-date-visible-p)
-                          (calendar-column-to-segment . emacsos-pinephone-calendar-segment)
-                          (calendar-cursor-to-visible-date . emacsos-pinephone-calendar-cursor)
-                          (calendar-forward-day . emacsos-pinephone-calendar-forward-day)
-                          (calendar-end-of-month . emacsos-pinephone-calendar-end-of-month)))
-           (advice-remove (car entry) (cdr entry)))
-         (remove-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode)
-         (when (get-buffer calendar-buffer) (kill-buffer calendar-buffer))))))
+     (let ((calendar-buffer " *phone-calendar-test*"))
+       (save-window-excursion
+	 (unwind-protect
+             (progn (emacsos-pinephone-calendar-setup) ,@body)
+           (dolist (entry '((calendar-generate . emacsos-pinephone-calendar-generate)
+                            (calendar-date-is-visible-p . emacsos-pinephone-calendar-date-visible-p)
+                            (calendar-column-to-segment . emacsos-pinephone-calendar-segment)
+                            (calendar-cursor-to-visible-date . emacsos-pinephone-calendar-cursor)
+                            (calendar-forward-day . emacsos-pinephone-calendar-forward-day)
+                            (calendar-end-of-month . emacsos-pinephone-calendar-end-of-month)))
+             (advice-remove (car entry) (cdr entry)))
+           (remove-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode)
+           (when (get-buffer calendar-buffer) (kill-buffer calendar-buffer)))))))
 
 (ert-deftest emacsos-openrc-calendar-one-month-native-navigation ()
   "M-x calendar keeps native date selection, including leap and year rollover."
