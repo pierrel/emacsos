@@ -161,7 +161,7 @@
   "Select prose or fixed-pitch faces for the current phone buffer."
   (buffer-face-set
    (if (derived-mode-p 'prog-mode 'conf-mode 'vterm-mode
-                       'term-mode 'comint-mode 'dired-mode)
+                       'term-mode 'comint-mode 'dired-mode 'calendar-mode)
        'fixed-pitch
      'variable-pitch)))
 

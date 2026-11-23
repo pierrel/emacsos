@@ -32,7 +32,7 @@ reopen an old offer.
 
 ** Phone Calendar
 
-On the PinePhone, =M-x calendar= opens one native Calendar month with compact
+On the PinePhone, =M-x calendar= opens one fixed-width native Calendar month with compact
 *Prev*, *Today* and *Next* controls. Select a date normally or use Calendar's
 existing day, week, month and year movement commands. Month changes keep the
 selected date visible, including leap days and year boundaries. The phone
