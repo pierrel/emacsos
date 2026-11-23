@@ -48,7 +48,7 @@
         (kill-buffer zebra)
         (when (get-buffer "*Completions*") (kill-buffer "*Completions*"))))))
 
-(ert-deftest emacsos-openrc-buffer-completion-tab-preserves-mru ()
+(ert-deftest emacsos-openrc-completion-buffer-tab-preserves-mru ()
   "Native Tab display follows recent use on the phone, desktop stays alphabetical."
   (dolist (phone '(nil t))
     (let* ((result (emacsos-test-buffer-completion phone "Phone-MRU-zE"))
@@ -60,7 +60,7 @@
       (should (equal (plist-get result :cycle)
                      '("Phone-MRU-zEBRA" "Phone-MRU-Alpha"))))))
 
-(ert-deftest emacsos-openrc-buffer-completion-ignore-case-phone-only ()
+(ert-deftest emacsos-openrc-completion-buffer-ignore-case-phone-only ()
   "Actual buffer input finds mixed-case names only with the phone setup enabled."
   (let ((phone (emacsos-test-buffer-completion t "phone-mru-ZeBrA"))
         (desktop (emacsos-test-buffer-completion nil "phone-mru-ZeBrA")))
