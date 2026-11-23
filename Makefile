@@ -112,7 +112,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py phone-contacts.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp EMACSOS-COMMANDS.org $(PINEPHONE_HOST):~/EMACSOS-COMMANDS.org
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
@@ -390,3 +390,8 @@ test-server: $(SERVER_STAMP)
 # server can do.  Requires docker and emacsclient on the host.
 smoke: $(SERVER_STAMP)
 	cd server && PATH="$(CURDIR)/$(SERVER_VENV)/bin:$$PATH" bash simulation/run.sh
+
+.PHONY: test-contacts
+test-contacts:
+	python3 -m pytest tests/test_contacts.py
+	emacs -Q --batch -L . -l tests/test-contacts.el -f ert-run-tests-batch-and-exit

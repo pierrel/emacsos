@@ -154,6 +154,12 @@ incrementally as the agent produces them; =chat.el= renders them
 in place, never blocking the phone's main loop.  The user can tap
 ABORT on the CHAT page at any point during a stream.
 
+Phone callbacks support multiline Elisp, including comments and literal string
+newlines. The bounded UTF-8 source is base64 framed as one stdin expression for
+=emacsclient= and decoded on the phone; source is kept out of process arguments.
+This transport encoding does not encrypt the expression or alter the existing
+full-trust config and phone authorization boundaries.
+
 ** Running
 
 =ASSIST_MODEL_URL= must point at an OpenAI-compatible chat
@@ -999,3 +1005,64 @@ or handled result does not establish physical vibration or wake from deep sleep.
 This consumer depends on the notification journal feature. It uses the shared HTTP encoding boundary included in the current client.
 
 Reasons reject Unicode control characters and line/paragraph separators while preserving ordinary Unicode, including joined emoji. Malformed asynchronous server responses release only their matching poll so a later timer tick can continue. Both user-facing upload scripts stage the required consumer module.
+
+** Local contacts
+
+Set =emacsos-contacts-file= in your persistent phone configuration to the absolute
+path of =contacts.yml= in a local checkout of your private Life repository. The
+checkout must be readable by the account running the phone UI. OpenRC sessions
+load =emacsos-agent-file= at startup; ordinary Emacs sessions can set the variable
+in their init file. The default =nil= leaves SMS number-only.
+
+#+begin_src yaml
+Alex Example:
+  phone: "+12025550123"
+  phone_satellite_backup: "2025550124"
+  email: "alex@example.net"
+  email_community: "alex.other@example.net"
+  birthday: "1990-03-04"
+  notes: |
+    Synthetic example with a multiline note.
+Jordan:
+  name: Jordan Example
+  phone_work: "+12025550125"
+#+end_src
+
+The top level maps a contact key to its fields. =name= is optional and defaults
+to that key. =phone= and =email= are defaults; additional numbers and addresses
+use =phone_TYPE= and =email_TYPE= with any nonempty type suffix. SMS displays a
+typed phone as =Name [TYPE] (number)=. =birthday= and =notes= hold plain strings;
+no date or century is inferred. Date-looking birthdays remain text even without
+quotes. Read and edit the existing file, preserving every field and its text.
+The reader never writes the file or automatically sends these fields to a model.
+
+Quote phone values to preserve their exact digits and optional leading =+=.
+National-form digit strings are supported as written. There is no country-prefix,
+suffix or alias guessing: =2025550123= and =+12025550123= are distinct keys.
+Numbers have 5–15 digits without spaces or punctuation. Repeated phone values
+are ambiguous and display only their number, including duplicates within one
+contact. A known default correspondent displays =Name (number)= in SMS
+conversations and their catalog. The exact number still identifies the
+conversation and sending confirmation; contacts never authorize a send.
+
+Tap SMS Refresh after editing or manually pulling the checkout. The asynchronous
+reader replaces labels without restarting Emacs or changing drafts, messages or
+proposals. No Git command or network request is made by contact lookup. Missing,
+invalid or unavailable data falls back to numbers with a short notice. The reader
+uses PyYAML's safe loader (Alpine =py3-yaml=; installed by the OpenRC deploy), a
+256 KiB regular-file limit, at most 1,000 contacts, and a
+three-second process deadline and 256 KiB decoded-output cap. Oversized label
+output also falls back to numbers. YAML aliases and duplicate mapping keys are
+rejected. Other installation methods need Python 3 with PyYAML available.
+
+Assist can maintain this file using its existing file tools in a thread bound to
+the Life repository. Ask it to read the current file before changing it, then use
+the existing explicit Merge & Push action. Pull the phone checkout yourself and
+refresh SMS. Unrelated repository threads do not gain this checkout through the
+contacts feature. A permitted Life thread can read the entire file with its
+ordinary file tools; this is not per-contact or field-level isolation.
+
+Keep contact names, phone numbers, emails, birthdays and notes here, rather than passwords
+or tokens. Private Git does not encrypt the checkout, history, backups or SD card.
+The phone display does not submit the contact book to a model or place it in a
+prompt. Assist reads requested data on demand in the configured repository.

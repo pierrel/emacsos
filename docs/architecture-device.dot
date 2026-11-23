@@ -18,7 +18,10 @@ digraph Device {
   E15 [label="E15  Call bridge\nMM ring → AT/PCM ↔ WSS"];
   E16 [label="E16  Alert client\nAssist poll/ack + local feedback"];
 
+  E17 [label="E17  Local contacts YAML\nprivate Git checkout · manual pull", fillcolor="#fff4d7"];
+
   { rank=same; E14; E15; E16; }
+  E17 -> E10 [label="bounded local safe YAML read\nlabels only · Refresh"];
   E10 -> E11 [label="confirmed attempt"];
   E11 -> E12 [label="SMS D-Bus", dir=both];
   E11 -> E13 [label="commit before effect"];
