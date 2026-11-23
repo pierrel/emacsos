@@ -1299,10 +1299,22 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
 (defun emacsos-pinephone-calendar-forward-day (days)
   "Move DAYS using native date arithmetic, centering the resulting month."
   (unless (zerop days)
-    (calendar-goto-date
-     (calendar-gregorian-from-absolute
-      (+ days (calendar-absolute-from-gregorian
-               (calendar-cursor-to-nearest-date)))))))
+    (let ((date (calendar-cursor-to-date)))
+      (unless date
+        (setq date (calendar-cursor-to-nearest-date))
+        (when (> days 0) (setq days (1- days))))
+      (calendar-goto-date
+       (calendar-gregorian-from-absolute
+        (+ days (calendar-absolute-from-gregorian date)))))))
+
+(defun emacsos-pinephone-calendar-end-of-month (months)
+  "Move forward MONTHS month ends and select the last day."
+  (let* ((date (calendar-cursor-to-nearest-date))
+         (month (car date)) (year (nth 2 date)))
+    (unless (= (cadr date) (calendar-last-day-of-month month year))
+      (setq months (1- months)))
+    (calendar-increment-month month year months)
+    (calendar-goto-date (list month (calendar-last-day-of-month month year) year))))
 
 (defun emacsos-pinephone-calendar-mode ()
   "Keep native Calendar compact and expose its month controls on the phone."
@@ -1331,6 +1343,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (advice-add 'calendar-column-to-segment :override #'emacsos-pinephone-calendar-segment)
   (advice-add 'calendar-cursor-to-visible-date :around #'emacsos-pinephone-calendar-cursor)
   (advice-add 'calendar-forward-day :override #'emacsos-pinephone-calendar-forward-day)
+  (advice-add 'calendar-end-of-month :override #'emacsos-pinephone-calendar-end-of-month)
   (add-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode))
 
 (defun emacsos-pinephone-initial-buffer ()
