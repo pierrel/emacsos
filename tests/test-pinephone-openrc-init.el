@@ -141,6 +141,16 @@
      (calendar-goto-today)
      (should (equal (calendar-cursor-to-date) (calendar-current-date))))))
 
+(ert-deftest emacsos-openrc-calendar-keeps-fixed-pitch-after-display-hooks ()
+  "Phone Calendar stays fixed-width after major-mode and window typography."
+  (emacsos-test-with-phone-calendar
+   (let ((after-change-major-mode-hook
+          (cons #'emacsos-pinephone-buffer-typography after-change-major-mode-hook)))
+     (calendar)
+     (should (eq buffer-face-mode-face 'fixed-pitch))
+     (emacsos-pinephone-display-typography (selected-frame))
+     (should (eq buffer-face-mode-face 'fixed-pitch)))))
+
 (ert-deftest emacsos-openrc-calendar-desktop-stays-three-months ()
   "Loading the phone bootstrap in a desktop batch does not customize Calendar."
   (require 'calendar)
