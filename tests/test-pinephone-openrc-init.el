@@ -6,6 +6,69 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(defun emacsos-test-buffer-completion (phone input)
+  "Inspect actual native switch-buffer completion for PHONE with typed INPUT."
+  (require 'minibuffer)
+  (let ((alpha (get-buffer-create "Phone-MRU-Alpha"))
+        (zebra (get-buffer-create "Phone-MRU-zEBRA"))
+        (read-buffer-completion-ignore-case nil)
+        (completion-category-overrides nil)
+        (completion-ignore-case nil)
+        result)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (when phone (emacsos-pinephone-buffer-completion-setup))
+            (switch-to-buffer alpha)
+            (switch-to-buffer zebra)
+            (let ((completing-read-function
+                   (lambda (_prompt table predicate &rest _args)
+                     ;; The real read-buffer call supplies both this native table
+                     ;; and its buffer-specific case folding to Tab completion.
+                     (with-temp-buffer
+                       (insert "Phone-MRU-")
+                       (let ((minibuffer-completion-table table)
+                             (minibuffer-completion-predicate predicate)
+                             (completion-all-sorted-completions nil))
+                         (let ((cycle (completion-all-sorted-completions
+                                       (point-min) (point-max))))
+                           (setcdr (last cycle) nil)
+                           (setq result (list :cycle (mapcar #'substring-no-properties cycle))))
+                         (minibuffer-completion-help (point-min) (point-max))
+                         (with-current-buffer "*Completions*"
+                           (setq result (plist-put result :display (buffer-string))))))
+                     (let ((match (try-completion input table predicate)))
+                       (setq result (plist-put result :match match))
+                       ;; Return a real candidate even for the desktop's failed
+                       ;; case-sensitive match, avoiding any interactive input.
+                       (if (stringp match) match (buffer-name alpha))))))
+              (call-interactively #'switch-to-buffer))
+            (plist-put result :selected (buffer-name)))
+        (kill-buffer alpha)
+        (kill-buffer zebra)
+        (when (get-buffer "*Completions*") (kill-buffer "*Completions*"))))))
+
+(ert-deftest emacsos-openrc-buffer-completion-tab-preserves-mru ()
+  "Native Tab display follows recent use on the phone, desktop stays alphabetical."
+  (dolist (phone '(nil t))
+    (let* ((result (emacsos-test-buffer-completion phone "Phone-MRU-zE"))
+           (display (plist-get result :display))
+           (alpha (string-match "Phone-MRU-Alpha" display))
+           (zebra (string-match "Phone-MRU-zEBRA" display)))
+      (should alpha) (should zebra)
+      (if phone (should (< zebra alpha)) (should (< alpha zebra)))
+      (should (equal (plist-get result :cycle)
+                     '("Phone-MRU-zEBRA" "Phone-MRU-Alpha"))))))
+
+(ert-deftest emacsos-openrc-buffer-completion-ignore-case-phone-only ()
+  "Actual buffer input finds mixed-case names only with the phone setup enabled."
+  (let ((phone (emacsos-test-buffer-completion t "phone-mru-ZeBrA"))
+        (desktop (emacsos-test-buffer-completion nil "phone-mru-ZeBrA")))
+    (should (equal (plist-get phone :match) "Phone-MRU-zEBRA"))
+    (should (equal (plist-get phone :selected) "Phone-MRU-zEBRA"))
+    (should-not (plist-get desktop :match))
+    (should (equal (plist-get desktop :selected) "Phone-MRU-Alpha"))))
+
 (defmacro emacsos-test-with-phone-calendar (&rest body)
   "Run BODY in a synthetic native phone Calendar, then restore desktop behavior."
   `(let ((calendar-buffer " *phone-calendar-test*"))

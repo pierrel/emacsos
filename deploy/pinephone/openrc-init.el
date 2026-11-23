@@ -1271,6 +1271,17 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
       '(:eval (emacsos-pinephone-controls-mode-line-string))
       emacsos-platform-mode-line-segments nil)
 
+(defun emacsos-pinephone-buffer-completion-setup ()
+  "Keep native buffer completion in recent-use order, ignoring name case."
+  (require 'minibuffer)
+  (setq read-buffer-completion-ignore-case t
+        completion-category-overrides (copy-tree completion-category-overrides))
+  ;; The native buffer table already follows `buffer-list' recent-use order.
+  (setf (alist-get 'display-sort-function
+                  (alist-get 'buffer completion-category-overrides)) #'identity
+        (alist-get 'cycle-sort-function
+                   (alist-get 'buffer completion-category-overrides)) #'identity))
+
 (defun emacsos-pinephone-calendar-generate (month year)
   "Render only MONTH, YEAR using the native Calendar month renderer."
   (setq displayed-month month displayed-year year)
@@ -1354,6 +1365,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (get-buffer emacsos-assist-web--thread-list-buffer-name))
 
 (when (display-graphic-p)
+  (emacsos-pinephone-buffer-completion-setup)
   (emacsos-pinephone-calendar-setup)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
   (setq emacsos-use-internal-keyboard nil

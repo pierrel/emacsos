@@ -39,6 +39,12 @@ selected date visible, including leap days and year boundaries. The phone
 bootstrap installs this layout only in its own Emacs session; desktop EmacsOS
 keeps the ordinary three-month Calendar.
 
+On the PinePhone, buffer-name completion also keeps the native recent-use
+order when Tab displays or cycles candidates, and matches names without
+regard to case. This applies to the native buffer prompt, including
+=switch-to-buffer=; other completion categories and desktop defaults stay
+unchanged.
+
 ** Virtual Keyboard
 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.
