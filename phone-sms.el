@@ -205,7 +205,7 @@ from proposal authorization and transport.")
   (let ((map (make-sparse-keymap)))
     (define-key map [mode-line mouse-1] #'emacsos-sms-show-status)
     map)
-  "Keymap for the phone-global SMS status badge.")
+  "Keymap used by the optional SMS status renderer.")
 
 (defun emacsos-sms-mode-line-string ()
   "Return independently tappable inbound and hidden outbound SMS badges."

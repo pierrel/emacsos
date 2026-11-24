@@ -114,11 +114,6 @@ Edit [[file:architecture-device.dot][architecture-device.dot]] and render with
   file and are not part of the label output. Assist can edit the repository through
   ordinary repo-thread tools and explicit Merge & Push; the operator pulls the
   phone checkout manually. There is no contacts service or automatic sync.
-  [[file:../phone-notifications.el][phone-notifications.el]] projects logical
-  alert reasons/timestamps from the existing private journal. Its generic unread
-  modeline action opens the same view as =C-c e n= and marks only that displayed
-  snapshot read in existing rows. Feedback diagnostics and outgoing SMS status
-  are not separate alerts; transport/approval state remains in E10/E13.
 - *E11 Fixed SMS helper.* [[file:../deploy/pinephone/openrc-sms-root][openrc-sms-root]]
   is the privileged, fixed =doas= command for collection, lookup, receipts and
   exact sending. It owns the SQLite transaction before a modem effect; a
@@ -154,3 +149,8 @@ Edit [[file:architecture-device.dot][architecture-device.dot]] and render with
   [[file:../phone-notifications.el][phone-notifications.el]] records the local
   reason and requests bounded feedback. This is distinct from E13's local
   incoming-SMS alert claim and from E8's durable alert receipt.
+  [[file:../phone-notifications.el][phone-notifications.el]] projects logical
+  alert reasons/timestamps from the existing private journal. Its generic unread
+  modeline action opens the same view as =C-c e n= and marks only that displayed
+  snapshot read in existing rows. Feedback diagnostics and outgoing SMS status
+  are not separate alerts; transport/approval state remains in E10/E13.

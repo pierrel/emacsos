@@ -103,7 +103,7 @@ The PinePhone startup enables this; ordinary desktop Emacs keeps its fonts.")
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
 ;; Global, minimal modeline: the EmacsOS label, transient call and
-;; SMS-chat-aware badges, then the platform's primary device segment and
+;; Call and generic notification badges, then the platform's primary segment and
 ;; optional extras.  The primary segment falls back to network status when a
 ;; platform does not replace it.  This order keeps urgent status visible if
 ;; the 320px line truncates.  Replaces the stock clutter (buffer position,

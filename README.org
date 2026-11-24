@@ -990,8 +990,10 @@ Outgoing SMS results no longer produce an SMS-specific modeline badge or a
 routine success notice. Sending, failure and unknown outcomes remain in the
 existing SMS UI/journal; proposal confirmation, acknowledgment, incoming alert
 claims and transport recovery are unchanged. The existing unknown-send warning
-still says not to resend. Incoming SMS, call and Assist alerts use the shared
-notification view without changing their feedback or host acknowledgment rules.
+still says not to resend. Recorded incoming SMS and Assist alerts use the
+shared view without changing their feedback or host acknowledgment rules.
+Call-specific alert production remains supplied by the separate call integration.
+The indicator follows UI-owned journal writes.
 
 Received-SMS events also request one finite quiet-profile =feedbackd= vibration
 through the existing verified ModemManager observer. This adds no independent
