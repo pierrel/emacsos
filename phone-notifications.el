@@ -1,4 +1,4 @@
-;;; phone-notifications.el --- Private reasons for phone feedback -*- lexical-binding: t; -*-
+;;; phone-notifications.el --- Private notification history and attention -*- lexical-binding: t; -*-
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
@@ -35,22 +35,38 @@
                         (memq (get-char-code-property character 'general-category)
                               '(Cc Zl Zp))) reason))))
 
-(defun emacsos-notifications--record (source reason event id)
-  "Persist a lifecycle EVENT with SOURCE, explicit REASON and correlation ID."
-  (unless (and (symbolp source) (<= (length (symbol-name source)) 40)
-               (not (string-match-p "[[:cntrl:]]" (symbol-name source))) (emacsos-notifications-valid-reason-p reason))
-    (error "Notification source and reason are required"))
-  (let* ((rows (emacsos-notifications--rows))
-         (directory (file-name-directory emacsos-notifications-file))
-         (row `((at . ,(format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t))
-                (id . ,id) (source . ,(symbol-name source))
-                (event . ,event) (reason . ,reason)))
-         temporary)
+(defvar emacsos-notifications--cache-file nil
+  "Journal path whose committed unread state is cached for redisplay.")
+(defvar emacsos-notifications--unread nil
+  "Cached unread indicator; the journal remains the durable source of truth.")
+
+(defun emacsos-notifications--alerts (rows)
+  "Return one recorded alert per retained source/identity, ignoring diagnostics."
+  (let ((identities (make-hash-table :test #'equal)) alerts)
+    (dolist (row rows)
+      (when (equal (alist-get 'event row) "recorded")
+        (let ((key (list (alist-get 'source row) (alist-get 'id row))))
+          (unless (gethash key identities)
+            (puthash key t identities)
+            (push row alerts)))))
+    (nreverse alerts)))
+
+(defun emacsos-notifications--cache (rows)
+  "Refresh the unread indicator from committed journal ROWS."
+  (setq emacsos-notifications--cache-file emacsos-notifications-file
+        emacsos-notifications--unread
+        (seq-some (lambda (row) (not (eq (alist-get 'seen row) t)))
+                  (emacsos-notifications--alerts rows)))
+  (force-mode-line-update t))
+
+(defun emacsos-notifications--write-rows (rows)
+  "Atomically save bounded journal ROWS, retaining private storage permissions."
+  (let ((directory (file-name-directory emacsos-notifications-file)) temporary)
     (when (file-symlink-p (directory-file-name directory))
       (error "Notification directory is a symlink"))
     (make-directory directory t)
     (set-file-modes directory #o700)
-    (setq rows (last (append rows (list row)) emacsos-notifications--limit))
+    (setq rows (last rows emacsos-notifications--limit))
     (unwind-protect
         (progn
           (setq temporary (make-temp-file (expand-file-name ".notifications-" directory)))
@@ -68,7 +84,55 @@
           (rename-file temporary emacsos-notifications-file t)
           (setq temporary nil))
       (when temporary (delete-file temporary)))
-    id))
+    (emacsos-notifications--cache rows)))
+
+(defun emacsos-notifications--record (source reason event id)
+  "Persist a lifecycle EVENT with SOURCE, explicit REASON and correlation ID."
+  (unless (and (symbolp source) (<= (length (symbol-name source)) 40)
+               (not (string-match-p "[[:cntrl:]]" (symbol-name source)))
+               (emacsos-notifications-valid-reason-p reason))
+    (error "Notification source and reason are required"))
+  (emacsos-notifications--write-rows
+   (append (emacsos-notifications--rows)
+           (list `((at . ,(format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t))
+                   (id . ,id) (source . ,(symbol-name source))
+                   (event . ,event) (reason . ,reason)))))
+  id)
+
+(defun emacsos-notifications--mark-read (alerts)
+  "Mark only the displayed snapshot ALERTS read, preserving later arrivals."
+  (let ((identities (make-hash-table :test #'equal))
+        (rows (emacsos-notifications--rows)))
+    (dolist (alert alerts)
+      (puthash (list (alist-get 'source alert) (alist-get 'id alert)) t identities))
+    (setq rows
+          (mapcar (lambda (row)
+                    (when (and (equal (alist-get 'event row) "recorded")
+                               (gethash (list (alist-get 'source row) (alist-get 'id row))
+                                        identities))
+                      (setf (alist-get 'seen row) t))
+                    row)
+                  rows))
+    (emacsos-notifications--write-rows rows)))
+
+(defconst emacsos-notifications--mode-line-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] #'emacsos-notifications-show)
+    map))
+
+(defun emacsos-notifications-mode-line-string ()
+  "Return a tappable generic indicator while a logical alert is unread."
+  (condition-case nil
+      (progn
+        (unless (equal emacsos-notifications--cache-file emacsos-notifications-file)
+          (emacsos-notifications--cache (emacsos-notifications--rows)))
+        (if emacsos-notifications--unread
+            (propertize " ● Notifications "
+                        'local-map emacsos-notifications--mode-line-map
+                        'mouse-face 'mode-line-highlight
+                        'help-echo "Open notification reasons")
+          ""))
+    (error "")))
 
 (defun emacsos-notifications-record (source reason)
   "Record a notification with a generic REASON; return its local identity."
@@ -144,25 +208,26 @@ recorded separately. Storage failure suppresses the feedback request."
     (delete-process process)))
 
 (defun emacsos-notifications-show ()
-  "Show private notification reasons and request outcomes in a read-only buffer."
+  "Show each logical alert's reason/time and mark only that snapshot read."
   (interactive)
-  (let ((rows (emacsos-notifications--rows))
+  (let ((alerts (emacsos-notifications--alerts (emacsos-notifications--rows)))
         (buffer (get-buffer-create "*Phone notifications*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert "Phone notifications\n\nRecorded/requested does not prove physical vibration.\n\n")
-        (if rows
-            (dolist (row (reverse rows))
-              (insert (format "%s  %s  %s\n  %s\n\n"
-                              (alist-get 'at row) (alist-get 'source row)
-                              (alist-get 'event row) (alist-get 'reason row))))
+        (insert "Notifications\n\n")
+        (if alerts
+            (dolist (alert (reverse alerts))
+              (insert (format "%s  %s\n  %s\n\n"
+                              (alist-get 'at alert) (alist-get 'source alert)
+                              (alist-get 'reason alert))))
           (insert "No recorded notifications.\n")))
       (goto-char (point-min))
       (special-mode)
       (setq-local revert-buffer-function
                   (lambda (&rest _) (emacsos-notifications-show))))
-    (pop-to-buffer buffer)))
+    (pop-to-buffer buffer)
+    (emacsos-notifications--mark-read alerts)))
 
 (provide 'phone-notifications)
 ;;; phone-notifications.el ends here

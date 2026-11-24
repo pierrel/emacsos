@@ -287,8 +287,7 @@ from proposal authorization and transport.")
               emacsos-sms--detail detail))
       (if visible
           (emacsos-sms--show)
-        (emacsos-sms--render)
-        (message "SMS status updated; tap the SMS badge to view"))
+        (emacsos-sms--render))
       (emacsos-sms--notify 'terminal))))
 
 (defun emacsos-sms--on-owner-changed (old-owner _new-owner _generation)

@@ -13,11 +13,11 @@
    (equal (default-value 'mode-line-format)
           '((:propertize " EmacsOS  " face (:height 0.8))
             (:eval (emacsos-call-mode-line-string))
-            (:eval (emacsos-sms-mode-line-string))
+            (:eval (emacsos-notifications-mode-line-string))
             (:eval (emacsos-net-mode-line-string))))))
 
 (ert-deftest test-os-platform-primary-replaces-network-status-only ()
-  "A platform primary entry replaces Network while call/SMS badges remain."
+  "A platform primary entry replaces Network while call/notification badges remain."
   (let ((emacsos-platform-primary-mode-line-segment
          '(:eval (platform-controls-string)))
         (emacsos-platform-mode-line-segments '((:eval (platform-extra-string)))))
@@ -26,7 +26,7 @@
       (should (member '(:eval (platform-extra-string)) format))
       (should-not (member '(:eval (emacsos-net-mode-line-string)) format))
       (should (member '(:eval (emacsos-call-mode-line-string)) format))
-      (should (member '(:eval (emacsos-sms-mode-line-string)) format)))))
+      (should (member '(:eval (emacsos-notifications-mode-line-string)) format)))))
 
 (ert-deftest test-os-command-list-surface-is-absent ()
   (dolist (symbol '(emacsos--render-commands emacsos--top-commands

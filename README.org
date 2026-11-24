@@ -970,18 +970,28 @@ migrated or removed automatically. Operator migration must preserve original
 records and must not send messages.
 
 
-The phone notification log opens with =C-c e n= and refreshes with =g=.
-It retains up to 256 newest local reason events within 128 KiB in private
+The notification view opens with =C-c e n= or the tappable *Notifications*
+modeline item. That item appears for unread logical alerts and clears when the
+view opens. Each retained alert appears once by source/identity, with its
+original reason and timestamp; feedback requests and client diagnostics stay in
+the private journal rather than becoming separate notifications. Refresh with
+=g=. Opening marks only the displayed snapshot read, so a later arrival keeps
+its indicator. Read state survives UI restarts in the same journal.
+
+The existing journal retains up to 256 event rows within 128 KiB in private
 =$XDG_STATE_HOME/emacsos/notifications.jsonl= (normally
-=~/.local/state/emacsos/notifications.jsonl=), mode 0600. Each SMS
-feedback client request is recorded before it starts; a storage failure suppresses
-that new request. Client failures and intentional stops are separate entries.
-A recorded request does not prove physical vibration. Reasons omit SMS bodies,
-numbers and caller details. Call-specific feedback wiring is maintained with
-the separate incoming-call feature; this journal change does not add it. Raw modem SMS events explicitly have unverified
-novelty/completion; this log does not itself fix duplicate notifications or cover
-external applications/direct hardware writers. Local SMS continues to use the same finite feedback client, independent of
-server configuration.
+=~/.local/state/emacsos/notifications.jsonl=), mode 0600. Reasons omit SMS bodies,
+numbers and caller details. Each feedback request is still recorded before its
+client starts; storage failure suppresses that request. Client outcomes remain
+available in the journal and do not prove physical vibration. There is no new
+collector or notification store.
+
+Outgoing SMS results no longer produce an SMS-specific modeline badge or a
+routine success notice. Sending, failure and unknown outcomes remain in the
+existing SMS UI/journal; proposal confirmation, acknowledgment, incoming alert
+claims and transport recovery are unchanged. The existing unknown-send warning
+still says not to resend. Incoming SMS, call and Assist alerts use the shared
+notification view without changing their feedback or host acknowledgment rules.
 
 Received-SMS events also request one finite quiet-profile =feedbackd= vibration
 through the existing verified ModemManager observer. This adds no independent

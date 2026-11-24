@@ -127,7 +127,7 @@ before loading EmacsOS when its primary entry replaces network status.")
   "Return the global minimal mode-line format for this platform."
   (append '((:propertize " EmacsOS  " face (:height 0.8))
             (:eval (emacsos-call-mode-line-string))
-            (:eval (emacsos-sms-mode-line-string)))
+            (:eval (emacsos-notifications-mode-line-string)))
           (list (or emacsos-platform-primary-mode-line-segment
                     '(:eval (emacsos-net-mode-line-string))))
           emacsos-platform-mode-line-segments))
@@ -799,7 +799,7 @@ a no-op commit at its own top."
 (declare-function emacsos-call--watcher-ensure "phone-call")
 (declare-function emacsos-call-mode-line-string "phone-call")
 (declare-function emacsos-send-message "phone-sms")
-(declare-function emacsos-sms-mode-line-string "phone-sms")
+(declare-function emacsos-notifications-mode-line-string "phone-notifications")
 (declare-function emacsos-sms-show-status "phone-sms")
 (declare-function emacsos-sms-chat-catalog "phone-sms-chat")
 
