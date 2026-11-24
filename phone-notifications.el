@@ -88,22 +88,22 @@
 
 (defun emacsos-notifications--record (source reason event id)
   "Persist a lifecycle EVENT with SOURCE, explicit REASON and correlation ID.
-Duplicate recorded identities inherit their retained read state."
+Duplicate recorded identities retain their original metadata and read state."
   (unless (and (symbolp source) (<= (length (symbol-name source)) 40)
                (not (string-match-p "[[:cntrl:]]" (symbol-name source)))
                (emacsos-notifications-valid-reason-p reason))
     (error "Notification source and reason are required"))
   (let* ((rows (emacsos-notifications--rows))
-         (row `((at . ,(format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t))
-                (id . ,id) (source . ,(symbol-name source))
-                (event . ,event) (reason . ,reason))))
-    (when (and (equal event "recorded")
-               (seq-some (lambda (previous)
+         (original
+          (and (equal event "recorded")
+               (seq-find (lambda (previous)
                            (and (equal (alist-get 'event previous) "recorded")
                                 (equal (alist-get 'source previous) (symbol-name source))
-                                (equal (alist-get 'id previous) id)
-                                (eq (alist-get 'seen previous) t))) rows))
-      (push '(seen . t) row))
+                                (equal (alist-get 'id previous) id))) rows)))
+         (row (or original
+                  `((at . ,(format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t))
+                    (id . ,id) (source . ,(symbol-name source))
+                    (event . ,event) (reason . ,reason)))))
     (emacsos-notifications--write-rows (append rows (list row))))
   id)
 

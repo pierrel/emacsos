@@ -119,7 +119,7 @@
   (should (emacsos-notifications-valid-reason-p "Family 👨‍👩‍👧‍👦 needs attention")))
 
 (ert-deftest phone-assist-notifications-receipt-retry-preserves-read-through-retention ()
-  "A retry after receipt failure cannot make a retained read alert unread."
+  "Receipt retries preserve retained alert metadata and read state through pruning."
   (let* ((directory (make-temp-file "phone-attention-retry-" t))
          (emacsos-assist-web-cache-directory (expand-file-name "cache" directory))
          (emacsos-notifications-file (expand-file-name "state/notifications.jsonl" directory))
@@ -129,9 +129,11 @@
          (emacsos-phone-notifications--owner nil)
          (alert '((thread_id . "thread-a") (id . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                   (reason . "Synthetic deadline needs attention")))
-         feedback)
+         (stamp "2001-01-01T01:00:00Z")
+         original feedback)
     (unwind-protect
-        (cl-letf (((symbol-function 'emacsos-assist-web--request)
+        (cl-letf (((symbol-function 'format-time-string) (lambda (&rest _) stamp))
+                  ((symbol-function 'emacsos-assist-web--request)
                    (lambda (method _path _body callback &rest _)
                      (funcall callback (when (equal method "GET")
                                          `((notifications . (,alert)))) nil)))
@@ -140,9 +142,12 @@
                   ((symbol-function 'emacsos-notifications-feedback)
                    (lambda (&rest _) (setq feedback t))))
           (emacsos-phone-notifications-poll)
+          (setq original (copy-tree (car (emacsos-notifications--rows))))
           (should (string-match-p "Notifications" (emacsos-notifications-mode-line-string)))
           (save-window-excursion (emacsos-notifications-show))
           (should (equal (emacsos-notifications-mode-line-string) ""))
+          (setq stamp "2001-02-02T02:00:00Z")
+          (setf (alist-get (quote reason) alert) "Synthetic changed retry reason")
           (emacsos-phone-notifications-poll)
           (should-not feedback)
           (should (equal (emacsos-notifications-mode-line-string) ""))
@@ -152,5 +157,10 @@
                                            (alist-get 'id alert)))
           (setq emacsos-notifications--cache-file nil)
           (should (equal (emacsos-notifications-mode-line-string) ""))
+          (let ((retained (car (emacsos-notifications--alerts
+                                (emacsos-notifications--rows)))))
+            (should (equal (alist-get (quote at) retained) (alist-get (quote at) original)))
+            (should (equal (alist-get (quote reason) retained)
+                           (alist-get (quote reason) original))))
           (should-not emacsos-phone-notifications--owner))
       (delete-directory directory t))))
