@@ -976,7 +976,9 @@ view opens. Each retained alert appears once by source/identity, with its
 original reason and timestamp; feedback requests and client diagnostics stay in
 the private journal rather than becoming separate notifications. Refresh with
 =g=. Opening marks only the displayed snapshot read, so a later arrival keeps
-its indicator. Read state survives UI restarts in the same journal. The phone's
+its indicator. Read state survives UI restarts in the same journal. Retries of a
+retained source/identity inherit its read state, so pruning an older duplicate
+cannot restore attention. The phone's
 visible Calendar keeps the dynamic OS attention line after native month updates;
 desktop Calendar and panes that intentionally hide the modeline keep their
 existing behavior.
