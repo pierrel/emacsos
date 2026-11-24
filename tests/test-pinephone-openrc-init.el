@@ -6,6 +6,57 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(defmacro emacsos-test-with-notification-calendar (&rest body)
+  "Run BODY in native Calendar with only a synthetic notification journal."
+  `(progn
+     (require 'calendar)
+     (require 'cal-move)
+     (let* ((calendar-buffer " *notification-calendar*")
+            (directory (make-temp-file "notification-calendar-" t))
+            (emacsos-notifications-file (expand-file-name "state/notifications.jsonl" directory))
+            (emacsos-notifications--cache-file nil)
+            (emacsos-notifications--unread nil))
+       (save-window-excursion
+         (unwind-protect (progn ,@body)
+           (advice-remove 'calendar-update-mode-line
+                          #'emacsos-pinephone-calendar-notification-mode-line)
+           (when (get-buffer calendar-buffer) (kill-buffer calendar-buffer))
+           (delete-directory directory t))))))
+
+(ert-deftest emacsos-openrc-notifications-calendar-keeps-dynamic-attention ()
+  "Phone Calendar keeps notification attention through native month updates."
+  (emacsos-test-with-notification-calendar
+   (advice-add 'calendar-update-mode-line :after
+               #'emacsos-pinephone-calendar-notification-mode-line)
+   (calendar)
+   (emacsos-notifications-record 'assist "Synthetic Calendar alert")
+   (dotimes (_ 2)
+     (calendar-scroll-left 1)
+     (should (member '(:eval (emacsos-notifications-mode-line-string)) mode-line-format))
+     (should (string-match-p "Notifications" (emacsos-notifications-mode-line-string))))
+   (calendar-goto-today)
+   (should (member '(:eval (emacsos-notifications-mode-line-string)) mode-line-format))
+   (call-interactively (key-binding (kbd "C-c e n")))
+   (should (equal (emacsos-notifications-mode-line-string) ""))
+   (with-current-buffer calendar-buffer
+     (should (member '(:eval (emacsos-notifications-mode-line-string)) mode-line-format)))
+   ;; A native update invoked elsewhere must not give a keyboard pane a line.
+   (with-temp-buffer
+     (setq-local mode-line-format nil)
+     (calendar-update-mode-line)
+     (should-not mode-line-format))))
+
+(ert-deftest emacsos-openrc-notifications-desktop-calendar-line-unchanged ()
+  "Without the phone-only registration, desktop Calendar keeps its native line."
+  (emacsos-test-with-notification-calendar
+   (should-not (advice-member-p #'emacsos-pinephone-calendar-notification-mode-line
+                               'calendar-update-mode-line))
+   (calendar)
+   (calendar-other-month 2 2024)
+   (should (stringp mode-line-format))
+   (dolist (month '("January" "February" "March"))
+     (should (string-match-p month (buffer-string))))))
+
 (ert-deftest emacsos-openrc-startup-retains-initialized-manual-chat ()
   "The documented manual buffer switch still reaches initialized chat after boot."
   (let ((emacsos--chat-buffer-name " *startup-manual-chat*")
