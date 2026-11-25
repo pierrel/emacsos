@@ -25,7 +25,11 @@ actions.
   the user can invoke them directly, and the agent can invoke them through
   Emacs evaluation.
   The PinePhone bootstrap also adapts native Calendar's month geometry and
-  date movement to one month, with native month/Today controls. This phone-only
+  date movement to one month, with native month/Today controls. Native segment
+  geometry is retained. One explicit window adapter preserves native fitting,
+  marking and cleanup-hook ordering while rendering one month; movement hooks
+  see the final selected date. The four remaining Emacs 30.1 replacement
+  contracts are documented in the README's native adapter boundary. This phone-only
   setup is not loaded by the ordinary desktop shell. It also sets only native
   buffer completion to recent-use ordering and case-insensitive name matching.
 - *E2 Local chat client.* [[file:../chat.el][chat.el]] sends =POST /chat= and

@@ -1282,34 +1282,51 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
         (alist-get 'cycle-sort-function
                    (alist-get 'buffer completion-category-overrides)) #'identity))
 
-(defun emacsos-pinephone-calendar-generate (month year)
-  "Render only MONTH, YEAR using the native Calendar month renderer."
-  (setq displayed-month month displayed-year year)
-  (erase-buffer)
-  (calendar-generate-month month year calendar-left-margin))
-
 (defun emacsos-pinephone-calendar-date-visible-p (date)
-  "Return whether DATE belongs to the phone's displayed month."
+  "Return whether DATE belongs to the single displayed month, not its neighbors."
   (and (calendar-date-is-valid-p date)
        (= (car date) displayed-month)
        (= (nth 2 date) displayed-year)))
 
-(defun emacsos-pinephone-calendar-segment ()
-  "Map the phone's single month to native Calendar's central segment."
-  1)
-
-(defun emacsos-pinephone-calendar-cursor (original date)
-  "Position DATE with ORIGINAL in the phone's single native month."
-  ;; Native cursor geometry offsets the central month by one month width.
-  (let ((calendar-left-margin (- calendar-left-margin calendar-month-width)))
-    (funcall original
-             (if (emacsos-pinephone-calendar-date-visible-p date)
-                 date
-               (list displayed-month 1 displayed-year)))))
+(defun emacsos-pinephone-calendar-window (&optional month year)
+  "Generate one native month, preserving Emacs 30.1 window and hook ordering."
+  (let* ((inhibit-read-only t)
+         (today (calendar-current-date))
+         (month (or month (car today)))
+         (year (or year (nth 2 today)))
+         (visible-window (eq (window-buffer) (get-buffer calendar-buffer))))
+    (setq displayed-month month displayed-year year)
+    ;; Keep native segment 1 at physical column 1 without replacing its geometry.
+    (setq-local calendar-left-margin (- 1 calendar-month-width)
+                calendar-right-margin (+ calendar-left-margin (* 7 calendar-column-width))
+                calendar-month-edges (list (cons 1 (calendar-month-edges 1))))
+    (erase-buffer)
+    ;; The renderer's intermonth truncation uses the physical left margin.
+    (let ((calendar-left-margin 1))
+      (calendar-generate-month month year calendar-left-margin))
+    (calendar-update-mode-line)
+    (calendar-cursor-to-visible-date
+     (if (calendar-date-is-visible-p today) today (list month 1 year)))
+    (set-buffer-modified-p nil)
+    ;; Retain native fitting and marking order; hooks run in native cleanup.
+    (when visible-window
+      (if (window-combined-p)
+          (fit-window-to-buffer nil nil calendar-minimum-window-height)
+        (set-window-vscroll nil 0))
+      (sit-for 0))
+    (when calendar-mark-holidays-flag
+      (calendar-mark-holidays)
+      (when visible-window (sit-for 0)))
+    (unwind-protect
+        (when calendar-mark-diary-entries-flag (diary-mark-entries))
+      (run-hooks (if (calendar-date-is-visible-p today)
+                     'calendar-today-visible-hook
+                   'calendar-today-invisible-hook)))))
 
 (defun emacsos-pinephone-calendar-forward-day (days)
-  "Move DAYS using native date arithmetic, centering the resulting month."
-  (unless (zerop days)
+  "Move DAYS without native 30.1's adjacent-month centering offset."
+  (if (zerop days)
+      (run-hooks 'calendar-move-hook)
     (let ((date (calendar-cursor-to-date)))
       (unless date
         (setq date (calendar-cursor-to-nearest-date))
@@ -1319,7 +1336,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
         (+ days (calendar-absolute-from-gregorian date)))))))
 
 (defun emacsos-pinephone-calendar-end-of-month (months)
-  "Move forward MONTHS month ends and select the last day."
+  "Move forward MONTHS month ends and select the last day before move hooks."
   (let* ((date (calendar-cursor-to-nearest-date))
          (month (car date)) (year (nth 2 date)))
     (unless (= (cadr date) (calendar-last-day-of-month month year))
@@ -1328,10 +1345,7 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
     (calendar-goto-date (list month (calendar-last-day-of-month month year) year))))
 
 (defun emacsos-pinephone-calendar-mode ()
-  "Keep native Calendar compact and expose its month controls on the phone."
-  (setq-local calendar-left-margin 1
-              calendar-right-margin (+ 1 (* 7 calendar-column-width))
-              calendar-month-edges (list (cons 1 (calendar-month-edges 0))))
+  "Expose compact native month controls in the phone Calendar header."
   (setq-local header-line-format
               (mapconcat
                (lambda (entry)
@@ -1348,11 +1362,9 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   "Install the one-month adapter only in the PinePhone Emacs session."
   (require 'calendar)
   (require 'cal-move)
-  (advice-add 'calendar-generate :override #'emacsos-pinephone-calendar-generate)
+  (advice-add 'calendar-generate-window :override #'emacsos-pinephone-calendar-window)
   (advice-add 'calendar-date-is-visible-p :override
               #'emacsos-pinephone-calendar-date-visible-p)
-  (advice-add 'calendar-column-to-segment :override #'emacsos-pinephone-calendar-segment)
-  (advice-add 'calendar-cursor-to-visible-date :around #'emacsos-pinephone-calendar-cursor)
   (advice-add 'calendar-forward-day :override #'emacsos-pinephone-calendar-forward-day)
   (advice-add 'calendar-end-of-month :override #'emacsos-pinephone-calendar-end-of-month)
   (add-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode))

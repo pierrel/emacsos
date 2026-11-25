@@ -78,10 +78,8 @@
        (save-window-excursion
 	 (unwind-protect
              (progn (emacsos-pinephone-calendar-setup) ,@body)
-           (dolist (entry '((calendar-generate . emacsos-pinephone-calendar-generate)
+           (dolist (entry '((calendar-generate-window . emacsos-pinephone-calendar-window)
                             (calendar-date-is-visible-p . emacsos-pinephone-calendar-date-visible-p)
-                            (calendar-column-to-segment . emacsos-pinephone-calendar-segment)
-                            (calendar-cursor-to-visible-date . emacsos-pinephone-calendar-cursor)
                             (calendar-forward-day . emacsos-pinephone-calendar-forward-day)
                             (calendar-end-of-month . emacsos-pinephone-calendar-end-of-month)))
              (advice-remove (car entry) (cdr entry)))
@@ -99,6 +97,7 @@
      (dolist (date '((2 29 2024) (12 31 2024) (1 1 2025)))
        (calendar-goto-date date)
        (should (equal (calendar-cursor-to-date) date))
+       (should (= (calendar-column-to-segment) 1))
        (should (equal (list displayed-month displayed-year)
                       (list (car date) (nth 2 date))))
        (save-excursion
@@ -117,7 +116,7 @@
      ;; The blank before February's first day counts as the first forward step.
      (goto-char (point-min))
      (forward-line (1- calendar-first-date-row))
-     (move-to-column calendar-left-margin)
+     (move-to-column (nth 1 (calendar-month-edges 1)))
      (should-not (calendar-cursor-to-date))
      (calendar-forward-day 1)
      (should (equal (calendar-cursor-to-date) '(2 1 2024)))
@@ -142,6 +141,62 @@
      (calendar-goto-today)
      (should (equal (calendar-cursor-to-date) (calendar-current-date))))))
 
+(ert-deftest emacsos-openrc-calendar-today-hooks-match-visible-month ()
+  "Native cleanup hooks see actual one-month visibility, including diary errors."
+  (emacsos-test-with-phone-calendar
+   (let ((calendar-mark-holidays-flag nil)
+         (calendar-mark-diary-entries-flag nil)
+         events)
+     (let ((calendar-today-visible-hook
+            (list (lambda () (push (list 'visible (calendar-cursor-to-date)) events))))
+           (calendar-today-invisible-hook
+            (list (lambda () (push (list 'invisible (calendar-cursor-to-date)) events)))))
+       (cl-letf (((symbol-function 'calendar-current-date) (lambda (&rest _) '(11 25 2026))))
+         (calendar)
+         (setq events nil)
+         (calendar-other-month 12 2026)
+         (should (equal events '((invisible (12 1 2026)))))
+         (calendar-goto-today)
+         (should (equal (car events) '(visible (11 25 2026))))
+         (setq events nil)
+         (let ((calendar-mark-diary-entries-flag t))
+           (cl-letf (((symbol-function 'diary-mark-entries)
+                      (lambda () (error "Synthetic diary failure"))))
+             (should-error (calendar-other-month 1 2027)
+                           :type 'error)))
+         (should (equal events '((invisible (1 1 2027))))))))))
+
+(ert-deftest emacsos-openrc-calendar-preserves-hook-self-removal ()
+  "One-shot today hooks remove themselves from the real native hook list."
+  (emacsos-test-with-phone-calendar
+   (let ((calendar-mark-holidays-flag nil)
+         (calendar-today-visible-hook nil)
+         calls once)
+     (setq once (lambda ()
+                  (setq calls (1+ (or calls 0)))
+                  (remove-hook 'calendar-today-visible-hook once)))
+     (add-hook 'calendar-today-visible-hook once)
+     (calendar)
+     (calendar-redraw)
+     (should (= calls 1)))))
+
+(ert-deftest emacsos-openrc-calendar-native-move-hooks-see-final-date-once ()
+  "Zero-day and month-end movements preserve the native final-date hook contract."
+  (emacsos-test-with-phone-calendar
+   (calendar)
+   (calendar-goto-date '(1 31 2024))
+   (let (events)
+     (let ((calendar-move-hook
+            (list (lambda () (push (calendar-cursor-to-date) events)))))
+       (calendar-forward-day 0)
+       (should (equal events '((1 31 2024))))
+       (setq events nil)
+       (calendar-end-of-month 1)
+       (should (equal events '((2 29 2024))))
+       (setq events nil)
+       (calendar-forward-day 1)
+       (should (equal events '((3 1 2024))))))))
+
 (ert-deftest emacsos-openrc-calendar-keeps-fixed-pitch-after-display-hooks ()
   "Phone Calendar stays fixed-width after major-mode and window typography."
   (emacsos-test-with-phone-calendar
@@ -155,7 +210,7 @@
 (ert-deftest emacsos-openrc-calendar-desktop-stays-three-months ()
   "Loading the phone bootstrap in a desktop batch does not customize Calendar."
   (require 'calendar)
-  (should-not (advice-member-p #'emacsos-pinephone-calendar-generate 'calendar-generate))
+  (should-not (advice-member-p #'emacsos-pinephone-calendar-window 'calendar-generate-window))
   (with-temp-buffer
     (calendar-mode)
     (let ((inhibit-read-only t)) (calendar-generate 2 2024))

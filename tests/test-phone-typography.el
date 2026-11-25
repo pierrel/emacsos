@@ -9,7 +9,7 @@
       (require 'os)
       (remove-hook 'window-setup-hook #'emacsos--init)
 
-      ;; Evaluate selected typography and Controls row functions without phone services.
+      ;; Evaluate selected typography, Controls and Calendar functions without phone services.
       (with-temp-buffer
 	(insert-file-contents "deploy/pinephone/openrc-init.el")
 	(goto-char (point-min))
@@ -22,10 +22,8 @@
 					       emacsos-pinephone-display-typography
                                                emacsos-pinephone-controls--bounded
                                                emacsos-pinephone-controls--insert-row
-                                               emacsos-pinephone-calendar-generate
                                                emacsos-pinephone-calendar-date-visible-p
-                                               emacsos-pinephone-calendar-segment
-                                               emacsos-pinephone-calendar-cursor
+                                               emacsos-pinephone-calendar-window
                                                emacsos-pinephone-calendar-forward-day
                                                emacsos-pinephone-calendar-end-of-month
                                                emacsos-pinephone-calendar-mode
