@@ -12,9 +12,10 @@ def receipt(**values):
             'occurred_at': '2026-10-24T20:00:00+00:00', **values}
 
 
+@pytest.mark.parametrize('archive_only', [False, True])
 @pytest.mark.parametrize('code,accepted', [(503, False), (400, False), (401, False), (200, True)])
-def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accepted):
-    row = receipt(); calls = []; posts = []
+def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accepted, archive_only):
+    row = receipt(archive_only=int(archive_only), occurred_at=None if archive_only else '2026-10-24T20:00:00+00:00'); calls = []; posts = []
     def helper(payload, timeout=70):
         calls.append(payload)
         return SimpleNamespace(stdout=json.dumps({'receipts': [row]}))
@@ -26,6 +27,8 @@ def test_handoff_ack_only_after_server_durable_success(monkeypatch, code, accept
     sf.sync_once()
     assert (len(calls) == 2) is accepted
     assert posts[0][1]['json']['text'] == row['text']
+    assert posts[0][1]['json']['archive_only'] is archive_only
+    assert posts[0][1]['json']['occurred_at'] == row['occurred_at']
     assert posts[0][1]['allow_redirects'] is False
     if accepted:
         assert calls[1] == {'operation': 'ack', 'message_id': 'physical1', 'status': 'received'}
@@ -117,3 +120,19 @@ def test_one_failed_receipt_does_not_block_later_batch_rows(monkeypatch, failure
     sf.sync_once()
     assert offered==['first','later']
     assert calls==[{'operation':'receipts'},{'operation':'ack','message_id':'later','status':'received'}]
+
+
+@pytest.mark.parametrize('failure', ['http', 'transport', 'shape'])
+def test_handoff_failure_diagnostics_do_not_disclose_payload_or_exception(monkeypatch, caplog, failure):
+    row = receipt(id='private-identity', text='private-body')
+    calls = []
+    monkeypatch.setattr(sf, 'helper', lambda payload, **kw: calls.append(payload) or SimpleNamespace(stdout=json.dumps({'receipts':[row]})))
+    monkeypatch.setattr(sf, 'INBOUND_URL', 'https://server.invalid/inbound/sms')
+    def post(*args, **kwargs):
+        if failure == 'transport': raise requests.Timeout('private-secret private-body')
+        return SimpleNamespace(status_code=503 if failure == 'http' else 200, json=lambda:[])
+    monkeypatch.setattr(sf.requests, 'post', post)
+    sf.sync_once()
+    assert calls == [{'operation':'receipts'}]
+    assert 'sms_boundary event=handoff_' in caplog.text
+    assert all(value not in caplog.text for value in ['private-identity', 'private-body', 'private-secret', row['number']])

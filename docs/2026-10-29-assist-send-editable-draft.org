@@ -1,0 +1,56 @@
+#+title: Ordinary Assist sends with a durable editable draft
+#+date: 2026-10-29
+
+* Contract
+
+The client owns editable text and one HTTP submission identity. Assist already
+accepts phone and browser messages through the same durable admission path,
+including while the thread is busy. Accepted Runs and ordering belong to the
+server. The client no longer keeps accepted Run entries, follow-up FIFOs,
+queue adoption/collision state or per-entry recovery and parser ownership.
+
+Send saves the draft and request identity before HTTP. A second Send while that
+HTTP request is pending leaves the editable draft in place. Failure restores or
+retains submitted text, preserves any newly edited text, and reports honest
+connection/acceptance uncertainty. Nothing automatically retries or cancels server work. The existing explicit
+Abort command retains its server cancellation endpoint and honest detach result. An explicit
+unchanged retry reuses its key; edited text gets a new key without a modal gate.
+If acceptance succeeds while another response is observed, that display continues.
+
+Send and C-x C-s persist editable text. Reopening restores it without network
+work. A single old unconfirmed identity is retained on import; unsent old FIFO,
+follow-up and retained source drafts become editable text with blank separators.
+Accepted text is not converted into a new submission. Private pre-update caches
+must be backed up before conversion; do not downgrade new-format draft records
+into old client recovery machinery.
+
+One in-session SSE observer remains provisional. Canonical server history is
+truth. The existing phone API supplies no active-Run discovery handle in a cold
+thread snapshot, so reopening reads history/status on Refresh rather than
+reconstructing an accepted Run queue or adding an Assist API.
+
+* Verification
+
+Use synthetic Unicode and temporary caches. Exercise public Send while an old
+observer is active through the real server admission endpoint and temporary Run
+store; verify durable admission, exact text, no parallel execution and same-key
+replay without another Run. Failure coverage uses actual Send, C-x C-s and a fresh
+buffer's ordinary reopen, with no request during restore. Check unchanged/edited
+retry identities, intentionally empty saved text, legacy unsent migration,
+accepted text exclusion, write failure and typed text during pending HTTP.
+Preserve transport parsing limits, authentication/approval fencing and Git
+currentness checks separately from obsolete FIFO-state assertions.
+
+* Deployment boundary
+
+This is a client-only change. Preserve the reviewed Unicode header-byte fix and
+all unrelated phone features. Old queue callbacks and buffer-local hooks cannot
+be assumed safe under a whole-module hot reload. Use a controlled activation with private draft and unsaved-buffer preservation. Source verification performs no model run, phone effect, real SMS/call or server source modification. Implementation and local checks do not claim physical deployment.
+
+* Historical supersessions
+
+This replaces the =Design= section of
+[[file:2026-09-20-assist-concurrent-request-running-fix.org][Assist Web concurrent request correction]]:
+its durable two-resident client FIFO, per-entry identities and adoption/recovery
+model are removed. A single HTTP retry identity and editable draft replace that
+model; existing server admission and canonical history remain authoritative.

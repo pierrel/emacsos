@@ -1,12 +1,14 @@
 #!/usr/bin/python3 -I
-"""Fixed root helper for exact SMS sends, private journal receipts and acknowledgment."""
+"""Fixed root helper for exact SMS sends, receipts, ACKs and local alert claims."""
 
 import fcntl
+import hashlib
 import json
 import os
 import re
 import signal
 import sys
+import syslog
 import sqlite3
 import uuid
 from pathlib import Path
@@ -34,6 +36,16 @@ ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 # LTE variants that explicitly retain SMS service.  Do not create an SMS
 # object while the radio is searching, denied, or only emergency-capable.
 SMS_READY_REGISTRATION_STATES = frozenset((1, 5, 6, 7, 9, 10))
+
+
+def diagnostic(event, identity="", error=None, reason="none"):
+    """Send fixed metadata to syslog, never into the JSON receipt stream."""
+    correlation = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    try:
+        syslog.syslog(syslog.LOG_WARNING, "sms_boundary event=%s correlation=%s error_type=%s reason=%s" %
+                      (event, correlation, type(error).__name__ if error else "none", reason))
+    except OSError:
+        pass
 
 
 class InputTimeout(Exception):
@@ -151,11 +163,35 @@ def journal():
     connection.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, direction TEXT, number TEXT, text TEXT, status TEXT, occurred_at TEXT, observation TEXT UNIQUE, ack_status TEXT)")
     if "last_offered" not in {row[1] for row in connection.execute("PRAGMA table_info(messages)")}:
         connection.execute("ALTER TABLE messages ADD COLUMN last_offered INTEGER NOT NULL DEFAULT 0")
-    # Reuse the bounded periodic-scan progress contract; identity remains the
-    # existing observation key until the separate timestamp/replay change.
+    if "archive_only" not in {row[1] for row in connection.execute("PRAGMA table_info(messages)")}:
+        connection.execute("ALTER TABLE messages ADD COLUMN archive_only INTEGER NOT NULL DEFAULT 0")
+        # Legacy incoming times were local rediscovery times, not SMS timestamps.
+        # Preserve old IDs/content/times/ACKs but prevent pending history turns.
+        connection.execute("UPDATE messages SET archive_only=1 WHERE direction='incoming'")
+    if "alert_claimed" not in {row[1] for row in connection.execute("PRAGMA table_info(messages)")}:
+        # Existing receipts are history at local-alert activation, regardless of ACK.
+        connection.execute("ALTER TABLE messages ADD COLUMN alert_claimed INTEGER NOT NULL DEFAULT 1")
+    connection.execute("CREATE TABLE IF NOT EXISTS incoming_alert_start (occurred_at TEXT NOT NULL)")
+    if not connection.execute("SELECT 1 FROM incoming_alert_start").fetchone():
+        connection.execute("INSERT INTO incoming_alert_start VALUES (?)", (datetime.now(timezone.utc).isoformat(),))
     connection.execute("CREATE TABLE IF NOT EXISTS incoming_scan (path TEXT)")
     if not connection.execute("SELECT 1 FROM incoming_scan").fetchone():
         connection.execute("INSERT INTO incoming_scan VALUES (NULL)")
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_keys'").fetchone():
+        connection.execute("CREATE TABLE incoming_keys (content_key TEXT PRIMARY KEY, message_id TEXT NOT NULL)")
+        # Keep every legacy receipt unchanged. Only future observations collapse
+        # equal source messages; they reuse the first existing durable identity.
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_inventory'").fetchone():
+            for row in connection.execute("SELECT content,message_id FROM incoming_inventory ORDER BY ordinal"):
+                connection.execute("INSERT OR IGNORE INTO incoming_keys VALUES (?,?)",
+                                   (incoming_key(row["content"]), row["message_id"]))
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_cutover'").fetchone():
+        connection.execute("CREATE TABLE incoming_cutover (occurred_at TEXT NOT NULL)")
+        if connection.execute("SELECT 1 FROM messages WHERE direction='incoming' LIMIT 1").fetchone():
+            # Unidentified legacy inventory must remain history even if MM
+            # publishes it later. This one-time source-time boundary is durable.
+            connection.execute("INSERT INTO incoming_cutover VALUES (?)", (datetime.now(timezone.utc).isoformat(),))
+
     connection.commit()
     return connection
 
@@ -175,69 +211,212 @@ def begin_attempt(connection, message_id, number, text, occurred_at=None):
     return "unknown", True
 
 
-def collect_incoming(connection, bus):
-    """Preserve each observed MM object, including identical independent texts.
+def collect_incoming(connection, bus, hint=None):
+    """Capture completed SMS using source-content identity, not exported paths.
 
-    Owner/path identity is an observation, not a verified carrier message id.
-    A ModemManager restart may expose an old message as another observation;
-    never discard a real text merely because its body and timestamp match.
-    The durable cursor rotates at most four objects per invocation, including
-    unreadable or incomplete objects; later polls wrap around to revisit them.
+    A durable scan cursor rotates bounded leaf reads, including failed reads.
+    Equal sender/timestamp/content observations collapse
+    by policy, including across owner/path changes. Source time never becomes NOW.
     """
     owner = str(bus.get_name_owner(MM_NAME))
     if not re.fullmatch(r":[0-9]+\.[0-9]+", owner):
         raise ValueError("owner")
-    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     objects = dbus.Interface(bus.get_object(owner, MM_ROOT), OBJECT_MANAGER).GetManagedObjects(timeout=10)
     messaging = [interfaces[MESSAGING] for interfaces in objects.values() if MESSAGING in interfaces]
     if len(messaging) != 1 or "Messages" not in messaging[0]:
         raise ValueError("messaging")
-    # ObjectManager enumerates modems. Leaf SMS objects are listed by Messaging.
     paths = sorted({str(path) for path in messaging[0]["Messages"]})
     if any(not SMS_PATH_RE.fullmatch(path) for path in paths):
         raise ValueError("SMS path")
     previous = connection.execute("SELECT path FROM incoming_scan").fetchone()[0]
     ordered = [path for path in paths if previous is None or path > previous]
     ordered += [path for path in paths if previous is not None and path <= previous]
-    # Commit progress before each read, including incomplete/failed objects.
-    # A later deadline cannot roll back earlier progress or captured receipts.
+    if hint in paths:
+        ordered = [hint] + [path for path in ordered if path != hint]
+    # Advance before each bounded read. A timeout retains earlier receipts and
+    # the next poll continues beyond the timed-out leaf rather than starving.
     for path in ordered[:CAPTURE_BATCH]:
         connection.execute("UPDATE incoming_scan SET path=?", (path,))
         connection.commit()
-        observation = boot + ":" + owner + ":" + path
-        if connection.execute("SELECT 1 FROM messages WHERE observation=?", (observation,)).fetchone():
-            continue
         try:
             properties = dbus.Interface(bus.get_object(owner, path),
                                         "org.freedesktop.DBus.Properties").GetAll(SMS, timeout=2)
         except InputTimeout:
             raise
-        except Exception:
-            # A stale/unreadable leaf must not starve later received messages.
+        except Exception as error:
+            diagnostic("modem_read_failed", path, error)
             continue
         if int(properties.get("State", 0)) != 3:
             continue
         number, text = str(properties.get("Number", "")), str(properties.get("Text", ""))
         if "\0" in number or len(number.encode()) > 128 or "\0" in text or len(text.encode()) > MAX_INCOMING_BYTES:
             continue
-        connection.execute("INSERT OR IGNORE INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status) VALUES (?, 'incoming', ?, ?, 'received', ?, ?, NULL)",
-                           (uuid.uuid4().hex, number, text, datetime.now(timezone.utc).isoformat(), observation))
-        # A later failed leaf read cannot roll back earlier captured messages.
-        connection.commit()
+        # Received payload/origin fields only: State, Storage and delivery
+        # report properties describe mutable lifecycle, not message content.
+        content = json.dumps([number, text, list(map(int, properties.get("Data", []))),
+                              str(properties.get("Timestamp", "")), str(properties.get("SMSC", "")),
+                              int(properties.get("PduType", 0)), int(properties.get("Class", -1))],
+                             ensure_ascii=False, separators=(",", ":"))
+        timestamp_reason = "missing" if not properties.get("Timestamp") else "malformed"
+        try:
+            timestamp = datetime.fromisoformat(str(properties.get("Timestamp", "")))
+            timestamp_reason = "naive" if timestamp.tzinfo is None else "none"
+            occurred_at = timestamp.isoformat() if timestamp.tzinfo is not None else None
+        except (TypeError, ValueError):
+            occurred_at = None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            identity, created = capture_incoming(connection, content, occurred_at)
+            connection.commit()
+        except (OSError, sqlite3.Error) as error:
+            diagnostic("capture_commit_failed", incoming_key(content), error)
+            raise
+        if created and occurred_at is None:
+            diagnostic("timestamp_archive_only", identity, reason=timestamp_reason)
+        # The local FULL commit is the durability boundary, not server ACK.
+        if (int(properties.get("Storage", 0)) in (1, 2)
+                and int(properties.get("PduType", 0)) == 1
+                and archived_plaintext(connection, content, occurred_at)):
+            try:
+                if str(bus.get_name_owner(MM_NAME)) != owner:
+                    continue
+                modem_path = next(path for path, fields in objects.items() if MESSAGING in fields)
+                dbus.Interface(bus.get_object(owner, modem_path), MESSAGING).Delete(
+                    dbus.ObjectPath(path), timeout=2)
+            except InputTimeout:
+                raise
+            except Exception as error:
+                diagnostic("modem_cleanup_failed", identity, error)
+                # A surviving transport copy is revisited by the existing scan.
+                pass
+
+
+def incoming_key(content):
+    """Hash sender, original source time and payload; identical messages collapse."""
+    number, text, data, source_time = json.loads(content)[:4]
+    try:
+        timestamp = datetime.fromisoformat(source_time)
+        if timestamp.utcoffset() is not None:
+            source_time = timestamp.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        pass
+    return hashlib.sha256(json.dumps([number, source_time, text, data],
+                                   ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def capture_incoming(connection, content, occurred_at):
+    """Insert atomically; return the stable receipt ID and whether it was new."""
+    key = incoming_key(content)
+    existing = connection.execute("SELECT message_id FROM incoming_keys WHERE content_key=?", (key,)).fetchone()
+    if existing:
+        return existing[0], False
+    number, text = json.loads(content)[:2]
+    identity = uuid.uuid4().hex
+    cutover = connection.execute("SELECT occurred_at FROM incoming_cutover").fetchone()
+    archive_only = occurred_at is None or (cutover is not None and
+        datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(cutover["occurred_at"]))
+    alert_start = connection.execute("SELECT occurred_at FROM incoming_alert_start").fetchone()[0]
+    alert_claimed = archive_only or datetime.fromisoformat(occurred_at) <= datetime.fromisoformat(alert_start)
+    connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,observation,ack_status,archive_only,alert_claimed) VALUES (?, 'incoming', ?, ?, 'received', ?, NULL, NULL, ?, ?)",
+                       (identity, number, text, occurred_at, int(archive_only), int(alert_claimed)))
+    connection.execute("INSERT INTO incoming_keys VALUES (?,?)", (key, identity))
+    return identity, True
+
+
+def claim_incoming_alerts(connection):
+    """Claim up to four completed local notifications, independently of server ACK.
+
+    The durable claim precedes the UI effect: a crash or logging failure can miss
+    an alert, but must not replay an uncertain vibration attempt.
+    """
+    connection.execute("BEGIN IMMEDIATE")
+    identities = [row[0] for row in connection.execute(
+        "SELECT id FROM messages WHERE direction='incoming' AND status='received' AND archive_only=0 AND alert_claimed=0 ORDER BY rowid LIMIT 4")]
+    connection.executemany("UPDATE messages SET alert_claimed=1 WHERE id=?", [(identity,) for identity in identities])
     connection.commit()
+    return identities
+
+
+def archived_plaintext(connection, content, occurred_at):
+    """Prove exact supported content is local before removing its modem copy."""
+    number, text, data, _source = json.loads(content)[:4]
+    if data or occurred_at is None or len(text.encode()) > 4096:
+        return False
+    key = incoming_key(content)
+    row = connection.execute("SELECT m.* FROM incoming_keys k JOIN messages m ON m.id=k.message_id WHERE k.content_key=?", (key,)).fetchone()
+    if row is None or row["direction"] != "incoming" or row["status"] != "received" or row["number"] != number or row["text"] != text:
+        return False
+    try:
+        original = datetime.fromisoformat(occurred_at).astimezone(timezone.utc)
+        recorded = datetime.fromisoformat(row["occurred_at"])
+        if recorded.utcoffset() is not None and recorded.astimezone(timezone.utc) == original:
+            return True
+    except (TypeError, ValueError):
+        pass
+    # Legacy receipt times remain unchanged; their original payload is already
+    # durable in the existing inventory, when present.
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_inventory'").fetchone():
+        return any(incoming_key(old["content"]) == key for old in connection.execute(
+            "SELECT content FROM incoming_inventory WHERE message_id=?", (row["id"],)))
+    return False
+
+
+def history(connection):
+    """Read bounded local history without contacting the modem or a server."""
+    where = ""
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_inventory'").fetchone():
+        connection.create_function("sms_source_key", 1, incoming_key, deterministic=True)
+        where = " WHERE id NOT IN (SELECT i.message_id FROM incoming_inventory i JOIN incoming_keys k ON sms_source_key(i.content)=k.content_key WHERE i.message_id != k.message_id)"
+    rows = connection.execute("SELECT id,direction,number,text,status,occurred_at FROM messages" + where + " ORDER BY rowid DESC LIMIT 101").fetchall()
+    selected = []
+    truncated = len(rows) > 100
+    for row in rows[:100]:
+        trial = selected + [dict(row)]
+        if len(json.dumps({"messages": trial, "truncated": False}, ensure_ascii=False).encode()) + 1 > 128 * 1024:
+            truncated = True
+            continue
+        selected = trial
+    return {"messages": list(reversed(selected)), "truncated": truncated}
 
 
 def receipt_operation(value):
-    """Read bounded pending receipts or acknowledge one exact observed status."""
-    connection = journal()
+    """Read local history, collect receipts/alerts, or acknowledge exact status."""
     try:
-        if value == {"operation": "receipts"}:
+        connection = journal()
+    except (OSError, sqlite3.Error) as error:
+        diagnostic("archive_open_failed", error=error)
+        raise
+    try:
+        if value == {"operation": "history"}:
+            print(json.dumps(history(connection), ensure_ascii=False))
+        elif (value == {"operation": "collect"} or
+                set(value) == {"operation", "path"} and value["operation"] == "collect"
+                and isinstance(value["path"], str) and SMS_PATH_RE.fullmatch(value["path"])):
+            try:
+                collect_incoming(connection, dbus.SystemBus(), value.get("path"))
+                collected = True
+            except Exception as error:
+                diagnostic("collection_failed", error=error)
+                connection.rollback()
+                collected = False
+            print(json.dumps({"collected": collected}))
+        elif (value == {"operation": "alerts"} or
+                set(value) == {"operation", "path"} and value["operation"] == "alerts"
+                and isinstance(value["path"], str) and SMS_PATH_RE.fullmatch(value["path"])):
+            try:
+                collect_incoming(connection, dbus.SystemBus(), value.get("path"))
+            except Exception as error:
+                diagnostic("collection_failed", error=error)
+                connection.rollback()
+            print(json.dumps({"alerts": claim_incoming_alerts(connection)}))
+        elif value == {"operation": "receipts"}:
             try:
                 collect_incoming(connection, dbus.SystemBus())
-            except Exception:
+            except Exception as error:
+                diagnostic("collection_failed", error=error)
                 # Outgoing journal sync does not depend on the modem being present.
                 connection.rollback()
-            rows = connection.execute("SELECT id,direction,number,text,status,occurred_at FROM messages WHERE ack_status IS NULL OR ack_status != status ORDER BY last_offered,rowid LIMIT 4").fetchall()
+            rows = connection.execute("SELECT id,direction,number,text,status,occurred_at,archive_only FROM messages WHERE ack_status IS NULL OR ack_status != status ORDER BY last_offered,rowid LIMIT 4").fetchall()
             batch = []
             for row in rows:
                 trial = batch + [dict(row)]
@@ -251,6 +430,11 @@ def receipt_operation(value):
                 connection.executemany("UPDATE messages SET last_offered=? WHERE id=?", [(turn, row["id"]) for row in batch])
                 connection.commit()
             print(json.dumps({"receipts": batch}, ensure_ascii=False))
+        elif set(value) == {"operation", "message_id"} and value["operation"] == "lookup":
+            if not isinstance(value["message_id"], str) or not ID_RE.fullmatch(value["message_id"]):
+                raise ValueError("lookup")
+            row = connection.execute("SELECT id,number,text,status FROM messages WHERE id=?", (value["message_id"],)).fetchone()
+            print(json.dumps({"message": dict(row) if row else None}, ensure_ascii=False))
         elif set(value) == {"operation", "message_id", "status"} and value["operation"] == "ack":
             if not isinstance(value["message_id"], str) or not ID_RE.fullmatch(value["message_id"]) or value["status"] not in {"received", "sent", "not_sent", "unknown"}:
                 raise ValueError("ack")
@@ -264,7 +448,7 @@ def receipt_operation(value):
 
 
 def main():
-    """Validate stdin, serialize modem mutation, and emit one terminal result."""
+    """Validate bounded stdin and execute a fixed send or journal operation."""
     if os.geteuid() != 0 or len(sys.argv) != 1:
         _emit("not-sent:invalid-input")
         return 2
@@ -344,6 +528,8 @@ def main():
             status = "unknown:dbus-unavailable"
         finally:
             connection.close()
+    if status.startswith("unknown:"):
+        diagnostic("send_unknown", message_id)
     _emit(status)
     return 0 if status == "sent" else 1
 

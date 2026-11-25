@@ -9,6 +9,9 @@ Two concerns:
 """
 from __future__ import annotations
 
+import base64
+import json
+import re
 import subprocess
 import shutil
 import time
@@ -131,7 +134,10 @@ def test_passes_expr_on_stdin_and_auth_path_to_emacsclient():
     assert captured["cmd"][2] == "-f"
     assert captured["cmd"][4] == "-e"
     assert len(captured["cmd"]) == 5
-    assert captured["input"] == '(message "hi")\n'
+    assert captured["input"].count("\n") == 1
+    payload = re.search(r'base64-decode-string "([A-Za-z0-9+/=]+)"', captured["input"])
+    assert payload
+    assert base64.b64decode(payload.group(1)).decode("utf-8") == '(message "hi")'
     assert captured["encoding"] == "utf-8"
     assert '(message "hi")' not in captured["cmd"]
 
@@ -191,8 +197,23 @@ def test_returns_failure_when_binary_missing():
     not shutil.which("emacs") or not shutil.which("emacsclient"),
     reason="Emacs client/server integration binaries unavailable",
 )
-def test_expression_on_stdin_reaches_real_tcp_emacs_server(tmp_path):
-    """Pin emacsclient's surprising no-argument `-e` stdin contract."""
+@pytest.mark.parametrize(("expr", "expected"), [
+    ("(+ 20 22)", "42"),
+    ("(+\n 20\n 22)", "42"),
+    ('(string-to-list "a\r\nb")', "(97 13 10 98)"),
+    (r'''(let ((text "first
+second\\path\"quoted\" ☃ 😀"))
+  ;; A comment must end before the next form.
+  (list (length (split-string text "\n"))
+        (equal (substring text 6) "second\\path\"quoted\" ☃ 😀")))''', "(2 t)"),
+    ('''(let ((text "first
+-eval (setq synthetic-spliced t)
+last"))
+  (list (length (split-string text "\\n"))
+        (boundp 'synthetic-spliced)))''', "(3 nil)"),
+])
+def test_expression_on_stdin_reaches_real_tcp_emacs_server(tmp_path, expr, expected):
+    """Exercise native TCP framing with multiline syntax, comments and strings."""
     tmp_path.chmod(0o700)
     auth_path = tmp_path / "stdin-test"
     expression = (
@@ -217,10 +238,23 @@ def test_expression_on_stdin_reaches_real_tcp_emacs_server(tmp_path):
             time.sleep(0.05)
         assert auth_path.exists()
         ok, output = call_emacs(
-            auth_path.read_text(), "127.0.0.1", "(+ 20 22)", timeout=2
+            auth_path.read_text(), "127.0.0.1", expr, timeout=2
         )
         assert ok
-        assert output == "42"
+        assert " ".join(output.split()) == expected
+        if expr == "(+ 20 22)":
+            # Exercise the actual multiline config producer through this protocol.
+            from emacsos_server.apply import _build_apply_expr
+            target = tmp_path / "synthetic-config.el"
+            content = '(setq synthetic-config-text "first\nsecond")\n'
+            apply_expr = (
+                f"(progn (defvar emacsos-agent-file {json.dumps(str(target))}) "
+                f"{_build_apply_expr(content)})"
+            )
+            ok, output = call_emacs(auth_path.read_text(), "127.0.0.1", apply_expr, timeout=2)
+            assert ok
+            assert output == '"ok: loaded"'
+            assert target.read_text() == content
     finally:
         server.terminate()
         server.wait(timeout=5)

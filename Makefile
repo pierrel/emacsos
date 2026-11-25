@@ -56,6 +56,7 @@ test-pinephone-scripts:
 	python3 tests/test-pinephone-openrc-session.py
 	python3 tests/test_pinephone_openrc_sms.py
 	emacs -Q --batch -L . -l tests/test-phone-notifications.el -l tests/test-phone-assist-notifications.el -l tests/test-pinephone-openrc-init.el
+	emacs -Q --batch -L . -L tests -l tests/test-sms-server-bridge.el -f ert-run-tests-batch-and-exit
 
 pinephone-openrc-install: test-pinephone-scripts
 	deploy/pinephone/install-openrc-session.sh
@@ -113,7 +114,7 @@ phone-install:
 	@echo "  chat URL: $(DEV_BOX_URL)"
 	@echo "  Assist Web API: $(ASSIST_WEB_API_URL)"
 	ssh $(PINEPHONE_HOST) "umask 077; mkdir -p $(PHONE_EMACSOS_DIR) ~/.config/emacsos"
-	scp os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
+	scp os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py phone-contacts.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el $(PINEPHONE_HOST):$(PHONE_EMACSOS_DIR)/
 	scp EMACSOS-COMMANDS.org $(PINEPHONE_HOST):~/EMACSOS-COMMANDS.org
 	scp "$(ASSIST_WEB_TOKEN_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-token
 	scp "$(ASSIST_WEB_CA_FILE)" $(PINEPHONE_HOST):~/.config/emacsos/assist-web-ca.pem
@@ -229,14 +230,16 @@ test-local-deploy-restart:
 
 test-elisp: test-install-local test-phone-assist-e2e-harness
 	python3 -B tests/test-simulation-startup.py
-	emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-dtach-shell.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
+	@test_home=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$test_home"' EXIT HUP INT TERM; \
+	HOME="$$test_home" emacs -Q --batch -L . -L tests -l tests/test-chat.el -l tests/test-os.el -l tests/test-emacsos-assist.el -l tests/test-assist-web.el -l tests/test-assist-web-send-draft.el -l tests/test-assist-web-observation.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-dtach-shell.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -l tests/test-network.el -l tests/test-call.el -l tests/test-sms.el -l tests/test-sms-chat.el -l tests/test-swipe-learning.el -f ert-run-tests-batch-and-exit
 
 .PHONY: test-desktop-assist
 test-desktop-assist: test-install-desktop
 	@desktop_home=$$(mktemp -d) || exit 1; \
 	trap 'rm -rf "$$desktop_home"' EXIT HUP INT TERM; \
 	HOME="$$desktop_home" emacs -Q --batch -l tests/test-assist-desktop.el -f ert-run-tests-batch-and-exit && \
-	HOME="$$desktop_home" emacs -Q --batch -L . -L tests -l tests/test-assist-web.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -f ert-run-tests-batch-and-exit && \
+	HOME="$$desktop_home" emacs -Q --batch -L . -L tests -l tests/test-assist-web.el -l tests/test-assist-web-send-draft.el -l tests/test-assist-web-observation.el -l tests/test-assist-web-git.el -l tests/test-interaction-typography.el -l tests/test-conversation-rendering.el -l tests/test-rendering-assets.el -f ert-run-tests-batch-and-exit && \
 	HOME="$$desktop_home" PYTHONDONTWRITEBYTECODE=1 python3 -B tests/test-assist-web-git-helper.py
 
 .PHONY: test-phone-assist-e2e-harness
@@ -389,3 +392,8 @@ test-server: $(SERVER_STAMP)
 # server can do.  Requires docker and emacsclient on the host.
 smoke: $(SERVER_STAMP)
 	cd server && PATH="$(CURDIR)/$(SERVER_VENV)/bin:$$PATH" bash simulation/run.sh
+
+.PHONY: test-contacts
+test-contacts:
+	python3 -m pytest tests/test_contacts.py
+	emacs -Q --batch -L . -l tests/test-contacts.el -f ert-run-tests-batch-and-exit

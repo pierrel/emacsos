@@ -1,0 +1,37 @@
+#+title: Editable draft and Send review
+
+* Essential change and architecture scope
+E7 in the [[file:architecture.org][component map]] owns editable text and one pending HTTP
+request identity. E8 owns accepted Runs and their canonical history. Relative
+to Main, this branch removes the client accepted-Run FIFO and its recovery
+scheduler. It adds no server API, component or observation handoff. The diagram
+edges and E7/E8 trust boundary remain unchanged.
+
+* Walkthrough
+1. [[file:../assist-web.el][=emacsos-assist-web--save-draft= and =--restore-draft=]] persist
+   editable text and an unchanged retry key. Send and =C-x C-s= save locally;
+   reopen restores the draft without sending it. Legacy unsent text migrates
+   into editable text; accepted entries are not submitted again.
+2. =emacsos-assist-web-send= saves before POST. Its callback checks the exact
+   request object, destination and receipt IDs. Failure retains editable text;
+   an unchanged explicit retry reuses its key. Every successful acceptance
+   emits =Message accepted=, including a follow-up while a response is active.
+   That follow-up preserves the current observer and uses existing server
+   admission. Opening an already-present canonical thread preserves its draft.
+3. Canonical terminal rendering is independent of saving unrelated editable
+   text. Authentication, approval generations and stale callback ownership
+   remain separate protections. Whole-thread observation across separate Runs
+   is a separate change, not part of this branch.
+4. [[file:../tests/test-assist-web-send-draft.el][Public-control regressions]] cover Send,
+   failed/unchanged retry, save/reopen, busy acceptance, collision ownership,
+   stale callbacks, exact terminal refresh and a terminal result when draft
+   saving fails. [[file:../Makefile][The ordinary ERT runner]] retains Main's disposable
+   HOME and shared-state fixture isolation. Removed FIFO tests exercise the
+   deleted contract; retained auth/approval/Git and current SMS tests still run.
+
+* Main compatibility
+The normal merge retains the approved branch history and Main's SMS review,
+notification, list typography and fixture changes. Manifest hashes and both
+installer pins derive from the combined sources. This source candidate is not
+by itself a claim that every feature in a separately composed live phone tree
+is present; deployment composition and physical testing retain their own scope.

@@ -19,6 +19,17 @@ The chat panel POSTs to =emacsos-chat-server-url= (default =http://localhost:876
 
 * Features
 
+Assist Web threads show *Control the live browser* while the server offers a live
+page. The link survives refreshing or reopening the thread and opens the exact
+server-provided viewer URL in the browser. The same action is available from the
+existing Status view, including threads without a Git repository. That action
+fetches the original thread's current offer before opening it, so returning
+control also retires a link left in a hidden thread. Cached snapshots do not
+advertise a live link; loading older history preserves that restriction. A
+successful canonical thread read restores the action even when the snapshot
+itself has not changed. A reply overtaken by a source-thread refresh cannot
+reopen an old offer.
+
 ** Virtual Keyboard
 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.
@@ -117,6 +128,12 @@ For an *interactive* session in =*chat*= — scrolling, typing, watching a strea
 
 * PinePhone session supervision
 
+The phone opens the native Assist thread list at startup. Its existing
+asynchronous refresh keeps cached threads available when offline; chat remains
+initialized in the background for the command menu and manual buffer switching.
+Preparing the startup buffer preserves the caller's windows, including when
+Controls falls back after its saved parent is closed.
+
 Startup waits for the Emacs window, server, and trusted input registration.
 The session watches required processes and the display. A busy Emacs command
 does not trigger a restart; a live but wedged Emacs or broken server socket
@@ -162,6 +179,12 @@ README for cutover and rollback ordering. Carrier SMS/call wake still requires a
 incrementally as the agent produces them; =chat.el= renders them
 in place, never blocking the phone's main loop.  The user can tap
 ABORT on the CHAT page at any point during a stream.
+
+Phone callbacks support multiline Elisp, including comments and literal string
+newlines. The bounded UTF-8 source is base64 framed as one stdin expression for
+=emacsclient= and decoded on the phone; source is kept out of process arguments.
+This transport encoding does not encrypt the expression or alter the existing
+full-trust config and phone authorization boundaries.
 
 ** Running
 
@@ -415,8 +438,7 @@ do not clear unread state; a newer server notification survives a stale receipt.
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
 =M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
 you return to the present.  Recall never sends a message.  Ordinary undo and
-redo affect input edits across transcript refreshes; accepting input into the
-submission queue starts a new undo history.  =M-g i= opens the standard Imenu
+redo affect input edits across transcript refreshes; submitting input starts a new undo history.  =M-g i= opens the standard Imenu
 index of loaded messages, while =C-c b/f= retain their message-boundary motion.
 
 =C-c a h= shows the
@@ -441,9 +463,8 @@ untracked and locally committed-but-unpushed changes are excluded. A failed
 status request labels any prior observation stale; an unconfirmed POST outcome
 is never retried automatically. Complete server conflict, busy, and stale
 responses are shown distinctly; a transport failure remains unconfirmed.
-After a verified merge, the client observes the originating thread when no
-message queue is resident; a queued message is left untouched and is never
-retried by the Git action. The client then fetches
+After a verified merge, the client refreshes the originating canonical thread
+without submitting any draft. The client then fetches
 the normal checkout (including published main), and observes fresh server Git
 facts so the next =C-c a d= uses the updated main comparison. The minibuffer
 reports merge and refresh progress; a blocked local checkout stays visibly
@@ -645,6 +666,22 @@ A connected send is a separate live check.  Package references: [[https://formul
 
 * Canonical Assist Web threads
 
+Architecture and local review: [[file:docs/phone-thread-observation-review.org][E7/E8 whole-thread observation walkthrough]].
+
+A visible editable-draft thread view checks canonical history every five seconds
+when its own stream and HTTP reads are idle. Completed replies and later
+server-selected work appear without manual Refresh, including after reopening
+the view. The existing Run stream remains the provisional text source; queued
+work and approval stops stay server-owned. Hidden views make no periodic reads,
+unchanged history is not rewritten, and a thread-access denial stops automatic
+observation. The editable draft and any unconfirmed Send identity stay separate
+from a discovered server Run. This client delta requires the editable-draft
+client from PR #89; it does not support the superseded local message queue.
+The server snapshot's optional =active_run= metadata enables discovery of
+running work. Without that metadata, canonical history can still update but a
+reopened view cannot attach to provisional text automatically.
+
+
 Assist Web thread buffers use the authenticated HTTPS phone API and SSE only as
 a provisional observation: the final canonical Assist snapshot remains truth.
 JSON requests normalize Unicode text and already encoded UTF-8 string values
@@ -658,10 +695,40 @@ to that list.  The list renders the validated local catalog immediately,
 refreshes it asynchronously, and exposes visible refresh or retry rows.  Each
 two-line row opens its exact thread with mouse-1 or RET.  Both entry points
 share the same complete thread, repository, and harness catalog.
-In the entry-owned queue flow, a new thread keeps its draft buffer when its
-first Run is accepted. Once the canonical title arrives, that same buffer
-adopts it and follows later title updates without losing its draft or queued
-message.
+Send submits the editable text directly through the existing phone API, even
+while a server thread is busy. Assist owns admission and its next available
+execution step; the client does not retain an accepted-Run queue. While one
+HTTP submission waits for its response, the editable text remains available.
+A failed request retains or restores its exact text for an explicit retry and
+reports connection or acceptance uncertainty. Edits appended to still-visible
+submitted text are retained without duplicating that text; after acceptance only
+the unsent suffix remains editable. Unchanged text reuses its request
+key; edited text gets a new key, with a status warning when an earlier response
+was uncertain. There is no automatic retry or acknowledgment gate.
+Every valid HTTP acceptance echoes =Message accepted=, including a follow-up
+sent while an earlier response is still observed; that acknowledgment does not
+switch or restart the earlier observer.
+
+Send and =C-x C-s= save the editable draft. Ordinary reopening restores that
+text without submitting or resuming work. Existing unsent queue/follow-up and
+retained-source text is recovered into the editable area, separated by blank
+lines; already accepted Runs remain server history. A current response observer
+continues independently when another message is accepted. If a local chat starts
+while HTTP acceptance is pending, the accepted Web Run remains server-owned;
+explicit Refresh observes it after local chat finishes, without overlapping
+transports. Programmatic refresh may cache canonical history during streaming,
+but leaves the provisional response display intact until its exact Run is
+retired. Once exact completion and canonical history are verified and cached,
+Refresh displays that history even if saving the independent editable draft
+fails. The draft stays visible and Refresh reports its save failure separately.
+Verified reconciliation clears its own pending-recheck notice without clearing
+unrelated access or repair warnings. After a restart,
+=Refresh= reads canonical server history and status; it does not reconstruct a
+local accepted-Run queue or automatically attach a previous SSE observer.
+A newly created thread keeps its current buffer and adopts its canonical title
+when the server snapshot arrives. If a timed-out creation is already open from
+the catalog, that canonical view and its draft remain untouched; any additional
+text stays in the original separate local draft, identified by a status notice.
 Top-level text streams in 7 KiB UTF-8 server chunks; the phone accepts 16 KiB
 deltas and 64 KiB events, while Assist caps encoded SSE records at 48 KiB, each
 send at five seconds, and an observation at 30 minutes plus one five-second
@@ -669,17 +736,14 @@ final-send grace period.  A reserved ordinary
 busy follower or initializing run returns =live_text=true=, but its SSE is a
 delta-empty status observation until the eventual worker starts.  Pi and
 journal saturation return =live_text=false=; an older Assist server visibly
-falls back to status-only observation.  ABORT before POST acceptance leaves an
-acceptance-unknown committed turn; Send reuses its exact idempotency key to
-re-observe it.  Afterwards, only HTTP 200 =cancelled= confirms cancellation;
+falls back to status-only observation.  Abort controls the currently observed server Run, not a pending HTTP submission.
+Only HTTP 200 =cancelled= confirms cancellation;
 structured HTTP 409 =running= or =transitioning= truthfully detaches, and other
 terminal outcomes reconcile the canonical snapshot.  =awaiting_approval= is a
 nonterminal Run state, but it ends this finite live-text observation. Its exact
-status check exposes the compact =Review= header action without discarding the accepted
-Run receipt or saved draft. After a decision, the same logical Run handle follows
-the approval resume and reconciles its completed canonical snapshot.
-Tap =Review= in a stopped Run header or =Review pending action= in a canonical
-snapshot to fetch all supported proposals. The =Status= buffer puts a prominent
+status is reflected by canonical history and its =Review pending action= link.
+Approval decisions refresh the thread without resubmitting editable text.
+Tap =Review pending action= in a canonical snapshot to fetch all supported proposals. The =Status= buffer puts a prominent
 =Pending approvals: Review= link first whenever the thread has pending approvals,
 including independent requests while the ordinary Run is ready. It opens the
 same approval list; Git fact availability does not gate the notice. Network and
@@ -711,9 +775,9 @@ validation rather than gaining an action from the renderer.
 
 Every decision uses two taps; another action or window disarms confirmation.
 Tokens bind the exact displayed proposal and scope. An in-flight decision fences
-peer previews until acknowledgment settles. Replies and Email keep accepted Run
-receipts; independent service acknowledgments carry their own exact kind/token
-and actual status instead of inventing a Run. A failed or unconfirmed POST hides
+peer previews until acknowledgment settles. Replies and Email resume server-owned
+Runs; independent service acknowledgments carry their own exact kind/token and
+actual status instead of inventing a Run. A failed or unconfirmed POST hides
 controls until explicit refresh, without automatically repeating the effect.
 Refresh can close a disappeared proposal even if it was selected from a chooser
 while the request was in flight. Access denials fence all peers and close previews;
@@ -722,17 +786,18 @@ an old callback cannot reopen them.
 The Email editor and preview share canonical body text with CRLF normalized to LF.
 Oversized edits stay in the editor: To allows 320 characters, subject 998 UTF-8
 bytes and body 65536 UTF-8 bytes; the encoded request is capped at 512 KiB.
-An accepted decision rechecks stopped Run owners even if another view refreshed
+An accepted decision refreshes live thread views even if another view refreshed
 the preview while the decision was in flight. Previews are fetched afresh and
 are not stored in the local snapshot cache. Headers remain single-line; bodies
 wrap and scroll. New request kinds reuse the existing server owners, without
 an independent desktop implementation or client-owned approval authority.
 
 If Assist confirms that the thread was deleted while an observer is open, the
-client retains visible partial text and the next draft, clears the accepted
-retry identity, and starts the next submission as a new thread.  If the durable
-Run store becomes unavailable, it instead preserves that identity and reports
-that an operator must repair observation; it never retries automatically.  The
+client retains visible partial text and the editable draft, retires the transient
+observer identity, and lets the next explicit Send create a new thread. If the
+durable Run store becomes unavailable, the transient observer remains unverified
+and the client reports that observation needs repair. The separate HTTP retry
+tuple is preserved independently; neither path automatically retries a send.  The
 current closure corrections are [[file:docs/2026-09-09-conversation-observation-closure-amendment.org][the observation closure amendment]],
 [[file:docs/2026-09-09-conversation-deletion-closure-amendment.org][the deleted-thread closure amendment]],
 and [[file:docs/2026-09-09-conversation-stream-batching-amendment.org][the stream-batching amendment]].
@@ -742,6 +807,8 @@ reconciling or opening a new stream. It preserves the draft and never resubmits
 the message.
 
 * Project Structure
+
+The current component and code map is [[file:docs/architecture.org][docs/architecture.org]].
 
 - =os.el= — main init file (keyboard, frame setup)
 - =chat.el= — CHAT page, =*chat*= transcript, SEND wiring to =/chat=
@@ -823,6 +890,21 @@ routes to it — not as bespoke tools.
 
 
 * PinePhone SMS journal and transport
+Ordinary Assist turns may stage exact SMS drafts for this phone. Open the thread
+and choose Review to use the existing SMS confirmation screen. Nothing is sent
+until two physical Send taps. The phone acknowledges the exact server proposal
+before invoking its fixed root helper with the same journal identity. A delayed
+approval response cannot send after its physical confirmation loses ownership.
+Cancel checks that no journal attempt exists and retains the draft until the
+server acknowledges rejection. Existing terminal or uncertain journal outcomes
+are shown without starting another attempt. Ordinary local SMS keeps its offline
+path; this adds no background sending authority.
+Phone outcome reports require a matching root-journal attempt; a lost approval
+response or modem restart before any attempt leaves the server draft retryable.
+Delayed journal lookups recheck the thread's authorization and current preview
+before displaying it. A single SMS review retains the source thread as its
+Cancel/Done destination.
+
 The fixed root SMS helper journals every exact outgoing attempt before calling
 ModemManager, including sends confirmed locally on the phone. A repeated attempt
 id reads its recorded outcome and never sends again. =sent= means ModemManager
@@ -832,14 +914,64 @@ cannot be read, the result is also =unknown=: a definite negative requires a
 positively new durable claim with no modem effect begun.
 
 The private journal lives at =/var/lib/emacsos-sms/messages.sqlite3=, outside the
-source checkout. It also records incoming ModemManager observations. Retries of
-one owner/boot/object observation retain one id; identical independent objects
-retain separate ids. A new ModemManager owner can expose an old physical SMS as a
-new observation. Physical deduplication across re-enumeration is not established.
-Incoming collection reuses a durable rotating cursor and a four-object read
-budget. Progress commits before each leaf, including failed or incomplete ones;
-a later deadline does not discard it. Subsequent polls wrap around and revisit
-a completed multipart object even if its completion signal was missed.
+source checkout and is the phone's SMS source of truth. Native conversations read
+this archive even when the modem or Assist is unavailable. The modem is a finite
+transport buffer: supported completed incoming messages are removed only after
+the local FULL-synchronous commit, independently of server availability or ACK.
+Incomplete, binary, unrepresentable or unsuccessfully archived messages remain
+on the modem. Existing retained copies may be cleaned after the same exact
+durable-content proof; a failed cleanup is revisited by the existing scan.
+No separate deletion queue or worker is added. A unique
+SHA256 key over exact sender, UTC-normalized original Timestamp and Text/Data
+maps repeated observations to one durable UUID. Local outgoing proposals also
+carry one exact durable attempt identity; active Sending and known terminal
+results cannot be replaced by an older write-ahead Unknown history read. Journal recovery binds the same verified attempt identity before presenting its result, so native acknowledgment clears the matching pending status. Unowned historical Unknown rows can accept later terminal journal results. A delayed history page retains records changed after its read began; later fresh pages remain authoritative. For a direct or server-linked send without a native record, terminal completion discards a pending older page and coalesces one fresh journal read, so Done or restaging cannot revive its earlier Unknown result. Conversation buffers use a separate namespace from the catalog, including for alphanumeric correspondents. Equal messages within the source
+timestamp resolution deliberately collapse. Exported paths, owner changes and raw
+Added signals do not establish novelty. See
+[[file:docs/2026-10-28-sms-platform-identity-simplification.org][the pinned platform contract]] and
+[[file:docs/2026-11-05-local-sms-archive-buffer.org][the local archive and transport-buffer contract]].
+
+Collection reads at most four objects per poll. A durable cursor advances before
+each read, including unreadable/incomplete objects. Each completed content key
+and receipt commits atomically. A deadline retains earlier progress and the next
+poll starts beyond the failed leaf. Trusted Added and multipart State3 completion
+signals supply bounded transient priority hints, so new completions do not wait
+behind an entire retained-history sweep. Hints are not durable identity and
+never directly request vibration. No new cached payload inventory or multiplicity
+reconciliation is created; repeated reads are safe through SQLite uniqueness.
+The local =collect= operation returns only a completion boolean, may remove
+redundant modem copies after local durability, and performs no notification,
+alert claim, server acknowledgment or send. A bounded =history= operation reads
+only the local journal, preserving stable identities and existing local UI
+unread/user-acknowledgment state across refresh. Legacy aliases are hidden only
+when their canonical representative is known; stored old rows remain unchanged.
+Alphanumeric correspondents are viewable without relaxing Send validation. Completed incoming messages use durable local alert claims and the existing
+private notification journal before requesting finite feedback. Raw Added signals
+never directly request feedback. Claims are independent of server handoff; an
+uncertain feedback attempt is not replayed or proof of physical vibration.
+
+Incoming =occurred_at= uses the original timezone-aware ModemManager SMS
+=Timestamp=, never rediscovery time. The host admits a subscription only if that
+source time is strictly after creation: delayed old texts and equal timestamps
+remain history-only. Missing, invalid or timezone-naive timestamps use null wire
+time plus =archive_only=true=, so they cannot start a turn. The current host
+archive substitutes its recording time when wire time is null; that fallback is
+not an original SMS timestamp and never establishes subscription eligibility.
+
+On first journal upgrade, existing incoming rows become archive-only without
+changing UUID, body, stored time or acknowledgment. Exact current observations
+in the old content inventory seed the new key map with an existing UUID; every
+old duplicate row and its ACK remain untouched. A journal with existing incoming history also records one durable
+upgrade cutoff. Unidentified messages timestamped at or before that cutoff stay
+archive-only, even if ModemManager publishes them later under new paths. This
+explicit migration baseline avoids replaying history to older subscriptions;
+post-cutoff timestamps use the normal subscription rule. Fresh journals have no
+migration cutoff. Outgoing rows and pending send outcomes retain their existing paths.
+Eligible complete modem copies may be deleted after the local FULL-synchronous
+archive commit. Existing server identities are not rewritten.
+Deploy matching host cutoff/archive-only support first. Collection rollback requires a reviewed compatibility procedure; never restore
+an older journal snapshot to repair history. Host downgrade while the new
+transport is active rejects its metadata and retains receipts unacknowledged.
 
 An optional UI-owned =~/.config/emacsos/sms.json= file (mode 0600) enables the
 unprivileged transport inside the existing UI service. It requires exactly
@@ -899,3 +1031,64 @@ or handled result does not establish physical vibration or wake from deep sleep.
 This consumer depends on the notification journal feature. It uses the shared HTTP encoding boundary included in the current client.
 
 Reasons reject Unicode control characters and line/paragraph separators while preserving ordinary Unicode, including joined emoji. Malformed asynchronous server responses release only their matching poll so a later timer tick can continue. Both user-facing upload scripts stage the required consumer module.
+
+** Local contacts
+
+Set =emacsos-contacts-file= in your persistent phone configuration to the absolute
+path of =contacts.yml= in a local checkout of your private Life repository. The
+checkout must be readable by the account running the phone UI. OpenRC sessions
+load =emacsos-agent-file= at startup; ordinary Emacs sessions can set the variable
+in their init file. The default =nil= leaves SMS number-only.
+
+#+begin_src yaml
+Alex Example:
+  phone: "+12025550123"
+  phone_satellite_backup: "2025550124"
+  email: "alex@example.net"
+  email_community: "alex.other@example.net"
+  birthday: "1990-03-04"
+  notes: |
+    Synthetic example with a multiline note.
+Jordan:
+  name: Jordan Example
+  phone_work: "+12025550125"
+#+end_src
+
+The top level maps a contact key to its fields. =name= is optional and defaults
+to that key. =phone= and =email= are defaults; additional numbers and addresses
+use =phone_TYPE= and =email_TYPE= with any nonempty type suffix. SMS displays a
+typed phone as =Name [TYPE] (number)=. =birthday= and =notes= hold plain strings;
+no date or century is inferred. Date-looking birthdays remain text even without
+quotes. Read and edit the existing file, preserving every field and its text.
+The reader never writes the file or automatically sends these fields to a model.
+
+Quote phone values to preserve their exact digits and optional leading =+=.
+National-form digit strings are supported as written. There is no country-prefix,
+suffix or alias guessing: =2025550123= and =+12025550123= are distinct keys.
+Numbers have 5–15 digits without spaces or punctuation. Repeated phone values
+are ambiguous and display only their number, including duplicates within one
+contact. A known default correspondent displays =Name (number)= in SMS
+conversations and their catalog. The exact number still identifies the
+conversation and sending confirmation; contacts never authorize a send.
+
+Tap SMS Refresh after editing or manually pulling the checkout. The asynchronous
+reader replaces labels without restarting Emacs or changing drafts, messages or
+proposals. No Git command or network request is made by contact lookup. Missing,
+invalid or unavailable data falls back to numbers with a short notice. The reader
+uses PyYAML's safe loader (Alpine =py3-yaml=; installed by the OpenRC deploy), a
+256 KiB regular-file limit, at most 1,000 contacts, and a
+three-second process deadline and 256 KiB decoded-output cap. Oversized label
+output also falls back to numbers. YAML aliases and duplicate mapping keys are
+rejected. Other installation methods need Python 3 with PyYAML available.
+
+Assist can maintain this file using its existing file tools in a thread bound to
+the Life repository. Ask it to read the current file before changing it, then use
+the existing explicit Merge & Push action. Pull the phone checkout yourself and
+refresh SMS. Unrelated repository threads do not gain this checkout through the
+contacts feature. A permitted Life thread can read the entire file with its
+ordinary file tools; this is not per-contact or field-level isolation.
+
+Keep contact names, phone numbers, emails, birthdays and notes here, rather than passwords
+or tokens. Private Git does not encrypt the checkout, history, backups or SD card.
+The phone display does not submit the contact book to a model or place it in a
+prompt. Assist reads requested data on demand in the configured repository.

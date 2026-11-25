@@ -1,0 +1,50 @@
+#+title: Test fixture isolation review
+
+* Essential change
+The test suite gives each scenario its own shared safety state and a disposable
+HOME. Production ownership guards and uncertain-call behavior stay unchanged.
+Start with the fixture boundaries below rather than treating the old cascade of
+failures as independent product defects.
+
+* Architecture scope
+The merged [[file:architecture.org][component map]] remains the runtime baseline.
+E7 is the Assist Web client exercised by the thread and Git tests; E1 contains
+the deterministic call UI exercised by the call tests. This branch changes their
+test setup, not those components, their trust boundaries or their connections to
+E8/ModemManager. No runtime component, data flow or diagram change is needed.
+
+This is an unmerged test/runner/guidance change. It adds no proposed phone or
+server architecture and needs no device deployment.
+
+* Walkthrough
+1. [[file:../tests/test-assist-web.el][Assist Web tests]] and
+   [[file:../tests/test-assist-web-git.el][Git tests]] bind safety state around the
+   scenarios that create stopped Run, approval or denial records. The binding
+   includes buffer cleanup and assertion failure. Buffers within one scenario
+   still share the same state. The existing
+   [[file:../tests/test-interaction-typography.el][typography fixture]] supplies the
+   same boundary to its callers; no global runner advice is installed.
+2. The completion fixture explicitly chooses live catalog state and retains
+   separate cached-label coverage. [[file:../Makefile][make test-elisp]] isolates
+   ERT's HOME using the same temporary-directory pattern as the desktop target.
+   This avoids dependence on the user's real cache while keeping synthetic
+   cache/error tests.
+3. [[file:../tests/test-call.el][The already-active-call test]] reuses the existing
+   complete UI fixture, including a matching asynchronous snapshot. The original
+   active-state/display assertions remain. Separate unavailable, mismatched and
+   stale-owner snapshot controls retain the production uncertainty fallback.
+4. [[file:../AGENTS.md][Testing guidance]] keeps these boundaries visible to future
+   implementors: update complete fixtures when shared state or asynchronous
+   dependencies change, preserve within-test sharing, and check causal order
+   pairs as well as the combined suite.
+
+* Checks
+Run the ordinary =make test-elisp= target, including its prerequisites. The
+original 953 ERT tests remain represented, with the original assertions intact.
+Check the producer/consumer pair in both orders, live and cached catalog states,
+and the existing async call success/failure/owner controls. Byte compilation of
+the changed test files has the same preexisting warnings as its baseline.
+
+A passing isolated test does not prove order independence. Conversely, fixture
+isolation is not evidence that every production stale-record lifecycle is
+correct; a runtime change would need its own public-flow reproduction and scope.

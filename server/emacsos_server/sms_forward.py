@@ -8,6 +8,7 @@ versions after server durability. It never repeats an SMS to repair history.
 from __future__ import annotations
 
 import hmac
+import hashlib
 import io
 import ipaddress
 from pathlib import Path
@@ -60,32 +61,35 @@ def send_sms(to, text, message_id, occurred_at):
 
 
 def sync_once():
-    """Retry archive handoff only. Incoming modem history stays available to UI."""
+    """Retry server handoff only; the phone journal owns durable SMS history."""
     receipts = json.loads(helper({"operation": "receipts"}, timeout=35).stdout)["receipts"]
     if not isinstance(receipts, list) or len(receipts) > 20:
         raise ValueError("invalid receipts")
     for row in receipts:
+        correlation = hashlib.sha256(row["id"].encode()).hexdigest()[:16]
         incoming = row["direction"] == "incoming"
         url = INBOUND_URL if incoming else INBOUND_URL.rsplit("/inbound/sms", 1)[0] + "/sms/receipts"
         body = {"message_id": row["id"], "text": row["text"], "occurred_at": row["occurred_at"]}
         if incoming:
             body["sender"] = row["number"]
+            body["archive_only"] = bool(row.get("archive_only", False))
         else:
             body.update(number=row["number"], status=row["status"])
         try:
             response = requests.post(url, json=body, headers={"X-Assist-SMS-Secret": SECRET},
                                      timeout=HTTP_TIMEOUT, verify=VERIFY_TLS, allow_redirects=False)
             if response.status_code != 200:
+                logger.warning("sms_boundary event=handoff_http_failed correlation=%s status=%s", correlation, response.status_code)
                 continue
             accepted = response.json()
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, ValueError) as error:
+            logger.warning("sms_boundary event=handoff_failed correlation=%s error_type=%s", correlation, type(error).__name__)
             # Keep this receipt unacknowledged, but offer the rest of the batch.
             continue
-        if not isinstance(accepted, dict):
-            continue
-        if incoming and accepted.get("status") not in ("accepted", "duplicate"):
-            continue
-        if not incoming and (accepted.get("message_id") != row["id"] or accepted.get("status") != row["status"]):
+        if (not isinstance(accepted, dict)
+                or incoming and accepted.get("status") not in ("accepted", "duplicate")
+                or not incoming and (accepted.get("message_id") != row["id"] or accepted.get("status") != row["status"])):
+            logger.warning("sms_boundary event=handoff_receipt_invalid correlation=%s", correlation)
             continue
         helper({"operation": "ack", "message_id": row["id"], "status": row["status"]}, timeout=35)
 
