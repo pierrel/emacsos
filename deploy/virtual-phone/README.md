@@ -73,6 +73,13 @@ native wtype arguments; `text` treats its argument literally. Scrolling acts at
 the current pointer location. Tap and wheel press/release use separate QMP
 reports so libinput observes both edges. PPM output is also supported.
 
+The graphical account's writable home is `/var/lib/emacsos-lab`. For synthetic
+file tests, use an explicit path such as
+`/var/lib/emacsos-lab/virtual-phone-state.txt` in the ordinary Emacs file prompt.
+The SSH root account's `/root` is not writable by the graphical account, and
+`/home/emacsos-lab` does not exist. A buffer's file prompt directory can differ
+from the account home.
+
 For additional harmless diagnostics, native SSH remains available:
 
 ```sh
@@ -153,14 +160,17 @@ and outside-Git screenshots for all seven scenarios:
 1. Build and boot the real graphical candidate from a clean checkout.
 2. Capture and inspect its phone-sized screen headlessly.
 3. Navigate existing buffers/views using ordinary keys, taps and scrolling.
-4. Launch Calendar through the UI, advance a month and inspect the visible result.
+4. Launch and operate an existing app or surface through the UI. Controls tap/scroll
+   is one example; Calendar month navigation is another when its title is readable.
 5. Enter and edit text through input and verify the visible result.
 6. Stop/relaunch, then reset and prove prior synthetic state is absent.
 7. Retrieve logs and run harmless diagnostics without an attached console.
 
 A fresh tester uses this published workflow and reports failures without code
 changes or silent workarounds. Boot alone, mocked UI, internal evaluation and
-historical results do not satisfy a fresh acceptance run.
+historical results do not satisfy a fresh acceptance run. The current foundation
+acceptance and its Calendar limitation are recorded in
+[the acceptance summary](../../docs/virtual-phone-review.org).
 
 Roadmap only: an isolated real Assist server with synthetic credentials/history
 and end-to-end client/server validation. This target does not implement it.
