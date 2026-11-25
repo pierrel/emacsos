@@ -332,7 +332,6 @@
         (funcall completion "sent")
         (should (eq test-sms--window-buffer elsewhere))
         (should (eq emacsos-sms--state 'sent))
-        (should (string-match-p "SMS" (emacsos-sms-mode-line-string)))
         (with-current-buffer "*SMS*"
           (should (string-prefix-p "Sent" (buffer-string))))
         (emacsos-sms-show-status)
@@ -340,34 +339,6 @@
         (emacsos-sms--dismiss)
         (should (eq test-sms--window-buffer elsewhere))
         (kill-buffer elsewhere)))))
-
-(ert-deftest emacsos-sms-mode-line-badge-is-phone-global ()
-  (test-sms--with-ui
-    (should (equal (emacsos-sms-mode-line-string) ""))
-    (emacsos-send-message "+14155550123" "hi")
-    (should (equal (emacsos-sms-mode-line-string) ""))
-    (setq test-sms--window-buffer (get-buffer-create "chat-like-buffer"))
-    (should (string-match-p "SMS" (emacsos-sms-mode-line-string)))
-    (let ((binding (lookup-key emacsos-sms--mode-line-keymap
-                               [mode-line mouse-1])))
-      (should (eq binding #'emacsos-sms-show-status)))
-    (kill-buffer "chat-like-buffer")))
-
-(ert-deftest emacsos-sms-mode-line-keeps-inbound-and-outbound-actions ()
-  (test-sms--with-ui
-    (let ((inbound-map (make-sparse-keymap)))
-      (setq emacsos-sms--state 'unknown
-            test-sms--window-buffer (get-buffer-create "chat-like-buffer"))
-      (cl-letf (((symbol-function 'emacsos-sms-chat-mode-line-string)
-                 (lambda ()
-                   (concat " " (propertize "● SMS" 'local-map inbound-map)))))
-        (let ((badge (emacsos-sms-mode-line-string)))
-          (should (text-property-any 0 (length badge)
-                                     'local-map inbound-map badge))
-          (should (text-property-any 0 (length badge)
-                                     'local-map emacsos-sms--mode-line-keymap
-                                     badge))))
-      (kill-buffer "chat-like-buffer"))))
 
 (ert-deftest emacsos-sms-invalid-terminal-result-is-unknown ()
   (test-sms--with-ui

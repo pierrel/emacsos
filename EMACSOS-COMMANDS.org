@@ -128,8 +128,11 @@ opens the exact row at point.
 Parenthesized entries are =eval_elisp= forms.  Bare command names run through
 =M-x=.
 
-The transient call and SMS modeline labels are touch controls for their current
-status or action.  The primary platform label opens Network controls on generic
+The transient call modeline label opens its current action. The generic
+Notifications label opens retained reasons/timestamps and clears unread attention;
+=C-c e n= opens the same view. Successful outgoing SMS is silent; failed or
+unknown outcomes use generic alerts. =M-x emacsos-sms-show-status= still opens
+the current SMS proposal/result.  The primary platform label opens Network controls on generic
 systems and the combined Controls buffer on PinePhone/OpenRC.  Assist threads
 open through =C-c a l= or =C-c a t=.  Keyboard hide/show and device state live in the
 Controls buffer.

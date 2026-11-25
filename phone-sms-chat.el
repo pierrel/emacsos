@@ -36,7 +36,7 @@
 
 (cl-defstruct emacsos-sms-chat-record
   id number body direction state origin owner generation path revision
-  unread acknowledged)
+  acknowledged)
 
 (defun emacsos-sms-chat--restore-record (record saved)
   "Restore every field of RECORD from its SAVED copy."
@@ -52,7 +52,6 @@
 
 (defvar emacsos-sms-chat--refresh nil "Current bounded archive reader process.")
 (defvar emacsos-sms-chat--refresh-again nil "Coalesced request made while a reader is active.")
-(defvar emacsos-sms-chat--history-loaded nil "Non-nil after the first local history read.")
 
 (defvar-local emacsos-sms-chat--number nil)
 (defvar-local emacsos-sms-chat--draft-marker nil)
@@ -188,7 +187,6 @@
     (with-current-buffer buffer (emacsos-sms-chat--render)))
   (when-let ((catalog (get-buffer emacsos-sms-chat--catalog-buffer)))
     (with-current-buffer catalog (emacsos-sms-chat--render-catalog)))
-  (when (fboundp 'force-mode-line-update) (force-mode-line-update t))
   (when (fboundp 'emacsos--render-page) (emacsos--render-page)))
 
 (defun emacsos-sms-chat--admit (record &optional quiet)
@@ -437,10 +435,7 @@ When QUIET is non-nil, leave rerendering to the caller."
             (setq emacsos-sms-chat--number number)
             (emacsos-sms-chat--render))
           (set-window-buffer window buffer)
-          (dolist (record (emacsos-sms-chat--records-for number))
-            (setf (emacsos-sms-chat-record-unread record) nil))
           (when (fboundp 'emacsos--render-page) (emacsos--render-page))
-          (force-mode-line-update t)
           buffer)))))
 
 (defun emacsos-sms-chat--catalog-numbers ()
@@ -501,35 +496,6 @@ When QUIET is non-nil, leave rerendering to the caller."
         (when (fboundp 'emacsos--render-page) (emacsos--render-page))
         buffer))))
 
-(defun emacsos-sms-chat--newest-unread ()
-  "Return the newest unread inbound record."
-  (car (last (seq-filter
-              (lambda (record)
-                (and (eq (emacsos-sms-chat-record-direction record) 'incoming)
-                     (emacsos-sms-chat-record-unread record)))
-              emacsos-sms-chat--records))))
-
-(defun emacsos-sms-chat-show-unread ()
-  "Open the conversation containing the newest unread SMS."
-  (interactive)
-  (if-let ((record (emacsos-sms-chat--newest-unread)))
-      (emacsos-sms-chat-open (emacsos-sms-chat-record-number record))
-    (emacsos-sms-chat-catalog)))
-
-(defconst emacsos-sms-chat--mode-line-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mode-line mouse-1] #'emacsos-sms-chat-show-unread)
-    map))
-
-(defun emacsos-sms-chat-mode-line-string ()
-  "Return a tappable badge exactly while an unread inbound SMS exists."
-  (if (emacsos-sms-chat--newest-unread)
-      (concat " " (propertize "● SMS"
-                              'local-map emacsos-sms-chat--mode-line-map
-                              'mouse-face 'mode-line-highlight
-                              'help-echo "Tap to read new message"))
-    ""))
-
 (defun emacsos-sms-chat--find-id (proposal-id)
   "Return the retained record with durable PROPOSAL-ID."
   (seq-find (lambda (record)
@@ -561,9 +527,7 @@ When QUIET is non-nil, leave rerendering to the caller."
                (record (or existing (make-emacsos-sms-chat-record
                                      :id id :number number :body body
                                      :direction (intern direction)
-                                     :origin (if (equal direction "outgoing") 'local 'archive)
-                                     :unread (and emacsos-sms-chat--history-loaded
-                                                  (equal direction "incoming"))))))
+                                     :origin (if (equal direction "outgoing") 'local 'archive)))))
           (cond
            ((and (memq emacsos-sms--state '(sending sent failed unknown))
                  (equal id emacsos-sms--attempt-id))
@@ -592,8 +556,7 @@ When QUIET is non-nil, leave rerendering to the caller."
         (push record incoming)))
     (setq emacsos-sms-chat--records (nreverse incoming))
     (if (emacsos-sms-chat--trim)
-        (setq emacsos-sms-chat--history-loaded t
-              emacsos-sms-chat--refresh-state
+        (setq emacsos-sms-chat--refresh-state
               (if (alist-get 'truncated value) "Local history (bounded view)" "Local history refreshed"))
       (dolist (saved saved-values)
         (emacsos-sms-chat--restore-record (car saved) (cdr saved)))

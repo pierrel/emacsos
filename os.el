@@ -103,7 +103,7 @@ The PinePhone startup enables this; ordinary desktop Emacs keeps its fonts.")
 (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))
 
 ;; Global, minimal modeline: the EmacsOS label, transient call and
-;; SMS-chat-aware badges, then the platform's primary device segment and
+;; Call and generic notification badges, then the platform's primary segment and
 ;; optional extras.  The primary segment falls back to network status when a
 ;; platform does not replace it.  This order keeps urgent status visible if
 ;; the 320px line truncates.  Replaces the stock clutter (buffer position,
@@ -127,7 +127,7 @@ before loading EmacsOS when its primary entry replaces network status.")
   "Return the global minimal mode-line format for this platform."
   (append '((:propertize " EmacsOS  " face (:height 0.8))
             (:eval (emacsos-call-mode-line-string))
-            (:eval (emacsos-sms-mode-line-string)))
+            (:eval (emacsos-notifications-mode-line-string)))
           (list (or emacsos-platform-primary-mode-line-segment
                     '(:eval (emacsos-net-mode-line-string))))
           emacsos-platform-mode-line-segments))
@@ -799,7 +799,7 @@ a no-op commit at its own top."
 (declare-function emacsos-call--watcher-ensure "phone-call")
 (declare-function emacsos-call-mode-line-string "phone-call")
 (declare-function emacsos-send-message "phone-sms")
-(declare-function emacsos-sms-mode-line-string "phone-sms")
+(declare-function emacsos-notifications-mode-line-string "phone-notifications")
 (declare-function emacsos-sms-show-status "phone-sms")
 (declare-function emacsos-sms-chat-catalog "phone-sms-chat")
 

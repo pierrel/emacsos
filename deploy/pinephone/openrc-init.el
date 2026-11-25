@@ -1257,6 +1257,13 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
     map)
   "Keymap for the PinePhone Controls entry.")
 
+(defun emacsos-pinephone-calendar-notification-mode-line (&rest _)
+  "Keep the phone Calendar's attention line dynamic after native updates."
+  (when-let ((buffer (get-buffer calendar-buffer)))
+    (with-current-buffer buffer
+      (when (eq major-mode 'calendar-mode)
+        (setq-local mode-line-format (emacsos--mode-line-format))))))
+
 (defun emacsos-pinephone-controls-mode-line-string ()
   "Return the compact PinePhone Controls modeline entry."
   (propertize " Controls "
@@ -1279,6 +1286,9 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (get-buffer emacsos-assist-web--thread-list-buffer-name))
 
 (when (display-graphic-p)
+  (with-eval-after-load 'calendar
+    (advice-add 'calendar-update-mode-line :after
+                #'emacsos-pinephone-calendar-notification-mode-line))
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
   (setq emacsos-use-internal-keyboard nil
         emacsos-control-window-percent 35

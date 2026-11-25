@@ -6,6 +6,7 @@
 ;; agent's sms skill, not this deterministic layer.
 
 (require 'subr-x)
+(require 'phone-notifications)
 
 (defconst emacsos-sms--number-re "\\`\\+?[0-9]\\{5,15\\}\\'"
   "A concrete SMS number: optional leading + then 5-15 digits.")
@@ -59,6 +60,18 @@ failure to start may instead return one of those terminal results directly."
 Each function receives a fresh plist containing :event, :proposal-id, :message-id,
 :number, :body, :context, :state, and :detail.  Observer errors are isolated
 from proposal authorization and transport.")
+
+(defun emacsos-sms--notification (event)
+  "Record failed or uncertain terminal EVENT without message contents."
+  (when (and (eq (plist-get event :event) 'terminal)
+             (memq (plist-get event :state) '(failed unknown)))
+    (emacsos-notifications--record
+     'sms (if (eq (plist-get event :state) 'unknown)
+              "SMS status unknown; do not resend."
+            "SMS not sent.")
+     "recorded" (concat "sms-result:" (plist-get event :proposal-id)))))
+
+(add-hook 'emacsos-sms-lifecycle-functions #'emacsos-sms--notification)
 
 (defun emacsos-sms--copy-field (value)
   "Copy VALUE when it is a string, otherwise return the scalar unchanged."
@@ -201,29 +214,6 @@ from proposal authorization and transport.")
         (set-window-buffer window (emacsos-sms--render))
         (emacsos-sms--rerender)))))
 
-(defconst emacsos-sms--mode-line-keymap
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mode-line mouse-1] #'emacsos-sms-show-status)
-    map)
-  "Keymap for the phone-global SMS status badge.")
-
-(defun emacsos-sms-mode-line-string ()
-  "Return independently tappable inbound and hidden outbound SMS badges."
-  (condition-case nil
-      (let ((inbound (and (fboundp 'emacsos-sms-chat-mode-line-string)
-                          (emacsos-sms-chat-mode-line-string)))
-            (outbound
-             (and emacsos-sms--state
-                  (not (emacsos-sms--visible-p))
-                  (concat
-                   " "
-                   (propertize "● SMS status"
-                               'local-map emacsos-sms--mode-line-keymap
-                               'mouse-face 'mode-line-highlight
-                               'help-echo "Tap to view message status")))))
-        (concat (if (stringp inbound) inbound "") (or outbound "")))
-    (error "")))
-
 (defun emacsos-sms--visible-p ()
   "Return non-nil when the SMS buffer owns the phone's target window."
   (let ((window (and (fboundp 'emacsos--target) (emacsos--target))))
@@ -287,8 +277,7 @@ from proposal authorization and transport.")
               emacsos-sms--detail detail))
       (if visible
           (emacsos-sms--show)
-        (emacsos-sms--render)
-        (message "SMS status updated; tap the SMS badge to view"))
+        (emacsos-sms--render))
       (emacsos-sms--notify 'terminal))))
 
 (defun emacsos-sms--on-owner-changed (old-owner _new-owner _generation)
