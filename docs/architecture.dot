@@ -28,6 +28,6 @@ digraph EmacsOS {
   E4 -> E6 [xlabel="config tools"];
   E4 -> E9 [xlabel="model calls"];
   E1 -> E7 [xlabel="shared threads"];
-  E7 -> E8 [xlabel="HTTPS messages / snapshots / exact Run"];
+  E7 -> E8 [xlabel="HTTPS messages / private secret entry / exact Run"];
   E8 -> E7 [xlabel="canonical history + active_run / SSE", constraint=false];
 }

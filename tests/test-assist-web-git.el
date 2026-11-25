@@ -1426,6 +1426,7 @@
                 (emacsos-assist-web-git--status-render)
                 (should-not (string-match-p "Pending approvals" (buffer-string)))
                 (should (string-prefix-p "No live browser control offer" (buffer-string)))
+                (should (string-match-p "Private logins" (buffer-string)))
                 (should (string-match-p "Assist Git status" (buffer-string)))))
           (when-let ((preview (get-buffer "*assist Approval thread-1*")))
             (kill-buffer preview))
@@ -1471,3 +1472,133 @@
                 (should-not (string-match-p "Pending approvals" (buffer-string))))))
         (kill-buffer view)
         (when (buffer-live-p source) (kill-buffer source))))))
+
+(ert-deftest test-assist-web-git-status-logins-use-existing-private-form ()
+  "Status exposes manual and requested private entry without an agent command."
+  (dolist (request '(nil ((id . "0123456789abcdef0123456789abcdef")
+                         (label . "Synthetic account")
+                         (login_page . "https://synthetic.example/login"))))
+    (let ((source (generate-new-buffer " *status-login-source*"))
+          (view (generate-new-buffer " *status-login-view*"))
+          (emacsos-assist-web--thread-safety (make-hash-table :test 'equal))
+          calls private-values)
+      (unwind-protect
+          (save-window-excursion
+            (with-current-buffer source
+              (emacsos-assist-web-mode)
+              (setq-local emacsos-assist-web--thread-id "thread-1"
+                          emacsos-assist-web-git--metadata test-assist-web-git--metadata
+                          emacsos-assist-web--snapshot
+                          `((thread . ((id . "thread-1")
+                                       (private_entry_request . ,request)))))
+              (insert "unsent login draft"))
+            (with-current-buffer view
+              (special-mode)
+              (setq-local emacsos-assist-web-git--status-source source
+                          emacsos-assist-web-git--status-identity
+                          '("thread-1" . "aaaaaaaaaaaaaaaaaaaa"))
+              (emacsos-assist-web-git--status-render)
+              (goto-char (point-min))
+              (search-forward (if request "Add requested login" "Add login"))
+              (let ((add (button-at (1- (point)))))
+                (should add)
+                (cl-letf (((symbol-function 'read-string)
+                           (lambda (prompt &rest _)
+                             (should-not request)
+                             (if (string-match-p "label" prompt) "Manual account"
+                               "https://synthetic.example/manual")))
+                          ((symbol-function 'read-passwd)
+                           (lambda (&rest _)
+                             (let ((value (copy-sequence "invented-private-value")))
+                               (push value private-values)
+                               value)))
+                          ((symbol-function 'run-at-time)
+                           (lambda (_delay _repeat callback &rest args)
+                             (apply callback args)))
+                          ((symbol-function 'emacsos-assist-web-refresh-thread) #'ignore)
+                          ((symbol-function 'emacsos-assist-web--request)
+                           (lambda (method path payload callback &rest _)
+                             (should (eq (current-buffer) source))
+                             (should (eq (window-buffer (selected-window)) source))
+                             (push (list method path (and payload (json-encode payload))) calls)
+                             (funcall callback
+                                      (if (equal method "GET") '((unlocked . nil))
+                                        '((id . "synthetic-saved"))) nil))))
+                  (button-activate add)
+                  (with-current-buffer view
+                    (goto-char (point-min))
+                    (search-forward "Unlock logins")
+                    (button-activate (button-at (1- (point))))))))
+            (setq calls (nreverse calls))
+            (should (equal (mapcar #'cadr calls)
+                           '("threads/thread-1/secrets" "threads/thread-1/secrets"
+                             "threads/thread-1/secrets/unlock")))
+            (let ((payload (json-read-from-string (nth 2 (nth 1 calls)))))
+              (should (equal (alist-get 'request_id payload) (alist-get 'id request)))
+              (should (equal (alist-get 'login_url payload)
+                             (if request (alist-get 'login_page request)
+                               "https://synthetic.example/manual"))))
+            (should (= (length private-values) 4))
+            (should (cl-every (lambda (value) (cl-every #'zerop (string-to-list value)))
+                              private-values))
+            (with-current-buffer source
+              (should (equal (buffer-string) "unsent login draft")))
+            (with-current-buffer view
+              (should-not (string-match-p "invented-private-value" (buffer-string)))))
+        (kill-buffer view)
+        (kill-buffer source)))))
+
+(ert-deftest test-assist-web-git-status-login-actions-recheck-original-source ()
+  "Old login buttons cannot prompt after source identity or access changes."
+  (dolist (change '(denied thread repository killed))
+    (dolist (label '("Add login" "Unlock logins"))
+      (let ((source (generate-new-buffer " *status-login-old-source*"))
+            (view (generate-new-buffer " *status-login-old-view*")) prompted)
+        (unwind-protect
+            (progn
+              (with-current-buffer source
+                (setq-local emacsos-assist-web--thread-id "thread-1"
+                            emacsos-assist-web-git--metadata
+                            (copy-tree test-assist-web-git--metadata)))
+              (with-current-buffer view
+                (special-mode)
+                (setq-local emacsos-assist-web-git--status-source source
+                            emacsos-assist-web-git--status-identity
+                            '("thread-1" . "aaaaaaaaaaaaaaaaaaaa"))
+                (emacsos-assist-web-git--status-render)
+                (goto-char (point-min))
+                (search-forward label)
+                (let ((button (button-at (1- (point)))))
+                  (if (eq change 'killed) (kill-buffer source)
+                    (with-current-buffer source
+                      (pcase change
+                        ('denied (setq emacsos-assist-web--denied t))
+                        ('thread (setq emacsos-assist-web--thread-id "other-thread"))
+                        ('repository (setq emacsos-assist-web-git--metadata '(:repo-key "other"))))))
+                  (cl-letf (((symbol-function 'read-passwd)
+                             (lambda (&rest _) (setq prompted t)))
+                            ((symbol-function 'emacsos-assist-web--request)
+                             (lambda (&rest _) (setq prompted t))))
+                    (should-error (button-activate button) :type 'user-error))
+                  (should-not prompted)
+                  (emacsos-assist-web-git--status-render)
+                  (should-not (string-match-p "Private logins" (buffer-string))))))
+          (kill-buffer view)
+          (when (buffer-live-p source) (kill-buffer source)))))))
+
+(ert-deftest test-assist-web-git-status-logins-require-a-repository ()
+  "Non-Git Status explains the requirement without collecting private input."
+  (let ((source (generate-new-buffer " *status-nongit-login-source*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq-local emacsos-assist-web--thread-id "thread-1"))
+          (with-temp-buffer
+            (setq-local emacsos-assist-web-git--status-source source
+                        emacsos-assist-web-git--status-identity '("thread-1"))
+            (should (emacsos-assist-web-git--status-valid-source-p))
+            (emacsos-assist-web-git--status-secret-actions)
+            (should (equal (buffer-string)
+                           "Private logins require a repository thread.\n\n"))
+            (should-not (next-button (point-min)))))
+      (kill-buffer source))))

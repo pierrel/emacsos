@@ -409,6 +409,39 @@ thread acknowledges the displayed snapshot only while its buffer has a visible
 window. Cached views, hidden-buffer rendering and background probes
 do not clear unread state; a newer server notification survives a stale receipt.
 
+Open a repository thread's =Status= page and choose =Add login= to create an
+encrypted repository login without asking the agent first. When a login request
+is pending, the same page shows =Add requested login= with its public label and
+HTTPS destination. =Unlock logins= opens the existing private unlock prompt.
+These actions return to the original thread before collecting private input.
+=C-c s= also privately adds a login. It masks the username,
+password and repository unlock phrase in the minibuffer. Label and login URL
+remain visible, but their prompts disable minibuffer history and message logging
+before validation. The phrase is entered
+once per thread and cached only in that thread's host-private directory. It must
+contain 12 to 1024 UTF-8 bytes. Rejections show fixed guidance for the failed
+validation without displaying submitted values or arbitrary response text; use
+=C-c u= to unlock an existing repository store in another thread.
+When the agent requests a new login using only its public site and label, the
+thread view offers an =Add requested login= button for those same masked prompts.
+The destination is fixed to the current agent request; a stale button cannot
+save to a later request. The store's ciphertext is committed in the server
+checkout and normally published on the
+thread branch. Merge the published branch through the ordinary Git flow before
+expecting a new thread to see its records. If the server reports a result branch
+after Git divergence, inspect and merge that branch instead.
+The client retains chat drafts while a private form is open or its status/save
+request is pending in a live buffer for that thread. A save timeout ends the client's wait, not the server's
+Git operation: saving may continue and the repository can remain busy. Unlock
+timeouts likewise leave the outcome unknown. Known input, size, access and
+contention refusals use fixed guidance; unknown failures remain unconfirmed. A
+full-store save refusal can leave the repository unlocked without adding an entry.
+Inspect Git status before retrying an unconfirmed operation; no automatic retry
+is sent.
+Private entry and unlock cancel if the thread's authorization changes while
+waiting or prompting. No further input or submission is requested; collected
+private strings are cleared. Refresh the authorized thread before trying again.
+
 =C-c a d= opens the thread's Magit diff or status.  In a thread,
 =M-p= and =M-n= recall loaded user inputs and restore the unfinished draft when
 you return to the present.  Recall never sends a message.  Ordinary undo and

@@ -17,6 +17,8 @@
 (declare-function emacsos-assist-web--require-snapshot "assist-web")
 (declare-function emacsos-assist-web-review-approval "assist-web")
 (declare-function emacsos-assist-web-browser-control "assist-web")
+(declare-function emacsos-assist-web-secret-add "assist-web")
+(declare-function emacsos-assist-web-secret-unlock "assist-web")
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-status-setup-buffer "magit-status")
 (defvar emacsos-assist-web--denied)
@@ -541,9 +543,38 @@ Status can hide the source buffer, which suspends its automatic observation."
                             'action #'emacsos-assist-web-git--status-browser-control)
       (insert "No live browser control offer; refresh the thread or ask Assist to open a page."))
     (insert "\n\n")))
+(defun emacsos-assist-web-git--status-secret-actions ()
+  "Offer existing private login entry from this view's authorized thread."
+  (when (emacsos-assist-web-git--status-valid-source-p)
+    (if (not (stringp (cdr emacsos-assist-web-git--status-identity)))
+        (insert "Private logins require a repository thread.\n\n")
+      (let ((request (with-current-buffer emacsos-assist-web-git--status-source
+                       (alist-get 'private_entry_request
+                                  (alist-get 'thread emacsos-assist-web--snapshot)))))
+	(insert "Private logins\n")
+	(when request
+          (insert (alist-get 'label request) "\n" (alist-get 'login_page request) "\n"))
+	(insert-text-button
+	 (if request "Add requested login" "Add login") 'follow-link t
+	 'action (lambda (_)
+                   (unless (emacsos-assist-web-git--status-valid-source-p)
+                     (user-error "Open an authorized canonical Assist thread first"))
+                   (let ((source emacsos-assist-web-git--status-source))
+                     (pop-to-buffer source)
+                     (emacsos-assist-web-secret-add request))))
+	(insert "  ")
+	(insert-text-button
+	 "Unlock logins" 'follow-link t
+	 'action (lambda (_)
+                   (unless (emacsos-assist-web-git--status-valid-source-p)
+                     (user-error "Open an authorized canonical Assist thread first"))
+                   (let ((source emacsos-assist-web-git--status-source))
+                     (pop-to-buffer source)
+                     (emacsos-assist-web-secret-unlock))))
+        (insert "\n\n")))))
 
 (defun emacsos-assist-web-git--status-render ()
-  "Render pending approvals and factual Git status without altering local work."
+  "Render approval, browser and private-login actions plus Git facts."
   (let ((inhibit-read-only t)
         (server emacsos-assist-web-git--status-server)
         (local emacsos-assist-web-git--status-local)
@@ -560,6 +591,7 @@ Status can hide the source buffer, which suspends its automatic observation."
                           'action #'emacsos-assist-web-git--status-review-approval)
       (insert "\n\n"))
     (emacsos-assist-web-git--status-browser-action)
+    (emacsos-assist-web-git--status-secret-actions)
     (insert "Assist Git status\n\n")
     (when emacsos-assist-web-git--status-outcome
       (insert emacsos-assist-web-git--status-outcome "\n\n"))
