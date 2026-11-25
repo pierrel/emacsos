@@ -42,7 +42,7 @@ for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf je
     install -o user -g user -m 0600 "/source/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
 done
-for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
+for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py phone-contacts.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     install -o user -g user -m 0600 "/repo/$name" \
         "/home/user/.cache/emacsos-openrc-stage/$name"
@@ -268,7 +268,7 @@ printf '%s\n' '#!/bin/sh' \
     'if [ "${1-}" = -I ] && [ "${2-}" = - ] && [ "$#" -eq 3 ]; then' \
     '  exec /usr/local/bin/python3 "$@"' \
     'fi' \
-    'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus, sqlite3, requests" ]; then' \
+    'if [ "${1-}" = -I ] && [ "${2-}" = -c ] && [ "${3-}" = "import dbus, sqlite3, requests, yaml" ]; then' \
     '  [ -e /tmp/py3-dbus-present ]' \
     '  exit $?' \
     'fi' \
@@ -1020,7 +1020,7 @@ rm -f /tmp/py3-dbus-present
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -e /tmp/py3-dbus-present ]
-dbus_install_line=$(grep -nFx 'apk add py3-dbus py3-requests emacs-magit git openssh-client-default' /tmp/transaction-log | cut -d: -f1)
+dbus_install_line=$(grep -nFx 'apk add py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default' /tmp/transaction-log | cut -d: -f1)
 ui_stop_line=$(grep -nFx 'rc-service emacsos-ui stop' /tmp/transaction-log | cut -d: -f1)
 [ "$dbus_install_line" -lt "$ui_stop_line" ]
 if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; then

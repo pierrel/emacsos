@@ -882,6 +882,8 @@ A failed or interrupted request retains its key for an explicit unchanged retry.
 (defvar-local emacsos-assist-web--in-flight nil)
 
 (defvar-local emacsos-assist-web--snapshot nil)
+(defvar-local emacsos-assist-web--snapshot-stale-p nil
+  "Non-nil when the displayed thread snapshot came from the local cache.")
 (defvar-local emacsos-assist-web--approval-source nil)
 (defvar-local emacsos-assist-web--approval nil)
 (defvar-local emacsos-assist-web--approval-edited nil)
@@ -1259,6 +1261,17 @@ MAX-MESSAGES and MAX-BYTES override the ordinary wire-snapshot limits."
     (when (and expected-thread-id
                (not (equal expected-thread-id (alist-get 'id thread))))
       (error "Assist Web snapshot identity does not match request"))
+    (when-let ((control-url (alist-get 'browser_control_url thread)))
+      (unless (and (stringp control-url) (<= (string-bytes control-url) 2048)
+                   (not (string-match-p "[[:space:][:cntrl:]]" control-url))
+                   (let ((parsed (url-generic-parse-url control-url)))
+                     (and (member (url-type parsed) '("http" "https"))
+                          (url-host parsed) (not (string-empty-p (url-host parsed)))
+                          (not (url-user parsed)) (not (url-password parsed))
+                          (not (url-target parsed))
+                          (equal (url-filename parsed)
+                                 (format "/thread/%s/browser" (alist-get 'id thread))))))
+        (error "Assist Web returned an invalid browser control link")))
     (let ((limit-messages (or max-messages emacsos-assist-web--max-snapshot-messages))
           (limit-bytes (or max-bytes emacsos-assist-web--max-snapshot-transcript-bytes)))
       (emacsos-assist-web--require-transcript-limits messages limit-messages limit-bytes)
@@ -3415,6 +3428,17 @@ Hidden, cached and failed views do not acknowledge unread notifications."
      emacsos-assist-web--thread-id
      (alist-get 'revision (alist-get 'thread snapshot)))))
 
+(defun emacsos-assist-web-browser-control (&optional _button)
+  "Open this authorized thread's current host-issued browser control link."
+  (interactive)
+  (let* ((thread (alist-get 'thread emacsos-assist-web--snapshot))
+         (url (alist-get 'browser_control_url thread)))
+    (unless (and (not emacsos-assist-web--denied)
+                 (not emacsos-assist-web--snapshot-stale-p)
+                 (equal emacsos-assist-web--thread-id (alist-get 'id thread)) url)
+      (user-error "No live browser control offer; refresh the thread"))
+    (browse-url url)))
+
 (defun emacsos-assist-web--render (snapshot &optional stale)
   "Render SNAPSHOT in the current remote-thread buffer, marked STALE if needed.
 Return whether its independent editable draft was saved locally."
@@ -3456,6 +3480,7 @@ Return whether its independent editable draft was saved locally."
           (error "Assist Web snapshot identity does not match this buffer"))
         (setq emacsos-assist-web--thread-id returned-id))
       (setq emacsos-assist-web--snapshot snapshot
+            emacsos-assist-web--snapshot-stale-p stale
             emacsos-assist-web--pending-rendered-p nil
             imenu--index-alist nil)
       (when (or emacsos-assist-web--canonical-buffer-name-p
@@ -3482,6 +3507,11 @@ Return whether its independent editable draft was saved locally."
                             (concat ": " error) "")))
         (setq emacsos-assist-web--status-end (copy-marker (point) nil))
         (insert "\n\n")
+        (when-let ((control-url (and (not stale)
+                                    (alist-get 'browser_control_url thread))))
+          (insert-text-button "Control the live browser" 'follow-link t
+                              'action #'emacsos-assist-web-browser-control)
+          (insert "\n\n"))
         (when (or (equal (alist-get 'status thread) "awaiting_approval")
                   (and (integerp (alist-get 'approval_count thread))
                        (> (alist-get 'approval_count thread) 0))
@@ -4339,7 +4369,9 @@ Refresh action and replaces only this view’s transient observer."
                                (alist-get 'next_before updated)
                                (and (not over-cap) (not at-cap)
                                     (alist-get 'next_before page))))
-                         (emacsos-assist-web--render updated))
+                         (emacsos-assist-web--render
+                          updated (or emacsos-assist-web--snapshot-stale-p
+                                      (not emacsos-assist-web--snapshot))))
                      (error
                       (emacsos-assist-web--set-status
                        (if (or emacsos-assist-web--snapshot cached)
@@ -5692,6 +5724,7 @@ no HTTP draft, retry key or user-message placeholder."
                                ;; Revision omits some display fields. Compare the
                                ;; complete validated snapshot before redrawing.
                                (when (or emacsos-assist-web--display-recovery
+                                         emacsos-assist-web--snapshot-stale-p
                                          (not (equal (emacsos-assist-web--retain-loaded-history
                                                       value emacsos-assist-web--snapshot)
                                                      emacsos-assist-web--snapshot)))

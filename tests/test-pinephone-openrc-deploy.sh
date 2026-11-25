@@ -59,7 +59,7 @@ for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt ph
     waydroid-container.conf waydroid-container-wrapper; do
     cp -- "$deploy_dir/$name" "$manifest_stage/$name"
 done
-for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
+for name in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py phone-contacts.py emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
     EMACSOS-COMMANDS.org; do
     cp -- "$repo_dir/$name" "$manifest_stage/$name"
 done
@@ -90,7 +90,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 52 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 53 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -121,9 +121,9 @@ grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
 simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
-install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus py3-requests emacs-magit git openssh-client-default >/dev/null' \
+install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default >/dev/null' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
-dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests'" \
+dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests, yaml'" \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 preflight_line=$(grep -nF 'preflight_backup_sources' "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 snapshot_line=$(grep -nF 'snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.' \
@@ -180,6 +180,7 @@ openrc-wifi-connect-root
 os.el
 phone-assist-notifications.el
 phone-call.el
+phone-contacts.py
 phone-fonts.conf
 phone-notifications.el
 phone-sms-chat.el
@@ -341,7 +342,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 52 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 53 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
@@ -369,7 +370,7 @@ grep -F "fail 'SMS helper already exists'" \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'permit nopass nolog emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-sms args' \
     "$deploy_dir/openrc-doas.conf" >/dev/null
-grep -F "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests'" \
+grep -F "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests, yaml'" \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-network' \
     "$deploy_dir/openrc-doas.conf" >/dev/null
@@ -548,7 +549,7 @@ grep -F 'for_window [app_id="firefox"] focus' "$deploy_dir/openrc-sway.config" >
 
 grep -F '"--new-instance" "about:blank"' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'emacsos-use-internal-keyboard nil' "$deploy_dir/openrc-init.el" >/dev/null
-grep -F 'emacsos-initial-buffer-function #'"'"'emacsos--chat-buffer' \
+grep -F 'emacsos-initial-buffer-function #'"'"'emacsos-pinephone-initial-buffer' \
     "$deploy_dir/openrc-init.el" >/dev/null
 grep -F 'server-port 8766' "$deploy_dir/openrc-init.el" >/dev/null
 grep -F '"/etc/emacsos-openrc/assist-web-url"' "$deploy_dir/openrc-init.el" >/dev/null

@@ -46,7 +46,10 @@ actions.
 - *E5 Phone callback.* [[file:../server/emacsos_server/channel.py][=eval_elisp=]]
   and [[file:../server/emacsos_server/emacs_backend.py][EmacsBackend]] use
   [[file:../server/emacsos_server/phone.py][phone.call_emacs]] to reach the
-  request's phone Emacs server. The callback can inspect or change Emacs state;
+  request's phone Emacs server. Expressions are UTF-8/base64 framed into one
+  stdin line and decoded/read/evaluated on the phone, preserving multiline Lisp
+  comments and string contents without putting source in argv. The callback can
+  inspect or change Emacs state;
   when it invokes a device primitive, E1 executes that concrete command.
 - *E6 Config history.* [[file:../server/emacsos_server/channel.py][=get_config=,
   =apply_config= and rollback tools]] work through
@@ -109,7 +112,17 @@ Edit [[file:architecture-device.dot][architecture-device.dot]] and render with
   [[file:../assist-web.el][Assist Web review]] brings a server draft to that
   same phone surface and ties its decision to the exact proposal and journal
   identity. [[file:../phone-sms-chat.el][phone-sms-chat.el]] presents local
-  history and conversations.
+  history and conversations. Its configured local contacts YAML is read by
+  [[file:../phone-contacts.py][phone-contacts.py]] as an unprivileged, bounded
+  PyYAML process. Labels decorate exact numbers; neither conversation keys nor
+  sending proposals use contact identity. SMS Refresh rereads local files, with
+  no Git/network operation.
+- *E17 Local contacts YAML.* A configured, UI-readable file in a private
+  checkout maps contact keys to string fields. Default and typed phone fields
+  supply display labels to E10; birthday and notes fields stay plain text in the
+  file and are not part of the label output. Assist can edit the repository through
+  ordinary repo-thread tools and explicit Merge & Push; the operator pulls the
+  phone checkout manually. There is no contacts service or automatic sync.
 - *E11 Fixed SMS helper.* [[file:../deploy/pinephone/openrc-sms-root][openrc-sms-root]]
   is the privileged, fixed =doas= command for collection, lookup, receipts and
   exact sending. It owns the SQLite transaction before a modem effect; a

@@ -18,7 +18,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=b1d028577783c5e23d2b579c0be218a810edf8069faf8ac236912e40ee5bdfe5
+manifest_hash=bad5597a4f7b2b8f99ba24d377fe73236f994c977e227a28545499231dc171c9
 mutating=0
 committed=0
 restart_only=0
@@ -49,6 +49,7 @@ emacsos-typography.el:/usr/local/share/emacsos-openrc/emacsos-typography.el
 chat.el:/usr/local/share/emacsos-openrc/chat.el
 assist-web.el:/usr/local/share/emacsos-openrc/assist-web.el
 assist-web-git.el:/usr/local/share/emacsos-openrc/assist-web-git.el
+phone-contacts.py:/usr/local/share/emacsos-openrc/phone-contacts.py
 assist-web-git-helper.py:/usr/local/share/emacsos-openrc/assist-web-git-helper.py
 emacsos-assist.el:/usr/local/share/emacsos-openrc/emacsos-assist.el
 network.el:/usr/local/share/emacsos-openrc/network.el
@@ -598,6 +599,7 @@ cleanup() {
             restore_file chat.el /usr/local/share/emacsos-openrc/chat.el 0644
             restore_file assist-web.el /usr/local/share/emacsos-openrc/assist-web.el 0644
             restore_file assist-web-git.el /usr/local/share/emacsos-openrc/assist-web-git.el 0644
+            restore_file phone-contacts.py /usr/local/share/emacsos-openrc/phone-contacts.py 0755
             restore_file assist-web-git-helper.py /usr/local/share/emacsos-openrc/assist-web-git-helper.py 0755
             restore_file emacsos-assist.el \
                 /usr/local/share/emacsos-openrc/emacsos-assist.el 0644
@@ -742,7 +744,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|phone-notifications.el|phone-assist-notifications.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|phone-contacts.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|phone-notifications.el|phone-assist-notifications.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -756,7 +758,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 52 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 53 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
@@ -772,7 +774,7 @@ for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf je
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
     emacsos-ui.initd openrc-boot-mode waydroid-container.service \
-    waydroid-container.conf waydroid-container-wrapper os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py \
+    waydroid-container.conf waydroid-container-wrapper os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el assist-web-git-helper.py phone-contacts.py \
     emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el EMACSOS-COMMANDS.org \
     openrc-call-root openrc-sms-root sms_forward.py \
     openrc-network-root openrc-wifi-connect-root openrc-device-root openrc-doas.conf \
@@ -829,14 +831,14 @@ done
     [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
 legacy_keyboard_paths || true
-timeout -s TERM -k 5 30 apk add --simulate py3-dbus py3-requests emacs-magit git openssh-client-default >/dev/null
+timeout -s TERM -k 5 30 apk add --simulate py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default >/dev/null
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 # This can fetch packages, so it must finish before stopping the UI.  The
 # remaining transaction uses its already-proven Python D-Bus, SQLite and HTTP dependencies.
-timeout -s TERM -k 5 30 apk add py3-dbus py3-requests emacs-magit git openssh-client-default >/dev/null
+timeout -s TERM -k 5 30 apk add py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default >/dev/null
 [ -x /usr/bin/python3 ] && [ -x /usr/bin/git ] && [ -x /usr/bin/ssh ] && \
     apk info -e py3-dbus >/dev/null && apk info -e emacs-magit >/dev/null && \
-    /usr/bin/python3 -I -c 'import dbus, sqlite3, requests' || fail 'SMS dependencies are absent'
+    /usr/bin/python3 -I -c 'import dbus, sqlite3, requests, yaml' || fail 'SMS dependencies are absent'
 current_keyboard_paths || true
 legacy_keyboard_paths || true
 snapshot_keyboard_stage "$stage/wvkbd-emacsos" "$snapshot/wvkbd-emacsos" 16777216
@@ -949,6 +951,8 @@ for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.e
     install -o root -g root -m 0644 "$snapshot/$module" \
         "/usr/local/share/emacsos-openrc/$module"
 done
+install -o root -g root -m 0755 "$snapshot/phone-contacts.py" \
+    /usr/local/share/emacsos-openrc/phone-contacts.py
 install -o root -g root -m 0755 "$snapshot/assist-web-git-helper.py" \
     /usr/local/share/emacsos-openrc/assist-web-git-helper.py
 install -o root -g root -m 0644 "$snapshot/openrc-init.el" \
@@ -1058,6 +1062,7 @@ for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.e
     dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
     cmp -s "$snapshot/$module" "/usr/local/share/emacsos-openrc/$module"
 done
+cmp -s "$snapshot/phone-contacts.py" /usr/local/share/emacsos-openrc/phone-contacts.py
 cmp -s "$snapshot/assist-web-git-helper.py" \
     /usr/local/share/emacsos-openrc/assist-web-git-helper.py
 

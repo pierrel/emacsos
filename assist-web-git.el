@@ -14,13 +14,16 @@
 (declare-function emacsos-assist-web--valid-id-p "assist-web")
 (declare-function emacsos-assist-web--thread-header "assist-web")
 (declare-function emacsos-assist-web--request "assist-web")
+(declare-function emacsos-assist-web--require-snapshot "assist-web")
 (declare-function emacsos-assist-web-review-approval "assist-web")
+(declare-function emacsos-assist-web-browser-control "assist-web")
 (declare-function emacsos-assist-web-secret-add "assist-web")
 (declare-function emacsos-assist-web-secret-unlock "assist-web")
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-status-setup-buffer "magit-status")
 (defvar emacsos-assist-web--denied)
 (defvar emacsos-assist-web--snapshot)
+(defvar emacsos-assist-web--snapshot-stale-p)
 (defvar emacsos-assist-web--thread-id)
 (defvar emacsos-assist-web--git-oid-regexp)
 
@@ -71,6 +74,7 @@
 (defvar-local emacsos-assist-web-git--status-pending nil)
 (defvar-local emacsos-assist-web-git--status-outcome nil)
 (defvar-local emacsos-assist-web-git--status-generation 0)
+(defvar-local emacsos-assist-web-git--status-browser-request nil)
 (defvar-local emacsos-assist-web-git--status-prompt-after-refresh nil)
 (defvar-local emacsos-assist-web-git--status-process nil)
 (defvar-local emacsos-assist-web-git--post-merge-view nil)
@@ -490,6 +494,55 @@ MANUAL permits a repeated status reminder."
   (with-current-buffer emacsos-assist-web-git--status-source
     (emacsos-assist-web-review-approval)))
 
+(defun emacsos-assist-web-git--status-browser-control (_button)
+  "Fetch the original authorized source's current offer before opening it.
+Status can hide the source buffer, which suspends its automatic observation."
+  (unless (emacsos-assist-web-git--status-valid-source-p)
+    (user-error "Open an authorized canonical Assist thread first"))
+  (let ((view (current-buffer))
+        (source emacsos-assist-web-git--status-source)
+        (identity emacsos-assist-web-git--status-identity)
+        (request (list 'browser-control)))
+    (setq emacsos-assist-web-git--status-browser-request request)
+    (with-current-buffer source
+      (let ((auth emacsos-assist-web--auth-epoch)
+            (refresh emacsos-assist-web--refresh-generation))
+        (emacsos-assist-web--request
+         "GET" (concat "threads/" (car identity)) nil
+         (lambda (value problem)
+           (when (buffer-live-p view)
+             (with-current-buffer view
+               (when (and (eq request emacsos-assist-web-git--status-browser-request)
+                          (eq source emacsos-assist-web-git--status-source)
+                          (equal identity emacsos-assist-web-git--status-identity)
+                          (emacsos-assist-web-git--status-valid-source-p)
+                          (with-current-buffer source
+                            (and (eql auth emacsos-assist-web--auth-epoch)
+                                 (= refresh emacsos-assist-web--refresh-generation))))
+                 (condition-case error
+                     (progn
+                       (when problem (error "%s" problem))
+                       (emacsos-assist-web--require-snapshot value (car identity))
+                       (with-current-buffer source
+                         (emacsos-assist-web--canonical-authorized auth))
+                       (if-let ((url (alist-get 'browser_control_url
+                                               (alist-get 'thread value))))
+                           (browse-url url)
+                         (message "No live browser control offer")))
+                   (error (message "Browser control unavailable: %s"
+                                   (error-message-string error)))))))))))))
+
+(defun emacsos-assist-web-git--status-browser-action ()
+  "Render the original source's current browser offer without Git prerequisites."
+  (when (emacsos-assist-web-git--status-valid-source-p)
+    (if (with-current-buffer emacsos-assist-web-git--status-source
+          (and (not emacsos-assist-web--snapshot-stale-p)
+               (alist-get 'browser_control_url
+                          (alist-get 'thread emacsos-assist-web--snapshot))))
+        (insert-text-button "Control the live browser" 'follow-link t
+                            'action #'emacsos-assist-web-git--status-browser-control)
+      (insert "No live browser control offer; refresh the thread or ask Assist to open a page."))
+    (insert "\n\n")))
 (defun emacsos-assist-web-git--status-secret-actions ()
   "Offer existing private login entry from this view's authorized thread."
   (when (emacsos-assist-web-git--status-valid-source-p)
@@ -521,7 +574,7 @@ MANUAL permits a repeated status reminder."
         (insert "\n\n")))))
 
 (defun emacsos-assist-web-git--status-render ()
-  "Render approval/private-login actions and Git facts without altering local work."
+  "Render approval, browser and private-login actions plus Git facts."
   (let ((inhibit-read-only t)
         (server emacsos-assist-web-git--status-server)
         (local emacsos-assist-web-git--status-local)
@@ -537,6 +590,7 @@ MANUAL permits a repeated status reminder."
                           'face '(bold warning) 'follow-link t
                           'action #'emacsos-assist-web-git--status-review-approval)
       (insert "\n\n"))
+    (emacsos-assist-web-git--status-browser-action)
     (emacsos-assist-web-git--status-secret-actions)
     (insert "Assist Git status\n\n")
     (when emacsos-assist-web-git--status-outcome
@@ -577,26 +631,29 @@ MANUAL permits a repeated status reminder."
                       "unavailable")))
     (when emacsos-assist-web-git--status-error
       (insert emacsos-assist-web-git--status-error "\n\n"))
-    (unless emacsos-assist-web-git--status-pending
-      (insert-text-button "Refresh facts"
-                          'follow-link t
-                          'action (lambda (_) (emacsos-assist-web-git--status-refresh)))
+    (when (and (emacsos-assist-web-git--status-valid-source-p)
+               (with-current-buffer emacsos-assist-web-git--status-source
+                 (stringp (plist-get emacsos-assist-web-git--metadata :repo-key))))
+      (unless emacsos-assist-web-git--status-pending
+        (insert-text-button "Refresh facts"
+                            'follow-link t
+                            'action (lambda (_) (emacsos-assist-web-git--status-refresh)))
+        (insert "  ")
+        (insert-text-button "Refresh checkout"
+                            'follow-link t
+                            'action #'emacsos-assist-web-git--status-refresh-checkout))
       (insert "  ")
-      (insert-text-button "Refresh checkout"
+      (insert-text-button "Git details"
                           'follow-link t
-                          'action #'emacsos-assist-web-git--status-refresh-checkout))
-    (insert "  ")
-    (insert-text-button "Git details"
-                        'follow-link t
-                        'action #'emacsos-assist-web-git--status-details)
-    (insert "\n\n")
-    (insert emacsos-assist-web-git--merge-warning)
-    (when (and fresh
-               (equal (alist-get 'state server) "available")
-               (not emacsos-assist-web-git--status-pending))
-      (insert-text-button "  SERVER Merge & Push  "
-                          'follow-link t
-                          'action #'emacsos-assist-web-git--status-action))
+                          'action #'emacsos-assist-web-git--status-details)
+      (insert "\n\n")
+      (insert emacsos-assist-web-git--merge-warning)
+      (when (and fresh
+                 (equal (alist-get 'state server) "available")
+                 (not emacsos-assist-web-git--status-pending))
+        (insert-text-button "  SERVER Merge & Push  "
+                            'follow-link t
+                            'action #'emacsos-assist-web-git--status-action)))
     (goto-char (point-min))))
 
 (defun emacsos-assist-web-git--status-confirm ()
@@ -918,18 +975,21 @@ Observe its canonical thread; VIEW receives the outcome."
              (emacsos-assist-web-git--finish-merge-refresh nil))))))))
 
 (defun emacsos-assist-web-git--open-status (&optional merge)
-  "Open the thread's factual Git view; MERGE requests a fresh prompt."
+  "Open thread Status actions; MERGE requests fresh repository facts."
   (let* ((source (if (and (boundp 'emacsos-assist-web-git--status-source)
                           emacsos-assist-web-git--status-source)
                      emacsos-assist-web-git--status-source (current-buffer)))
          (metadata (with-current-buffer source emacsos-assist-web-git--metadata))
-         (tid (plist-get metadata :tid))
+         (tid (with-current-buffer source emacsos-assist-web--thread-id))
          (repo (plist-get metadata :repo-key)))
-    (unless (and (buffer-live-p source) (stringp tid) (stringp repo)
+    (unless (and (buffer-live-p source) (stringp tid)
+                 (or (null repo) (equal tid (plist-get metadata :tid)))
                  (with-current-buffer source
                    (and (equal tid emacsos-assist-web--thread-id)
                         (not (eq emacsos-assist-web--denied t)))))
       (user-error "Open an authorized canonical Assist Git thread first"))
+    (when (and merge (not (stringp repo)))
+      (user-error "Open a repository thread for Git merge"))
     (let ((view (get-buffer-create (format "*Assist Git %s*" tid))))
       (with-current-buffer view
         (unless (derived-mode-p 'special-mode) (special-mode))
@@ -947,11 +1007,16 @@ Observe its canonical thread; VIEW receives the outcome."
           (setq emacsos-assist-web-git--status-source source
                 emacsos-assist-web-git--status-identity (cons tid repo)
                 emacsos-assist-web-git--status-prompt-after-refresh merge)
-          (emacsos-assist-web-git--status-refresh)))
+          (if (stringp repo)
+              (emacsos-assist-web-git--status-refresh)
+            (setq emacsos-assist-web-git--status-fresh nil
+                  emacsos-assist-web-git--status-local nil
+                  emacsos-assist-web-git--status-error "Git facts are unavailable for this thread")
+            (emacsos-assist-web-git--status-render))))
       (pop-to-buffer view))))
 
 (defun emacsos-assist-web-git-status ()
-  "Show fresh server-published and read-only local Git facts."
+  "Show current thread actions and available repository facts."
   (interactive)
   (emacsos-assist-web-git--open-status))
 
