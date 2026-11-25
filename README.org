@@ -86,8 +86,8 @@ desktop regressions and phone-sized graphical acceptance before retaining the
 adapter. Use an upstream one-month facility if it makes this boundary unnecessary;
 future Calendar internals are not assumed to be unchanged.
 
-On the PinePhone, buffer-name completion also keeps the native recent-use
-order when Tab displays or cycles candidates, and matches names without
+On the PinePhone, repeated Tab cycles buffer-name candidates in native recent-use
+order and matches names without
 regard to case. This applies to the native buffer prompt, including
 =switch-to-buffer=; other completion categories and desktop defaults stay
 unchanged.

@@ -1277,8 +1277,10 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (setq read-buffer-completion-ignore-case t
         completion-category-overrides (copy-tree completion-category-overrides))
   ;; The native buffer table already follows `buffer-list' recent-use order.
-  (setf (alist-get 'display-sort-function
-                  (alist-get 'buffer completion-category-overrides)) #'identity
+  (setf (alist-get 'cycle
+                  (alist-get 'buffer completion-category-overrides)) t
+        (alist-get 'display-sort-function
+                   (alist-get 'buffer completion-category-overrides)) #'identity
         (alist-get 'cycle-sort-function
                    (alist-get 'buffer completion-category-overrides)) #'identity))
 

@@ -14,6 +14,7 @@
         (read-buffer-completion-ignore-case nil)
         (completion-category-overrides nil)
         (completion-ignore-case nil)
+        (completion-cycle-threshold nil)
         result)
     (save-window-excursion
       (unwind-protect
@@ -33,7 +34,12 @@
                          (let ((cycle (completion-all-sorted-completions
                                        (point-min) (point-max))))
                            (setcdr (last cycle) nil)
-                           (setq result (list :cycle (mapcar #'substring-no-properties cycle))))
+                           (setq result
+                                 (list :cycle (mapcar #'substring-no-properties cycle)
+                                       :cycle-threshold
+                                       (completion--cycle-threshold
+                                        (completion-metadata "Phone-MRU-" table predicate))
+                                       :global-threshold completion-cycle-threshold)))
                          (minibuffer-completion-help (point-min) (point-max))
                          (with-current-buffer "*Completions*"
                            (setq result (plist-put result :display (buffer-string))))))
@@ -56,6 +62,8 @@
            (alpha (string-match "Phone-MRU-Alpha" display))
            (zebra (string-match "Phone-MRU-zEBRA" display)))
       (should alpha) (should zebra)
+      (should (eq (plist-get result :cycle-threshold) phone))
+      (should-not (plist-get result :global-threshold))
       (if phone (should (< zebra alpha)) (should (< alpha zebra)))
       (should (equal (plist-get result :cycle)
                      '("Phone-MRU-zEBRA" "Phone-MRU-Alpha"))))))
