@@ -2,10 +2,29 @@
 
 * Current successor status
 
-The readiness timeout correction requires a new independent blind run in both
-contexts before publication. That successor is not accepted by the previous
-results below. The existing UI/application payload is unchanged, but the changed
-readiness boundary must be exercised with the complete seven scenarios again.
+The readiness correction passed source checks but the second independent blind
+run did not establish complete acceptance. Its exact inputs were isolated
+=c4801ed729b54409209fa3fc04be74e7d1b139ea= and deployed-source composition
+=8959bdac019ace32ed07716d5cb36f788b92e157=. Save/relaunch persistence remained
+PARTIAL in both: the tester did not save a synthetic file through ordinary UI.
+Both guests did boot, accept input, stop cleanly, relaunch, reset and provide
+logs. Candidate Calendar remained PARTIAL; live Calendar remained PASS.
+
+The recorded save attempts released Ctrl before the second key of each Emacs
+prefix, producing =C-x f= (fill-column) and =C-x s= (save-some-buffers). A single
+ordinary-input reproduction displayed the fill-column prompt and "No files need
+saving"; the failed capture is preserved privately. The wrapper passed native
+input literally. The usage guide lacked an explicit file-save example, so this
+is a concrete documentation gap rather than a persistence pass.
+
+The documentation-only successor publishes explicit =M-x find-file= and
+=M-x save-buffer= examples for save, reopen and reset. No wrapper/runtime code,
+internal file write, evaluation or recovery mechanism is added. A development
+run of that exact ordinary-input flow showed the write confirmation, saved
+text after relaunch, and an empty "New file" buffer after reset. Its captures
+remain private outside Git. This development evidence does not replace the required third independent blind seven-scenario run in both contexts.
+Successor acceptance remains pending that run. Earlier results below retain
+their exact source attribution and do not establish acceptance of this successor.
 
 * Previous fresh shared-runtime acceptance
 

@@ -97,14 +97,37 @@ can diagnose a problem but cannot replace visible ordinary-input acceptance.
 
 ## Stop, relaunch and clean reset
 
+Use these ordinary Emacs commands to save a synthetic file, reopen it after a
+relaunch, then verify its contents are absent after reset. `keys` passes native
+wtype arguments literally: `-M` presses a modifier and `-m` releases it. The
+examples use the same explicit M-x input as the app commands above.
+
 ```sh
+# From a ready guest, open a named file, enter text, and save through the UI.
+deploy/virtual-phone/operate keys -- -M alt -k x -m alt find-file -k Return
+deploy/virtual-phone/operate text '/var/lib/emacsos-lab/virtual-phone-state.txt'
+deploy/virtual-phone/operate keys -- -k Return
+deploy/virtual-phone/operate text 'Persisted synthetic state'
+deploy/virtual-phone/operate keys -- -M alt -k x -m alt save-buffer -k Return
+deploy/virtual-phone/operate screenshot "$VIRTUAL_PHONE_STATE/saved.png"
+# Inspect the visible text and successful write message before stopping.
 deploy/virtual-phone/operate stop       # guest poweroff; expect container exit 0
-deploy/virtual-phone/start              # same overlay and saved synthetic files
+deploy/virtual-phone/start              # same overlay and saved synthetic file
 deploy/virtual-phone/operate ready
+deploy/virtual-phone/operate keys -- -M alt -k x -m alt find-file -k Return
+deploy/virtual-phone/operate text '/var/lib/emacsos-lab/virtual-phone-state.txt'
+deploy/virtual-phone/operate keys -- -k Return
+deploy/virtual-phone/operate screenshot "$VIRTUAL_PHONE_STATE/reopened.png"
+# Inspect that the saved text returned, then reset the stopped overlay.
 deploy/virtual-phone/operate stop
-deploy/virtual-phone/operate reset      # remove stopped overlay only
-deploy/virtual-phone/start              # fresh base; prior synthetic files absent
+deploy/virtual-phone/operate reset
+deploy/virtual-phone/start
 deploy/virtual-phone/operate ready
+deploy/virtual-phone/operate keys -- -M alt -k x -m alt find-file -k Return
+deploy/virtual-phone/operate text '/var/lib/emacsos-lab/virtual-phone-state.txt'
+deploy/virtual-phone/operate keys -- -k Return
+deploy/virtual-phone/operate screenshot "$VIRTUAL_PHONE_STATE/reset-empty-file.png"
+# Inspect the new empty file buffer: prior synthetic contents must be absent.
 ```
 
 `stop` bounds its SSH request to 15 seconds and its container-exit wait to
