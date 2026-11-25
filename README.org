@@ -30,6 +30,68 @@ successful canonical thread read restores the action even when the snapshot
 itself has not changed. A reply overtaken by a source-thread refresh cannot
 reopen an old offer.
 
+** Phone Calendar
+
+On the PinePhone, =M-x calendar= opens one fixed-width native Calendar month with compact
+*Prev*, *Today* and *Next* controls. Select a date normally or use Calendar's
+existing day, week, month and year movement commands. Month changes keep the
+selected date visible, including leap days and year boundaries. The phone
+bootstrap installs this layout only in its own Emacs session; desktop EmacsOS
+keeps the ordinary three-month Calendar.
+
+*** Native adapter boundary
+
+The adapter was audited against the phone's Emacs 30.1 Calendar sources. It uses
+native segment 1 with a virtual origin to the left of the buffer, while the
+native month renderer uses physical column 1. Native cursor positioning and
+column-to-segment classification therefore agree without either being advised.
+The compact mode-line span uses the same virtual origin. Geometry is recomputed
+on each generation, including after native layout changes.
+
+Four replacements remain, down from five, with four advices rather than six:
+
+- =calendar-generate-window=: Emacs 30.1 couples hardcoded three-month generation
+  with a separate three-month today-hook decision. The one-month adapter calls
+  the native month renderer and retains native window fitting, holiday/diary
+  order and cleanup-hook timing, but chooses visibility for the rendered month.
+  A mode hook cannot change those later decisions. A temporary hook-dispatch
+  wrapper lost native hook-list mutations, so this explicit boundary keeps the
+  real hook lists intact. Re-audit this flow on upgrade; retire it if native
+  window generation supports the required extent and hook selection. Native
+  =calendar-generate= itself remains unchanged.
+- =calendar-date-is-visible-p=: the native predicate accepts adjacent months.
+  One-month navigation needs only the displayed month to count as visible;
+  hiding adjacent text without this change leaves offscreen dates selectable.
+  Retire it when the native predicate respects the actual rendered extent.
+- =calendar-forward-day=: the native path intentionally centers one month short
+  of its target to keep that target in a neighboring segment. The replacement
+  keeps native date arithmetic, blank-cell stepping and final move hooks, but
+  centers the target month through =calendar-goto-date=. There is no setting for
+  the hardcoded centering adjustment. Retire it if native day movement stops
+  assuming that a neighboring segment remains on screen.
+- =calendar-end-of-month=: the native offscreen branch redraws but leaves point
+  on day one. The small replacement uses native month/date arithmetic and
+  selects the requested last day before the move hook runs once. An after-advice
+  would let user hooks observe the wrong date; hiding the hook list temporarily
+  can lose changes made during generation. A key-binding change would miss M-x
+  and direct callers. Retire it when the native branch selects the last day
+  before running its move hook.
+
+The phone's native window fit uses pixelwise resizing locally. The generic
+attention line can be taller than a text row; whole-row rounding otherwise
+clips the last week of a six-week month. Desktop window sizing is unchanged.
+
+On an Emacs upgrade, recheck these named contracts and rerun native date/hook/
+desktop regressions and phone-sized graphical acceptance before retaining the
+adapter. Use an upstream one-month facility if it makes this boundary unnecessary;
+future Calendar internals are not assumed to be unchanged.
+
+On the PinePhone, repeated Tab cycles buffer-name candidates in native recent-use
+order and matches names without
+regard to case. This applies to the native buffer prompt, including
+=switch-to-buffer=; other completion categories and desktop defaults stay
+unchanged.
+
 ** Virtual Keyboard
 
 A virtual keyboard is displayed in a dedicated window at the bottom of the frame. The layout follows the *Optimal-T9* design from [[https://doi.org/10.1145/3279778.3279786][Qin et al., ISS 2018]], a 3x3 multi-letter key layout optimized for clarity, speed, and learnability on small touchscreens.

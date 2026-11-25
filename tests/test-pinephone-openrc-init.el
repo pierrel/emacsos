@@ -6,6 +6,243 @@
                              (file-name-directory load-file-name)))
 (require 'os)
 
+(defun emacsos-test-buffer-completion (phone input)
+  "Inspect actual native switch-buffer completion for PHONE with typed INPUT."
+  (require 'minibuffer)
+  (let ((alpha (get-buffer-create "Phone-MRU-Alpha"))
+        (zebra (get-buffer-create "Phone-MRU-zEBRA"))
+        (read-buffer-completion-ignore-case nil)
+        (completion-category-overrides nil)
+        (completion-ignore-case nil)
+        (completion-cycle-threshold nil)
+        result)
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (when phone (emacsos-pinephone-buffer-completion-setup))
+            (switch-to-buffer alpha)
+            (switch-to-buffer zebra)
+            (let ((completing-read-function
+                   (lambda (_prompt table predicate &rest _args)
+                     ;; The real read-buffer call supplies both this native table
+                     ;; and its buffer-specific case folding to Tab completion.
+                     (with-temp-buffer
+                       (insert "Phone-MRU-")
+                       (let ((minibuffer-completion-table table)
+                             (minibuffer-completion-predicate predicate)
+                             (completion-all-sorted-completions nil))
+                         (let ((cycle (completion-all-sorted-completions
+                                       (point-min) (point-max))))
+                           (setcdr (last cycle) nil)
+                           (setq result
+                                 (list :cycle (mapcar #'substring-no-properties cycle)
+                                       :cycle-threshold
+                                       (completion--cycle-threshold
+                                        (completion-metadata "Phone-MRU-" table predicate))
+                                       :global-threshold completion-cycle-threshold)))
+                         (minibuffer-completion-help (point-min) (point-max))
+                         (with-current-buffer "*Completions*"
+                           (setq result (plist-put result :display (buffer-string))))))
+                     (let ((match (try-completion input table predicate)))
+                       (setq result (plist-put result :match match))
+                       ;; Return a real candidate even for the desktop's failed
+                       ;; case-sensitive match, avoiding any interactive input.
+                       (if (stringp match) match (buffer-name alpha))))))
+              (call-interactively #'switch-to-buffer))
+            (plist-put result :selected (buffer-name)))
+        (kill-buffer alpha)
+        (kill-buffer zebra)
+        (when (get-buffer "*Completions*") (kill-buffer "*Completions*"))))))
+
+(ert-deftest emacsos-openrc-completion-buffer-tab-preserves-mru ()
+  "Native Tab display follows recent use on the phone, desktop stays alphabetical."
+  (dolist (phone '(nil t))
+    (let* ((result (emacsos-test-buffer-completion phone "Phone-MRU-zE"))
+           (display (plist-get result :display))
+           (alpha (string-match "Phone-MRU-Alpha" display))
+           (zebra (string-match "Phone-MRU-zEBRA" display)))
+      (should alpha) (should zebra)
+      (should (eq (plist-get result :cycle-threshold) phone))
+      (should-not (plist-get result :global-threshold))
+      (if phone (should (< zebra alpha)) (should (< alpha zebra)))
+      (should (equal (plist-get result :cycle)
+                     '("Phone-MRU-zEBRA" "Phone-MRU-Alpha"))))))
+
+(ert-deftest emacsos-openrc-completion-buffer-ignore-case-phone-only ()
+  "Actual buffer input finds mixed-case names only with the phone setup enabled."
+  (let ((phone (emacsos-test-buffer-completion t "phone-mru-ZeBrA"))
+        (desktop (emacsos-test-buffer-completion nil "phone-mru-ZeBrA")))
+    (should (equal (plist-get phone :match) "Phone-MRU-zEBRA"))
+    (should (equal (plist-get phone :selected) "Phone-MRU-zEBRA"))
+    (should-not (plist-get desktop :match))
+    (should (equal (plist-get desktop :selected) "Phone-MRU-Alpha"))))
+
+(defmacro emacsos-test-with-phone-calendar (&rest body)
+  "Run BODY in a synthetic native phone Calendar, then restore desktop behavior."
+  `(progn
+     (require 'calendar)
+     (require 'cal-move)
+     (let ((calendar-buffer " *phone-calendar-test*"))
+       (save-window-excursion
+	 (unwind-protect
+             (progn (emacsos-pinephone-calendar-setup) ,@body)
+           (dolist (entry '((calendar-generate-window . emacsos-pinephone-calendar-window)
+                            (calendar-date-is-visible-p . emacsos-pinephone-calendar-date-visible-p)
+                            (calendar-forward-day . emacsos-pinephone-calendar-forward-day)
+                            (calendar-end-of-month . emacsos-pinephone-calendar-end-of-month)))
+             (advice-remove (car entry) (cdr entry)))
+           (remove-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode)
+           (when (get-buffer calendar-buffer) (kill-buffer calendar-buffer)))))))
+
+(ert-deftest emacsos-openrc-calendar-one-month-native-navigation ()
+  "M-x calendar keeps native date selection, including leap and year rollover."
+  (emacsos-test-with-phone-calendar
+   (calendar)
+   (should (eq major-mode 'calendar-mode))
+   (should (equal (calendar-cursor-to-date) (calendar-current-date)))
+   (should (<= (string-width header-line-format) 24))
+   (let ((calendar-mark-holidays-flag nil))
+     (dolist (date '((2 29 2024) (12 31 2024) (1 1 2025)))
+       (calendar-goto-date date)
+       (should (equal (calendar-cursor-to-date) date))
+       (should (= (calendar-column-to-segment) 1))
+       (should (equal (list displayed-month displayed-year)
+                      (list (car date) (nth 2 date))))
+       (save-excursion
+         (goto-char (point-min))
+         (while (not (eobp))
+           (should (<= (current-column) 24))
+           (end-of-line)
+           (should (<= (current-column) 24))
+           (forward-line 1))))
+     (calendar-goto-date '(1 31 2024))
+     (calendar-end-of-month 1)
+     (should (equal (calendar-cursor-to-date) '(2 29 2024)))
+     (calendar-goto-date '(1 15 2024))
+     (calendar-end-of-month 2)
+     (should (equal (calendar-cursor-to-date) '(2 29 2024)))
+     ;; The blank before February's first day counts as the first forward step.
+     (goto-char (point-min))
+     (forward-line (1- calendar-first-date-row))
+     (move-to-column (nth 1 (calendar-month-edges 1)))
+     (should-not (calendar-cursor-to-date))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(2 1 2024)))
+     (calendar-goto-date '(2 28 2024))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(2 29 2024)))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(3 1 2024)))
+     (calendar-goto-date '(12 31 2024))
+     (calendar-forward-day 1)
+     (should (equal (calendar-cursor-to-date) '(1 1 2025)))
+     (let ((last-nonmenu-event nil) (current-prefix-arg nil))
+       (call-interactively
+        (lookup-key (get-text-property 1 'keymap header-line-format)
+                    [header-line mouse-1])))
+     (should (equal (list displayed-month displayed-year) '(12 2024)))
+     (let ((last-nonmenu-event nil) (current-prefix-arg nil))
+       (call-interactively
+        (lookup-key (get-text-property 17 'keymap header-line-format)
+                    [header-line mouse-1])))
+     (should (equal (list displayed-month displayed-year) '(1 2025)))
+     (calendar-goto-today)
+     (should (equal (calendar-cursor-to-date) (calendar-current-date))))))
+
+(ert-deftest emacsos-openrc-calendar-fits-without-line-rounding ()
+  "Phone Calendar fits exact pixels without changing the desktop resize option."
+  (let ((window-resize-pixelwise nil)
+        (native-fit (symbol-function 'fit-window-to-buffer))
+        fitted)
+    (emacsos-test-with-phone-calendar
+     (cl-letf (((symbol-function 'fit-window-to-buffer)
+                (lambda (&rest arguments)
+                  (push window-resize-pixelwise fitted)
+                  (apply native-fit arguments))))
+       (calendar)
+       (calendar-goto-date '(1 1 2027)))
+     (should fitted)
+     (should (cl-every #'identity fitted)))
+    (should-not window-resize-pixelwise)))
+
+(ert-deftest emacsos-openrc-calendar-today-hooks-match-visible-month ()
+  "Native cleanup hooks see actual one-month visibility, including diary errors."
+  (emacsos-test-with-phone-calendar
+   (let ((calendar-mark-holidays-flag nil)
+         (calendar-mark-diary-entries-flag nil)
+         events)
+     (let ((calendar-today-visible-hook
+            (list (lambda () (push (list 'visible (calendar-cursor-to-date)) events))))
+           (calendar-today-invisible-hook
+            (list (lambda () (push (list 'invisible (calendar-cursor-to-date)) events)))))
+       (cl-letf (((symbol-function 'calendar-current-date) (lambda (&rest _) '(11 25 2026))))
+         (calendar)
+         (setq events nil)
+         (calendar-other-month 12 2026)
+         (should (equal events '((invisible (12 1 2026)))))
+         (calendar-goto-today)
+         (should (equal (car events) '(visible (11 25 2026))))
+         (setq events nil)
+         (let ((calendar-mark-diary-entries-flag t))
+           (cl-letf (((symbol-function 'diary-mark-entries)
+                      (lambda () (error "Synthetic diary failure"))))
+             (should-error (calendar-other-month 1 2027)
+                           :type 'error)))
+         (should (equal events '((invisible (1 1 2027))))))))))
+
+(ert-deftest emacsos-openrc-calendar-preserves-hook-self-removal ()
+  "One-shot today hooks remove themselves from the real native hook list."
+  (emacsos-test-with-phone-calendar
+   (let ((calendar-mark-holidays-flag nil)
+         (calendar-today-visible-hook nil)
+         calls once)
+     (setq once (lambda ()
+                  (setq calls (1+ (or calls 0)))
+                  (remove-hook 'calendar-today-visible-hook once)))
+     (add-hook 'calendar-today-visible-hook once)
+     (calendar)
+     (calendar-redraw)
+     (should (= calls 1)))))
+
+(ert-deftest emacsos-openrc-calendar-native-move-hooks-see-final-date-once ()
+  "Zero-day and month-end movements preserve the native final-date hook contract."
+  (emacsos-test-with-phone-calendar
+   (calendar)
+   (calendar-goto-date '(1 31 2024))
+   (let (events)
+     (let ((calendar-move-hook
+            (list (lambda () (push (calendar-cursor-to-date) events)))))
+       (calendar-forward-day 0)
+       (should (equal events '((1 31 2024))))
+       (setq events nil)
+       (calendar-end-of-month 1)
+       (should (equal events '((2 29 2024))))
+       (setq events nil)
+       (calendar-forward-day 1)
+       (should (equal events '((3 1 2024))))))))
+
+(ert-deftest emacsos-openrc-calendar-keeps-fixed-pitch-after-display-hooks ()
+  "Phone Calendar stays fixed-width after major-mode and window typography."
+  (emacsos-test-with-phone-calendar
+   (let ((after-change-major-mode-hook
+          (cons #'emacsos-pinephone-buffer-typography after-change-major-mode-hook)))
+     (calendar)
+     (should (eq buffer-face-mode-face 'fixed-pitch))
+     (emacsos-pinephone-display-typography (selected-frame))
+     (should (eq buffer-face-mode-face 'fixed-pitch)))))
+
+(ert-deftest emacsos-openrc-calendar-desktop-stays-three-months ()
+  "Loading the phone bootstrap in a desktop batch does not customize Calendar."
+  (require 'calendar)
+  (should-not (advice-member-p #'emacsos-pinephone-calendar-window 'calendar-generate-window))
+  (with-temp-buffer
+    (calendar-mode)
+    (let ((inhibit-read-only t)) (calendar-generate 2 2024))
+    (should (string-match-p "January" (buffer-string)))
+    (should (string-match-p "February" (buffer-string)))
+    (should (string-match-p "March" (buffer-string)))
+    (should-not header-line-format)))
+
 (ert-deftest emacsos-openrc-startup-retains-initialized-manual-chat ()
   "The documented manual buffer switch still reaches initialized chat after boot."
   (let ((emacsos--chat-buffer-name " *startup-manual-chat*")

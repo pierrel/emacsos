@@ -9,7 +9,7 @@
       (require 'os)
       (remove-hook 'window-setup-hook #'emacsos--init)
 
-      ;; Evaluate selected typography and Controls row functions without phone services.
+      ;; Evaluate selected typography, Controls and Calendar functions without phone services.
       (with-temp-buffer
 	(insert-file-contents "deploy/pinephone/openrc-init.el")
 	(goto-char (point-min))
@@ -21,9 +21,26 @@
 					       emacsos-pinephone-buffer-typography
 					       emacsos-pinephone-display-typography
                                                emacsos-pinephone-controls--bounded
-                                               emacsos-pinephone-controls--insert-row)))
+                                               emacsos-pinephone-controls--insert-row
+                                               emacsos-pinephone-calendar-date-visible-p
+                                               emacsos-pinephone-calendar-window
+                                               emacsos-pinephone-calendar-forward-day
+                                               emacsos-pinephone-calendar-end-of-month
+                                               emacsos-pinephone-calendar-mode
+                                               emacsos-pinephone-calendar-setup)))
 		  (eval form t))))
 	  (end-of-file nil)))
+
+      ;; Reuse the native Calendar fixture without loading the bootstrap test runner.
+      (with-temp-buffer
+        (insert-file-contents "tests/test-pinephone-openrc-init.el")
+        (condition-case nil
+            (while t
+              (let ((form (read (current-buffer))))
+                (when (and (eq (car-safe form) 'defmacro)
+                           (eq (cadr form) 'emacsos-test-with-phone-calendar))
+                  (eval form t))))
+          (end-of-file nil)))
 
       (menu-bar-mode -1)
       (tool-bar-mode -1)
@@ -65,6 +82,29 @@
 		(redisplay t)
 		(should (equal (typography-test-font-family 1) "JetBrains Mono")))
 	    (kill-buffer buffer))))
+
+      (ert-deftest phone-typography-calendar-dates-align-after-display-hooks ()
+        (emacsos-test-with-phone-calendar
+         (delete-other-windows)
+         (calendar)
+         (calendar-goto-date '(3 1 2024))
+         ;; Later window changes and startup sweeps must retain the date grid font.
+         (emacsos-pinephone-display-typography (selected-frame))
+         (emacsos-pinephone-apply-typography)
+         (redisplay t)
+         (let ((columns
+                (mapcar
+                 (lambda (day)
+                   (calendar-cursor-to-visible-date (list 3 day 2024))
+                   (redisplay t)
+                   (should (equal (typography-test-font-family (point))
+                                  "JetBrains Mono"))
+                   (car (posn-x-y (posn-at-point))))
+                 '(1 8 15 22 29))))
+           ;; These dates occupy the same weekday column on five different rows.
+           (should (apply #'= columns)))
+         (should (<= (car (window-text-pixel-size nil nil nil 10000))
+                     (window-body-width nil t)))))
 
       (ert-deftest phone-typography-color-customization-keeps-real-fonts ()
         (let* ((faces '(variable-pitch mode-line mode-line-inactive header-line default fixed-pitch))

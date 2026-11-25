@@ -161,7 +161,7 @@
   "Select prose or fixed-pitch faces for the current phone buffer."
   (buffer-face-set
    (if (derived-mode-p 'prog-mode 'conf-mode 'vterm-mode
-                       'term-mode 'comint-mode 'dired-mode)
+                       'term-mode 'comint-mode 'dired-mode 'calendar-mode)
        'fixed-pitch
      'variable-pitch)))
 
@@ -1271,6 +1271,108 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
       '(:eval (emacsos-pinephone-controls-mode-line-string))
       emacsos-platform-mode-line-segments nil)
 
+(defun emacsos-pinephone-buffer-completion-setup ()
+  "Keep native buffer completion in recent-use order, ignoring name case."
+  (require 'minibuffer)
+  (setq read-buffer-completion-ignore-case t
+        completion-category-overrides (copy-tree completion-category-overrides))
+  ;; The native buffer table already follows `buffer-list' recent-use order.
+  (setf (alist-get 'cycle
+                  (alist-get 'buffer completion-category-overrides)) t
+        (alist-get 'display-sort-function
+                   (alist-get 'buffer completion-category-overrides)) #'identity
+        (alist-get 'cycle-sort-function
+                   (alist-get 'buffer completion-category-overrides)) #'identity))
+
+(defun emacsos-pinephone-calendar-date-visible-p (date)
+  "Return whether DATE belongs to the single displayed month, not its neighbors."
+  (and (calendar-date-is-valid-p date)
+       (= (car date) displayed-month)
+       (= (nth 2 date) displayed-year)))
+
+(defun emacsos-pinephone-calendar-window (&optional month year)
+  "Generate one native month, preserving Emacs 30.1 window and hook ordering."
+  (let* ((inhibit-read-only t)
+         (today (calendar-current-date))
+         (month (or month (car today)))
+         (year (or year (nth 2 today)))
+         (visible-window (eq (window-buffer) (get-buffer calendar-buffer))))
+    (setq displayed-month month displayed-year year)
+    ;; Keep native segment 1 at physical column 1 without replacing its geometry.
+    (setq-local calendar-left-margin (- 1 calendar-month-width)
+                calendar-right-margin (+ calendar-left-margin (* 7 calendar-column-width))
+                calendar-month-edges (list (cons 1 (calendar-month-edges 1))))
+    (erase-buffer)
+    ;; The renderer's intermonth truncation uses the physical left margin.
+    (let ((calendar-left-margin 1))
+      (calendar-generate-month month year calendar-left-margin))
+    (calendar-update-mode-line)
+    (calendar-cursor-to-visible-date
+     (if (calendar-date-is-visible-p today) today (list month 1 year)))
+    (set-buffer-modified-p nil)
+    ;; Fit exact pixels: the phone attention line need not be a whole text row.
+    ;; Retain native marking order; hooks run in native cleanup.
+    (when visible-window
+      (if (window-combined-p)
+          (let ((window-resize-pixelwise t))
+            (fit-window-to-buffer nil nil calendar-minimum-window-height))
+        (set-window-vscroll nil 0))
+      (sit-for 0))
+    (when calendar-mark-holidays-flag
+      (calendar-mark-holidays)
+      (when visible-window (sit-for 0)))
+    (unwind-protect
+        (when calendar-mark-diary-entries-flag (diary-mark-entries))
+      (run-hooks (if (calendar-date-is-visible-p today)
+                     'calendar-today-visible-hook
+                   'calendar-today-invisible-hook)))))
+
+(defun emacsos-pinephone-calendar-forward-day (days)
+  "Move DAYS without native 30.1's adjacent-month centering offset."
+  (if (zerop days)
+      (run-hooks 'calendar-move-hook)
+    (let ((date (calendar-cursor-to-date)))
+      (unless date
+        (setq date (calendar-cursor-to-nearest-date))
+        (when (> days 0) (setq days (1- days))))
+      (calendar-goto-date
+       (calendar-gregorian-from-absolute
+        (+ days (calendar-absolute-from-gregorian date)))))))
+
+(defun emacsos-pinephone-calendar-end-of-month (months)
+  "Move forward MONTHS month ends and select the last day before move hooks."
+  (let* ((date (calendar-cursor-to-nearest-date))
+         (month (car date)) (year (nth 2 date)))
+    (unless (= (cadr date) (calendar-last-day-of-month month year))
+      (setq months (1- months)))
+    (calendar-increment-month month year months)
+    (calendar-goto-date (list month (calendar-last-day-of-month month year) year))))
+
+(defun emacsos-pinephone-calendar-mode ()
+  "Expose compact native month controls in the phone Calendar header."
+  (setq-local header-line-format
+              (mapconcat
+               (lambda (entry)
+                 (propertize (car entry) 'mouse-face 'highlight
+                             'keymap (let ((map (make-sparse-keymap)))
+                                       (define-key map [header-line mouse-1] (cdr entry))
+                                       map)))
+               '((" Prev " . calendar-scroll-right)
+                 (" Today " . calendar-goto-today)
+                 (" Next " . calendar-scroll-left))
+               " ")))
+
+(defun emacsos-pinephone-calendar-setup ()
+  "Install the one-month adapter only in the PinePhone Emacs session."
+  (require 'calendar)
+  (require 'cal-move)
+  (advice-add 'calendar-generate-window :override #'emacsos-pinephone-calendar-window)
+  (advice-add 'calendar-date-is-visible-p :override
+              #'emacsos-pinephone-calendar-date-visible-p)
+  (advice-add 'calendar-forward-day :override #'emacsos-pinephone-calendar-forward-day)
+  (advice-add 'calendar-end-of-month :override #'emacsos-pinephone-calendar-end-of-month)
+  (add-hook 'calendar-mode-hook #'emacsos-pinephone-calendar-mode))
+
 (defun emacsos-pinephone-initial-buffer ()
   "Prepare chat and return the native Assist list without changing caller windows."
   (emacsos--chat-buffer)
@@ -1279,6 +1381,8 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
   (get-buffer emacsos-assist-web--thread-list-buffer-name))
 
 (when (display-graphic-p)
+  (emacsos-pinephone-buffer-completion-setup)
+  (emacsos-pinephone-calendar-setup)
   (add-to-list 'load-path "/usr/local/share/emacsos-openrc")
   (setq emacsos-use-internal-keyboard nil
         emacsos-control-window-percent 35
