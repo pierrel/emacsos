@@ -1,0 +1,87 @@
+#+TITLE: Elogind 257 on Alpine: source research and package evidence
+#+DATE: 2026-11-25
+
+* Problem and result
+
+The phone suspend path should use native operation ownership without maintaining
+our private sleep-behavior patch. Upstream 257.16 supplies synchronous helper
+execution, but the existing Alpine recipe packages 255.24 and does not build
+257.16 unchanged on musl. The question was whether a small compatibility port
+could preserve native behavior without an OS upgrade.
+
+A standard aarch64 Alpine build now produces signed 257.16-r1 packages. The six
+runtime APK signatures verify, and their actual daemon, loginctl and inhibitor
+executables run and resolve all libraries on existing Alpine musl libraries.
+The package database remained unchanged during extraction and runtime checks.
+This is package/ABI evidence, not daemon startup, kernel sleep or carrier-wake
+acceptance. No phone deployment is part of this result.
+
+* What others have tried
+
+- [[https://github.com/alpinelinux/aports/blob/3e01beb006cd2a86729f26a17a7544bf788d53f9/community/elogind/APKBUILD][Alpine's inspected recipe]] supplies 255.24-r2 with ordinary musl portability
+  patches. Its gshadow workaround removes a header that the older code did not
+  need; that is insufficient for 257's shared account-conversion code.
+- [[https://github.com/elogind/elogind/issues/362][Upstream issue 362]] describes the same gshadow failure on musl. The merged
+  [[https://github.com/elogind/elogind/commit/0ba931c7c6dfae18c819be9425ea74e9f18a0313][0ba931c compatibility commit]] supplies a standard unsupported-operation stub
+  rather than fabricated shadow data. Its include-path wiring still needs
+  [[https://github.com/elogind/elogind/pull/385][open PR 385]], whose exact inspected patch commit is
+  =3a8fba5a51619b9f84c7f9c841a20fc242fc9133=. That follow-up is not merged.
+- [[https://github.com/elogind/elogind/issues/352][Upstream issue 352]] documents libc/kernel-header inclusion-order problems.
+  Both inspected release and stable sources still include the IP definition
+  after the tunnel header that embeds it. Our one-line reorder is a local
+  compatibility correction, not a claim that upstream accepted that exact fix.
+- [[https://github.com/gentoo/gentoo/blob/master/sys-auth/elogind/elogind-257.16.ebuild][Gentoo has a 257.16 ebuild]] and retained musl patches; issue 362 includes
+  Gentoo reports and proposed follow-ups. This is not proof of an out-of-box
+  maintained Alpine 257 package.
+- [[https://github.com/void-linux/void-packages/commit/7e6e47aedc56eee0312add158db709e2af38a132][Void reverted 255.22 to 252.39]], citing hibernation and session-closing
+  problems. Those reports do not establish the cause of this phone's incidents
+  or prove that 257 has the same behavior.
+
+* Reproductions and chosen compatibility changes
+
+The preserved aarch64 compiler command failed with an incomplete =struct iphdr=
+in =linux/if_tunnel.h=. Moving the already included =linux/ip.h= before that
+header made the same object compile successfully. The standard full abuild then
+completed. This changes header ordering, not a networking policy or API.
+
+The first working package used local gshadow guards. Those have been replaced
+by the upstream compatibility commit and its proposed include-path correction.
+The stub returns =EOPNOTSUPP= and supplies no privileged fields. The native
+caller's =incomplete= flag describes security-restricted access, not successful
+authentication. An earlier insistence on an extra always-incomplete musl rule
+was unnecessary; that local rule is not retained.
+
+The selected [[file:../deploy/pinephone/elogind/APKBUILD][recipe]] carries five applicable official Alpine patches, the two
+upstream patches above, and two narrow local build/header corrections. One
+local correction includes classic passwd/group conversion even when the
+optional glibc NSS module is off: login1/PAM still use those converters. The
+other is the IP/tunnel include reorder. There is no private sleep-behavior
+patch. Optional NSS-module and userdb-daemon installation stay disabled; normal
+passwd/password-shadow and ordinary group handling remain native.
+
+Adding the standard bash build dependency also removed the observed version
+script warning: the selected packaged tools report =elogind 257 (257.16)=.
+The prior package's duplicated version tag was a build-metadata issue, not a
+claimed different native release.
+
+* Evidence and limits
+
+The package milestone was reached within the resumed 30-minute checkpoint.
+The first compile failure/reorder proof is recorded in =netlink-before.log=
+and =netlink-after.log=. The selected build is =abuild-upstream-r1.log= and
+its packaged-tool/signature checks are =variant1-runtime-proof.log= in the
+=pr92-port-resume-20261125= evidence bundle. Private signing material and binary
+artifacts are not source files. The upstream source archive SHA256 remains
+=3c8146409bfb9daa77f272212c2b0bf0ae727c782ec87ece0d2d25e0e5bf5f4c=.
+
+Independent focused source/provenance and separate comment review accepted the
+selected compatibility changes. This does not replace the next actual VM
+package/startup and sleep tests. Hardware-specific policy and carrier wake
+remain separate from virtual kernel evidence.
+
+* Historical supersessions
+
+This resolves the package-not-ready conclusion in the Alpine package route
+section of [[file:2026-11-24-native-suspend-simplification.org][the November 24 simplification proposal]]. Its native helper/fallback
+observations and physical-test limitations remain unchanged. The proposal's
+local source-only patch applicability check is not rewritten as a build result.

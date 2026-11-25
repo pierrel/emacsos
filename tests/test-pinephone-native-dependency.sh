@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-docker run --rm --network none --cap-add SYS_PTRACE --cap-add BLOCK_SUSPEND \
+docker run --rm --network none \
     --mount "type=bind,src=$repo_dir/deploy/pinephone/openrc-power-monitor,dst=/source/openrc-power-monitor,readonly" \
     --mount "type=bind,src=$repo_dir/deploy/pinephone/emacsos-ui.initd,dst=/source/emacsos-ui.initd,readonly" \
-    --mount "type=bind,src=$repo_dir/tests/test-pinephone-native-input.py,dst=/test.py,readonly" \
+    --mount "type=bind,src=$repo_dir/tests/test-pinephone-native-dependency.py,dst=/test.py,readonly" \
     --mount "type=bind,src=$repo_dir/deploy/pinephone/openrc-call-root,dst=/helper,readonly" \
     --mount "type=bind,src=$repo_dir/tests/test-pinephone-call-idle.py,dst=/call-test.py,readonly" \
     python:3.13-alpine /bin/sh -ec '

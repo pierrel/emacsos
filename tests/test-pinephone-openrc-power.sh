@@ -6,6 +6,8 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 source_dir=${POWER_TEST_SOURCE_DIR:-$repo_dir/deploy/pinephone}
 
+# SYS_PTRACE permits this fixture to inspect the lab user's guard descriptors;
+# the production monitor/helper no longer imports another process's FDs.
 docker run --rm --network none --cap-add BLOCK_SUSPEND --cap-add SYS_PTRACE -i \
     -v "$source_dir/openrc-session-power:/source/session-power:ro" \
     -v "$source_dir/openrc-suspend-root:/source/suspend-root:ro" \
@@ -27,12 +29,7 @@ install -o root -g root -m 0755 /tmp/session-power.test \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 /source/process-group \
     /usr/local/share/emacsos-openrc/process-group
-sed -e 's|^power=/sys/power$|power=/tmp/power|' \
-    -e 's|^power_key=.*$|power_key=/tmp/power-key/wakeup|' \
-    -e 's|^axp_power_key=.*$|axp_power_key=/tmp/axp-power-key/wakeup|' \
-    -e 's|^modem_controller=.*$|modem_controller=/tmp/modem-controller|' \
-    -e 's|/sys/class/power_supply|/tmp/power-supplies|g' \
-    /source/suspend-root >/tmp/suspend-root.test
+cp /source/suspend-root /tmp/suspend-root.test
 chmod 0755 /tmp/suspend-root.test
 ln -s /usr/local/bin/python3 /usr/bin/python3
 
@@ -45,7 +42,6 @@ chmod 0755 /usr/bin/flock
 rm -f /usr/bin/timeout
 printf '%s\n' \
     '#!/bin/sh' \
-    'case $* in *"/tmp/power/wakeup_count"*) exec /bin/busybox timeout "$@" ;; esac' \
     'while [ "$#" -gt 0 ]; do' \
     '  case $1 in -s|-k) shift 2 ;; [0-9]*) shift; break ;; *) break ;; esac' \
     'done' \
@@ -56,61 +52,32 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" >>/tmp/root-error.log' >/usr/bin/l
 chmod 0755 /usr/bin/logger
 cat >/usr/bin/doas <<'CLIENT'
 #!/usr/bin/python3
-import array, json, os, socket, sys
+import json, socket, sys
 assert sys.argv[1:3] == ['-n', '/usr/local/sbin/emacsos-openrc-suspend']
-assert sys.argv[3:] in ([], ['wake'], ['press'], ['monitor'])
+assert sys.argv[3:] in (['wake'], ['press'], ['monitor'])
 sock = socket.socket(socket.AF_UNIX)
 sock.connect('/tmp/root-helper.sock')
-fds = array.array('i', [0, 1, 2]) if not sys.argv[3:] else array.array('i')
-sock.sendmsg([json.dumps(sys.argv[3:]).encode()],
-             [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)] if fds else [])
+sock.sendall(json.dumps(sys.argv[3:]).encode())
 sock.shutdown(socket.SHUT_WR)
 result = json.loads(sock.makefile().read())
-if sys.argv[3:]:
-    sys.stdout.write(result['stdout'])
-    sys.stderr.write(result['stderr'])
+sys.stdout.write(result['stdout'])
+sys.stderr.write(result['stderr'])
 sys.exit(result['code'])
 CLIENT
 chmod 0755 /usr/bin/doas
 cat >/tmp/root-helper.py <<'BROKER'
-import array, json, os, socket, subprocess, threading
-from pathlib import Path
+import json, os, socket, subprocess, threading
 
 def serve(client):
-    fds = array.array('i')
     try:
-        data, ancillary, _, _ = client.recvmsg(128, socket.CMSG_SPACE(3 * fds.itemsize))
-        action = json.loads(data)
-        assert action in ([], ['wake'], ['press'], ['monitor'])
-        for level, kind, value in ancillary:
-            assert (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
-            fds.frombytes(value)
-        if not action and not Path('/tmp/admission-phase').exists() and not Path('/tmp/power-policy-test').exists():
-            with open('/tmp/doas.log', 'a') as log:
-                log.write('/usr/local/sbin/emacsos-openrc-suspend\n')
-            result = {'code': int(Path('/tmp/suspend-status').read_text()), 'stdout': '', 'stderr': ''}
-        else:
-            if action:
-                process = subprocess.Popen(['/tmp/suspend-root.test', *action],
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            else:
-                assert len(fds) == 3
-                process = subprocess.Popen(['/tmp/suspend-root.test'],
-                                           stdin=fds[0], stdout=fds[1], stderr=fds[2])
-            # Once spawned only the actual owners retain the epoll/input FDs.
-            for fd in fds:
-                os.close(fd)
-            fds = array.array('i')
-            stdout, stderr = process.communicate()
-            result = {'code': process.returncode, 'stdout': stdout or '', 'stderr': stderr or ''}
-            if not action and Path('/tmp/power-policy-test').exists():
-                import time
-                with open('/tmp/power-policy-attempts', 'a') as log:
-                    log.write(json.dumps({'code': process.returncode, 'at': time.clock_gettime(time.CLOCK_BOOTTIME)}) + '\n')
-        client.sendall(json.dumps(result).encode())
+        action = json.loads(client.recv(128))
+        assert action in (['wake'], ['press'], ['monitor'])
+        process = subprocess.Popen(['/tmp/suspend-root.test', *action],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, stderr = process.communicate()
+        client.sendall(json.dumps({'code': process.returncode,
+                                  'stdout': stdout, 'stderr': stderr}).encode())
     finally:
-        for fd in fds:
-            os.close(fd)
         client.close()
 server = socket.socket(socket.AF_UNIX)
 server.bind('/tmp/root-helper.sock')
@@ -169,11 +136,10 @@ python3 - <<'MONITOR_FIXTURE'
 from pathlib import Path
 p = Path('/usr/local/share/emacsos-openrc/power-monitor')
 s = Path('/source/power-monitor').read_text()
-a = s.index('def verify_input('); b = s.index('\ndef verify_guard()', a)
+a = s.index('def verify_input('); b = s.index('def require_capability()', a)
 s = s[:a] + "def verify_input(fd, name, key):\n    assert stat.S_ISFIFO(os.fstat(fd).st_mode)\n\n" + s[b:]
-a = s.index('    found = set()'); b = s.index('    os.dup2(guard.fileno(), 4', a)
-s = s[:a] + "    for fd in INPUTS:\n        source = os.open('/tmp/wake-input-' + str(fd), os.O_RDWR | os.O_NONBLOCK)\n        os.dup2(source, fd, inheritable=True)\n        os.close(source)\n        guard.register(fd, select.EPOLLIN | WAKEUP)\n" + s[b:]
-s = s.replace("SUSPEND = '/usr/local/sbin/emacsos-openrc-suspend'", "SUSPEND = '/tmp/suspend-root.test'")
+a = s.index('    found = set()'); b = s.index("    user = pwd.getpwnam", a)
+s = s[:a] + "    inputs = {}\n    for label, (name, key) in zip((3, 5), INPUTS.items()):\n        fd = os.open('/tmp/wake-input-' + str(label), os.O_RDWR | os.O_NONBLOCK)\n        guard.register(fd, select.EPOLLIN | WAKEUP)\n        inputs[fd] = (name, key)\n" + s[b:]
 p.write_text(s); p.chmod(0o755)
 MONITOR_FIXTURE
 mkfifo /tmp/wake-input-3 /tmp/wake-input-5
@@ -359,25 +325,6 @@ def sources():
         if (watch and int(watch[1], 16) & (1 << 29)
                 and re.search(r'eventfd-count:\s*1\s*$', event, re.M)):
             active.add(re.search(r'eventfd-id:\s*(\d+)', event)[1])
-    # Real EPOLLWAKEUP registrations on fixture input queues. FIONREAD
-    # observes queued packets without consuming the worker's private input.
-    for info in Path('/proc').glob('[0-9]*/fdinfo/4'):
-        try:
-            registration = info.read_text()
-            for target in (3, 5):
-                watch = re.search(r'tfd:\s*' + str(target) + r'\s+events:\s*([0-9a-f]+)', registration)
-                if not watch or not int(watch[1], 16) & (1 << 29):
-                    continue
-                fd = os.open(str(info.parent.parent / 'fd' / str(target)), os.O_RDONLY | os.O_NONBLOCK)
-                try:
-                    pending = array.array('i', [0])
-                    fcntl.ioctl(fd, 0x541b, pending, True)
-                    if pending[0]:
-                        active.add('input-' + str(os.fstat(fd).st_ino))
-                finally:
-                    os.close(fd)
-        except OSError:
-            continue
     return active
 
 operation = sys.argv[1]

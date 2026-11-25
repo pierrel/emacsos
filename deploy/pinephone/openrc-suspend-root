@@ -6,38 +6,10 @@ PATH=/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
 umask 077
 
-power=/sys/power
-power_key=/sys/devices/platform/gpio-keys/power/wakeup
-axp_power_key=/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup
-modem_controller=/sys/devices/platform/soc/1c1b000.usb
-external_power=/sys/class/power_supply/axp20x-usb/online
-
 fail() {
     /usr/bin/logger -t emacsos-openrc-suspend "$1" || true
     printf 'emacsos-openrc-suspend: %s\n' "$1" >&2
     exit 1
-}
-
-enable_wakeup() {
-    wakeup=$1
-    [ -f "$wakeup" ] && [ ! -L "$wakeup" ] ||
-        fail "wakeup source is absent: $wakeup"
-    printf '%s\n' enabled >"$wakeup" || fail "could not enable: $wakeup"
-    [ "$(sed -n '1p' "$wakeup")" = enabled ] ||
-        fail "wakeup source is disabled: $wakeup"
-}
-
-external_power_present() {
-    for presence in "$external_power" "${external_power%/online}/present"; do
-        [ -f "$presence" ] && [ ! -L "$presence" ] ||
-            fail "external power state is absent: $presence"
-        case $(sed -n '1p' "$presence") in
-            0) ;;
-            1) return 0 ;;
-            *) fail "invalid external power state: $presence" ;;
-        esac
-    done
-    return 1
 }
 
 trap 'exit 1' HUP INT TERM
@@ -55,11 +27,9 @@ case $# in
             request)
                 exec /usr/bin/loginctl --no-ask-password suspend
                 ;;
-            guarded-suspend) ;;
             wake|press) ;;
             *) fail 'unknown guarded action' ;;
         esac
-        if [ "$1" != guarded-suspend ]; then
         # A ready eventfd registered with EPOLLWAKEUP holds a private kernel
         # source. Both descriptors follow the fixed action and its descendants;
         # their last close releases protection, including after TERM or KILL.
@@ -84,57 +54,6 @@ guard.close()
 os.execv('/bin/su', ['su', '-s', '/bin/sh', 'emacsos-lab', '-c',
                     'exec /usr/local/share/emacsos-openrc/session-power guarded-' + sys.argv[1]])
 GUARD
-        fi
         ;;
     *) fail 'arguments are not accepted' ;;
 esac
-external_power_present && exit 77
-[ -d "$power" ] && [ ! -L "$power" ] || fail 'unsafe power interface'
-grep -F '[deep]' "$power/mem_sleep" >/dev/null ||
-    fail 'deep suspend is not selected'
-[ "$(sed -n '1p' "$power/sync_on_suspend")" = 1 ] ||
-    fail 'kernel suspend syncing is disabled'
-[ -r "$power/wakeup_count" ] && [ -w "$power/wakeup_count" ] ||
-    fail 'wakeup counter is unavailable'
-[ -w "$power/state" ] || fail 'suspend state is unavailable'
-# USB bus numbers vary at boot; the internal controller and port do not.
-modem=
-for candidate in "$modem_controller"/usb*/[0-9]*-1; do
-    [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
-    [ -z "$modem" ] || fail 'ambiguous internal modem port'
-    modem=$candidate
-done
-[ -n "$modem" ] && [ -f "$modem/idVendor" ] && [ ! -L "$modem/idVendor" ] &&
-    [ "$(sed -n '1p' "$modem/idVendor")" = 2c7c ] &&
-    [ -f "$modem/idProduct" ] && [ ! -L "$modem/idProduct" ] &&
-    [ "$(sed -n '1p' "$modem/idProduct")" = 0125 ] ||
-    fail 'expected EG25 modem is absent'
-
-enable_wakeup "$power_key"
-enable_wakeup "$axp_power_key"
-enable_wakeup "$modem/power/wakeup"
-enable_wakeup "${external_power%/online}/power/wakeup"
-
-# These exact locks were opened safely by the synchronous entry process.
-[ /proc/$$/fd/8 -ef /run/emacsos-openrc-call.lock ] && flock -n -x 8 || exit 75
-[ /proc/$$/fd/6 -ef /run/emacsos-power-state.lock ] && flock -n -x 6 || exit 75
-
-wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 6>&- 8>&-) || exit 75
-case $wakeup_count in
-    ''|*[!0-9]*) fail 'invalid wakeup counter' ;;
-esac
-
-/usr/local/sbin/emacsos-openrc-call idle-check 3>&- 4>&- 5>&- 6>&- 8>&- || exit 75
-
-# A queued wake action keeps its kernel source active while waiting for our
-# display lock. The bounded counter read then vetoes; later input changes the
-# armed count. This native job never falls back to another sleep writer.
-printf '%s\n' "$wakeup_count" >"$power/wakeup_count" || exit 75
-# A plug during counter sampling must still veto this admission. Later USB
-# IRQs participate in the kernel wakeup-count handshake.
-external_power_present && exit 77
-if ! printf '%s\n' mem >"$power/state"; then
-    new_wakeup_count=$(timeout -s TERM -k 1 2 sed -n '1p' "$power/wakeup_count" 3>&- 4>&- 5>&- 6>&- 8>&-) || exit 75
-    [ "$new_wakeup_count" != "$wakeup_count" ] && exit 75
-    exit 1
-fi

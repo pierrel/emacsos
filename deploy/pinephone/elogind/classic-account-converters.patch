@@ -1,0 +1,16 @@
+Subject: [PATCH] shared: build classic account converters without the NSS module
+
+--- a/src/shared/meson.build
++++ b/src/shared/meson.build
+@@ -279,9 +279,8 @@
+         'xml.c',
+ )
+ 
+-if get_option('nss-elogind') != false
+-	shared_sources += files('user-record-nss.c')
+-endif
++# Classic converters are needed by login1/PAM without the optional NSS module.
++shared_sources += files('user-record-nss.c')
+ 
+ #endif // 0
+ 

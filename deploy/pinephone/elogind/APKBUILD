@@ -1,8 +1,8 @@
 # Contributor: Leo <thinkabit.ukim@gmail.com>
-# Maintainer: team/alpine-desktop <pabloyoyoista@postmarketos.org>
+maintainer="team/alpine-desktop <achill@achill.org>"
 pkgname=elogind
-pkgver=252.24
-pkgrel=2
+pkgver=257.16
+pkgrel=1
 pkgdesc="Standalone fork of systemd's elogind"
 url="https://github.com/elogind/elogind"
 arch="all"
@@ -10,6 +10,7 @@ license="GPL-2.0-or-later LGPL-2.1-or-later"
 depends="dbus shadow busctl=$pkgver-r$pkgrel"
 options="!check" # Tests fail on builders
 makedepends="
+	bash
 	acl-dev
 	coreutils
 	dbus-dev
@@ -39,40 +40,41 @@ subpackages="
 	busctl:_busctl
 	"
 source="https://github.com/elogind/elogind/archive/v$pkgver/elogind-v$pkgver.tar.gz
-	getdents.patch
-	gshadow.patch
-	more-strerror_r.patch
-	no-bash.patch
-	sigfillset.patch
-	statx.patch
-	strerror_r.patch
-	re-add_GNU_basename_macro_for_musl.patch
-	rlimit-util-no-cast.patch
 	elogind.initd
-	owned-sleep.patch
+	0002-basic-use-sh-instead-of-bash-in-the-shebang.patch
+	0003-shared-include-signal.h-in-async.h.patch
+	0004-add-missing-musl_missing.h.patch
+	0006-pass-correct-parameters-to-getdents64.patch
+	0009-sd-journal-remove-last_stat.patch
+	upstream-0ba931c-musl-gshadow.patch
+	upstream-pr385-musl-includes.patch
+	classic-account-converters.patch
+	0012-netlink-ip-before-tunnel.patch
 	"
 
 build() {
 	export LDFLAGS="$LDFLAGS -lintl"
 	abuild-meson \
+		--libexecdir=/usr/libexec/elogind \
 		-Db_lto=true \
-		-Db_lto_threads=2 \
 		-Dcgroup-controller=elogind \
 		-Ddefault-hierarchy=unified \
 		-Ddefault-kill-user-processes=false \
 		-Dhalt-path=/sbin/halt \
-		-Dman=true \
-		-Dpolkit=true \
+		-Dman=enabled \
+		-Dpolkit=enabled \
 		-Dreboot-path=/sbin/reboot \
 		-Dtests="$(want_check && echo true || echo false)" \
 		\
 		-Dpamconfdir=/etc/pam.d \
-		-Drootlibdir=/usr/lib \
-		-Drootlibexecdir=/usr/libexec/elogind \
 		-Dudevrulesdir=/usr/lib/udev/rules.d \
 		-Dsplit-usr=false \
+		-Dutmp=false \
+		-Dnss-elogind=false \
+		-Duserdb=false \
+		-Dlibc=musl \
 		build
-	meson compile -j 2 -C build
+	meson compile -j 4 -C build
 }
 
 check() {
@@ -93,6 +95,10 @@ package() {
 
 	# Install openrc service
 	install -Dm755 "$srcdir"/elogind.initd "$pkgdir"/etc/init.d/elogind
+
+	# Move template files to -doc subpackage
+	mv "$pkgdir"/etc/elogind \
+		"$pkgdir"/usr/share/doc/"$pkgname"/templates
 }
 
 _common() {
@@ -108,16 +114,15 @@ _busctl() {
 }
 
 sha512sums="
-5f93ed305a4f946fdad821907909176edb71245ae7db39177d59f7fbad9a78acf6eb227b82e2e6fc17614b75ad9f785edb4c6006a2d2283a582b8318a73ed533  elogind-v252.24.tar.gz
-d684b546762ca6a133e7b4395be514dfb1516c9e8e28c97ea216f4fa1bb66caa64db90cff19f68ac2cc2c5eb347ef813b9e030245c9fe1159f7d40ad8d63e666  getdents.patch
-b69598c6ff56155b8f73bb4684bca6fd66011a9088e0007499617621d2f2b8b5683efabb414d1376a27f931d5372cfda845ad50e4e2efa498391529a22909108  gshadow.patch
-d79d8fb6149299b24d6935d1e8feff194daf67318d45dd8e93087e715f08863a6152261ee2c0b5eff89b01c7189117605309be43184104ba571fbb8425e2f364  more-strerror_r.patch
-b0157d43cafbd54c9af7ea5d11cf0f03e3aa9524b5f959457ac2c5a325d1d000f5c8d6e4bb6a5b4f7e7d55230d3ae0de033abd3fc6a8b6cf4bfb7cbe2230667b  no-bash.patch
-28884612bee898c775f51a27ad26a5478ade3a1608cb528d7797a01ad3606a71379e7486a39246032d736810ad7c8e2925ba25d5f72d39473a14e6e23fcffe3e  sigfillset.patch
-f7f22edfea8062c6bfaa2e7b706368ab87b026bc486a2f34627bb82cd362883279ccd9e8436208b0904b86e80b3fa977695ca79a19e1dd9e7218dbb1eb8610e0  statx.patch
-6b60da7b045a7004da09b910a192c3e9a00ef7507cb108d9639e18cc81e8bb56e37d3c8db1efee37334c15cddaca480f0cf25d7532cf2381f9981e9d2033bc44  strerror_r.patch
-3bbbe054759f5e911219a588168935d4b0ced6e92da85ac39a51f52893ac775c10b19819ead960380241be8a66ad55e71ebb7445ff835241e1162bbe0202d5fd  re-add_GNU_basename_macro_for_musl.patch
-4e570289619f92d7b0da2cf1eae59f1a1ad18df4df46380c15a6b35f211dab5a14e8c4319f098e6042bf00f359bf236171552268236e31dfd5b88b5d2c653a85  rlimit-util-no-cast.patch
+dfd61b635124de87bfbb5bac7e6607148e9f7f3eda5961669f9472ca7d050f465fe368ceb63e3aba1e5efe445959e91cf703d6a561966bafc9bc50c245224e68  elogind-v257.16.tar.gz
 fe8855ffbb8149a8c3892791c4d179c8edf863e9641892c700637b352e8d9d31e406b1d6c5fed5c19e35eb9dcf33bfdb93f0b5a659aaef299ec10b442a878146  elogind.initd
-19432e8aa7caedda7effcdad7ec2b7cb9f711464b5cef2a46883c0b3a06a4debd12fdf65f2bc2adfe6ff78323fc45dfa5ac2dd79503dcd6ad526fe95c1deb00b  owned-sleep.patch
+bdbe44ea26e19408bff4d65bb3c7a594e6f2554c15dc7ed5db411e291f29b371d748ddfe590b32681f1fbe30f5722b662b02f8f282ed01b6e8873df0d380eba6  classic-account-converters.patch
+db7629d6fabccfebf2f3a425f94aeba47875532ca05ddd8ae13ca33f1a5648ab772af9526fe2e6cdcb1dd265f5b890898580f2ed704ba439159fabf2e395bdd0  upstream-pr385-musl-includes.patch
+9d1850b4b8debc7b8b4e5507bf6d64bf9add45927408baffeda582c1884ac0f80cc052744e219b5ac08e4c356f60820e876719bb664dda27c772de38b46259dd  upstream-0ba931c-musl-gshadow.patch
+eb556e1ca69aa0182702ac48b8d6cd1c3e97d14a4c8cf90b361dd0d1e62788728fea3a0121e7eadb0b2de358c33d0febd487d2bef33223a3b1ae409655afadfb  0009-sd-journal-remove-last_stat.patch
+9f76d7247438c9aeba5635c999e995708a59eb5d9b4e6173a86b6000f1f063704951202f2ea16252433abfe97b8d108b5539d4ddf81e60e6e28095fdc14c4ccd  0006-pass-correct-parameters-to-getdents64.patch
+7bc9a571ab99e6541ed14d21aab2f0d538ddb4e9b150b4dbc8137425ad8df9b4f23edbe4d399080d6e7a5bddd6deb770d94212cf792b288d1e58c57a6b2468b5  0004-add-missing-musl_missing.h.patch
+15ddf8a7d19ded3a4788c576bfd91a87807f8259fcd9926f3120642ce3054a72f37e8eaf13357169a81396168f7def3543ff9110e0529574dc790b6562ed467c  0003-shared-include-signal.h-in-async.h.patch
+80b1e494bd55335144b0762b353bf07bb752290a4245fcd0baef2f64364f2037135a44b07ab7e8655eee5061afc529532e757d775bae9b76fc78ea3e58a47aae  0002-basic-use-sh-instead-of-bash-in-the-shebang.patch
+5353562b823fe3657bddc57fa9858a04b6b85fa0048431af0945eb8d4ab52ba9ad95a57a1afa5b2b774d0ec1e405e078d6a664f240b77f5124b963194c80ea6c  0012-netlink-ip-before-tunnel.patch
 "

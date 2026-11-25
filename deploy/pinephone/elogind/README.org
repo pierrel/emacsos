@@ -1,78 +1,78 @@
 * Native suspend dependency
 
-This directory extends the Alpine 252.24-r1 aport to 252.24-r2. It preserves
-upstream source checksums and adds =owned-sleep.patch=. The patch makes the
-single configured external mechanism synchronous and authoritative, retains
-native busy ownership until its sleep child is reaped, and fixes terminal
-child accounting. It adds no controller or provider state.
+This recipe ports Alpine's 255.24 aport to upstream 257.16-r1. It carries the
+applicable distro portability patches, upstream musl gshadow commit 0ba931c and
+the still-open PR385 include-path follow-up. Two local corrections keep classic
+account conversion independent of the optional NSS module and include the IP
+header before tunnel structures. No patch changes native sleep behavior.
+See [[file:../../../docs/2026-11-25-elogind-musl-port.org][the source and package evidence]] for exact provenance and limits.
 
-Build with ordinary abuild in an isolated aarch64 Alpine builder. Fetch the
-source URLs declared in APKBUILD and verify their checksums. Sign the resulting
-APKs; binaries and private signing keys do not belong in source control. A
-rebuild is not promised to be byte-identical across repository/toolchain or
-signing-key changes.
+Build with ordinary abuild in an isolated Alpine builder for the target
+architecture. Source and patch checksums are declared in APKBUILD. The optional
+NSS module and userdb daemon are disabled; they are not needed for the phone's
+existing login1/PAM contract. Binary artifacts and private signing keys stay
+outside source control. A rebuild is not promised byte-identical across build
+repositories, toolchains or signing keys.
 
-Install the matched installed split-package set together: =busctl=, =elogind=,
-=elogind-common=, =elogind-lang=, =elogind-openrc=, and =libelogind=. Verify
-architecture, signatures and exact package hashes before installation. Use a
-temporary per-invocation =apk --keys-dir= containing existing trusted distro
-keys and the reviewed build's public key. Never use =--allow-untrusted= or
-install a permanent publisher key for this operation.
+The matched runtime set is =busctl=, =elogind=, =elogind-common=, =elogind-lang=,
+=elogind-openrc= and =libelogind=. Verify architecture, signatures, exact artifact
+hashes and dependency compatibility before installation. Use temporary
+per-invocation =apk --keys-dir= containing the existing distro keys and reviewed
+build's public key. Do not use =--allow-untrusted= or install a permanent publisher
+key for this operation.
 
-Install the same =native-sleep.conf= at BOTH
-=/etc/elogind/logind.conf.d/50-emacsos-native-sleep.conf= and
-=/etc/elogind/sleep.conf.d/50-emacsos-native-sleep.conf=. Check for conflicting
-configuration before cutover. =AllowSuspendInterrupts=no= ensures existing
-PrepareForSleep delay-inhibitor preparation happens before launching the sleep
-child; the stock interruptible path postpones that preparation. The child reparses sleep.conf and clears its prior helper selection, so the
-sleep.conf.d copy is mandatory even when startup parsed logind.conf.d. Configure
-only the fixed synchronous helper; no fallback entry command is supported.
-The UI installer/updater checks the selected active provider executable and
-both exact configuration inputs before changing or stopping the UI. Competing
-active helper or sleep-interrupt settings are rejected conservatively.
+* Native and phone responsibilities
+
+Elogind owns the suspend operation and waits for its fixed helper. Existing
+Swayidle policy remains one request after ordinary idle time. Existing modem
+and network delay inhibitors supply preparation; their native timeout remains.
+Install =native-sleep.conf= at
+=/etc/elogind/sleep.conf.d/50-emacsos-native-sleep.conf=. Upstream 257 reads
+that sleep configuration in both the manager and sleep child; it does not parse
+these options from logind.conf. Remove the obsolete 252-specific logind drop-in.
+=AllowSuspendInterrupts=no= keeps preparation before the helper, and the sleep
+child reparses sleep.conf. Configure only the fixed helper.
+
+The helper owns call/display locks, phone admission checks and its actual mem
+write. Expected policy refusals log a successful no-op, which suppresses native
+fallback. An unexpected helper execution/termination failure retains upstream's
+native fallback. This is not crash-proof policy enforcement. The live input
+monitor owns its own kernel wake registrations; the helper does not import or
+retain them after monitor death. No new sleep controller is introduced.
 
 * Ordered activation
 
-Before stopping anything, preserve the exact old installed package set, its
-signed APKs, current configuration and three existing helper files. Confirm
-no active call, no pending native sleep operation, and external power or
-adequate battery. Stop and positively quiesce the old UI/direct sleep writer.
-Do not bypass a failed quiescence check.
+Before changing anything, preserve the old installed package set, its signed
+APKs, configuration and current helpers. Confirm no active call or native job,
+and adequate power. Quiesce old UI/requesters and the actual old sleep writer
+before changing the provider/helper contract. A new lock cannot protect against
+an old writer holding a different inode.
 
-When upgrading from runtime-local display locks, also prove the old native job
-and guarded writer have finished before installing or starting the new helpers.
-The new persistent lock cannot retroactively exclude an old writer holding the
-old inode. Preserve =/run/emacsos-power-state.lock= on subsequent restarts,
-updates and rollback; never recreate it to bypass a busy writer. Returning to an
-older lock protocol likewise requires native-job quiescence, not only a drained
-UI cgroup. Session state and generation files remain in the UI runtime.
+Install and verify the selected helpers, fixed sleep configuration and complete
+native package set before allowing new UI requests. Restart the provider and
+verify that login1 is owned by the installed executable, not a surviving old
+process. Verify fresh modem/network delay inhibitors; descriptors do not survive
+provider restart. The standard installer checks selected package, active
+installed executable and fixed configuration before changing or stopping UI.
+Keep the stable display-lock inode across ordinary UI restarts.
 
-While the UI is stopped, install the reviewed new =openrc-suspend-root=,
-=openrc-power-monitor= and =openrc-call-root= helpers to their normal fixed
-locations. Install the native configuration and matched package bundle before
-restarting elogind. Verify its executable and fresh ModemManager/eg25-manager
-delay inhibitors; old inhibitor descriptors cannot survive a provider restart.
-Only then run the normal complete UI updater, which starts the new session.
+Rollback uses the preserved exact package set, configuration and helpers with
+the same requester/writer quiescence and owner/inhibitor checks. Keep private
+phone archives, drafts, credentials and unrelated installed features intact.
+Package compatibility evidence is not permission to activate an unreviewed
+composition or evidence that physical modem wake works.
 
-If activation fails, stop any partial UI before restoring the old three
-helpers, old provider packages and configuration. The complete UI updater's
-own rollback remains responsible for its remaining payload. Keep the UI stopped
-if old native ownership or package rollback cannot be established. Do not
-release a potentially active old sleep owner by guessing its completion.
+* Checks
 
-* Off-device checks
+=tests/test-pinephone-native-dependency.sh= covers package/config/active-provider
+preflight, persistent display-lock identity and the existing call-idle boundary.
+=tests/test-pinephone-suspend-policy.sh= executes actual helper processes and
+locks with private I/O sinks. Its blocked pipe is a syscall-lifetime model, not
+kernel sleep. The old patched-provider/input-import fixtures are removed.
 
-The native fixture sources live in =tests/elogind-native-proof/=. Copy that
-directory as =proof/= into a patched elogind source tree and append its Meson
-target to the upstream root meson.build. Build =proof-provider= using the same
-configured native build, then run =python3 tests/elogind-native-proof/run.py
-BUILD_DIR=. Its wrapped system sinks are synthetic; its fork, wait, reaping,
-parent-death and configured-tool behavior execute actual provider code.
-
-With that build available, run
-=ELOGIND_PROOF_BUILD_DIR=BUILD_DIR tests/test-pinephone-native-sleep.sh=.
-This runs actual acquisition and the shell guard in an isolated container.
-Eventfds substitute for hardware input; fake sysfs substitutes for kernel
-sleep. The blocked-write case is interruptible, not a physical D-state model.
-Real-device identity, capabilities and exact registration must be verified
-before activation. Passing these tests does not demonstrate carrier wake.
+Before publication or target activation, exercise the native package and affected
+workflow in a separate virtual phone, both alone and composed with deployed
+features. Observe actual kernel entry/exit and native preparation, not just a
+successful method reply. Record missing hardware honestly; do not emulate an
+EG25 receipt or claim carrier acceptance from VM S3. Physical call/SMS wake and
+hardware feedback require separate target validation.

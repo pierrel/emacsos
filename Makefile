@@ -50,7 +50,8 @@ test-pinephone-scripts:
 	tests/test-pinephone-openrc-wifi-connect.sh
 	tests/test-pinephone-openrc-device.sh
 	tests/test-pinephone-openrc-power.sh
-	tests/test-pinephone-native-input.sh
+	tests/test-pinephone-native-dependency.sh
+	tests/test-pinephone-suspend-policy.sh
 	python3 tests/test-pinephone-openrc-power-startup.py
 	python3 tests/test-pinephone-openrc-session.py
 	python3 tests/test_pinephone_openrc_sms.py

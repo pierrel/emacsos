@@ -309,16 +309,15 @@ grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-sessio
 grep -F '"$root/process-group" "$root/session-power" monitor' "$deploy_dir/openrc-session" >/dev/null
 grep -F "timeout 180 'doas -n /usr/local/sbin/emacsos-openrc-suspend request'" "$deploy_dir/openrc-session" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
-grep -F 'guard = import_input_guard(user.pw_uid)' "$deploy_dir/openrc-power-monitor" >/dev/null
+grep -F 'guard.register(fd, select.EPOLLIN | WAKEUP)' "$deploy_dir/openrc-power-monitor" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \
     "$deploy_dir/openrc-session-power" >/dev/null
-grep -F 'expected EG25 modem is absent' "$deploy_dir/openrc-suspend-root" >/dev/null
+grep -F 'expected EG25 modem is absent or ambiguous' "$deploy_dir/openrc-power-monitor" >/dev/null
 grep -F 'bindsym XF86AudioRaiseVolume nop' "$deploy_dir/openrc-sway.config" >/dev/null
 grep -F 'bindsym XF86AudioLowerVolume nop' "$deploy_dir/openrc-sway.config" >/dev/null
-grep -F 'enable_wakeup "$power_key"' "$deploy_dir/openrc-suspend-root" >/dev/null
-grep -F 'enable_wakeup "$axp_power_key"' "$deploy_dir/openrc-suspend-root" >/dev/null
-grep -F 'enable_wakeup "$modem/power/wakeup"' \
-    "$deploy_dir/openrc-suspend-root" >/dev/null
+grep -F "Path('/sys/devices/platform/gpio-keys/power/wakeup')" "$deploy_dir/openrc-power-monitor" >/dev/null
+grep -F "Path('/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup')" "$deploy_dir/openrc-power-monitor" >/dev/null
+grep -F "modems[0] / 'power/wakeup'" "$deploy_dir/openrc-power-monitor" >/dev/null
 grep -F 'idle-blank) flock -n -x 9' "$deploy_dir/openrc-session-power" >/dev/null
 grep -F 'timeout -s TERM -k 1 3 /usr/bin/wtype -k F24' \
     "$deploy_dir/openrc-session-power" >/dev/null

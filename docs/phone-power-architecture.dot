@@ -1,0 +1,25 @@
+digraph PhonePower {
+  graph [label="PR92 candidate · phone power ownership (unmerged, not deployed)",
+         labelloc=t, rankdir=TB, fontname="DejaVu Sans", fontsize=19, pad=.25];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=12,
+        fillcolor="#e9f3ff", color="#34506a"];
+  edge [fontname="DejaVu Sans", fontsize=10, color="#49647d"];
+  P1 [label="P1  Swayidle\nexisting one-shot idle policy", fillcolor="#f3f3f3", URL="../deploy/pinephone/openrc-session"];
+  P2 [label="P2  Upstream elogind 257\nnative operation owner", URL="../deploy/pinephone/elogind/README.org"];
+  P3 [label="P3  Root dispatcher + policy helper\nsoftware guard / admission / mem write", URL="../deploy/pinephone/openrc-suspend-root"];
+  P4 [label="P4  Linux PM kernel\nwakeup_count / deep sleep", fillcolor="#edf5e9"];
+  P5 [label="P5  Live input monitor\nown input queues + EPOLLWAKEUP", URL="../deploy/pinephone/openrc-power-monitor"];
+  P6 [label="P6  Session display actions\nshared stable display lock", fillcolor="#f3f3f3", URL="../deploy/pinephone/openrc-session-power"];
+  P7 [label="P7  Existing call helper\nshared call lock + MM query", fillcolor="#f3f3f3", URL="../deploy/pinephone/openrc-call-root"];
+  P8 [label="P8  MM / eg25 / NM\nexisting delay holders", fillcolor="#f3f3f3"];
+  P1 -> P2 [label="Suspend request"];
+  P2 -> P8 [label="PrepareForSleep"];
+  P8 -> P2 [label="release delay FD"];
+  P2 -> P3 [label="run and wait for fixed helper", penwidth=2];
+  P3 -> P4 [label="policy checks → arm → mem"];
+  P5 -> P4 [label="kernel wake registrations"];
+  P5 -> P6 [label="synchronous press / wake"];
+  P6 -> P3 [label="fixed software-wake guard"];
+  P3 -> P6 [label="guarded display action"];
+  P3 -> P7 [label="bounded known-idle check"];
+}
