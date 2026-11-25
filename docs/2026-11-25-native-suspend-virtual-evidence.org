@@ -1,0 +1,136 @@
+#+TITLE: Native suspend implementation and virtual evidence
+#+DATE: 2026-11-25
+
+* Result and identity
+
+Runtime candidate =4aa20da2bfc662089d9f067cc6d6ed48ca6a106b= implements the
+reviewed native-first design. Its tree is
+=423d276101c32f075b0877cab655985ad76ee437=. It is unmerged, unpublished and
+not installed on a physical phone. This report adds evidence without changing
+those runtime bytes.
+
+Upstream 257.16 owns the sleep operation and synchronously waits for one fixed
+phone helper. The helper retains existing call/display locks through its actual
+mem write and returns success for expected policy vetoes. The private provider
+sleep patch, foreign input-descriptor discovery/import and associated C proof
+harness are removed. The monitor keeps its own input registrations and handles
+press/wake synchronously before polling again. The two runtime files lose 102
+net lines; the private provider behavior patch loses another 144 lines.
+
+Unexpected helper execution/termination failure retains upstream fallback.
+This is not crash-proof policy enforcement or protection after monitor death.
+Those limitations are explicit, rather than introducing another controller.
+
+* Package and native-process evidence
+
+The [[file:2026-11-25-elogind-musl-port.org][package record]] identifies the official distro patches, upstream gshadow
+compatibility commit, still-open include follow-up and two local build/header
+corrections. The selected standard aarch64 abuild completed. All six runtime
+APKs verify, and the packaged daemon/loginctl/inhibitor run and eagerly resolve
+their libraries with existing Alpine musl libraries. Extraction checks did not
+change the builder's package database. This is not a physical-phone dependency
+transaction or permission to install the packages there.
+
+The same recipe built native x86_64 packages for a disposable Alpine 3.22 VM.
+The actual packaged daemon started through ordinary OpenRC, without a private
+loader or behavior patch. Three finite tests observed:
+
+- An intentionally successful no-op helper completed without kernel entry.
+- A normal helper entered real virtual S3. Both kernel PM messages and QMP
+  SUSPEND/WAKEUP establish entry/resume, independently of login1's early reply.
+- A controlled nonzero helper exit exercised upstream's native fallback and
+  entered virtual S3. This is an abnormal-return experiment, not a phone crash.
+
+The tests also observed delay-holder release before helper execution,
+PreparingForSleep while the helper was held, rejection of a concurrent second
+request, and actual guest keyboard packets. No modem, carrier, physical input
+wiring or haptic behavior is inferred from those observations.
+
+* Integrated corrections caught by the VM
+
+The actual Alpine apk-tools rejected =apk info --exists=. The supported
+=apk info --installed elogind=257.16-r1= predicate accepts the selected version
+and rejects the old and an invented version. The helper and exact-argv fixture
+now use that real contract.
+
+The 257 manager calls =parse_sleep_config=, which reads =elogind/sleep.conf=,
+as does the native sleep path. A copied =[Sleep]= logind.conf drop-in emitted
+an ignored-section warning. The fixed dependency now requires only the sleep
+configuration; the obsolete 252-specific logind drop-in is unnecessary.
+Active installed-executable identity, fixed configuration digest, conflicting
+sleep-setting rejection and owner recheck remain.
+
+* Both source contexts
+
+The frozen virtual target was revision =97dee= with image
+=sha256:2547f28a90fe4e8ecb1ad919986eb28fecc449326b939413043f096d18f9e5c6=.
+A private disk-backed overlay was used. Its accepted virtual-only session is
+an explicit adaptation; this is not a claim about a later shared-runtime target.
+
+First the exact candidate, then a temporary composition over recorded live
+source =3d2d2d4c7e13e6bb08edffa96732449aa5d87a7c=, loaded the actual application
+modules and PinePhone Emacs bootstrap. Both passed native dependency checks,
+accepted ordinary Wayland keyboard input and produced inspected UI screenshots.
+They used synthetic state and unreachable loopback Assist endpoints.
+
+The composed source preserves the live call-idle-blank generation path, usage
+collector launch and unrelated application modules. Existing usage attempt/return
+telemetry moves from the deleted shell writer to the actual Python writer.
+Its children close writer descriptors; timeout/failure diagnostics and same-PID
+pairing remain. No telemetry command runs between counter arming and mem entry.
+Expected successful no-op vetoes have return status zero; abrupt kill can still
+leave an unpaired diagnostic event.
+
+Actual native dispatch to the production helper completed as a successful veto
+without QMP S3. The virtual session does not initialize physical phone power
+state, and the VM lacks PinePhone supply/modem hardware. These refusals verify
+the native dispatch/no-op boundary, not normal physical admission. The separate
+normal S3 experiment used a declared fixed test helper. A final, explicitly
+synthetic blank-state precondition let the production helper reach the absent
+=axp20x-usb= supply check and veto there. No PinePhone hardware was emulated.
+
+* Deterministic checks and review
+
+The exact candidate's ordinary =make test-pinephone-scripts= completed with
+exit zero, including 93 ERT results, eight provider/stable-lock checks, three
+call-idle checks and eight helper-policy cases. Other platform checks in that
+target also passed.
+
+The live-preserving composition's same target completed with exit zero,
+including 119 OpenRC/notification ERT results, ten SMS bridge ERT results and
+22 usage tests. The relocated usage-hook test executes its real timeout with
+inheritable fixture descriptors and verifies they are closed in the child,
+power execution continues and failed diagnostics are reported.
+
+The helper cases use actual processes/flocks and private I/O sinks for normal
+entry, call/USB/display vetoes, unsafe state, counter timeout and a blocked
+writer. Their pipe models a blocked syscall; it is not kernel sleep. Existing
+input/display fixtures retain overflow, simultaneous-event and guarded-action
+coverage. Obsolete foreign-FD/private-provider fixtures are removed.
+
+Focused independent package/runtime/integration review and separate comment,
+architecture and documentation passes converged. Verified corrections were the
+APK predicate, version-specific config contract, diagram boundary and relocated
+telemetry diagnostic/fixture alignment. No known in-scope blocker remains in
+this candidate. Git whitespace checks exclude preserved patch-file context and
+mail trailers; those source/checksum bytes are intentionally unchanged.
+
+* Remaining target acceptance
+
+Physical activation is a separate operation. Preserve the actual live feature
+composition and private phone data, quiesce old requesters/writer before changing
+the lock/provider contract, install the matched signed package set using temporary
+trust, and verify the installed provider actually owns login1. Re-establish and
+verify modem/network delay inhibitors after restart. The
+[[file:../deploy/pinephone/elogind/README.org][dependency and ordered activation contract]] describes that boundary.
+
+Physical SMS/call wake, display/input behavior and feedback still need target
+validation after an authorized installation. VM S3 and UI checks do not establish
+those hardware outcomes. No phone operation, public push, PR update or merge was
+performed for this evidence.
+
+* Historical supersessions
+
+This replaces the next-VM-work status in the =Evidence and limits= section of
+[[file:2026-11-25-elogind-musl-port.org][the package record]] with actual native-package and both-context virtual results.
+Its source research, build facts and physical-test limitations remain valid.
