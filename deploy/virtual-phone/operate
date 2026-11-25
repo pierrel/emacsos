@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Thin native SSH/QMP operations for one disposable virtual phone state."""
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import socket
+import subprocess
+import sys
+import time
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def ssh(command, **kwargs):
+    return run(['docker', 'exec', '-i', cid(), 'ssh', '-T', '-i', '/out/id_ed25519',
+                '-p', '2222', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
+                '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+                'root@127.0.0.1', command], timeout=15, **kwargs)
+
+
+def cid():
+    return (state / 'container.id').read_text().strip()
+
+
+def qmp(commands):
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(15)
+        sock.connect(str(state / 'qmp.sock'))
+        stream = sock.makefile('rwb', buffering=0)
+        if 'QMP' not in json.loads(stream.readline()):
+            raise RuntimeError('missing QMP greeting')
+        for number, command in enumerate([{'execute': 'qmp_capabilities'}, *commands]):
+            command['id'] = number
+            stream.write(json.dumps(command).encode() + b'\n')
+            while True:
+                response = json.loads(stream.readline())
+                if response.get('id') == number:
+                    if 'error' in response:
+                        raise RuntimeError(response['error'])
+                    break
+
+
+def event(events):
+    return {'execute': 'input-send-event', 'arguments': {'events': events}}
+
+
+def button(name, down):
+    return {'type': 'btn', 'data': {'button': name, 'down': down}}
+
+
+parser = argparse.ArgumentParser(description=__doc__)
+sub = parser.add_subparsers(dest='action', required=True)
+sub.add_parser('ready', help='wait up to 60 seconds for the shared physical readiness marker')
+p = sub.add_parser('screenshot', help='capture real scanout to a PPM or PNG outside Git')
+p.add_argument('output', type=Path)
+p = sub.add_parser('tap', help='tap a pixel in the 720x1440 scanout')
+p.add_argument('x', type=int, choices=range(720), metavar='X')
+p.add_argument('y', type=int, choices=range(1440), metavar='Y')
+p = sub.add_parser('scroll', help='scroll at the current pointer position')
+p.add_argument('direction', choices=['up', 'down'])
+p.add_argument('steps', type=int, choices=range(1, 101), metavar='STEPS')
+p = sub.add_parser('keys', help='pass ordinary key/text arguments to native wtype (use -- before options)')
+p.add_argument('arguments', nargs=argparse.REMAINDER)
+p = sub.add_parser('text', help='type literal text through native wtype')
+p.add_argument('text')
+sub.add_parser('logs', help='read serial, QEMU and guest UI/system logs')
+sub.add_parser('diag', help='run harmless kernel/OpenRC/package diagnostics')
+sub.add_parser('stop', help='guest poweroff, bounded wait, then remove only its exited container')
+sub.add_parser('reset', help='remove only the stopped session overlay; next start uses the clean base')
+args = parser.parse_args()
+repo = Path(__file__).resolve().parents[2]
+state = Path(os.environ.get('VIRTUAL_PHONE_STATE', repo / '.build/virtual-phone')).resolve()
+try:
+    if args.action == 'ready':
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                ssh('test "$(cat /run/emacsos-ui/ready 2>/dev/null)" = ready',
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print('ready: shared Sway window and Emacs server probes passed')
+                break
+            except subprocess.CalledProcessError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('UI not ready after 60 seconds; run operate logs')
+                time.sleep(1)
+    elif args.action == 'screenshot':
+        output = args.output.resolve()
+        if output.suffix not in ('.ppm', '.png'):
+            raise ValueError('screenshot output must end in .ppm or .png')
+        ppm = state / 'scanout.ppm'
+        qmp([{'execute': 'screendump', 'arguments': {'filename': '/out/scanout.ppm'}}])
+        if output.suffix == '.png':
+            run(['magick', str(ppm), str(output)])
+        else:
+            import shutil
+            if output != ppm:
+                shutil.copyfile(ppm, output)
+        print(output)
+    elif args.action == 'tap':
+        qmp([event([{'type': 'abs', 'data': {'axis': 'x', 'value': round(args.x * 32767 / 719)}},
+                    {'type': 'abs', 'data': {'axis': 'y', 'value': round(args.y * 32767 / 1439)}},
+                    button('left', True)]), event([button('left', False)])])
+    elif args.action == 'scroll':
+        qmp([command for _ in range(args.steps) for command in
+             (event([button('wheel-' + args.direction, True)]),
+              event([button('wheel-' + args.direction, False)]))])
+    elif args.action in ('keys', 'text'):
+        words = ['--', args.text] if args.action == 'text' else args.arguments
+        if args.action == 'keys' and words[:1] == ['--']:
+            words = words[1:]
+        if not words:
+            raise ValueError('keys requires wtype arguments')
+        command = ('export XDG_RUNTIME_DIR=/run/emacsos-ui; '
+                   'for socket in "$XDG_RUNTIME_DIR"/wayland-*; do '
+                   '[ ! -S "$socket" ] || export WAYLAND_DISPLAY="${socket##*/}"; done; '
+                   'exec wtype ' + shlex.join(words))
+        ssh('su -s /bin/sh emacsos-lab -c ' + shlex.quote(command))
+    elif args.action == 'diag':
+        ssh('uname -a; cat /etc/alpine-release; rc-status; '
+            'python3 -I -c ' + shlex.quote('import dbus, requests, yaml; print("Python dependencies ready")'))
+    elif args.action == 'logs':
+        run(['tail', '-n', '100', str(state / 'serial.log')])
+        run(['docker', 'logs', '--tail', '100', cid()])
+        ssh('tail -n 100 /var/log/virtual-phone-ui.log /var/log/messages')
+    elif args.action == 'stop':
+        container = cid()
+        try:
+            ssh('poweroff')
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 255:
+                raise
+        result = run(['docker', 'wait', container], timeout=30, capture_output=True, text=True)
+        if result.stdout.strip() != '0':
+            raise RuntimeError('guest/container did not exit cleanly: ' + result.stdout.strip())
+        run(['docker', 'rm', container])
+        (state / 'container.id').unlink()
+        print('stopped: exit 0; disk and evidence preserved')
+    elif args.action == 'reset':
+        if (state / 'container.id').exists():
+            raise RuntimeError('stop the owned guest before reset')
+        (state / 'session.qcow2').unlink()
+        print('reset: overlay removed; next start uses the clean base')
+except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+    print(f'virtual-phone: {error}', file=sys.stderr)
+    sys.exit(1)

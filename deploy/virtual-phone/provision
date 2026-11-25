@@ -1,0 +1,78 @@
+#!/bin/sh
+# Provision only a disposable Alpine virtual phone image.
+set -eu
+[ -f /etc/alpine-release ]
+root=/usr/local/share/emacsos-openrc
+install -d -m0755 "$root" /usr/local/libexec /etc/emacsos-openrc
+snapshot=$(mktemp -d)
+while read -r digest name; do
+    case $name in
+        sms_forward.py) source=/source/server/emacsos_server/$name ;;
+        *)
+            if [ -f "/source/deploy/pinephone/$name" ]; then
+                source=/source/deploy/pinephone/$name
+            else
+                source=/source/$name
+            fi ;;
+    esac
+    install -m0644 "$source" "$snapshot/$name"
+done < /source/deploy/pinephone/openrc-manifest.sha256
+(cd "$snapshot" && sha256sum -c /source/deploy/pinephone/openrc-manifest.sha256)
+. "$snapshot/openrc-runtime"
+install_runtime "$snapshot"
+rm -rf "$snapshot"
+# Only this image selects virtual hardware; physical installation has no marker.
+install -m0644 /dev/null "$root/virtual"
+install -m0755 /source/deploy/virtual-phone/session /usr/local/libexec/emacsos-virtual-session
+# The virtual GPU has a different connector; preserve the physical UI geometry.
+sed -i 's/output DSI-1 mode 720x1440@60Hz scale 2/output * mode 720x1440 scale 2/; /input type:touch map_to_output/d' "$root/sway.config"
+adduser -D -h /var/lib/emacsos-lab emacsos-lab
+chmod 0700 /var/lib/emacsos-lab
+install -o emacsos-lab -g emacsos-lab -m600 /source/EMACSOS-COMMANDS.org /var/lib/emacsos-lab/EMACSOS-COMMANDS.org
+addgroup emacsos-lab video
+addgroup emacsos-lab seat
+addgroup emacsos-lab audio
+printf 'root:%s\n' "$(head -c 32 /dev/urandom | sha256sum | cut -d ' ' -f 1)" | chpasswd
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+cp /source/deploy/virtual-phone/authorized_keys /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+printf '%s\n' 'PasswordAuthentication no' 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/virtual-phone.conf
+printf '%s\n' 'http://127.0.0.1:9/chat' > /etc/emacsos-openrc/chat-url
+printf '%s\n' 'http://127.0.0.1:9/api/v1/phone' > /etc/emacsos-openrc/assist-web-url
+cat > /etc/local.d/virtual-phone.start <<'START'
+#!/bin/sh
+install -d -o emacsos-lab -g emacsos-lab -m700 /run/emacsos-ui
+install -o emacsos-lab -g emacsos-lab -m600 /dev/null /var/log/virtual-phone-ui.log
+START
+chmod 755 /etc/local.d/virtual-phone.start
+printf '%s\n' '::respawn:/bin/su -s /bin/sh emacsos-lab -c /usr/local/libexec/emacsos-virtual-session' >> /etc/inittab
+rc-update add devfs sysinit
+rc-update add dmesg sysinit
+rc-update add udev sysinit
+rc-update add udev-trigger sysinit
+rc-update add hwdrivers sysinit
+rc-update add root boot
+rc-update add fsck boot
+rc-update add localmount boot
+rc-update add modules boot
+rc-update add sysctl boot
+rc-update add cgroups boot
+rc-update add hwclock boot
+rc-update add hostname boot
+rc-update add bootmisc boot
+rc-update add syslog boot
+rc-update add dbus default
+rc-update add seatd default
+rc-update add sshd default
+rc-update add networking boot
+rc-update add local default
+printf '%s\n' 'auto lo' 'iface lo inet loopback' 'auto eth0' 'iface eth0 inet dhcp' > /etc/network/interfaces
+printf '%s\n' 'virtual-phone' > /etc/hostname
+printf '%s\n' '/dev/vda / ext4 defaults 0 1' > /etc/fstab
+printf '%s\n' 'virtio_gpu' > /etc/modules
+printf '%s\n' 'features="ata base ext4 keymap kms virtio"' > /etc/mkinitfs/mkinitfs.conf
+set -- /lib/modules/*
+[ "$#" -eq 1 ]
+mkinitfs -c /etc/mkinitfs/mkinitfs.conf "${1##*/}"
+rm -rf /source

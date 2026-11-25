@@ -1,0 +1,24 @@
+#!/bin/sh
+# Start or resume a disposable overlay using standard QMP/VNC/SSH interfaces.
+set -eu
+repo=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+state=${VIRTUAL_PHONE_STATE:-$repo/.build/virtual-phone}
+state=$(CDPATH='' cd -- "$state" && pwd)
+[ ! -e "$state/container.id" ] || { echo 'Stop the previous container and remove container.id first.' >&2; exit 1; }
+image=$(cat "$state/image-id")
+if [ ! -e "$state/session.qcow2" ]; then
+    docker run --rm --user "$(id -u):$(id -g)" --network none -v "$state:/out" "$image" \
+        qemu-img create -f qcow2 -F raw -b /out/base.raw /out/session.qcow2
+fi
+docker run --detach --user "$(id -u):$(id -g)" --cidfile "$state/container.id" --network none \
+    --device /dev/kvm --group-add "$(stat -c %g /dev/kvm)" -v "$state:/out" "$image" \
+    qemu-system-x86_64 -accel kvm -cpu host -m 2048 -smp 2 \
+    -kernel /out/vmlinuz -initrd /out/initramfs \
+    -append 'root=/dev/vda rootfstype=ext4 rw console=ttyS0 modules=virtio_pci,virtio_blk,ext4' \
+    -drive file=/out/session.qcow2,format=qcow2,if=virtio \
+    -device virtio-vga,xres=720,yres=1440 -device qemu-xhci -device usb-tablet \
+    -display none -vnc unix:/out/vnc.sock \
+    -qmp unix:/out/qmp.sock,server=on,wait=off -serial file:/out/serial.log \
+    -netdev user,id=net,restrict=on,hostfwd=tcp:127.0.0.1:2222-:22 \
+    -device virtio-net-pci,netdev=net
+printf '%s\n' "Started container $(cat "$state/container.id"); SSH is container-local 127.0.0.1:2222."

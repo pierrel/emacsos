@@ -1,0 +1,8 @@
+#!/bin/sh
+# BusyBox init respawns the same runtime session used by the physical phone.
+set -eu
+exec >> /var/log/virtual-phone-ui.log 2>&1
+export HOME=/var/lib/emacsos-lab XDG_RUNTIME_DIR=/run/emacsos-ui
+export XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd WLR_RENDERER=pixman
+export WLR_BACKENDS=drm,libinput WLR_DRM_NO_ATOMIC=1 NO_AT_BRIDGE=1
+exec /usr/bin/setsid --fork --wait /bin/sh /usr/local/share/emacsos-openrc/session

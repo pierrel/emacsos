@@ -1,0 +1,51 @@
+#+title: Virtual phone acceptance and review record
+
+* Current revision
+
+The shared-runtime revision requires fresh seven-scenario UI acceptance from
+clean source in both the isolated candidate and an explicit composition with
+current deployed application code. No previous result substitutes for that run.
+The published procedure is [[file:../deploy/virtual-phone/README.md][the virtual phone workflow]]. Capture screenshots and
+logs in private state outside Git, and record exact source identities with the
+results. Screenshots are deliberately excluded from this branch and its history.
+
+The first revised integrated path built the shared physical payload, booted
+Alpine/OpenRC, passed the physical session's Sway-window and Emacs-server
+readiness probes, and produced a real 720x1440 capture. Guest diagnostics imported
+D-Bus, Requests and PyYAML. This development check is not final acceptance.
+
+* Historical evidence attribution
+
+Before this revision, accepted source 41a5561ac88b15aedc6b3801bd1378555e7724aa
+contained the first virtual target and four bridge review rounds. Its runtime
+source was 97dee428aab9e652c4946963107f4ecc4febfa7a; the corresponding live-source
+composition was 21c6d6ade98d0d76f8f768bab1e57f4f36dfe8ba. Earlier UI observations
+were attributed to c253be0796925d2133b3286e8c1db793484e7a68 and composition
+0d5493f087c4e3e0c7270c749d06ab071e2b0dea, with affected runtime follow-ups on
+c8e0d0f036be5306b9a4f733f617d2fc9de43d73 and fa8fdd880f62dd1d9af65260ec9bbaa5aa69682a.
+Those observations established the earlier milestone, with explicitly reused
+unchanged-runtime scenes. They do not validate the revised shared target.
+
+The original branch history, historical report and capture evidence were
+preserved privately outside Git before the branch-only rewrite. Historical
+commit identifiers here identify that archived evidence; the revised public
+branch does not retain its screenshot objects as ancestors.
+
+Four actual Copilot rounds were completed on the earlier target. Verified fixes
+covered keyboard and font notices, source-capture failure propagation, KVM device
+group access, native UI restart and HOME, explicit payload permissions under
+umask 077, and bounded cleanup of a stopped keyboard child. Round four reported
+no open issues. Review limits continue across this revision.
+
+* Known boundaries
+
+The guest has no external network, real credentials, personal history, modem,
+sensors or battery. Assist is unavailable by design; real isolated Assist
+integration remains roadmap work. Physical behavior is not established by guest
+UI success. Mobile Firefox policy uses the native signed postmarketOS v25.06 package,
+4.6.0-r0, via a one-off tagged repository. It matches the recorded physical
+package input; no current physical package-version check is claimed. The guest has an unresolved historical SSH I/O-error observation;
+no long-lived reliability guarantee follows from short acceptance sessions.
+
+Physical shared deployment changes require source review and deterministic
+checks. No physical deployment or merge is authorized by virtual acceptance.

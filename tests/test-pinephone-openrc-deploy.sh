@@ -49,7 +49,7 @@ done
 
 manifest_stage=$(mktemp -d)
 trap 'rm -rf -- "$manifest_stage"' EXIT HUP INT TERM
-for name in inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
+for name in openrc-runtime inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config openrc-session \
     openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root wvkbd-transaction-root \
     openrc-call-root openrc-sms-root openrc-network-root openrc-wifi-connect-root \
@@ -90,7 +90,7 @@ grep -F 'os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW' \
 grep -F 'stat.S_IMODE(info.st_mode) != 0o600' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'info.st_nlink != 1' "$deploy_dir/openrc-update-root" >/dev/null
-grep -F '[ "$count" -eq 53 ]' "$deploy_dir/openrc-update-root" >/dev/null
+grep -F '[ "$count" -eq 54 ]' "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'legacy-emacos-assist.el:/usr/local/share/emacsos-openrc/emacos-assist.el' \
     "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'restore_file legacy-emacos-assist.el' \
@@ -102,7 +102,7 @@ keyboard_install_line=$(grep -nF \
     'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos" "$current_wvkbd"' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 session_install_line=$(grep -nF \
-    'install -o root -g root -m 0755 "$snapshot/openrc-session"' \
+    'install_runtime "$snapshot"' \
     "$deploy_dir/openrc-update-root" | tail -1 | cut -d: -f1)
 [ "$keyboard_install_line" -lt "$session_install_line" ]
 grep -F 'WVKBD_REPO_DIR=${WVKBD_REPO_DIR:-$repo_dir/../wvkbd}' \
@@ -119,9 +119,9 @@ grep -F '"$wvkbd_sha256  $snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" "$deploy_dir/openrc-update-root" >/dev/null
 grep -F 'env -u EMACSOS_WVKBD_CANDIDATE_SHA256 rc-service' \
     "$deploy_dir/openrc-update-root" >/dev/null
-simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate py3-dbus' \
+simulate_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add --simulate "$@"' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
-install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default >/dev/null' \
+install_line=$(grep -nF 'timeout -s TERM -k 5 30 apk add "$@" >/dev/null' \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
 dbus_check_line=$(grep -nF "/usr/bin/python3 -I -c 'import dbus, sqlite3, requests, yaml'" \
     "$deploy_dir/openrc-update-root" | cut -d: -f1)
@@ -171,6 +171,7 @@ openrc-init.el
 openrc-network-root
 openrc-power-monitor
 openrc-process-group
+openrc-runtime
 openrc-session
 openrc-session-power
 openrc-sms-root
@@ -342,7 +343,7 @@ grep -F 'rc-service emacsos-ui start 8>&- 9>&-' \
 grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-boot-mode" >/dev/null
 
 grep -F '[ "${SUDO_USER-}" = user ]' "$deploy_dir/openrc-install-root" >/dev/null
-grep -F '[ "$count" -eq 53 ]' "$deploy_dir/openrc-install-root" >/dev/null
+grep -F '[ "$count" -eq 54 ]' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'install -o root -g root -m 0755 "$snapshot/wvkbd-emacsos"' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'unexpected staged file' "$deploy_dir/openrc-install-root" >/dev/null
@@ -351,7 +352,7 @@ grep -F "fail 'lab account group set is unsafe'" "$deploy_dir/openrc-install-roo
 grep -F '/run/emacsos-openrc-proof' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'apk add --simulate "$@"' "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'pinephone-callaudiod alsa-utils' \
-    "$deploy_dir/openrc-install-root" >/dev/null
+    "$deploy_dir/openrc-runtime" >/dev/null
 grep -F 'rc-update add eg25-manager default' \
     "$deploy_dir/openrc-install-root" >/dev/null
 grep -F 'rc-update add modemmanager default' \

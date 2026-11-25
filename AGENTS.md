@@ -18,6 +18,22 @@ phone**. There is **no small-model eval harness** here — the live phone is the
 
 ## Testing and deployment facts
 
+- Before publishing a phone-affecting PR, publishing phone-code updates to that
+  PR (including review fixes), or deploying it to a physical phone,
+  run its real UI flow through the [virtual phone](deploy/virtual-phone/README.md).
+  Validate both the isolated candidate checkout and an explicit clean composition
+  with the currently deployed application source. Use separate synthetic guest
+  state for each context and record exact source, commands, screenshots and
+  limitations. Build/start with `WVKBD_REPO_DIR=/path/to/wvkbd
+  deploy/virtual-phone/build` and `deploy/virtual-phone/start` from each checkout;
+  follow the linked standard SSH/QMP/VNC input and inspection instructions.
+  Mocked, TTY or internal Emacs-evaluation tests do not satisfy this gate.
+  Keep physical validation for hardware-specific behavior and explicitly record
+  unsupported virtual checks. Run the affected workflows proportionately; PR
+  metadata edits and documentation changes that do not affect the UI need no
+  irrelevant VM runs. While this target is being established, this gate
+  remains pending until both real guest contexts have been exercised.
+
 - Run `make test-elisp` (ERT) and `make test-server` (pytest) for affected client
   and server changes. Use `make smoke` when the wire protocol or boot path
   changes, plus real-phone smoke after a boot-path refactor. Unit tests do not
