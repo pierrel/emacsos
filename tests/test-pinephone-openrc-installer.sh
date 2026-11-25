@@ -72,6 +72,7 @@ printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
     'printf "%s\\n" "apk $*" >>/tmp/transaction-log' \
     'if [ -e /tmp/block-apk ]; then exec sleep 300; fi' \
+    'if [ "${1-}" = add ] && [ "${2-}" != --simulate ] && [ -e /tmp/python-bootstrap ]; then cp /tmp/python-bootstrap /usr/bin/python3; chmod 0755 /usr/bin/python3; fi' \
     'if [ "${1-}" = add ]; then for package do [ "$package" != py3-dbus ] || touch /tmp/py3-dbus-present; done; fi' \
     'exit 0' \
     >/usr/bin/apk
@@ -322,7 +323,10 @@ printf '%s\n' \
 chown root:root /etc/inittab
 chmod 0644 /etc/inittab
 
-# Native dependency failure rejects fresh installation before UI activation.
+# Fresh dependency installation bootstraps Python before native preflight.
+# An invalid provider still rejects before payload publication or UI activation.
+mv /usr/bin/python3 /tmp/python-bootstrap
+[ ! -e /usr/bin/python3 ]
 touch /tmp/native-provider-invalid
 : >/tmp/rc-service-log
 if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
@@ -333,6 +337,8 @@ fi
 grep -F 'native sleep dependency is not ready' /tmp/native-install-reject.out >/dev/null
 [ ! -e /etc/init.d/emacsos-ui ]
 ! grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null
+[ -x /usr/bin/python3 ] || { printf '%s\n' 'native preflight ran before Python bootstrap' >&2; exit 1; }
+rm /tmp/python-bootstrap
 rm /tmp/native-provider-invalid
 
 # Caller-supplied reviewed digests bind the root snapshot to the build that

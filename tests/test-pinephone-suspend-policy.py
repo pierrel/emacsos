@@ -17,17 +17,18 @@ class SuspendPolicy(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='phone-policy-')
         self.root = Path(self.temp.name)
         self.root.chmod(0o755)
-        self.uid = pwd.getpwnam('emacsos-lab').pw_uid
+        user = pwd.getpwnam('emacsos-lab')
+        self.uid, self.gid = user.pw_uid, user.pw_gid
         self.runtime = self.root / 'runtime'
         self.runtime.mkdir(mode=0o700)
-        os.chown(self.runtime, self.uid, self.uid)
+        os.chown(self.runtime, self.uid, self.gid)
         self.state = self.runtime / 'power-state'
         self.state.write_bytes(b'blank\n')
         self.state.chmod(0o600)
-        os.chown(self.state, self.uid, self.uid)
+        os.chown(self.state, self.uid, self.gid)
         self.display = self.root / 'display.lock'
         self.display.touch(mode=0o600)
-        os.chown(self.display, self.uid, self.uid)
+        os.chown(self.display, self.uid, self.gid)
         self.call = self.root / 'call.lock'
         self.call.touch(mode=0o600)
         self.power = self.root / 'power'
@@ -124,7 +125,7 @@ sys.exit(int(pathlib.Path(%r).read_text()))
     def test_unavailable_state_is_bounded_successful_veto(self):
         self.state.unlink()
         os.mkfifo(self.state, 0o600)
-        os.chown(self.state, self.uid, self.uid)
+        os.chown(self.state, self.uid, self.gid)
         self.assert_veto()
 
     def test_unsafe_lock_is_successful_veto(self):
@@ -177,7 +178,8 @@ sys.exit(int(pathlib.Path(%r).read_text()))
             self.assertNotEqual(self.startup().returncode, 0)
             os.read(keeper, 8192)
             self.assertEqual(child.wait(timeout=3), 0)
-            self.assertEqual(self.startup().returncode, 0)
+            result = self.startup()
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertEqual(self.state.read_bytes(), b'waking\n')
             sink.unlink()
             sink.write_bytes(b'')

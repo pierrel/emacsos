@@ -269,8 +269,6 @@ done
 [ "$(sha256sum "$snapshot/openrc-manifest.sha256")" = \
     "$manifest_hash  $snapshot/openrc-manifest.sha256" ] || fail 'manifest hash mismatch'
 (cd "$snapshot" && sha256sum -c openrc-manifest.sha256) || fail 'payload hash mismatch'
-timeout -s TERM -k 1 15 /usr/bin/python3 -I "$snapshot/openrc-power-monitor" provider-check ||
-    fail 'native sleep dependency is not ready'
 [ "$(sha256sum "$snapshot/wvkbd-emacsos")" = \
     "$wvkbd_sha256  $snapshot/wvkbd-emacsos" ] || fail 'keyboard digest mismatch'
 [ "$(sha256sum "$snapshot/wvkbd-notice")" = \
@@ -402,6 +400,8 @@ for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
 /usr/bin/python3 -I -c 'import dbus, sqlite3, requests' || fail 'SMS Python dependencies are absent'
+timeout -s TERM -k 1 15 /usr/bin/python3 -I "$snapshot/openrc-power-monitor" provider-check ||
+    fail 'native sleep dependency is not ready'
 for directory in /usr /usr/local /usr/local/sbin /etc /etc/doas.d; do
     check_safe_root_directory "$directory"
 done

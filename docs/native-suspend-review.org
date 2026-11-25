@@ -61,7 +61,9 @@ initd create-once lock test. [[file:../tests/test-pinephone-openrc-power.sh][Dis
 overflow and simultaneous-event ordering, guarded display overlap and cleanup.
 Their SYS_PTRACE capability is test-only cross-UID inspection; the product no
 longer imports foreign descriptors or needs that capability for acquisition.
-The old patched-provider and input-import fixtures are deleted.
+The old patched-provider and input-import fixtures are deleted. The policy
+fixture defaults to the public Alpine Python image and uses the account's actual
+primary GID; it does not require a separately built application sandbox image.
 
 Actual native-package VM evidence is separate: the standard OpenRC daemon has
 been started, a successful no-op prevented entry, the normal test helper entered

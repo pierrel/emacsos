@@ -1,0 +1,39 @@
+#+TITLE: Native suspend installer and fixture corrections
+#+DATE: 2026-11-25
+
+* Scope
+
+Review of candidate 8798f97 found a fresh-install interpreter-order defect and an
+undocumented local test-image dependency. These are installer/fixture changes;
+compiled provider, policy helper, package recipe and six runtime APKs stay exact.
+No physical operation is performed.
+
+The installer now runs native preflight after its existing dependency install
+and Python import check, still before UI publication/activation. The changed
+transaction fixture starts without /usr/bin/python3; only actual dependency
+installation restores its fixture interpreter. Invalid native dependencies must
+then reject before creating or stopping UI. The predecessor fails this new
+regression; the corrected full installer/update/rollback fixture passes.
+
+The policy fixture uses the existing public python:3.13-alpine baseline instead
+of an unrelated local application image. Its account setup uses the actual
+primary GID rather than assuming UID equals GID. All eight actual helper/lock
+cases pass with production validation unchanged.
+
+* Explicit deferred finding
+
+The inherited APKBUILD stages two standalone compatibility headers outside
+$pkgdir. Inspection of the actual selected development APK confirms ordinary
+Meson headers exist under usr/include/elogind but the root-level compatibility
+copies are absent. This real development-package defect has no demonstrated
+phone-runtime impact. It is deferred under the bounded phone-runtime scope;
+APKBUILD and the six tested runtime artifact identities remain unchanged.
+No corrected development-package or new binary identity is claimed.
+
+* Historical supersessions
+
+This supplements the Deterministic checks and review section of
+[[file:2026-11-25-native-suspend-virtual-evidence.org][the virtual evidence report]] with the fresh-interpreter and public-image
+regressions and the explicit development-package limitation. Its native/VM
+observations and physical-acceptance limits remain valid; those runtime bytes
+have not changed.
