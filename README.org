@@ -77,6 +77,10 @@ Four replacements remain, down from five, with four advices rather than six:
   and direct callers. Retire it when the native branch selects the last day
   before running its move hook.
 
+The phone's native window fit uses pixelwise resizing locally. The generic
+attention line can be taller than a text row; whole-row rounding otherwise
+clips the last week of a six-week month. Desktop window sizing is unchanged.
+
 On an Emacs upgrade, recheck these named contracts and rerun native date/hook/
 desktop regressions and phone-sized graphical acceptance before retaining the
 adapter. Use an upstream one-month facility if it makes this boundary unnecessary;

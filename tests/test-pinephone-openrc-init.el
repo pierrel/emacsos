@@ -141,6 +141,22 @@
      (calendar-goto-today)
      (should (equal (calendar-cursor-to-date) (calendar-current-date))))))
 
+(ert-deftest emacsos-openrc-calendar-fits-without-line-rounding ()
+  "Phone Calendar fits exact pixels without changing the desktop resize option."
+  (let ((window-resize-pixelwise nil)
+        (native-fit (symbol-function 'fit-window-to-buffer))
+        fitted)
+    (emacsos-test-with-phone-calendar
+     (cl-letf (((symbol-function 'fit-window-to-buffer)
+                (lambda (&rest arguments)
+                  (push window-resize-pixelwise fitted)
+                  (apply native-fit arguments))))
+       (calendar)
+       (calendar-goto-date '(1 1 2027)))
+     (should fitted)
+     (should (cl-every #'identity fitted)))
+    (should-not window-resize-pixelwise)))
+
 (ert-deftest emacsos-openrc-calendar-today-hooks-match-visible-month ()
   "Native cleanup hooks see actual one-month visibility, including diary errors."
   (emacsos-test-with-phone-calendar

@@ -1308,10 +1308,12 @@ Proportional rows fit STATUS to the pixels left after LABEL and action budgets."
     (calendar-cursor-to-visible-date
      (if (calendar-date-is-visible-p today) today (list month 1 year)))
     (set-buffer-modified-p nil)
-    ;; Retain native fitting and marking order; hooks run in native cleanup.
+    ;; Fit exact pixels: the phone attention line need not be a whole text row.
+    ;; Retain native marking order; hooks run in native cleanup.
     (when visible-window
       (if (window-combined-p)
-          (fit-window-to-buffer nil nil calendar-minimum-window-height)
+          (let ((window-resize-pixelwise t))
+            (fit-window-to-buffer nil nil calendar-minimum-window-height))
         (set-window-vscroll nil 0))
       (sit-for 0))
     (when calendar-mark-holidays-flag
