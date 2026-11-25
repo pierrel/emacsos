@@ -18,7 +18,7 @@ lock=/run/emacsos-openrc-install.lock
 boot_lock=/run/emacsos-openrc-boot-mode.lock
 wvkbd_legacy_lock=/run/wvkbd-emacos-install.lock
 wvkbd_lock=/run/wvkbd-emacsos-install.lock
-manifest_hash=7e2acfc25d4534548159c5373fa7d7937b77a623b1d89463970ac000175681ea
+manifest_hash=42a9a0f3b59f953d135160658e0e3ea5865a4c948ac062ca2d18a594fd024b1e
 mutating=0
 committed=0
 restart_only=0
@@ -744,7 +744,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     name=${path##*/}
     case $name in
-        openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|phone-contacts.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|phone-notifications.el|phone-assist-notifications.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
+        openrc-runtime|openrc-manifest.sha256|inter.ttf|inter-OFL.txt|jetbrains-mono.ttf|jetbrains-mono-OFL.txt|phone-fonts.conf|openrc-init.el|dtach-shell.el|dtach-shell-init.el|openrc-sway.config|openrc-session|openrc-session-power|openrc-power-monitor|openrc-process-group|emacsos-wvkbd-launch|swipe-learning-collector.py|openrc-suspend-root|wvkbd-transaction-root|emacsos-ui.initd|openrc-boot-mode|waydroid-container.service|waydroid-container.conf|waydroid-container-wrapper|os.el|emacsos-typography.el|chat.el|assist-web.el|assist-web-git.el|assist-web-git-helper.py|phone-contacts.py|emacsos-assist.el|network.el|phone-call.el|phone-sms.el|phone-sms-chat.el|phone-notifications.el|phone-assist-notifications.el|swipe-learning.el|EMACSOS-COMMANDS.org|openrc-call-root|openrc-sms-root|sms_forward.py|openrc-network-root|openrc-wifi-connect-root|openrc-device-root|openrc-doas.conf|openrc-chat-url|openrc-assist-web-url|openrc-emacs-server.nft|assist-web-token|assist-web-ca.pem|wvkbd-emacsos|wvkbd-notice) ;;
         *) fail "unexpected staged file: $name" ;;
     esac
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unsafe staged file: $name"
@@ -758,7 +758,7 @@ for path in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
         fail "oversized staged file: $name"
     count=$((count + 1))
 done
-[ "$count" -eq 53 ] || fail 'staging directory is incomplete'
+[ "$count" -eq 54 ] || fail 'staging directory is incomplete'
 
 preflight_destination_directories
 preflight_backup_sources
@@ -769,7 +769,7 @@ legacy_assist_module || true
 snapshot=$(mktemp -d /var/tmp/emacsos-openrc-update.XXXXXX)
 chown root:root "$snapshot"
 chmod 0700 "$snapshot"
-for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
+for name in openrc-runtime openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
@@ -831,11 +831,18 @@ done
     [ -x /usr/bin/mmcli ] && [ -x /usr/bin/gdbus ] ||
     fail 'call dependencies are absent'
 legacy_keyboard_paths || true
-timeout -s TERM -k 5 30 apk add --simulate py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default >/dev/null
+. "$snapshot/openrc-runtime"
+# Packages are read only from the digest-verified root snapshot.
+# shellcheck disable=SC2086
+set -- $runtime_packages $browser_policy_packages $hardware_packages
+timeout -s TERM -k 5 30 apk add --simulate "$@" >/dev/null
 [ -x /usr/sbin/nft ] || fail 'nft is absent'
 # This can fetch packages, so it must finish before stopping the UI.  The
 # remaining transaction uses its already-proven Python D-Bus, SQLite and HTTP dependencies.
-timeout -s TERM -k 5 30 apk add py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default >/dev/null
+timeout -s TERM -k 5 30 apk add "$@" >/dev/null
+for package do
+    apk info -e "$package" >/dev/null || fail "package did not install: $package"
+done
 [ -x /usr/bin/python3 ] && [ -x /usr/bin/git ] && [ -x /usr/bin/ssh ] && \
     apk info -e py3-dbus >/dev/null && apk info -e emacs-magit >/dev/null && \
     /usr/bin/python3 -I -c 'import dbus, sqlite3, requests, yaml' || fail 'SMS dependencies are absent'
@@ -946,31 +953,14 @@ cmp -s "$snapshot/openrc-doas.conf" /etc/doas.d/95-emacsos-ui.conf
 mv -f -- "$boot_tmp" /usr/local/sbin/emacsos-openrc-boot-mode
 boot_tmp=
 rm -f -- /etc/doas.d/95-emacsos-ui-suspend.conf
-for module in os.el emacsos-typography.el chat.el assist-web.el assist-web-git.el emacsos-assist.el network.el phone-call.el phone-sms.el phone-sms-chat.el phone-notifications.el phone-assist-notifications.el swipe-learning.el \
-    dtach-shell.el dtach-shell-init.el inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf; do
-    install -o root -g root -m 0644 "$snapshot/$module" \
-        "/usr/local/share/emacsos-openrc/$module"
-done
-install -o root -g root -m 0755 "$snapshot/phone-contacts.py" \
-    /usr/local/share/emacsos-openrc/phone-contacts.py
-install -o root -g root -m 0755 "$snapshot/assist-web-git-helper.py" \
-    /usr/local/share/emacsos-openrc/assist-web-git-helper.py
-install -o root -g root -m 0644 "$snapshot/openrc-init.el" \
-    /usr/local/share/emacsos-openrc/init.el
-install -o root -g root -m 0644 "$snapshot/openrc-sway.config" \
-    /usr/local/share/emacsos-openrc/sway.config
-install -o root -g root -m 0755 "$snapshot/openrc-session" \
-    /usr/local/share/emacsos-openrc/session
+. "$snapshot/openrc-runtime"
+install_runtime "$snapshot"
 install -o root -g root -m 0755 "$snapshot/openrc-power-monitor" \
     /usr/local/share/emacsos-openrc/power-monitor
 install -o root -g root -m 0755 "$snapshot/openrc-session-power" \
     /usr/local/share/emacsos-openrc/session-power
 install -o root -g root -m 0755 "$snapshot/openrc-process-group" \
     /usr/local/share/emacsos-openrc/process-group
-install -o root -g root -m 0755 "$snapshot/emacsos-wvkbd-launch" \
-    /usr/local/libexec/emacsos-wvkbd-launch
-install -o root -g root -m 0755 "$snapshot/swipe-learning-collector.py" \
-    /usr/local/share/emacsos-openrc/swipe-learning-collector.py
 install -o root -g root -m 0755 "$snapshot/openrc-call-root" \
     /usr/local/sbin/emacsos-openrc-call
 install -o root -g root -m 0755 "$snapshot/openrc-sms-root" \

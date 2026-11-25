@@ -1,0 +1,40 @@
+#!/bin/sh
+# Build a disposable guest from this checkout and its pinned keyboard source.
+set -eu
+repo=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+state=${VIRTUAL_PHONE_STATE:-$repo/.build/virtual-phone}
+keyboard=${WVKBD_REPO_DIR:-$repo/../wvkbd}
+[ ! -e "$state/container.id" ] || { echo 'Stop the VM before rebuilding.' >&2; exit 1; }
+[ ! -e "$state/session.qcow2" ] || { echo 'Remove the stopped VM overlay before rebuilding its base.' >&2; exit 1; }
+mkdir -p "$state"
+rm -rf "$state/context"
+mkdir -p "$state/context/source"
+chmod 700 "$state"
+state=$(CDPATH='' cd -- "$state" && pwd)
+cp "$repo/deploy/virtual-phone/Dockerfile" "$state/context/"
+# Only tracked candidate files enter the image, with the current worktree edits.
+git -C "$repo" ls-files -z > "$state/source-files"
+tar -C "$repo" --null -T "$state/source-files" -cf "$state/source.tar"
+tar -C "$state/context/source" -xf "$state/source.tar"
+[ -f "$state/id_ed25519" ] || ssh-keygen -q -t ed25519 -N '' -f "$state/id_ed25519"
+cp "$state/id_ed25519.pub" "$state/context/source/deploy/virtual-phone/authorized_keys"
+revision=$(cat "$repo/deploy/pinephone/wvkbd-revision")
+git -C "$keyboard" archive "$revision" > "$state/context/keyboard.tar"
+docker build --iidfile "$state/image-id" "$state/context"
+image=$(cat "$state/image-id")
+container=$(docker create "$image")
+trap 'docker rm "$container" >/dev/null' EXIT HUP INT TERM
+docker export "$container" > "$state/rootfs.tar"
+docker run --rm --network none -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$state:/out" "$image" sh -eu -c '
+    mkdir /rootfs
+    tar xf /out/rootfs.tar -C /rootfs
+    # Docker export includes this marker; it would suppress real VM boot services.
+    rm -f /rootfs/.dockerenv /rootfs/run/.containerenv
+    cp /rootfs/boot/vmlinuz-virt /out/vmlinuz
+    cp /rootfs/boot/initramfs-virt /out/initramfs
+    truncate -s 3G /out/base.raw
+    mkfs.ext4 -F -d /rootfs /out/base.raw
+    rm -rf /rootfs
+    chown "$HOST_UID:$HOST_GID" /out/base.raw /out/vmlinuz /out/initramfs
+'
+printf '%s\n' "Built $state/base.raw"

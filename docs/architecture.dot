@@ -9,6 +9,10 @@ digraph EmacsOS {
   edge [fontname="DejaVu Sans", fontsize=11, color="#49647d",
         arrowsize=0.7];
 
+  V1 [label="V1  Virtual phone target\nQEMU/KVM · synthetic offline guest",
+      style="rounded,dashed", fillcolor="#ffffff"];
+  V1 -> E1 [xlabel="offline guest instance", style=dashed];
+
   E1 [label="E1  Phone shell\nEmacs UI + deterministic commands",
       fillcolor="#e5edf5"];
   E2 [label="E2  Local chat client\n/chat + NDJSON stream"];

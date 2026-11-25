@@ -149,3 +149,23 @@ Edit [[file:architecture-device.dot][architecture-device.dot]] and render with
   [[file:../phone-notifications.el][phone-notifications.el]] records the local
   reason and requests bounded feedback. This is distinct from E13's local
   incoming-SMS alert claim and from E8's durable alert receipt.
+
+* Virtual development target
+
+V1 is the optional [[file:../deploy/virtual-phone/README.md][virtual phone target]].
+Its [[file:../deploy/virtual-phone/build][build]] provisions an Alpine/OpenRC guest
+from the candidate checkout and pinned keyboard archive. The
+[[file:../deploy/virtual-phone/start][launcher]] runs QEMU/KVM in an isolated
+container with a disposable disk overlay, private QMP/VNC sockets and
+container-local SSH. The [[file:../deploy/virtual-phone/session][guest session]]
+supplies only the virtual environment and executes the same physical
+[[file:../deploy/pinephone/openrc-session][runtime session]], sharing startup, window/server readiness probes and
+supervision. Both physical installers and the VM consume the digest-verified
+[[file:../deploy/pinephone/openrc-runtime][runtime dependencies and payload definition]]. Native BusyBox init supervises that session at the shared script path
+so the unchanged application restart command can restart its own process tree. E1 and E7 are real application code inside this guest.
+
+V1 does not connect to E3, E8 or E9: test endpoints point to guest loopback and
+QEMU/container networking blocks external access. No phone HOME or personal
+credentials enter the image. Physical audio, power, modem and device helpers
+are omitted, with unavailable UI states explicitly retained. This is a development
+instance boundary, not a replacement for physical device validation.

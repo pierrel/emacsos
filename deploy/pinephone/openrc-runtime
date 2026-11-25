@@ -1,0 +1,48 @@
+# Reviewed runtime inputs shared by physical and virtual Alpine targets.
+# Source only after the physical installer's root snapshot passes its digest checks.
+runtime_packages='sway swayidle emacs-pgtk emacs-magit emacs-vterm git openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox coreutils doas flock util-linux-misc py3-dbus py3-requests py3-yaml'
+# This software UI policy is provided by postmarketOS, not stock Alpine 3.22.
+browser_policy_packages='mobile-config-firefox'
+browser_policy_repository=https://mirror.postmarketos.org/postmarketos/v25.06
+browser_policy_key_sha256=b70e6ffc64a652d63aee0c28cb9ecb2ca3b49d759ca7a023bcb854d08780964b
+# These packages require PinePhone hardware or Android; the VM omits them.
+hardware_packages='waydroid pipewire-pulse alsa-ucm-conf eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils'
+runtime_payload='
+0644 os.el os.el
+0644 emacsos-typography.el emacsos-typography.el
+0644 chat.el chat.el
+0644 assist-web.el assist-web.el
+0644 assist-web-git.el assist-web-git.el
+0644 emacsos-assist.el emacsos-assist.el
+0644 network.el network.el
+0644 phone-call.el phone-call.el
+0644 phone-sms.el phone-sms.el
+0644 phone-sms-chat.el phone-sms-chat.el
+0644 phone-notifications.el phone-notifications.el
+0644 phone-assist-notifications.el phone-assist-notifications.el
+0644 swipe-learning.el swipe-learning.el
+0644 dtach-shell.el dtach-shell.el
+0644 dtach-shell-init.el dtach-shell-init.el
+0644 inter.ttf inter.ttf
+0644 inter-OFL.txt inter-OFL.txt
+0644 jetbrains-mono.ttf jetbrains-mono.ttf
+0644 jetbrains-mono-OFL.txt jetbrains-mono-OFL.txt
+0644 phone-fonts.conf phone-fonts.conf
+0755 phone-contacts.py phone-contacts.py
+0755 assist-web-git-helper.py assist-web-git-helper.py
+0644 openrc-init.el init.el
+0644 openrc-sway.config sway.config
+0755 openrc-session session
+0755 swipe-learning-collector.py swipe-learning-collector.py
+'
+
+install_runtime() {
+    runtime_source=$1
+    printf '%s\n' "$runtime_payload" | while read -r mode source destination; do
+        [ -n "$mode" ] || continue
+        install -o root -g root -m "$mode" "$runtime_source/$source" \
+            "/usr/local/share/emacsos-openrc/$destination"
+    done
+    install -o root -g root -m 0755 "$runtime_source/emacsos-wvkbd-launch" \
+        /usr/local/libexec/emacsos-wvkbd-launch
+}

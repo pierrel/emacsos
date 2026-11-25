@@ -1,11 +1,13 @@
 #!/bin/sh
-# Own and supervise the minimal PinePhone graphical process tree.
+# Own and supervise the shared graphical process tree, with explicit hardware checks.
 
 set -eu
 umask 077
 
 root=/usr/local/share/emacsos-openrc
 runtime=${XDG_RUNTIME_DIR:-}
+virtual=0
+[ ! -f "$root/virtual" ] || virtual=1
 sway_pid=
 emacs_pid=
 keyboard_pid=
@@ -41,6 +43,14 @@ fail() {
     fail 'seatd socket is unavailable to the service user'
 
 cleanup() {
+    if [ "$virtual" -eq 1 ]; then
+        # The private leader retains its group ID through bounded stopped-child cleanup.
+        rm -f -- "$runtime/ready" "$runtime"/wayland-* "$runtime"/sway-ipc.*.sock
+        trap '' TERM INT HUP
+        kill -TERM "-$$" 2>/dev/null || true
+        sleep 3
+        kill -KILL "-$$"
+    fi
     rm -f -- "$runtime/ready"
     [ -z "$probe_file" ] || rm -f -- "$probe_file"
     [ -z "$sms_pid" ] || kill "$sms_pid" 2>/dev/null || true
@@ -94,6 +104,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+cd "$HOME"
+if [ "$virtual" -eq 1 ]; then
+    IFS= read -r own_stat <"/proc/$$/stat"
+    own_fields=${own_stat#*) }
+    # Kernel numeric fields after the parenthesized command name.
+    # shellcheck disable=SC2086
+    set -- $own_fields
+    [ "${3-}" = "$$" ] && [ "${4-}" = "$$" ] || fail 'private session group is absent'
+fi
+
 # Explicit starts create a private runtime directory. Cleanup removes this
 # attempt's sockets and FIFO before a supervised respawn.
 for candidate in "$runtime"/wayland-* "$runtime"/sway-ipc.*.sock; do
@@ -118,6 +138,7 @@ IFS= read -r DBUS_SESSION_BUS_ADDRESS <"$dbus_address_file"
 [ -n "$DBUS_SESSION_BUS_ADDRESS" ] || fail 'session D-Bus address is empty'
 export DBUS_SESSION_BUS_ADDRESS
 
+if [ "$virtual" -eq 0 ]; then
 timeout -s TERM -k 1 15 /usr/bin/alsaucm -c PinePhone set _fboot ""
 timeout -s TERM -k 1 15 /usr/bin/alsaucm -c PinePhone set _boot ""
 
@@ -131,13 +152,15 @@ pulse_pid=$!
 attempt=0
 while [ "$attempt" -lt 100 ]; do
     for pid in "$pipewire_pid" "$wireplumber_pid" "$pulse_pid"; do
-        kill -0 "$pid" 2>/dev/null || fail 'a required audio process exited'
+        [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || fail 'a required audio process exited'
     done
     [ -S "$runtime/pulse/native" ] && break
     attempt=$((attempt + 1))
     sleep 0.1
 done
 [ -S "$runtime/pulse/native" ] || fail 'PulseAudio-compatible socket did not appear'
+
+fi
 
 /usr/bin/sway --config "$root/sway.config" &
 sway_pid=$!
@@ -188,6 +211,7 @@ WAYLAND_DISPLAY=${wayland_socket##*/}
 SWAYSOCK=$sway_socket
 export WAYLAND_DISPLAY SWAYSOCK
 
+if [ "$virtual" -eq 0 ]; then
 probe_sway get_outputs &&
     tr -d '\n' <"$probe_file" |
         grep -Eq '"name": ?"DSI-1".*"active": ?true.*"scale": ?2(\.0+)?' ||
@@ -195,6 +219,11 @@ probe_sway get_outputs &&
 probe_sway get_inputs &&
     grep -F 'Goodix Capacitive TouchScreen' "$probe_file" >/dev/null ||
     fail 'touchscreen is absent from the Sway seat'
+
+else
+    probe_sway get_outputs &&
+        grep -Eq '"active": ?true' "$probe_file" || fail 'virtual display is inactive'
+fi
 
 /usr/local/libexec/emacsos-wvkbd-launch &
 keyboard_pid=$!
@@ -206,7 +235,7 @@ attempt=0
 while [ "$attempt" -lt 150 ]; do
     for pid in "$sway_pid" "$emacs_pid" "$keyboard_pid" \
         "$pipewire_pid" "$wireplumber_pid" "$pulse_pid" "$dbus_pid"; do
-        kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
+        [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
     done
     if probe_sway get_tree &&
        grep -Eq '"app_id"[[:space:]]*:[[:space:]]*"emacs"' "$probe_file" &&
@@ -227,6 +256,7 @@ if [ "$attempt" -ge 150 ]; then
     fi
 fi
 
+if [ "$virtual" -eq 0 ]; then
 mkfifo -m 0600 "$runtime/power-events"
 power_fifo=$runtime/power-events
 "$root/process-group" "$root/session-power" monitor &
@@ -250,6 +280,8 @@ sleep 0.2
 kill -0 "$idle_pid" 2>/dev/null || fail 'swayidle exited during startup'
 kill -0 "$power_pid" 2>/dev/null || fail 'power timer exited during startup'
 
+fi
+
 printf '%s\n' ready >"$runtime/.ready.tmp"
 mv -- "$runtime/.ready.tmp" "$runtime/ready"
 rm -f -- "$runtime/failure"
@@ -263,7 +295,7 @@ while :; do
     fi
     for pid in "$sway_pid" "$emacs_pid" "$keyboard_pid" "$idle_pid" "$power_pid" \
         "$pipewire_pid" "$wireplumber_pid" "$pulse_pid" "$dbus_pid"; do
-        kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
+        [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || fail 'a required UI process exited'
     done
     probe_sway get_outputs &&
         grep -F '"active": true' "$probe_file" >/dev/null ||

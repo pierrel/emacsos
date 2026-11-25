@@ -1,0 +1,166 @@
+#+title: Virtual phone acceptance and review record
+
+* Current fresh acceptance
+
+The third independent blind run passed all seven required criteria in both
+clean, unchanged source contexts, using the published workflow without source
+edits, internal file writes or private implementation hints:
+
+- Isolated candidate: =ca6ec33bb6cf12944b609fa3c5c94f0ea352cd34=.
+- Current deployed-source composition: =ea1eb609e2f20e9c9a9d12c96c03aac056f15b23=.
+- Runtime/readiness correction retained from =c4801ed729b54409209fa3fc04be74e7d1b139ea=.
+- Full independent report: third-run /Blind virtual-phone acceptance report/,
+  2026-11-25; private report, screenshots and logs remain outside Git.
+
+| Criterion | Expected and observed in both contexts |
+|-----------+----------------------------------------|
+| Real clean build/boot | =build=, =start= and =operate ready= completed; real Alpine/OpenRC/Sway/Emacs became ready. |
+| Headless capture | Visually inspected 720x1440 captures showed the real EmacsOS surface and keyboard. |
+| Ordinary navigation | M-x keys, pointer taps and scrolling visibly changed buffers and surfaces. |
+| Existing application operation | Controls appeared; its Retry action visibly changed unavailable status to Checking, and scrolling changed the rendered surface. |
+| Enter and edit text | =Virtual phone draft= became =Virtual phone edited= after five Backspaces and replacement text. |
+| Save/relaunch/reset | Published M-x find-file/save-buffer showed the write confirmation, reopened =Persisted synthetic state= after graceful relaunch, then showed an empty =(New file)= buffer after reset. |
+| Diagnostics/logs | =operate diag= and =operate logs= retrieved actual kernel/Alpine/OpenRC/Python status and serial/container/guest logs. |
+
+The tester reported no modifier-sequence failure. Both owned guests were
+finally stopped gracefully with exit 0; their synthetic state and evidence were
+preserved. No physical deployment, production effect or merge was performed.
+This final acceptance-summary update is documentation-only; it does not change
+the exact tested runtime or tool behavior.
+
+The isolated candidate still has a Calendar limitation: titles were not
+consistently readable and some transitions retained stale Calendar content under
+the new surface. The required app-operation criterion used Controls, not a
+Calendar month-identity claim. No Calendar fix or blanket all-app pass is claimed.
+The first example-coordinate tap at =(220,690)= missed Controls after Calendar
+changed the layout; the tester preserved that failure, inspected the actual
+screen and tapped the visible tab at =(220,170)=. This is normal pointer input,
+not a hidden application workaround. GTK cursor/allocation warnings and expected
+unavailable hardware/SMS notices remain recorded in the logs.
+
+Keyboard attribution was independently checked after the run. The report lists
+the sibling repository HEAD =d776e3602a359c8299b5299137d39a4fe16ba97a= as its
+pin, but both actual build archives match the tracked pin
+=1da13c0eb901e67d3caf6cc7a058aeb771a8052b=. Their SHA-256 is
+=24d40922fca91ecc237b055d6c27e780c90c2cbe4c0054c3866ff1b5723214d8=.
+The original private report is preserved; this records the verified build input
+rather than repeating its repository-HEAD attribution error.
+
+* Second blind run and persistence documentation gap
+
+The readiness correction passed source checks but the second independent blind
+run did not establish complete acceptance. Its exact inputs were isolated
+=c4801ed729b54409209fa3fc04be74e7d1b139ea= and deployed-source composition
+=8959bdac019ace32ed07716d5cb36f788b92e157=. Save/relaunch persistence remained
+PARTIAL in both: the tester did not save a synthetic file through ordinary UI.
+Both guests did boot, accept input, stop cleanly, relaunch, reset and provide
+logs. Candidate Calendar remained PARTIAL; live Calendar remained PASS.
+
+The recorded save attempts released Ctrl before the second key of each Emacs
+prefix, producing =C-x f= (fill-column) and =C-x s= (save-some-buffers). A single
+ordinary-input reproduction displayed the fill-column prompt and "No files need
+saving"; the failed capture is preserved privately. The wrapper passed native
+input literally. The usage guide lacked an explicit file-save example, so this
+is a concrete documentation gap rather than a persistence pass.
+
+The documentation-only successor publishes explicit =M-x find-file= and
+=M-x save-buffer= examples for save, reopen and reset. No wrapper/runtime code,
+internal file write, evaluation or recovery mechanism is added. A development
+run of that exact ordinary-input flow showed the write confirmation, saved
+text after relaunch, and an empty "New file" buffer after reset. Its captures
+remain private outside Git. This development evidence does not replace the required third independent blind seven-scenario run in both contexts.
+Acceptance remained pending at that point; the third independent run is recorded
+above. Earlier results below retain their exact source attribution.
+
+* Previous fresh shared-runtime acceptance
+
+An independent fresh tester built and operated both unchanged clean source
+contexts using only the published [[file:../deploy/virtual-phone/README.md][workflow]], prerequisites and seven acceptance
+criteria. The tester received no implementation history, old results or private
+helpers, made no code edits, and recorded commands, expected/actual results,
+screenshots and difficulties in a private report outside Git.
+
+- Isolated runtime: =ffd91ad500d19f6bc8da17705e02b3b9031c6552=.
+- Current deployed-source composition: =55728baa3616abb5b9279f2afcfac54a126fecd8=.
+- Pinned keyboard object: =1da13c0eb901e67d3caf6cc7a058aeb771a8052b=.
+
+The seven-scenario foundation is accepted with Controls as the existing-app
+operation in both contexts. This is not blanket all-app acceptance. Calendar
+remains partial in the isolated candidate and passed in the deployed-source
+composition; no Calendar fix is claimed by this target.
+
+| Scenario | Commands/actions | Expected and observed |
+|----------+------------------+-----------------------|
+| Clean graphical build/boot | =build=, =start=, =operate ready= | Both built from clean source, booted Alpine/OpenRC and passed shared Sway-window/Emacs-server readiness. |
+| Headless capture | =operate screenshot= | Both produced visually inspected real 720x1440 EmacsOS and keyboard captures. |
+| Ordinary navigation | =operate keys=, =tap=, =scroll= | Both visibly changed buffers/views using ordinary input. |
+| Existing app operation | Documented Controls tap followed by scrolling | Both visibly opened Controls and scrolled to its tail. Hardware status rows remained unsupported. |
+| Text editing | Type =Virtual phone draft=, five Backspaces, type =edited= | Both visibly displayed =Virtual phone edited=. |
+| Relaunch/reset | Save a synthetic file through ordinary UI; =stop=, =start=; then =stop=, =reset=, =start= | Both reopened persisted synthetic content after relaunch, then showed clean UI after reset. Graceful stops returned exit 0. |
+| Diagnostics/logs | =operate diag=, =operate logs= | Both retrieved kernel/Alpine/OpenRC and Python-dependency diagnostics plus serial, container and guest logs. |
+
+Calendar was also launched through ordinary =M-x calendar= input, then advanced
+using =calendar-scroll-left=. The isolated candidate changed its grid but
+clipped/wrapped the title, so November-to-December identity could not be verified
+visually: PARTIAL. The deployed-source composition visibly showed November 2026
+then December 2026: PASS. Controls operation passed independently in both
+contexts and satisfies the original existing-app criterion, where Calendar was
+an example.
+
+The tester's first candidate file-save attempt used =/root= and received
+Permission denied; a second assumed =/home/emacsos-lab=, which was absent.
+A harmless SSH diagnostic identified the actual graphical home,
+=/var/lib/emacsos-lab=. Saving and reopening there through ordinary UI passed.
+This difficulty is retained explicitly; the usage guide now names the home.
+The host's restricted shell also required approved host-level execution for
+Docker/KVM. These were recorded difficulties, not hidden acceptance repairs.
+
+Both tester-owned guests were gracefully stopped with exit 0. Their overlays,
+full report, logs and captures remain private outside Git. Screenshots are
+excluded from this branch and its history. This acceptance summary and home
+clarification are documentation-only; the tested runtime identities above
+remain exact. No historical runtime evidence substitutes for this fresh run.
+
+The revised physical shared installer/updater passed deterministic source
+checks and independent review. They have not been deployed to a physical phone.
+
+* Historical evidence attribution
+
+Before this revision, accepted source 41a5561ac88b15aedc6b3801bd1378555e7724aa
+contained the first virtual target and four bridge review rounds. Its runtime
+source was 97dee428aab9e652c4946963107f4ecc4febfa7a; the corresponding live-source
+composition was 21c6d6ade98d0d76f8f768bab1e57f4f36dfe8ba. Earlier UI observations
+were attributed to c253be0796925d2133b3286e8c1db793484e7a68 and composition
+0d5493f087c4e3e0c7270c749d06ab071e2b0dea, with affected runtime follow-ups on
+c8e0d0f036be5306b9a4f733f617d2fc9de43d73 and fa8fdd880f62dd1d9af65260ec9bbaa5aa69682a.
+Those observations established the earlier milestone, with explicitly reused
+unchanged-runtime scenes. They do not validate the revised shared target.
+
+The original branch history, historical report and capture evidence were
+preserved privately outside Git before the branch-only rewrite. Historical
+commit identifiers here identify that archived evidence; the revised public
+branch does not retain its screenshot objects as ancestors.
+
+Four actual Copilot rounds were completed on the earlier target. Verified fixes
+covered keyboard and font notices, source-capture failure propagation, KVM device
+group access, native UI restart and HOME, explicit payload permissions under
+umask 077, and bounded cleanup of a stopped keyboard child. Round four reported
+no open issues. Review limits continue across this revision.
+
+* Known boundaries
+
+The guest has no external network, real credentials, personal history, modem,
+sensors or battery. Assist is unavailable by design; real isolated Assist
+integration remains roadmap work. Physical behavior is not established by guest
+UI success. Mobile Firefox policy uses the native signed postmarketOS v25.06 package,
+4.6.0-r0, via a one-off tagged repository. It matches the recorded physical
+package input; no current physical package-version check is claimed. Its shipped
+policy regenerates profile CSS and requests a Firefox restart on first use. A
+development launch closed before an ordinary repeat launch displayed the mobile
+browser UI; no automatic retry was added. This is separate from the blind run.
+
+The guest has an unresolved historical SSH I/O-error observation;
+no long-lived reliability guarantee follows from short acceptance sessions.
+
+Physical shared deployment changes require source review and deterministic
+checks. No physical deployment or merge is authorized by virtual acceptance.

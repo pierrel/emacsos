@@ -52,6 +52,7 @@ test-pinephone-scripts:
 	tests/test-pinephone-openrc-power.sh
 	python3 tests/test-pinephone-openrc-power-startup.py
 	python3 tests/test-pinephone-openrc-session.py
+	python3 tests/test-virtual-phone-operate.py
 	python3 tests/test_pinephone_openrc_sms.py
 	emacs -Q --batch -L . -l tests/test-phone-notifications.el -l tests/test-phone-assist-notifications.el -l tests/test-pinephone-openrc-init.el
 	emacs -Q --batch -L . -L tests -l tests/test-sms-server-bridge.el -f ert-run-tests-batch-and-exit

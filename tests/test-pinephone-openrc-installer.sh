@@ -14,6 +14,7 @@ docker run --rm --network none -i \
     -v "$repo_dir:/repo:ro" \
 python:3.13-alpine /bin/sh -s <<'CONTAINER'
 set -eu
+. /source/openrc-runtime
 
 refresh_keyboard_digests() {
     EMACSOS_WVKBD_SHA256=$(sha256sum \
@@ -29,7 +30,7 @@ addgroup -S user
 adduser -S -D -H -h /home/user -s /bin/sh -G user user
 install -d -o user -g user -m 0700 /home/user /home/user/.cache \
     /home/user/.cache/emacsos-openrc-stage
-for name in openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
+for name in openrc-runtime openrc-manifest.sha256 inter.ttf inter-OFL.txt jetbrains-mono.ttf jetbrains-mono-OFL.txt phone-fonts.conf openrc-init.el dtach-shell.el dtach-shell-init.el openrc-sway.config \
     openrc-session openrc-session-power openrc-power-monitor openrc-process-group emacsos-wvkbd-launch \
     swipe-learning-collector.py openrc-suspend-root \
     wvkbd-transaction-root \
@@ -476,7 +477,7 @@ DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
 [ -x /usr/local/sbin/emacsos-openrc-device ]
 [ -x /etc/init.d/emacsos-ui ]
 [ "$(id -Gn emacsos-lab | tr ' ' '\n' | grep -Exc 'audio|seat|video')" -eq 3 ]
-grep -F 'apk add --simulate sway swayidle emacs-pgtk emacs-magit emacs-vterm git openssh-client-default grim wtype wvkbd seatd seatd-openrc firefox mobile-config-firefox waydroid pipewire-pulse alsa-ucm-conf coreutils doas flock util-linux-misc eg25-manager modemmanager modemmanager-openrc mobile-broadband-provider-info pinephone-callaudiod alsa-utils' \
+grep -Fx "apk add --simulate $runtime_packages $browser_policy_packages $hardware_packages" \
     /tmp/apk-log >/dev/null
 grep -F 'rc-service emacsos-ui start' /tmp/rc-service-log >/dev/null
 grep -F 'rc-service eg25-manager start' /tmp/rc-service-log >/dev/null
@@ -1020,7 +1021,7 @@ rm -f /tmp/py3-dbus-present
 DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
     /bin/sh /tmp/openrc-update-root
 [ -e /tmp/py3-dbus-present ]
-dbus_install_line=$(grep -nFx 'apk add py3-dbus py3-requests py3-yaml emacs-magit git openssh-client-default' /tmp/transaction-log | cut -d: -f1)
+dbus_install_line=$(grep -nFx "apk add $runtime_packages $browser_policy_packages $hardware_packages" /tmp/transaction-log | cut -d: -f1)
 ui_stop_line=$(grep -nFx 'rc-service emacsos-ui stop' /tmp/transaction-log | cut -d: -f1)
 [ "$dbus_install_line" -lt "$ui_stop_line" ]
 if sed -n "$((ui_stop_line + 1)),\$p" /tmp/transaction-log | grep -q '^apk '; then
@@ -1039,7 +1040,7 @@ if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=use
     exit 1
 fi
 rm -f /tmp/block-apk
-grep -F 'apk add --simulate py3-dbus' /tmp/transaction-log >/dev/null
+grep -Fx "apk add --simulate $runtime_packages $browser_policy_packages $hardware_packages" /tmp/transaction-log >/dev/null
 if grep -F 'rc-service emacsos-ui stop' /tmp/transaction-log >/dev/null; then
     printf '%s\n' 'blocked apk stopped the UI' >&2
     exit 1

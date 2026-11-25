@@ -10,11 +10,12 @@ SOURCE = (Path(__file__).resolve().parents[1] / 'deploy/pinephone/openrc-session
 CLEANUP = SOURCE[SOURCE.index('cleanup() {'):SOURCE.index('\ntrap cleanup EXIT')]
 CREATE_FIFO = SOURCE[SOURCE.index('mkfifo -m 0600'):SOURCE.index('"$root/process-group" "$root/session-power" monitor')]
 RUNTIME = SOURCE[SOURCE.index('while :; do\n') + len('while :; do\n'):SOURCE.index('    sleep 30 &')]
-STARTUP = SOURCE[SOURCE.index('attempt=0\n', SOURCE.index('emacs_pid=$!')):SOURCE.index('mkfifo -m 0600')]
+STARTUP = SOURCE[SOURCE.index('attempt=0\n', SOURCE.index('emacs_pid=$!')):SOURCE.index('if [ "$virtual" -eq 0 ]; then', SOURCE.index('emacs_pid=$!'))]
 
 # Only the temporary directory and stub children are reachable from these pieces.
 HEADER = '''set -eu
 runtime=$1
+virtual=0
 probe_file=$runtime/probe
 keyboard_pid=1; emacs_pid=2; sway_pid=3; power_pid=4; idle_pid=5
 pipewire_pid=6; wireplumber_pid=7; pulse_pid=8; dbus_pid=9

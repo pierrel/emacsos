@@ -65,6 +65,7 @@ keyboard_notice_hash=${keyboard_notice_hash%% *}
 ssh -T "$@" "$phone_host" \
     "rm -rf -- '$stage' '$bootstrap' && install -d -m 0700 '$stage' '$bootstrap'"
 scp -q "$@" \
+    "$deploy_dir/openrc-runtime" \
     "$deploy_dir/openrc-manifest.sha256" \
     "$deploy_dir/inter.ttf" \
     "$deploy_dir/inter-OFL.txt" \
