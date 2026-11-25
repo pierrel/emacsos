@@ -5,7 +5,7 @@
 (defmacro notifications-test-journal (&rest body)
   `(let* ((directory (make-temp-file "notifications-test-" t))
           (emacsos-notifications-file (expand-file-name "state/notifications.jsonl" directory))
-          (emacsos-notifications--cache-file nil)
+          (emacsos-notifications--unavailable nil)
           (emacsos-notifications--unread nil))
      (unwind-protect (progn ,@body) (delete-directory directory t))))
 
@@ -124,7 +124,8 @@
    (should-not (member '(:eval (emacsos-sms-mode-line-string))
                        (emacsos--mode-line-format)))
    ;; A fresh UI process derives unread state from the same durable journal.
-   (setq emacsos-notifications--cache-file nil emacsos-notifications--unread nil)
+   (setq emacsos-notifications--unread nil)
+   (emacsos-notifications--initialize)
    (let ((badge (emacsos-notifications-mode-line-string)))
      (should (string-match-p "Notifications" badge))
      (should-not (string-match-p "SMS" badge))
@@ -140,7 +141,7 @@
    (should (equal (emacsos-notifications-mode-line-string) ""))
    (emacsos-notifications--record 'assist "Synthetic failed client" "client-failed" "one")
    (should (equal (emacsos-notifications-mode-line-string) ""))
-   (setq emacsos-notifications--cache-file nil)
+   (emacsos-notifications--initialize)
    (should (equal (emacsos-notifications-mode-line-string) ""))
    (emacsos-notifications-record 'call "Synthetic incoming call")
    (should (string-match-p "Notifications" (emacsos-notifications-mode-line-string)))
@@ -170,7 +171,7 @@
    (require 'phone-sms)
    (let ((emacsos-sms--state 'sending)
          (emacsos-sms--proposal-id "synthetic-outgoing")
-         (emacsos-sms-lifecycle-functions nil)
+         (emacsos-sms-lifecycle-functions (list #'emacsos-sms--notification))
          notice)
      (cl-letf (((symbol-function 'emacsos-sms--visible-p) (lambda () nil))
                ((symbol-function 'emacsos-sms--render) #'ignore)
@@ -200,3 +201,93 @@
               (lambda () (ert-fail "modeline reread the journal"))))
      (dotimes (_ 3)
        (should (string-match-p "Notifications" (emacsos-notifications-mode-line-string)))))))
+
+(ert-deftest notifications-outgoing-failure-and-unknown-need-generic-attention ()
+  "Terminal failures and uncertainty alert without leaking recipient or body."
+  (require 'phone-sms)
+  (dolist (outcome '(("not-sent:send-failed" . "not sent")
+                     ("unknown:send-failed" . "unknown.*do not resend")))
+    (notifications-test-journal
+     (let ((emacsos-sms--state 'sending)
+           (emacsos-sms-lifecycle-functions (list #'emacsos-sms--notification))
+           (emacsos-sms--proposal-id "synthetic-result")
+           (emacsos-sms--number "+15555550123")
+           (emacsos-sms--body "Synthetic private content"))
+       (cl-letf (((symbol-function 'emacsos-sms--visible-p) (lambda () nil))
+                 ((symbol-function 'emacsos-sms--render) #'ignore))
+         (emacsos-sms--finished "synthetic-result" (car outcome)))
+       (let ((alerts (emacsos-notifications--alerts (emacsos-notifications--rows))))
+         (should (= 1 (length alerts)))
+         (should (string-match-p (cdr outcome) (alist-get 'reason (car alerts))))
+         (should-not (string-match-p (regexp-opt '("15555550123" "private content"))
+                                     (alist-get 'reason (car alerts)))))
+       (should (string-match-p "Notifications" (emacsos-notifications-mode-line-string)))))))
+
+(ert-deftest notifications-journal-failure-stays-visible-without-redisplay-io ()
+  "A cached storage error is visible and never retried by redisplay."
+  (notifications-test-journal
+   (cl-letf (((symbol-function 'rename-file) (lambda (&rest _) (error "Synthetic disk failure"))))
+     (should-error (emacsos-notifications-record 'system "Synthetic alert")))
+   (let ((reads 0))
+     (cl-letf (((symbol-function 'emacsos-notifications--rows)
+                (lambda () (cl-incf reads) (error "Must not retry"))))
+       (dotimes (_ 3)
+         (should (string-match-p "Notifications unavailable"
+                                 (emacsos-notifications-mode-line-string)))))
+     (should (zerop reads)))))
+
+(ert-deftest notifications-retained-identity-is-a-capacity-and-write-noop ()
+  "Retries retain bytes, original metadata and read state without using capacity."
+  (notifications-test-journal
+   (let ((emacsos-notifications--limit 2))
+     (emacsos-notifications--record 'assist "Synthetic original" "recorded" "retained")
+     (emacsos-notifications--record 'call "Synthetic second" "recorded" "second")
+     (save-window-excursion (emacsos-notifications-show))
+     (let ((before (with-temp-buffer
+                     (insert-file-contents emacsos-notifications-file) (buffer-string)))
+           (write (symbol-function 'emacsos-notifications--write-rows))
+           (writes 0))
+       (cl-letf (((symbol-function 'emacsos-notifications--write-rows)
+                  (lambda (rows) (cl-incf writes) (funcall write rows))))
+         (dotimes (_ 10)
+           (emacsos-notifications--record 'assist "Synthetic changed retry" "recorded" "retained")))
+       (should (zerop writes))
+       (should (equal before (with-temp-buffer
+                               (insert-file-contents emacsos-notifications-file) (buffer-string))))
+       (should (= 2 (length (emacsos-notifications--rows))))
+       (should-not emacsos-notifications--unread))
+     ;; Genuinely new alerts can evict an old identity; this is not a forever claim.
+     (emacsos-notifications--record 'system "Synthetic third" "recorded" "third")
+     (emacsos-notifications--record 'assist "Synthetic after eviction" "recorded" "retained")
+     (should (equal (alist-get 'reason (car (last (emacsos-notifications--rows))))
+                    "Synthetic after eviction")))))
+
+(ert-deftest notifications-startup-error-is-visible-without-redisplay-work ()
+  "Startup caches parse/projection failure without redisplay reads or messages."
+  (dolist (corrupt '("synthetic invalid json\n" "42\n"))
+    (notifications-test-journal
+     (make-directory (file-name-directory emacsos-notifications-file) t)
+     (write-region corrupt nil emacsos-notifications-file nil 'silent)
+     (emacsos-notifications--initialize)
+     (let ((reads 0) (messages 0))
+       (cl-letf (((symbol-function 'insert-file-contents)
+                  (lambda (&rest _) (cl-incf reads) (ert-fail "Redisplay attempted I/O")))
+                 ((symbol-function 'message) (lambda (&rest _) (cl-incf messages))))
+         (dotimes (_ 10)
+           (should (string-match-p "Notifications unavailable"
+                                   (emacsos-notifications-mode-line-string)))))
+       (should (zerop reads))
+       (should (zerop messages))))))
+
+(ert-deftest notifications-live-corrupt-row-caches-failure-for-every-reader ()
+  "Corruption discovered by open or record also reaches the visible error cache."
+  (dolist (operation '(open record))
+    (notifications-test-journal
+     (emacsos-notifications-record 'system "Synthetic initial alert")
+     (write-region "42\n" nil emacsos-notifications-file nil 'silent)
+     (should-error
+      (if (eq operation 'open)
+          (save-window-excursion (emacsos-notifications-show))
+        (emacsos-notifications-record 'system "Synthetic later alert")))
+     (should (string-match-p "Notifications unavailable"
+                             (emacsos-notifications-mode-line-string))))))

@@ -14,7 +14,7 @@
      (let* ((calendar-buffer " *notification-calendar*")
             (directory (make-temp-file "notification-calendar-" t))
             (emacsos-notifications-file (expand-file-name "state/notifications.jsonl" directory))
-            (emacsos-notifications--cache-file nil)
+            (emacsos-notifications--unavailable nil)
             (emacsos-notifications--unread nil))
        (save-window-excursion
          (unwind-protect (progn ,@body)

@@ -11,21 +11,35 @@
 (defconst emacsos-notifications--limit 256)
 (defconst emacsos-notifications--bytes (* 128 1024))
 (defvar emacsos-notifications--sequence 0)
+(defvar emacsos-notifications--unavailable nil
+  "Cached journal failure, displayed without storage access during redisplay.")
+
+(defun emacsos-notifications--storage-error (problem)
+  "Cache storage failure PROBLEM for the attention line, then preserve the error."
+  (setq emacsos-notifications--unavailable t)
+  (force-mode-line-update t)
+  (signal (car problem) (cdr problem)))
 
 (defun emacsos-notifications--rows ()
   "Read the bounded journal; refuse corrupt or redirected storage."
-  (when (file-symlink-p emacsos-notifications-file)
-    (error "Notification journal is a symlink"))
-  (when (file-exists-p emacsos-notifications-file)
-    (unless (and (file-regular-p emacsos-notifications-file)
-                 (<= (file-attribute-size (file-attributes emacsos-notifications-file))
-                     emacsos-notifications--bytes))
-      (error "Notification journal is unavailable or too large"))
-    (with-temp-buffer
-      (insert-file-contents emacsos-notifications-file)
-      (mapcar (lambda (line)
-                (json-parse-string line :object-type 'alist :array-type 'list))
-              (split-string (buffer-string) "\n" t)))))
+  (condition-case problem
+      (progn
+	(when (file-symlink-p emacsos-notifications-file)
+	  (error "Notification journal is a symlink"))
+	(when (file-exists-p emacsos-notifications-file)
+	  (unless (and (file-regular-p emacsos-notifications-file)
+                       (<= (file-attribute-size (file-attributes emacsos-notifications-file))
+			   emacsos-notifications--bytes))
+	    (error "Notification journal is unavailable or too large"))
+	  (with-temp-buffer
+	    (insert-file-contents emacsos-notifications-file)
+	    (mapcar (lambda (line)
+                      (let ((row (json-parse-string line :object-type 'alist :array-type 'list)))
+                        (unless (and (consp row) (seq-every-p #'consp row))
+                          (error "Invalid notification journal row"))
+                        row))
+                    (split-string (buffer-string) "\n" t)))))
+    (error (emacsos-notifications--storage-error problem))))
 
 (defun emacsos-notifications-valid-reason-p (reason)
   "Require a bounded single-line reason without Unicode control characters."
@@ -35,8 +49,6 @@
                         (memq (get-char-code-property character 'general-category)
                               '(Cc Zl Zp))) reason))))
 
-(defvar emacsos-notifications--cache-file nil
-  "Journal path whose committed unread state is cached for redisplay.")
 (defvar emacsos-notifications--unread nil
   "Cached unread indicator; the journal remains the durable source of truth.")
 
@@ -53,7 +65,7 @@
 
 (defun emacsos-notifications--cache (rows)
   "Refresh the unread indicator from committed journal ROWS."
-  (setq emacsos-notifications--cache-file emacsos-notifications-file
+  (setq emacsos-notifications--unavailable nil
         emacsos-notifications--unread
         (seq-some (lambda (row) (not (eq (alist-get 'seen row) t)))
                   (emacsos-notifications--alerts rows)))
@@ -61,34 +73,36 @@
 
 (defun emacsos-notifications--write-rows (rows)
   "Atomically save bounded journal ROWS, retaining private storage permissions."
-  (let ((directory (file-name-directory emacsos-notifications-file)) temporary)
-    (when (file-symlink-p (directory-file-name directory))
-      (error "Notification directory is a symlink"))
-    (make-directory directory t)
-    (set-file-modes directory #o700)
-    (setq rows (last rows emacsos-notifications--limit))
-    (unwind-protect
-        (progn
-          (setq temporary (make-temp-file (expand-file-name ".notifications-" directory)))
-          (with-temp-buffer
-            (dolist (item rows) (insert (json-encode item) "\n"))
-            (while (and (cdr rows)
-                        (> (string-bytes (buffer-string)) emacsos-notifications--bytes))
-              (goto-char (point-min))
-              (delete-region (point) (progn (forward-line 1) (point)))
-              (setq rows (cdr rows)))
-            (when (> (string-bytes (buffer-string)) emacsos-notifications--bytes)
-              (error "Notification journal exceeds its limit"))
-            (write-region (point-min) (point-max) temporary nil 'silent))
-          (set-file-modes temporary #o600)
-          (rename-file temporary emacsos-notifications-file t)
-          (setq temporary nil))
-      (when temporary (delete-file temporary)))
-    (emacsos-notifications--cache rows)))
+  (condition-case problem
+      (let ((directory (file-name-directory emacsos-notifications-file)) temporary)
+	(when (file-symlink-p (directory-file-name directory))
+	  (error "Notification directory is a symlink"))
+	(make-directory directory t)
+	(set-file-modes directory #o700)
+	(setq rows (last rows emacsos-notifications--limit))
+	(unwind-protect
+            (progn
+              (setq temporary (make-temp-file (expand-file-name ".notifications-" directory)))
+              (with-temp-buffer
+		(dolist (item rows) (insert (json-encode item) "\n"))
+		(while (and (cdr rows)
+                            (> (string-bytes (buffer-string)) emacsos-notifications--bytes))
+		  (goto-char (point-min))
+		  (delete-region (point) (progn (forward-line 1) (point)))
+		  (setq rows (cdr rows)))
+		(when (> (string-bytes (buffer-string)) emacsos-notifications--bytes)
+		  (error "Notification journal exceeds its limit"))
+		(write-region (point-min) (point-max) temporary nil 'silent))
+              (set-file-modes temporary #o600)
+              (rename-file temporary emacsos-notifications-file t)
+              (setq temporary nil))
+	  (when temporary (delete-file temporary)))
+        (emacsos-notifications--cache rows))
+    (error (emacsos-notifications--storage-error problem))))
 
 (defun emacsos-notifications--record (source reason event id)
   "Persist a lifecycle EVENT with SOURCE, explicit REASON and correlation ID.
-Duplicate recorded identities retain their original metadata and read state."
+A retained recorded identity is a no-op, retaining metadata, read state and capacity."
   (unless (and (symbolp source) (<= (length (symbol-name source)) 40)
                (not (string-match-p "[[:cntrl:]]" (symbol-name source)))
                (emacsos-notifications-valid-reason-p reason))
@@ -104,7 +118,8 @@ Duplicate recorded identities retain their original metadata and read state."
                   `((at . ,(format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t))
                     (id . ,id) (source . ,(symbol-name source))
                     (event . ,event) (reason . ,reason)))))
-    (emacsos-notifications--write-rows (append rows (list row))))
+    (unless original
+      (emacsos-notifications--write-rows (append rows (list row)))))
   id)
 
 (defun emacsos-notifications--mark-read (alerts)
@@ -128,19 +143,22 @@ Duplicate recorded identities retain their original metadata and read state."
     (define-key map [mode-line mouse-1] #'emacsos-notifications-show)
     map))
 
-(defun emacsos-notifications-mode-line-string ()
-  "Return a tappable generic indicator while a logical alert is unread."
+(defun emacsos-notifications--initialize ()
+  "Load durable attention state once outside redisplay; keep failure visible."
   (condition-case nil
-      (progn
-        (unless (equal emacsos-notifications--cache-file emacsos-notifications-file)
-          (emacsos-notifications--cache (emacsos-notifications--rows)))
-        (if emacsos-notifications--unread
-            (propertize " ● Notifications "
-                        'local-map emacsos-notifications--mode-line-map
-                        'mouse-face 'mode-line-highlight
-                        'help-echo "Open notification reasons")
-          ""))
-    (error "")))
+      (emacsos-notifications--cache (emacsos-notifications--rows))
+    (error nil)))
+
+(defun emacsos-notifications-mode-line-string ()
+  "Return cached generic attention or storage failure without journal I/O."
+  (if (or emacsos-notifications--unavailable emacsos-notifications--unread)
+      (propertize (if emacsos-notifications--unavailable
+                      " ! Notifications unavailable "
+                    " ● Notifications ")
+                  'local-map emacsos-notifications--mode-line-map
+                  'mouse-face 'mode-line-highlight
+                  'help-echo "Open notification reasons")
+    ""))
 
 (defun emacsos-notifications-record (source reason)
   "Record a notification with a generic REASON; return its local identity."
@@ -236,6 +254,8 @@ recorded separately. Storage failure suppresses the feedback request."
                   (lambda (&rest _) (emacsos-notifications-show))))
     (pop-to-buffer buffer)
     (emacsos-notifications--mark-read alerts)))
+
+(emacsos-notifications--initialize)
 
 (provide 'phone-notifications)
 ;;; phone-notifications.el ends here

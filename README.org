@@ -977,11 +977,19 @@ original reason and timestamp; feedback requests and client diagnostics stay in
 the private journal rather than becoming separate notifications. Refresh with
 =g=. Opening marks only the displayed snapshot read, so a later arrival keeps
 its indicator. Read state survives UI restarts in the same journal. Retries of a
-retained source/identity keep its original reason, timestamp and read state, so
-pruning an older duplicate cannot make it appear new or recent. The phone's
+retained source/identity are a no-op: no bytes, timestamp changes, journal write
+or retention capacity are added. Original reason, timestamp and read state stay
+in the existing row. Once legitimate retention evicts an identity, the bounded
+journal no longer remembers it; producer receipts still own deduplication. The phone's
 visible Calendar keeps the dynamic OS attention line after native month updates;
 desktop Calendar and panes that intentionally hide the modeline keep their
 existing behavior.
+
+Journal unread state is initialized outside redisplay and updated after durable
+writes. A storage failure caches a visible *Notifications unavailable* action;
+redisplay performs no journal reads, retries, repairs or diagnostic messages.
+Existing explicit journal operations still report their errors; this does not
+add a background retry or weaken producer acknowledgment requirements.
 
 The existing journal retains up to 256 event rows within 128 KiB in private
 =$XDG_STATE_HOME/emacsos/notifications.jsonl= (normally
@@ -991,10 +999,13 @@ client starts; storage failure suppresses that request. Client outcomes remain
 available in the journal and do not prove physical vibration. There is no new
 collector or notification store.
 
-Outgoing SMS results no longer produce an SMS-specific modeline badge or a
-routine success notice. Sending, failure and unknown outcomes remain in the
-existing SMS UI/journal; proposal confirmation, acknowledgment, incoming alert
-claims and transport recovery are unchanged. The existing unknown-send warning
+Successful outgoing SMS results are silent. Failed sends create a generic
+"SMS not sent." alert; uncertain sends create "SMS status unknown; do not
+resend." The reasons omit recipients and message contents. The SMS-specific
+modeline renderer, badge navigation and badge-only unread state are removed.
+Sending, failure and unknown outcomes remain in the existing SMS UI/journal;
+proposal confirmation, acknowledgment, incoming alert claims and transport
+recovery are unchanged. The existing unknown-send warning
 still says not to resend. Recorded incoming SMS and Assist alerts use the
 shared view without changing their feedback or host acknowledgment rules.
 Call-specific alert production remains supplied by the separate call integration.
@@ -1009,6 +1020,67 @@ texts are preserved exactly. Received bodies share the server's bounded multipar
 serialized receipt batches stay below the transport cap even with escaped text.
 
 * Reasoned Assist phone alerts
+
+** Synthetic notification validation
+
+Use only a disposable virtual-phone guest and its synthetic HOME. These setup
+forms inject application events; they do not send SMS, use the modem, vibrate,
+ACK a real host alert or establish transport/hardware success. Invoke setup with
+the target's existing Emacs diagnostic channel, then perform visible actions
+with ordinary keyboard/pointer input.
+
+Start a fresh owned journal:
+
+#+begin_src emacs-lisp
+(setq emacsos-notifications-file
+      (expand-file-name "notifications.jsonl"
+                        (make-temp-file "notification-review-" t)))
+(emacsos-notifications--initialize)
+(emacsos-notifications--record 'system "Synthetic reason needs attention"
+                               "recorded" "review-one")
+#+end_src
+
+Observe the generic indicator, open it with =C-c e n=, and check the reason,
+original timestamp and cleared indicator. Record a fresh identity and tap the
+indicator to exercise the same action. Re-record =review-one= with different
+reason text: the retained bytes, original timestamp/reason and read state must
+not change. The deterministic tests also apply retention pressure through the
+real Assist consumer's failed-receipt retry and check zero duplicate writes.
+
+Inject each terminal lifecycle observer boundary separately:
+
+#+begin_src emacs-lisp
+(emacsos-sms--notification '(:event terminal :state sent :proposal-id "review-sent"))
+(emacsos-sms--notification '(:event terminal :state failed :proposal-id "review-failed"))
+(emacsos-sms--notification '(:event terminal :state unknown :proposal-id "review-unknown"))
+#+end_src
+
+Success adds no alert. Failure and uncertainty must appear with distinct fixed
+reasons; uncertainty includes the no-resend warning. Automated regressions also
+exercise the actual SMS terminal callback and preserve its state/observer fences.
+Incoming SMS/call/Assist fixtures retain their existing claim, receipt and ACK
+checks; these synthetic outcomes are not real network deliveries.
+
+For storage failure, use a new owned file and initialize its cached error:
+
+#+begin_src emacs-lisp
+(setq emacsos-notifications-file (make-temp-file "notification-corrupt-"))
+(write-region "42\n" nil emacsos-notifications-file nil 'silent)
+(emacsos-notifications--initialize)
+#+end_src
+
+Observe the fixed unavailable indicator. Repeated redisplay must neither perform I/O nor emit
+messages; deterministic tests instrument both. Do not alter a real journal,
+permissions or user files, and do not repair the synthetic file to make a run
+pass.
+
+Open ordinary =M-x calendar= while a fresh synthetic alert is unread. Use its
+native month controls and verify the generic indicator remains, then open it by
+shortcut and tap. Pure notification builds retain native Calendar; one-month
+Calendar navigation additionally requires the separately reviewed phone
+Calendar adapter as a declared test prerequisite, or the preserved-live
+composition that includes it. Do not claim the notification PR alone contains
+that separate adapter. Screenshots and fixture artifacts stay outside Git.
 
 The OpenRC phone session polls Assist's authenticated notifications endpoint every
 30 seconds. =notify= queues a bounded reason for the current urgent cycle; it

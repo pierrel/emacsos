@@ -28,7 +28,6 @@
          (emacsos-sms--detail nil)
          (emacsos-sms--proposal-id nil)
          (emacsos-sms--attempt-id nil)
-         (emacsos-sms-chat--history-loaded nil)
          (emacsos-sms--confirm-id nil)
          (emacsos-sms--confirm-timer nil)
          (emacsos-sms--previous-buffer nil)
@@ -59,31 +58,31 @@
 
 (ert-deftest emacsos-sms-chat-render-keeps-exact-draft-and-hostile-body-inert ()
   (test-sms-chat--with-state
-    (emacsos-sms-chat--admit
-     (make-emacsos-sms-chat-record
-      :id "one" :number "+14155550123"
-      :body (concat "[tap](https://bad)" (string #x202e) "\\u{202E}")
-      :direction 'incoming :state 'received :origin 'modem
-      :owner ":1.mm" :generation 3 :path "/org/freedesktop/ModemManager1/SMS/1"
-      :revision 1 :unread t))
-    (let ((buffer (emacsos-sms-chat-open "+14155550123")))
-      (should (buffer-live-p buffer))
-      (with-current-buffer buffer
-        (goto-char (point-max))
-        (insert "  exact draft  ")
-        (backward-char 3)
-        (let ((offset (- (point) emacsos-sms-chat--draft-marker)))
-          (emacsos-sms-chat--render)
-          (should (equal (emacsos-sms-chat--draft) "  exact draft  "))
-          (should (= (- (point) emacsos-sms-chat--draft-marker) offset)))
-        (goto-char (point-min))
-        (search-forward "https://bad")
-        (should-not (get-text-property (point) 'emacsos-conversation-url))
-        (should-not
-         (text-property-not-all (point-min) emacsos-sms-chat--draft-marker
-                                'read-only t))
-        (should (string-match-p "\\\\u{202E}\\\\\\\\u{202E}"
-                                (buffer-string)))))))
+   (emacsos-sms-chat--admit
+    (make-emacsos-sms-chat-record
+     :id "one" :number "+14155550123"
+     :body (concat "[tap](https://bad)" (string #x202e) "\\u{202E}")
+     :direction 'incoming :state 'received :origin 'modem
+     :owner ":1.mm" :generation 3 :path "/org/freedesktop/ModemManager1/SMS/1"
+     :revision 1))
+   (let ((buffer (emacsos-sms-chat-open "+14155550123")))
+     (should (buffer-live-p buffer))
+     (with-current-buffer buffer
+       (goto-char (point-max))
+       (insert "  exact draft  ")
+       (backward-char 3)
+       (let ((offset (- (point) emacsos-sms-chat--draft-marker)))
+         (emacsos-sms-chat--render)
+         (should (equal (emacsos-sms-chat--draft) "  exact draft  "))
+         (should (= (- (point) emacsos-sms-chat--draft-marker) offset)))
+       (goto-char (point-min))
+       (search-forward "https://bad")
+       (should-not (get-text-property (point) 'emacsos-conversation-url))
+       (should-not
+        (text-property-not-all (point-min) emacsos-sms-chat--draft-marker
+                               'read-only t))
+       (should (string-match-p "\\\\u{202E}\\\\\\\\u{202E}"
+                               (buffer-string)))))))
 
 (ert-deftest emacsos-sms-chat-render-bound-counts-visible-control-escapes ()
   (test-sms-chat--with-state
@@ -386,24 +385,23 @@
 
 (ert-deftest emacsos-sms-chat-archive-rollback-retains-object-and-all-fields ()
   (test-sms-chat--with-state
-    (let* ((old (make-emacsos-sms-chat-record :id "one" :origin 'local :state 'sent :unread t :acknowledged t))
-           (saved (copy-emacsos-sms-chat-record old)))
-      (setq emacsos-sms-chat--records (list old))
-      (cl-letf (((symbol-function 'emacsos-sms-chat--trim) (lambda () nil)))
-        (emacsos-sms-chat--apply-history
-         `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown"))) (truncated))))
-      (should (eq (car emacsos-sms-chat--records) old))
-      (should (equal old saved))
-      (should-not emacsos-sms-chat--history-loaded))))
+   (let* ((old (make-emacsos-sms-chat-record :id "one" :origin 'local :state 'sent :acknowledged t))
+          (saved (copy-emacsos-sms-chat-record old)))
+     (setq emacsos-sms-chat--records (list old))
+     (cl-letf (((symbol-function 'emacsos-sms-chat--trim) (lambda () nil)))
+       (emacsos-sms-chat--apply-history
+        `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown"))) (truncated))))
+     (should (eq (car emacsos-sms-chat--records) old))
+     (should (equal old saved))
+     (should (string-match-p "Local view full" emacsos-sms-chat--refresh-state)))))
 
-(ert-deftest emacsos-sms-chat-archive-preserves-unread-and-user-ack ()
+(ert-deftest emacsos-sms-chat-archive-preserves-user-ack ()
   (test-sms-chat--with-state
-    (let ((old (make-emacsos-sms-chat-record :id "one" :number "+14155550123" :body "same" :direction 'outgoing :origin 'local :state 'unknown :unread t :acknowledged t)))
-      (setq emacsos-sms-chat--records (list old))
-      (emacsos-sms-chat--apply-history
-       `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown"))) (truncated)))
-      (should (emacsos-sms-chat-record-unread old))
-      (should (emacsos-sms-chat-record-acknowledged old)))))
+   (let ((old (make-emacsos-sms-chat-record :id "one" :number "+14155550123" :body "same" :direction 'outgoing :origin 'local :state 'unknown :acknowledged t)))
+     (setq emacsos-sms-chat--records (list old))
+     (emacsos-sms-chat--apply-history
+      `((messages . (,(test-sms-chat--history-row "one" "outgoing" "unknown"))) (truncated)))
+     (should (emacsos-sms-chat-record-acknowledged old)))))
 
 (ert-deftest emacsos-sms-chat-archive-alphanumeric-sender-is-view-only ()
   (test-sms-chat--with-state
@@ -434,16 +432,6 @@
       (let ((text (with-current-buffer test-sms-chat--window-buffer (buffer-string))))
         (should (string-match-p (regexp-quote "\\u{202E}\\u{2066}") text))
         (should-not (string-match-p (string #x202e) text))))))
-
-(ert-deftest emacsos-sms-chat-archive-new-unread-is-not-reasserted-after-read ()
-  (test-sms-chat--with-state
-    (emacsos-sms-chat--apply-history '((messages) (truncated)))
-    (let ((value `((messages . (,(test-sms-chat--history-row "new" "incoming" "received"))) (truncated))))
-      (emacsos-sms-chat--apply-history value)
-      (should (emacsos-sms-chat-record-unread (car emacsos-sms-chat--records)))
-      (emacsos-sms-chat-open "+14155550123")
-      (emacsos-sms-chat--apply-history value)
-      (should-not (emacsos-sms-chat-record-unread (car emacsos-sms-chat--records))))))
 
 (ert-deftest emacsos-sms-chat-delayed-archive-does-not-regress-terminal-result ()
   (test-sms-chat--with-state

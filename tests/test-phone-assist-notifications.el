@@ -123,7 +123,7 @@
   (let* ((directory (make-temp-file "phone-attention-retry-" t))
          (emacsos-assist-web-cache-directory (expand-file-name "cache" directory))
          (emacsos-notifications-file (expand-file-name "state/notifications.jsonl" directory))
-         (emacsos-notifications--cache-file nil)
+         (emacsos-notifications--unavailable nil)
          (emacsos-notifications--unread nil)
          (emacsos-notifications--limit 3)
          (emacsos-phone-notifications--owner nil)
@@ -148,14 +148,21 @@
           (should (equal (emacsos-notifications-mode-line-string) ""))
           (setq stamp "2001-02-02T02:00:00Z")
           (setf (alist-get (quote reason) alert) "Synthetic changed retry reason")
+          (let ((before (with-temp-buffer
+                          (insert-file-contents emacsos-notifications-file)
+                          (buffer-string))))
           (emacsos-phone-notifications-poll)
+            ;; A retained retry must consume no bytes or eviction capacity.
+            (should (equal before (with-temp-buffer
+                                    (insert-file-contents emacsos-notifications-file)
+                                    (buffer-string)))))
           (should-not feedback)
           (should (equal (emacsos-notifications-mode-line-string) ""))
-          ;; Only diagnostics arrive while retention removes the older record.
+          ;; The original and two diagnostics fit the limit; retries used no capacity.
           (dotimes (_ 2)
             (emacsos-notifications--record 'assist "Synthetic diagnostic" "client-failed"
                                            (alist-get 'id alert)))
-          (setq emacsos-notifications--cache-file nil)
+          (emacsos-notifications--initialize)
           (should (equal (emacsos-notifications-mode-line-string) ""))
           (let ((retained (car (emacsos-notifications--alerts
                                 (emacsos-notifications--rows)))))

@@ -152,7 +152,10 @@ Edit [[file:architecture-device.dot][architecture-device.dot]] and render with
   [[file:../phone-notifications.el][phone-notifications.el]] projects logical
   alert reasons/timestamps from the existing private journal. Its generic unread
   modeline action opens the same view as =C-c e n= and marks only that displayed
-  snapshot read in existing rows. Feedback diagnostics and outgoing SMS status
-  are not separate alerts; transport/approval state remains in E10/E13.
+  snapshot read in existing rows. Retained identities do not write another row.
+  Feedback diagnostics and successful outgoing SMS are not separate alerts;
+  failed/unknown terminal SMS events add fixed reason-only alerts through the
+  existing lifecycle observer boundary. Journal failures are cached outside
+  redisplay; transport/approval state remains in E10/E13.
   The phone bootstrap restores E1's dynamic line after native Calendar updates;
   desktop Calendar and intentionally hidden modelines are not overridden.
