@@ -1,6 +1,52 @@
 #+title: Virtual phone acceptance and review record
 
-* Current successor status
+* Current fresh acceptance
+
+The third independent blind run passed all seven required criteria in both
+clean, unchanged source contexts, using the published workflow without source
+edits, internal file writes or private implementation hints:
+
+- Isolated candidate: =ca6ec33bb6cf12944b609fa3c5c94f0ea352cd34=.
+- Current deployed-source composition: =ea1eb609e2f20e9c9a9d12c96c03aac056f15b23=.
+- Runtime/readiness correction retained from =c4801ed729b54409209fa3fc04be74e7d1b139ea=.
+- Full independent report: third-run /Blind virtual-phone acceptance report/,
+  2026-11-25; private report, screenshots and logs remain outside Git.
+
+| Criterion | Expected and observed in both contexts |
+|-----------+----------------------------------------|
+| Real clean build/boot | =build=, =start= and =operate ready= completed; real Alpine/OpenRC/Sway/Emacs became ready. |
+| Headless capture | Visually inspected 720x1440 captures showed the real EmacsOS surface and keyboard. |
+| Ordinary navigation | M-x keys, pointer taps and scrolling visibly changed buffers and surfaces. |
+| Existing application operation | Controls appeared; its Retry action visibly changed unavailable status to Checking, and scrolling changed the rendered surface. |
+| Enter and edit text | =Virtual phone draft= became =Virtual phone edited= after five Backspaces and replacement text. |
+| Save/relaunch/reset | Published M-x find-file/save-buffer showed the write confirmation, reopened =Persisted synthetic state= after graceful relaunch, then showed an empty =(New file)= buffer after reset. |
+| Diagnostics/logs | =operate diag= and =operate logs= retrieved actual kernel/Alpine/OpenRC/Python status and serial/container/guest logs. |
+
+The tester reported no modifier-sequence failure. Both owned guests were
+finally stopped gracefully with exit 0; their synthetic state and evidence were
+preserved. No physical deployment, production effect or merge was performed.
+This final acceptance-summary update is documentation-only; it does not change
+the exact tested runtime or tool behavior.
+
+The isolated candidate still has a Calendar limitation: titles were not
+consistently readable and some transitions retained stale Calendar content under
+the new surface. The required app-operation criterion used Controls, not a
+Calendar month-identity claim. No Calendar fix or blanket all-app pass is claimed.
+The first example-coordinate tap at =(220,690)= missed Controls after Calendar
+changed the layout; the tester preserved that failure, inspected the actual
+screen and tapped the visible tab at =(220,170)=. This is normal pointer input,
+not a hidden application workaround. GTK cursor/allocation warnings and expected
+unavailable hardware/SMS notices remain recorded in the logs.
+
+Keyboard attribution was independently checked after the run. The report lists
+the sibling repository HEAD =d776e3602a359c8299b5299137d39a4fe16ba97a= as its
+pin, but both actual build archives match the tracked pin
+=1da13c0eb901e67d3caf6cc7a058aeb771a8052b=. Their SHA-256 is
+=24d40922fca91ecc237b055d6c27e780c90c2cbe4c0054c3866ff1b5723214d8=.
+The original private report is preserved; this records the verified build input
+rather than repeating its repository-HEAD attribution error.
+
+* Second blind run and persistence documentation gap
 
 The readiness correction passed source checks but the second independent blind
 run did not establish complete acceptance. Its exact inputs were isolated
@@ -23,8 +69,8 @@ internal file write, evaluation or recovery mechanism is added. A development
 run of that exact ordinary-input flow showed the write confirmation, saved
 text after relaunch, and an empty "New file" buffer after reset. Its captures
 remain private outside Git. This development evidence does not replace the required third independent blind seven-scenario run in both contexts.
-Successor acceptance remains pending that run. Earlier results below retain
-their exact source attribution and do not establish acceptance of this successor.
+Acceptance remained pending at that point; the third independent run is recorded
+above. Earlier results below retain their exact source attribution.
 
 * Previous fresh shared-runtime acceptance
 

@@ -70,7 +70,9 @@ deploy/virtual-phone/operate logs > "$VIRTUAL_PHONE_STATE/diagnostics.log" 2>&1
 ```
 
 Inspect each capture and wait for the visible transition before the next action.
-A successful input command alone does not establish UI success. `keys` accepts
+Tap coordinates are examples for a particular visible layout; locate the actual
+control in a new capture after app navigation. A successful input command alone
+does not establish UI success. `keys` accepts
 native wtype arguments; `text` treats its argument literally. Scrolling acts at
 the current pointer location. Tap and wheel press/release use separate QMP
 reports so libinput observes both edges. PPM output is also supported.
@@ -195,8 +197,9 @@ A fresh tester uses this published workflow and reports failures without code
 changes or silent workarounds. Boot alone, mocked UI, internal evaluation and
 historical results do not satisfy a fresh acceptance run. The
 [acceptance record](../../docs/virtual-phone-review.org) identifies the exact
-previously tested source and Calendar limitation. Acceptance of the readiness
-correction is pending a new independent run in both contexts.
+independently tested candidate and deployed-source composition, all seven results,
+and the remaining Calendar/stale-surface limitation. Controls is the tested
+app-operation scenario; this target does not claim every app is validated.
 
 Roadmap only: an isolated real Assist server with synthetic credentials/history
 and end-to-end client/server validation. This target does not implement it.
