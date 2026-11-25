@@ -15,11 +15,11 @@ def run(command, **kwargs):
     return subprocess.run(command, check=True, **kwargs)
 
 
-def ssh(command, **kwargs):
+def ssh(command, timeout=15, **kwargs):
     return run(['docker', 'exec', '-i', cid(), 'ssh', '-T', '-i', '/out/id_ed25519',
                 '-p', '2222', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
                 '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
-                'root@127.0.0.1', command], timeout=15, **kwargs)
+                'root@127.0.0.1', command], timeout=timeout, **kwargs)
 
 
 def cid():
@@ -78,15 +78,17 @@ try:
     if args.action == 'ready':
         deadline = time.monotonic() + 60
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('UI not ready after 60 seconds; run operate logs')
             try:
                 ssh('test "$(cat /run/emacsos-ui/ready 2>/dev/null)" = ready',
+                    timeout=min(15, remaining),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 print('ready: shared Sway window and Emacs server probes passed')
                 break
-            except subprocess.CalledProcessError:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('UI not ready after 60 seconds; run operate logs')
-                time.sleep(1)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
     elif args.action == 'screenshot':
         output = args.output.resolve()
         if output.suffix not in ('.ppm', '.png'):

@@ -44,8 +44,10 @@ service, token or phone connection is used.
 
 `operate` is a thin wrapper over SSH, native `wtype`, QMP, Docker and ImageMagick.
 It reports failures and does not repair or silently replace a failing guest.
-`ready` uses a 60-second readiness budget, with each SSH attempt bounded to
-15 seconds, for the physical session's readiness marker,
+`ready` uses a total 60-second readiness budget for the physical session's
+readiness marker. Failed or stalled SSH attempts can be followed by another
+probe within that same deadline; each attempt is bounded to at most 15 seconds
+and the remaining budget. The marker is
 written after Sway exposes an Emacs window and its Emacs server responds.
 
 ```sh
@@ -168,9 +170,10 @@ and outside-Git screenshots for all seven scenarios:
 
 A fresh tester uses this published workflow and reports failures without code
 changes or silent workarounds. Boot alone, mocked UI, internal evaluation and
-historical results do not satisfy a fresh acceptance run. The current foundation
-acceptance and its Calendar limitation are recorded in
-[the acceptance summary](../../docs/virtual-phone-review.org).
+historical results do not satisfy a fresh acceptance run. The
+[acceptance record](../../docs/virtual-phone-review.org) identifies the exact
+previously tested source and Calendar limitation. Acceptance of the readiness
+correction is pending a new independent run in both contexts.
 
 Roadmap only: an isolated real Assist server with synthetic credentials/history
 and end-to-end client/server validation. This target does not implement it.

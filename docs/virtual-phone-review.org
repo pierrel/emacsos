@@ -1,6 +1,13 @@
 #+title: Virtual phone acceptance and review record
 
-* Fresh shared-runtime acceptance
+* Current successor status
+
+The readiness timeout correction requires a new independent blind run in both
+contexts before publication. That successor is not accepted by the previous
+results below. The existing UI/application payload is unchanged, but the changed
+readiness boundary must be exercised with the complete seven scenarios again.
+
+* Previous fresh shared-runtime acceptance
 
 An independent fresh tester built and operated both unchanged clean source
 contexts using only the published [[file:../deploy/virtual-phone/README.md][workflow]], prerequisites and seven acceptance
