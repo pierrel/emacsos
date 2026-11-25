@@ -68,25 +68,37 @@
     ("store_unavailable" . "Secret store needs verification; inspect Git status before retry"))
   "Fixed notices for the private secret API's allowlisted failure codes.")
 
-(defun emacsos-assist-web--secret-save-notice (value problem)
-  "Describe private save VALUE or typed PROBLEM without exposing response text."
-  (cond
-   ((and (not problem) (alist-get 'id value))
-    (if (alist-get 'result_branch value)
-        "Encrypted login committed on a result branch; inspect Git status"
-      "Encrypted login saved to this thread's Git branch"))
-   ((eq (plist-get problem :kind) 'timeout)
-    "Login save timed out; saving may continue and chat may stay busy. Inspect Git status before retry")
-   ((eql (plist-get problem :status) 409)
-    (concat "Login save rejected: "
-            (or (cdr (assoc (plist-get problem :secret-code)
-                            emacsos-assist-web--secret-rejections))
-                "reason unavailable; refresh before retry")))
-   ((memq (plist-get problem :status) '(401 403 404))
-    "Login save access unavailable; reopen this thread before retry")
-   ((memq (plist-get problem :kind) '(credentials busy))
-    "Login save not submitted; check credentials or request budget")
-   (t "Login save unconfirmed; inspect Git status before retry. Saving may continue")))
+(defun emacsos-assist-web--secret-notice (operation value problem)
+  "Describe private OPERATION's VALUE or PROBLEM using fixed safe text.
+Only acknowledged success and recognized refusal categories are conclusive."
+  (let ((action (if (eq operation 'unlock) "Secret unlock" "Login save"))
+        (code (plist-get problem :secret-code)))
+    (cond
+     ((and (not problem) (eq operation 'unlock)
+           (eq (alist-get 'unlocked value) t))
+      "Secrets unlocked for this thread")
+     ((and (not problem) (eq operation 'save) (alist-get 'id value))
+      (if (alist-get 'result_branch value)
+          "Encrypted login committed on a result branch; inspect Git status"
+        "Encrypted login saved to this thread's Git branch"))
+     ((eq (plist-get problem :kind) 'timeout)
+      (if (eq operation 'save)
+          "Login save timed out; saving may continue and chat may stay busy. Outcome unknown; inspect Git status before retry"
+        "Secret unlock timed out; outcome unknown. Unlocking may still complete"))
+     ((and (eql (plist-get problem :status) 409)
+           (not (equal code "store_unavailable"))
+           (assoc code emacsos-assist-web--secret-rejections))
+      (concat action " rejected: "
+              (cdr (assoc code emacsos-assist-web--secret-rejections))))
+     ((eql (plist-get problem :status) 413)
+      (concat action " rejected: private form exceeds the server request-size limit"))
+     ((eql (plist-get problem :status) 422)
+      (concat action " rejected: private form is invalid; reopen it before retry"))
+     ((memq (plist-get problem :status) '(401 403 404))
+      (concat action " rejected: access unavailable; reopen this thread before retry"))
+     ((memq (plist-get problem :kind) '(credentials busy))
+      (concat action " not submitted; check credentials or request budget"))
+     (t (concat action " unconfirmed; outcome unknown. Inspect Git status before retry; the operation may still complete")))))
 
 (defun emacsos-assist-web-secret-unlock ()
   "Privately unlock this thread's credentials while its authorization is current."
@@ -105,13 +117,8 @@
             (emacsos-assist-web--request
              "POST" (format "threads/%s/secrets/unlock" tid)
              `((passphrase . ,passphrase))
-             (lambda (_value error)
-               (message "%s" (if error
-                                 (concat "Secret unlock failed: "
-                                         (or (cdr (assoc (plist-get error :secret-code)
-                                                         emacsos-assist-web--secret-rejections))
-                                             "reason unavailable; refresh before retry"))
-                                "Secrets unlocked for this thread")))
+             (lambda (value problem)
+               (message "%s" (emacsos-assist-web--secret-notice 'unlock value problem)))
              nil nil nil nil t)))
       (when passphrase (clear-string passphrase)))))
 
@@ -144,12 +151,14 @@
                       (let (label login-url username password passphrase)
                         (unwind-protect
                             (progn
-                              (setq label (if request (alist-get 'label request)
-                                            (read-string "Login label: ")))
-                              (check-access)
-                              (setq login-url (if request (alist-get 'login_page request)
-                                                (read-string "HTTPS login origin and path: ")))
-                              (check-access)
+                              ;; Raw public input is visible but not retained before validation.
+                              (let ((message-log-max nil))
+                                (setq label (if request (alist-get 'label request)
+                                              (read-string "Login label: " nil t)))
+                                (check-access)
+                                (setq login-url (if request (alist-get 'login_page request)
+                                                  (read-string "HTTPS login origin and path: " nil t)))
+                                (check-access))
                               (setq username (read-passwd "Username (masked): "))
                               (check-access)
                               (setq password (read-passwd "Password: "))
@@ -169,7 +178,7 @@
                                  (when (buffer-live-p origin)
                                    (with-current-buffer origin
                                      (setq emacsos-assist-web--secret-add-pending-p nil)))
-                                 (message "%s" (emacsos-assist-web--secret-save-notice value problem))
+                                 (message "%s" (emacsos-assist-web--secret-notice 'save value problem))
                                  (when (and request (not problem) (alist-get 'id value)
                                             (buffer-live-p origin))
                                    (with-current-buffer origin

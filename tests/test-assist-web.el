@@ -5590,12 +5590,12 @@ server clears only flags for a view that is still current."
                               (cl-every #'zerop (string-to-list value))) values)))))))
 
 (ert-deftest test-assist-web-secret-save-errors-use-fixed-safe-notices ()
-  (should (string-match-p "rejected" (emacsos-assist-web--secret-save-notice
-                                     nil '(:kind http :status 409 :text "private-body"))))
+  (should (string-match-p "unconfirmed" (emacsos-assist-web--secret-notice 'save
+                                        nil '(:kind http :status 409 :text "private-body"))))
   (dolist (problem '((:kind http :status 503 :text "private-body")
                      (:kind transport :text "private-body")
                      (:kind parse :text "private-body")))
-    (let ((notice (emacsos-assist-web--secret-save-notice nil problem)))
+    (let ((notice (emacsos-assist-web--secret-notice 'save nil problem)))
       (should (string-match-p "unconfirmed" notice))
       (should-not (string-match-p "private-body" notice)))))
 
@@ -5785,8 +5785,101 @@ server clears only flags for a view that is still current."
         (should (eql (plist-get (cadr result) :status) 409))
         (should (equal (plist-get (cadr result) :secret-code)
                        (and (assoc code emacsos-assist-web--secret-rejections) code)))
-        (let ((notice (emacsos-assist-web--secret-save-notice nil (cadr result))))
+        (let ((notice (emacsos-assist-web--secret-notice 'save nil (cadr result))))
           (should-not (string-match-p "invented-private-body" notice))
           (when (equal code "invalid_phrase_length")
             (should (string-match-p "12 to 1024 UTF-8 bytes" notice))
             (should-not (string-match-p "busy" notice))))))))
+
+(ert-deftest test-assist-web-secret-unlock-unknown-outcome-is-not-a-rejection ()
+  (dolist (problem '((:kind timeout) (:kind transport) (:kind http :status 503)))
+    (with-temp-buffer
+      (setq-local emacsos-assist-web--thread-id "synthetic-thread")
+      (let (notice (posts 0))
+        (cl-letf (((symbol-function 'read-passwd)
+                   (lambda (&rest _) (copy-sequence "invented phrase only")))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (setq notice (apply #'format format-string args))))
+                  ((symbol-function 'emacsos-assist-web--request)
+                   (lambda (_method _path _payload callback &rest _)
+                     (cl-incf posts)
+                     (funcall callback nil problem))))
+          (emacsos-assist-web-secret-unlock))
+        (should (= posts 1))
+        (should (string-match-p "unknown\\|unconfirmed" notice))
+        (should-not (string-match-p "rejected\\|failed" notice))))))
+
+(ert-deftest test-assist-web-secret-public-prompts-disable-history-and-logging ()
+  (with-temp-buffer
+    (setq-local emacsos-assist-web--thread-id "synthetic-thread")
+    (let ((prompts 0))
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (_prompt &optional _initial history &rest _)
+                   (cl-incf prompts)
+                   (should (eq history t))
+                   (should-not message-log-max)
+                   "Invented public text"))
+                ((symbol-function 'read-passwd)
+                 (lambda (&rest _) (copy-sequence "invented private text")))
+                ((symbol-function 'run-at-time)
+                 (lambda (_delay _repeat function &rest args) (apply function args)))
+                ((symbol-function 'emacsos-assist-web--request)
+                 (lambda (method _path _payload callback &rest _)
+                   (if (equal method "GET") (funcall callback '((unlocked . t)) nil)
+                     (funcall callback '((id . "invented-id")) nil)))))
+        (save-window-excursion
+          (switch-to-buffer (current-buffer))
+          (emacsos-assist-web-secret-add)))
+      (should (= prompts 2)))))
+
+(ert-deftest test-assist-web-secret-notices-separate-refusals-and-unknowns ()
+  (dolist (operation '(save unlock))
+    (dolist (problem '((:kind http :status 413 :text "invented-private-body")
+                       (:kind http :status 422 :text "invented-private-body")
+                       (:kind http :status 409 :secret-code "invalid_phrase_length")
+                       (:kind http :status 409 :secret-code "repository_busy")))
+      (let ((notice (emacsos-assist-web--secret-notice operation nil problem)))
+        (should (string-match-p "rejected" notice))
+        (should-not (string-match-p "invented-private-body" notice))))
+    (dolist (problem '((:kind http :status 409 :secret-code "store_unavailable")
+                       (:kind http :status 409 :secret-code "invented-private-body")
+                       (:kind http :status 500) (:kind parse) (:kind transport)))
+      (let ((notice (emacsos-assist-web--secret-notice operation nil problem)))
+        (should (string-match-p "unconfirmed.*unknown" notice))
+        (should-not (string-match-p "rejected\\|invented-private-body" notice)))))
+  (should (string-match-p "unconfirmed"
+           (emacsos-assist-web--secret-notice 'unlock nil nil)))
+  (should (equal "Secrets unlocked for this thread"
+           (emacsos-assist-web--secret-notice 'unlock '((unlocked . t)) nil))))
+
+(ert-deftest test-assist-web-private-body-refusals-use-fixed-http-notices ()
+  "Actual 413/422 callbacks retain refusal status without parsing raw input."
+  (dolist (status '(413 422))
+    (dolist (operation '(save unlock))
+      (with-temp-buffer
+        (setq-local emacsos-assist-web--thread-id "synthetic-thread")
+        (let ((emacsos-assist-web--requests nil) result)
+          (cl-letf (((symbol-function 'emacsos-assist-web--read-token) (lambda () "token"))
+                    ((symbol-function 'emacsos-assist-web--trustfiles) (lambda () nil))
+                    ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+                    ((symbol-function 'url-retrieve)
+                     (lambda (_url callback &rest _)
+                       (let ((response (generate-new-buffer " *private-body-refusal*")))
+                         (with-current-buffer response
+                           (insert (format "HTTP/1.1 %d Refused\r\nContent-Type: application/json\r\n\r\n" status))
+                           (setq-local url-http-response-status status
+                                       url-http-content-type "application/json"
+                                       url-http-end-of-headers (copy-marker (point)))
+                           (insert "{\"detail\":\"invented-private-body\"}")
+                           (funcall callback `(:error (error http ,status))))
+                         response))))
+            (emacsos-assist-web--request
+             "POST" (concat "threads/synthetic-thread/secrets"
+                            (if (eq operation 'unlock) "/unlock" "")) nil
+             (lambda (value problem) (setq result (list value problem))) nil nil nil nil t))
+          (should-not (car result))
+          (should (eql (plist-get (cadr result) :status) status))
+          (let ((notice (emacsos-assist-web--secret-notice operation nil (cadr result))))
+            (should (string-match-p "rejected" notice))
+            (should-not (string-match-p "invented-private-body" notice))))))))
