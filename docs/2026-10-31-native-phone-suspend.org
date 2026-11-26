@@ -1,0 +1,88 @@
+#+TITLE: One native phone suspend owner
+#+DATE: 2026-10-31
+
+* Intended behavior
+
+The existing Swayidle process requests native elogind suspend once after 180
+seconds of seat inactivity. It no longer delegates policy to a separate
+screen-off timer. Manual blanking therefore waits for that ordinary idle
+period; a USB-vetoed attempt is not retried on unplug until new seat activity.
+Those timing differences are deliberate.
+
+The native operation waits for existing modem delay inhibitors, then invokes
+one synchronous fixed guard. The patched provider treats a configured guard
+failure as a veto, without another tool or direct kernel fallback. It retains
+busy ownership until its exact sleep child reaches a terminal state and is
+reaped. Parent death reaches its owned descendants. If an already-entered
+kernel operation cannot yet finish, its actual writer keeps the existing
+locks and input descriptions, so a replacement cannot race past it.
+
+* Removed and retained responsibilities
+
+Remove the monitor's deadline/retry loop, power-event FIFO, frontend suspend
+branch and stdio descriptor handoff. Remove the redundant suspend-owner lock.
+Keep native operation ownership in elogind and policy in existing Swayidle.
+There is no new service, frontend controller, PAM/session migration or idle
+policy daemon.
+
+Keep trusted input decoding, overflow resynchronization, software wake guards,
+manual display transitions, call-before-display lock order, USB checks and
+the kernel wakeup-count read/arm/commit handshake. Input registration must
+precede the initial display transition. Generic resume never lights a manually
+blanked display.
+
+The guard pins the exact monitor using pidfd before validating its final UID
+credentials, fixed argv and service cgroup membership. It imports descriptors
+3/4/5 from that pinned process. Hardware identity and the full key bitmap are
+checked again. EPOLL_CTL_MOD with the original descriptor numbers proves the
+same registered open descriptions; inode equality alone is insufficient.
+The guard never polls the imported epoll. Its existing consumer finishes each
+synchronous guarded display action before the next poll. Pending input is
+therefore protected either by the imported input registration or by that
+software display action while it waits for the display lock.
+
+The guard keeps input descriptors and call/display locks through its exec and
+builtin mem write. Counter readers and call queries close their copies.
+After import the monitor's continued lifetime is unnecessary: the actual
+writer owns the same kernel objects. No PID-liveness approximation replaces
+that ownership.
+
+* Validation and limits
+
+Real-kernel container tests cover absent/ambiguous monitor, wrong credentials,
+missing wake flags, a substituted open description, exit during acquisition,
+unread input surviving monitor death and continued-consumer ordering.
+The integrated fixture executes actual patched provider code, acquisition,
+locks and shell entry. Only hardware devices, display output and kernel PM
+sinks are fixtures. It covers call, unknown call, USB, nonblank display,
+unsafe lock, missing monitor, modem identity/enumeration, queued input and
+software wake at read/arm/commit boundaries. A blocked actual shell builtin
+keeps locks after monitor and provider death, vetoes a replacement, and exits
+without a later mem write. That FIFO syscall is interruptible; a separate
+native barrier models the already-committed uninterruptible phase.
+
+Native fork/wait/death controls and signed aarch64 package validation are
+prerequisites, not proof of real carrier wake. Actual incoming call/SMS wake,
+post-resume UI and hardware feedback require coordinated device validation.
+No source test sends a carrier message or performs real suspend.
+
+* Activation
+
+The matched native package bundle, identical fixed logind.conf.d and
+sleep.conf.d configurations, and existing helper
+locations must be established before the new UI starts. The provider cannot
+inherit old modem inhibitor descriptors across restart: verify fresh modem
+and network delay inhibitors before enabling new requests. The package README
+records exact ordering and rollback prerequisites. The actual child parser
+clears the old helper list before reading sleep.conf.d; a negative logind-only
+fixture demonstrates the unsafe unconfigured path. Both configuration inputs
+are checked before either standard installer can mutate or stop the UI.
+
+* Historical supersessions
+
+This replaces the screen-off timer, FIFO reconciliation and stdio-handoff
+sections in [[file:2026-10-12-phone-wake-input-queues.org][Private hardware input queues guard phone sleep admission]].
+Input hardware binding and kernel wake-source protection remain required;
+only operation ownership and policy routing change. It replaces the armed
+unplug retry described in [[file:2026-10-13-phone-external-power-exemption.org][Phone external-power exemption]]
+with the deliberate one-shot idle policy above.

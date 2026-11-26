@@ -1,0 +1,168 @@
+#+TITLE: Smaller phone suspend path using upstream elogind
+#+DATE: 2026-11-24
+
+* Recommendation and scope
+
+Prefer upstream elogind 257.16 with one fixed synchronous phone-policy helper.
+Delete the private provider behavior patch and cross-process input-descriptor
+import. Keep existing Swayidle policy, ordinary input handling, call/display
+serialization and the kernel wakeup-count handshake. No new process supervisor,
+controller, queue, retry state, PAM migration or operating-system upgrade is
+proposed.
+
+This is a reviewed design proposal, not an implemented or deployable candidate.
+Its main remaining prerequisite is a target-compatible Alpine package build.
+Root must accept this minimal choice before runtime source edits.
+
+* Evidence that changes the solution choice
+
+Unmodified 257.16 was built and run in a separate Alpine/QEMU/KVM guest using
+private compatible glibc libraries. Real delay-inhibitor release preceded the
+configured helper. While the helper was held, PreparingForSleep remained true
+and a second request returned OperationInProgress. Three actual cases completed:
+
+- A deliberate successful no-op helper produced no kernel sleep entry or QMP
+  SUSPEND event.
+- A helper performing the actual mem write produced kernel deep/S3 entry and
+  exit, independently observed by QMP SUSPEND and WAKEUP.
+- An injected exit 42, without a helper mem write, produced native fallback and
+  real S3. This establishes the upstream failure contract.
+
+The source archive SHA256 was
+=3c8146409bfb9daa77f272212c2b0bf0ae727c782ec87ece0d2d25e0e5bf5f4c=.
+The raw evidence bundle is named =pr92-upstream257-20261124=; its important logs
+are =build-glibc-final.log=, =activate257.log=, =case-veto-r2.log=,
+=case-normal.log= and =case-fail.log=. The initial veto harness failure is kept
+separately: duplicate preparation signals caused a second write to an exited
+inhibitor. The corrected harness releases its live holder only once.
+
+These are actual process/kernel results, not phone modem or display-policy
+acceptance. Synthetic keyboard events reached guest evdev, but no actual phone
+admission policy was attached. The compatible glibc bundle is not an Alpine APK.
+The first private overlay's sshd I/O error is an environment constraint with
+unknown cause; the successful cases used a fresh separate overlay. Neither the
+physical phone nor the virtual-target owner's active guest was changed.
+
+* Proposed ownership and admission
+
+The existing Swayidle process makes its ordinary one-shot native suspend
+request. Its current 180-second inactivity timing and no automatic retry on
+unplug remain unchanged. Elogind owns admission, preparation and the synchronous
+operation. Existing modem/network delay inhibitors remain the preparation path;
+the helper does not duplicate their work or replace their documented timeout.
+
+The fixed helper acquires the existing call lock and then the stable display
+lock before reading policy state. It reads the current runtime display state,
+checks USB power and known call-idle status, validates required wake sources,
+and uses the existing kernel wakeup-count read/arm/commit sequence. It owns its
+lock descriptors through its own actual mem write. Query/timeout children close
+their copies, so a stalled diagnostic child cannot prolong those locks.
+
+Every expected admission refusal logs a specific reason and returns success
+without writing mem: busy lock, nonblank or unavailable state, active/unknown
+call, USB power, unavailable required policy input, counter timeout or a detected
+wake race. Old exit 75/77 paths and implicit set-e failures must not accidentally
+be reused as vetoes. A successful no-op is the supported upstream helper result
+that suppresses fallback. This is policy, not a new recovery state machine.
+
+Ordinary startup still publishes waking under the stable display lock before
+Sway can run. The lock inode stays outside the replaceable UI runtime. This
+preserves the source-reproduced restart race correction: an existing writer
+holds the same lock that new startup needs; startup winning first makes the
+fresh state ineligible. No nested startup flock is introduced.
+
+* Deletion inventory and retained contracts
+
+- Delete the approximately 144-line private elogind patch. Actual 257 waiting
+  supplies the synchronous normal path. Do not retain the old custom death and
+  cancellation machinery solely because its former fixtures assert it.
+- Delete pidfd_getfd, process/cgroup/argv discovery, fixed input FDs 3/4/5 import,
+  repeated ioctl/epoll-MOD identity proofs and imported-object retention after
+  monitor death. These enforce the old sharing architecture. No retained
+  physical incident establishes that architecture as a user requirement.
+- Delete the separate Python entry/acquisition layer and its input-FD handoff;
+  acquire the two existing locks in the fixed helper itself. Keep only bounded
+  checks actually needed for those privileged fixed paths.
+- Replace the hard-coded private-provider binary/config checksum gate with the
+  selected package/config dependency contract. Installer verification still
+  prevents activating an unsupported provider or missing fixed helper; it must
+  not depend on an obsolete private binary digest.
+- Keep the ordinary input monitor, hardware selection, event decoding and
+  SYN_DROPPED resynchronization. Keep its own EPOLLWAKEUP registrations and
+  register inputs before the display becomes sleep-eligible. Complete each
+  synchronous press/wake action before the next epoll wait. Linux documents
+  protection from queued event through processing until the next wait; this
+  works without importing the monitor's descriptors into the helper.
+- Keep the existing software wake/press guard before waiting for the display
+  lock. This still uses its own eventfd/epoll descriptors 10/11; the proposal
+  removes input-descriptor import, not all descriptor inheritance.
+- Keep existing manual blank/wake semantics, call-before-display lock order,
+  USB exemption and kernel wake-source/counter handling. Their user outcomes
+  remain in scope; no extra idle controller is needed.
+
+This removes several hundred lines across the provider patch and acquisition
+pipeline before any justified local consolidation. An exact net LOC figure
+belongs to the implementation diff, not this design estimate.
+
+* Abnormal helper failure is a separate limitation
+
+Unmodified upstream falls back on a nonzero helper result, failed exec or
+unsuccessful termination. The exit-42 experiment demonstrates that behavior;
+it does not demonstrate a phone helper crash. There is no retained physical
+incident proving that this fallback caused an unsafe phone sleep. Earlier
+provider/monitor death controls exercise modeled sinks or deliberate process
+failures. The physical restart/battery report did not establish a helper-crash
+cause; the separate SMS receive failure was traced to a full modem store.
+
+Accordingly this proposal accepts normal upstream abnormal-failure behavior
+rather than reintroducing a provider patch by default. It does not claim hard
+policy veto after a broken helper, nor input protection after monitor death.
+Such unexpected states get native/helper diagnostics and existing supervision.
+If preserving a policy veto despite helper execution failure becomes an explicit
+requirement, that is a concrete additional contract for Root to assess, not a
+reason to retain the old machinery without discussion.
+
+* Alpine package route and exact remaining constraint
+
+The inspected official Alpine aport at
+=3e01beb006cd2a86729f26a17a7544bf788d53f9= packages 255.24-r2. Its APKBUILD
+already includes gshadow and other musl portability patches plus the ordinary
+OpenRC split packages. The bare upstream musl experiment omitted those patches;
+its missing gshadow.h therefore does not show that a new suspend-behavior patch
+or phone OS upgrade is necessary.
+
+Static dry runs of that exact recipe's ten patches against 257.16 found six
+apply, including gshadow. Four do not apply verbatim: prctl, the two strerror
+patches and the session-GC patch. At least the prctl and STRERROR changes already
+have corresponding upstream musl branches. The remaining patches need ordinary
+recipe reconciliation, not blind application or a claim that all four are
+unnecessary. The source-only evidence is named =patch-compatibility.json= in
+=pr92-design-20261124=. No target package build is claimed by a dry run.
+
+The smallest next package operation is to refresh this existing aport for
+257.16, retain applicable distro portability fixes, omit only changes proven
+upstream, and run its standard aarch64 abuild. Do not add a private sleep
+behavior patch or upgrade the phone's core libc. Stop at the first substantive
+new compatibility requirement and present that exact blocker. Until this
+succeeds, the package is the deployment constraint.
+
+After a package exists, implementation acceptance is the smaller helper's
+normal/veto/input/call/display behavior in a separate VM and then the same
+candidate composed with deployed features. Physical modem/carrier wake remains
+a later target check owned by the operator, not something VM S3 establishes.
+
+* Primary sources
+
+- [[https://github.com/elogind/elogind/releases/tag/v257.16][Official 257.16 release]] and
+  [[https://github.com/elogind/elogind/blob/v257.16/src/sleep/sleep.c][external helper execution source]].
+- [[https://github.com/alpinelinux/aports/blob/3e01beb006cd2a86729f26a17a7544bf788d53f9/community/elogind/APKBUILD][Pinned Alpine recipe and adjacent distro patches]].
+- [[https://man7.org/linux/man-pages/man7/epoll.7.html][Linux epoll processing/wakeup lifetime documentation]].
+
+* Historical supersessions
+
+This replaces the private-provider patch, imported input-object ownership and
+post-monitor-death retention choices in
+[[file:2026-10-31-native-phone-suspend.org][One native phone suspend owner]], sections Intended behavior and
+Removed and retained responsibilities. Its recorded experiments remain valid
+historical evidence; the new proposal changes which guarantees are retained.
+This does not rewrite prior physical test results or claim a new deployment.

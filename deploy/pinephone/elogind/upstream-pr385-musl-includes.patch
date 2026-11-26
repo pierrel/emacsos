@@ -1,0 +1,53 @@
+From 3a8fba5a51619b9f84c7f9c841a20fc242fc9133 Mon Sep 17 00:00:00 2001
+From: LinuxUserGD <hugegameartgd@gmail.com>
+Date: Thu, 5 Nov 2026 15:54:36 +0000
+Subject: [PATCH] meson: Add musl include directory to `basic_includes`
+
+---
+ meson.build       | 12 ++++++------
+ meson_options.txt |  2 +-
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 636764eeba..7b394d2193 100644
+--- a/meson.build
++++ b/meson.build
+@@ -2532,12 +2532,6 @@ boot_stubs = []
+ 
+ build_dir_include = include_directories('.')
+ 
+-#if 1 /// if elogind is built on musl, we have to include some overloads
+-if get_option('libc') == 'musl'
+-	libc_include_dir = 'src/include/musl'
+-endif
+-
+-
+ basic_includes = include_directories(
+         'src/basic',
+         'src/fundamental',
+@@ -2548,6 +2542,12 @@ basic_includes = include_directories(
+         'src/systemd',
+         '.')
+ 
++#if 1 /// if elogind is built on musl, we have to include some overloads
++if get_option('libc') == 'musl'
++basic_includes = [include_directories('src/include/musl'), basic_includes]
++endif
++#endif // 1
++
+ #if 0 /// elogind has fewer subdirectories here, and needs a few others
+ # libsystemd_includes = [basic_includes, include_directories(
+ #         'src/libsystemd/sd-bus',
+diff --git a/meson_options.txt b/meson_options.txt
+index 3a90fbc4f2..357316dfec 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -475,7 +475,7 @@ option('polkit', type : 'feature', deprecated : { 'true' : 'enabled', 'false' :
+ #if 1 /// early adoption of the 'libc' option, so elogind can keep supporting musl
+ option('libc', type : 'combo', choices : ['glibc', 'musl'],
+        description : 'libc implementation to be used')
+-#endi // 1
++#endif // 1
+ 
+ option('acl', type : 'feature', deprecated : { 'true' : 'enabled', 'false' : 'disabled' },
+        description : 'libacl support')

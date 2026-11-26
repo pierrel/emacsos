@@ -134,16 +134,42 @@ initialized in the background for the command menu and manual buffer switching.
 Preparing the startup buffer preserves the caller's windows, including when
 Controls falls back after its saved parent is closed.
 
-Startup waits for the Emacs window and server to become ready. Once running,
-the session watches required processes and the display. A busy Emacs command
+Startup waits for the Emacs window, server, and trusted input registration.
+The session watches required processes and the display. A busy Emacs command
 does not trigger a restart; a live but wedged Emacs or broken server socket
-requires manual recovery. Cleanup removes the session-created power-event
-FIFO after its reader groups stop, so supervised restarts can create it again.
-A refused or failed deep-suspend attempt is logged without terminating the wake
-monitor or restarting the UI. The panel stays dark, trusted wake input remains
-active, and the existing timer retries later. External power still prevents
-deep suspend. The modem is identified by its internal USB controller, port and
-EG25 hardware IDs, without depending on the bus number assigned at boot.
+requires manual recovery.
+
+Swayidle blanks after 60 seconds and makes one canonical elogind suspend
+request after 240 seconds without seat activity, giving 180 seconds after the
+automatic blank. Manual blanking does not start a separate 120-second timer. USB power vetoes admission; unplugging
+after a veto does not retry until fresh seat activity starts another idle
+period. A refused suspend stays dark with trusted wake input active.
+
+The native sleep job waits for ModemManager and eg25-manager delay inhibitors,
+then runs one fixed synchronous policy helper. The live input monitor owns
+its own trusted wake registrations; the helper does not import or retain them.
+The helper owns the call and display locks through the actual kernel entry.
+It rejects unknown call state, active display and USB power, and uses the
+kernel wakeup-count handshake for pending wake activity. The modem is identified
+by its internal controller, port and EG25 hardware IDs, without relying on its boot-assigned USB bus number.
+
+The existing display lock lives at =/run/emacsos-power-state.lock=, outside
+replaceable UI runtime. Every supervised session first takes that lock and
+publishes =waking= before launching Sway. Native admission takes the call and
+display locks before reading runtime state, and holds them through
+kernel entry. A still-running sleep writer therefore blocks new UI startup;
+startup that wins first makes subsequent admission fail closed. The state and
+idle generation remain session runtime files. The lock inode is created once
+per boot and is never replaced by ordinary UI restart, update or rollback.
+Moving from the earlier runtime-local lock requires verified old-writer
+quiescence before activating these helpers; see the native dependency README.
+
+This route requires upstream elogind 257.16-r1 built with the Alpine portability
+recipe and fixed sleep configuration in =deploy/pinephone/elogind/=. There is
+no private sleep-behavior patch. Expected policy refusals are successful no-ops;
+unexpected helper failure retains upstream native fallback. Install that
+provider and configuration before starting this UI version; see that directory's
+README for cutover and rollback ordering. Carrier SMS/call wake still requires an actual coordinated phone test.
 
 * Chat Server
 

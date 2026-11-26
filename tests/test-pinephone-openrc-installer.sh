@@ -72,6 +72,7 @@ printf '%s\n' '#!/bin/sh' \
     'printf "%s\\n" "apk $*" >>/tmp/apk-log' \
     'printf "%s\\n" "apk $*" >>/tmp/transaction-log' \
     'if [ -e /tmp/block-apk ]; then exec sleep 300; fi' \
+    'if [ "${1-}" = add ] && [ "${2-}" != --simulate ] && [ -e /tmp/python-bootstrap ]; then cp /tmp/python-bootstrap /usr/bin/python3; chmod 0755 /usr/bin/python3; fi' \
     'if [ "${1-}" = add ]; then for package do [ "$package" != py3-dbus ] || touch /tmp/py3-dbus-present; done; fi' \
     'exit 0' \
     >/usr/bin/apk
@@ -265,6 +266,7 @@ for executable in dbus-run-session pipewire pipewire-pulse wireplumber waydroid 
     install -m 0755 /bin/true "/usr/bin/$executable"
 done
 printf '%s\n' '#!/bin/sh' \
+    'if [ "${3-}" = provider-check ]; then [ ! -e /tmp/native-provider-invalid ]; exit $?; fi' \
     'if [ "${1-}" = -I ] && [ "${2-}" = - ] && [ "$#" -eq 3 ]; then' \
     '  exec /usr/local/bin/python3 "$@"' \
     'fi' \
@@ -320,6 +322,24 @@ printf '%s\n' \
     'tty2::respawn:/sbin/getty 38400 tty2' >/etc/inittab
 chown root:root /etc/inittab
 chmod 0644 /etc/inittab
+
+# Fresh dependency installation bootstraps Python before native preflight.
+# An invalid provider still rejects before payload publication or UI activation.
+mv /usr/bin/python3 /tmp/python-bootstrap
+[ ! -e /usr/bin/python3 ]
+touch /tmp/native-provider-invalid
+: >/tmp/rc-service-log
+if DEPLOY_CLIENT_IP=198.51.100.10 ASSIST_WEB_SERVER_IP=203.0.113.8 SUDO_USER=user \
+    /bin/sh /source/openrc-install-root >/tmp/native-install-reject.out 2>&1; then
+    printf '%s\n' 'fresh installer accepted missing native dependency' >&2
+    exit 1
+fi
+grep -F 'native sleep dependency is not ready' /tmp/native-install-reject.out >/dev/null
+[ ! -e /etc/init.d/emacsos-ui ]
+! grep -F 'rc-service emacsos-ui stop' /tmp/rc-service-log >/dev/null
+[ -x /usr/bin/python3 ] || { printf '%s\n' 'native preflight ran before Python bootstrap' >&2; exit 1; }
+rm /tmp/python-bootstrap
+rm /tmp/native-provider-invalid
 
 # Caller-supplied reviewed digests bind the root snapshot to the build that
 # was verified before transfer, not merely to the user-writable stage.
@@ -551,7 +571,7 @@ touch /tmp/require-new-keyboard
 install -o root -g root -m 0755 /bin/true \
     /usr/local/sbin/emacsos-openrc-suspend
 printf '%s\n' \
-    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args' \
+    'permit nopass emacsos-lab as root cmd /usr/local/sbin/emacsos-openrc-suspend args request' \
     >/etc/doas.d/95-emacsos-ui-suspend.conf
 chown root:root /etc/doas.d/95-emacsos-ui-suspend.conf
 chmod 0600 /etc/doas.d/95-emacsos-ui-suspend.conf
@@ -820,6 +840,11 @@ awk '
                current < snapshot && legacy < snapshot)
     }
 ' /tmp/openrc-update-root
+
+# An absent/wrong native provider/config cannot reach UI stop or payload change.
+touch /tmp/native-provider-invalid
+assert_preflight_rejection native-provider
+rm /tmp/native-provider-invalid
 
 # A modified pinned font must fail digest validation before the UI stops.
 printf '%s\n' tampered-font >/home/user/.cache/emacsos-openrc-update/inter.ttf

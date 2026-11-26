@@ -11,7 +11,7 @@ snapshot=
 reference_tmp=
 doas_tmp=
 lock=/run/emacsos-openrc-install.lock
-manifest_hash=7e2acfc25d4534548159c5373fa7d7937b77a623b1d89463970ac000175681ea
+manifest_hash=de602cdf60d15666e10c62883d2364e4c34baade1b99ca321579f6b7b9eb13dc
 committed=0
 mutating=0
 lab_group_created=0
@@ -400,6 +400,8 @@ for executable in /usr/bin/dbus-run-session /usr/bin/pipewire \
     [ -x "$executable" ] || fail "required executable is absent: $executable"
 done
 /usr/bin/python3 -I -c 'import dbus, sqlite3, requests, yaml' || fail 'SMS Python dependencies are absent'
+timeout -s TERM -k 1 15 /usr/bin/python3 -I "$snapshot/openrc-power-monitor" provider-check ||
+    fail 'native sleep dependency is not ready'
 for directory in /usr /usr/local /usr/local/sbin /etc /etc/doas.d; do
     check_safe_root_directory "$directory"
 done

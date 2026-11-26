@@ -1,8 +1,9 @@
 #!/usr/bin/python3
-"""Keep trusted wake input protected through the screen-off timer and actions."""
+"""Handle phone wake input and the fixed native suspend policy."""
 
+import hashlib
+import shlex
 import fcntl
-import math
 import os
 from pathlib import Path
 import pwd
@@ -13,14 +14,15 @@ import struct
 import subprocess
 import sys
 import syslog
-import time
 
 POWER = '/usr/local/share/emacsos-openrc/session-power'
-SUSPEND = '/usr/local/sbin/emacsos-openrc-suspend'
 RUNTIME = Path('/run/emacsos-ui')
-INPUTS = {3: ('axp20x-pek', 116), 5: ('gpio-keys', 143)}
+INPUTS = {'axp20x-pek': 116, 'gpio-keys': 143}
+POWER_SYSFS = Path('/sys/power')
+SUPPLY = Path('/sys/class/power_supply/axp20x-usb')
+MODEM = Path('/sys/devices/platform/soc/1c1b000.usb')
+CALL = '/usr/local/sbin/emacsos-openrc-call'
 WAKEUP = 1 << 29
-DELAY = 120
 EVENT = struct.Struct('@llHHi')
 
 
@@ -39,24 +41,15 @@ def verify_input(fd, name, key):
         fail('wake input identity does not match')
     parent = (Path('/sys/dev/char') / f'13:{os.minor(source.st_rdev)}' / 'device/device').resolve()
     expected = (Path('/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek')
-                if fd == 3 else Path('/sys/devices/platform/gpio-keys'))
+                if name == 'axp20x-pek' else Path('/sys/devices/platform/gpio-keys'))
     if parent != expected or (parent / 'driver').resolve().name != name:
         fail('wake input driver binding does not match')
-    if fd == 5:
+    if name == 'gpio-keys':
         node = parent / 'of_node/ring-indicator'
         if (node.joinpath('label').read_bytes() != b'Ring Indicator\0'
                 or node.joinpath('linux,code').read_bytes() != bytes.fromhex('0000008f')
                 or not node.joinpath('wakeup-source').is_file()):
             fail('ring indicator hardware binding does not match')
-
-
-def verify_guard():
-    registration = Path('/proc/self/fdinfo/4').read_text()
-    for fd in INPUTS:
-        match = re.search(r'tfd:\s*' + str(fd) + r'\s+events:\s*([0-9a-f]+).*?ino:([0-9a-f]+)', registration)
-        if (not match or not int(match[1], 16) & WAKEUP
-                or int(match[2], 16) != os.fstat(fd).st_ino):
-            fail('wake queue guard is absent')
 
 
 def require_capability():
@@ -66,84 +59,217 @@ def require_capability():
         fail('CAP_BLOCK_SUSPEND is absent')
 
 
-def now():
-    return time.clock_gettime(time.CLOCK_BOOTTIME)
+def read_limited(path, limit):
+    with path.open('rb') as stream:
+        value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError('fixed power input is too large')
+    return value
+
+
+def provider_check():
+    """Require selected package, active installed daemon and fixed policy."""
+    if subprocess.run(['/sbin/apk', 'info', '--installed', 'elogind=257.16-r1'],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      timeout=3).returncode:
+        fail('selected native provider package is not installed')
+    config_sha = '5a52023dbc739721b3ec4f4287a4607623b0761f13e15604ef9baa6c9e4c2d9a'
+    daemon = Path('/usr/libexec/elogind/elogind')
+    def bus(method, name, kind):
+        reply = shlex.split(subprocess.check_output([
+            '/usr/bin/busctl', '--system', '--timeout=3', 'call',
+            'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+            method, 's', name], timeout=4).decode('ascii'))
+        if len(reply) != 2 or reply[0] != kind:
+            fail('native provider lookup failed')
+        return reply[1]
+    owner = bus('GetNameOwner', 'org.freedesktop.login1', 's')
+    if not re.fullmatch(r':\d+\.\d+', owner):
+        fail('native provider owner is invalid')
+    pid = bus('GetConnectionUnixProcessID', owner, 'u')
+    if not pid.isdecimal():
+        fail('native provider identity is invalid')
+    # A package upgrade must not leave the old daemon owning login1.
+    if not os.path.samefile(daemon, Path('/proc') / pid / 'exe'):
+        fail('installed native provider is not active')
+    environment = read_limited(Path('/proc') / pid / 'environ', 65536)
+    if any(value.startswith(b'ELOGIND_CONF_FILE=') for value in environment.split(b'\0')):
+        fail('native provider uses an alternate configuration')
+    selected = {Path('/etc/elogind/sleep.conf.d/50-emacsos-native-sleep.conf')}
+    for config in selected:
+        info = config.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
+                or hashlib.sha256(read_limited(config, 65536)).hexdigest() != config_sha):
+            fail('fixed native sleep configuration is absent or changed')
+    # Reject competing sleep settings instead of emulating native precedence.
+    # Upstream 257 reads these options from sleep.conf for manager and child.
+    for root in ('/etc/elogind', '/run/elogind', '/usr/local/lib/elogind', '/usr/lib/elogind'):
+        for name in ('sleep.conf',):
+            paths = [Path(root) / name, *Path(root).glob(name + '.d/*.conf')]
+            if len(paths) > 128:
+                fail('too many native sleep configuration files')
+            for config in paths:
+                if config in selected or not config.exists():
+                    continue
+                for line in read_limited(config, 65536).decode().splitlines():
+                    if line.rstrip().endswith('\\'):
+                        fail('native sleep configuration continuation is unsupported')
+                    key = line.strip().partition('=')[0].strip()
+                    if key in ('SuspendByUsing', 'AllowSuspendInterrupts'):
+                        fail('competing native sleep configuration')
+    if bus('GetNameOwner', 'org.freedesktop.login1', 's') != owner:
+        fail('native provider changed during dependency validation')
+
+
+def locked_file(path, uid, create=False):
+    flags = os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(path, flags | (os.O_CREAT if create else 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise ValueError('unsafe power lock')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        current = os.stat(path, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError('power lock was replaced')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def entry():
+    """Handle native admission; expected policy refusals are successful no-ops."""
+    locks = []
+    try:
+        user = pwd.getpwnam('emacsos-lab')
+        locks.append(locked_file('/run/emacsos-openrc-call.lock', 0, create=True))
+        parent = Path('/run').lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe power-lock parent')
+        locks.append(locked_file('/run/emacsos-power-state.lock', user.pw_uid))
+        runtime = RUNTIME.lstat()
+        if (not stat.S_ISDIR(runtime.st_mode) or runtime.st_uid != user.pw_uid
+                or stat.S_IMODE(runtime.st_mode) != 0o700):
+            raise ValueError('unsafe power runtime')
+        fd = os.open(RUNTIME / 'power-state', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            state = os.fstat(fd)
+            if (not stat.S_ISREG(state.st_mode) or state.st_uid != user.pw_uid
+                    or stat.S_IMODE(state.st_mode) != 0o600 or state.st_nlink != 1):
+                raise ValueError('unsafe display state')
+            if os.read(fd, 32) != b'blank\n':
+                raise ValueError('display is not blank')
+        finally:
+            os.close(fd)
+
+        def value(path):
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError('unsafe power interface')
+            return read_limited(path, 128).strip()
+
+        def external_power():
+            states = [value(SUPPLY / name) for name in ('online', 'present')]
+            if any(state not in (b'0', b'1') for state in states):
+                raise ValueError('external power state is unknown')
+            return b'1' in states
+
+        if external_power():
+            raise ValueError('external power is present')
+        if b'[deep]' not in value(POWER_SYSFS / 'mem_sleep'):
+            raise ValueError('deep suspend is not selected')
+        if value(POWER_SYSFS / 'sync_on_suspend') != b'1':
+            raise ValueError('kernel suspend syncing is disabled')
+        modems = [path for path in MODEM.glob('usb*/[0-9]*-1')
+                  if path.is_dir() and not path.is_symlink()]
+        if (len(modems) != 1 or value(modems[0] / 'idVendor') != b'2c7c'
+                or value(modems[0] / 'idProduct') != b'0125'):
+            raise ValueError('expected EG25 modem is absent or ambiguous')
+        wakeups = [Path('/sys/devices/platform/gpio-keys/power/wakeup'),
+                   Path('/sys/devices/platform/soc/1f03400.rsb/sunxi-rsb-3a3/axp221-pek/power/wakeup'),
+                   modems[0] / 'power/wakeup', SUPPLY / 'power/wakeup']
+        for path in wakeups:
+            value(path)
+            path.write_bytes(b'enabled\n')
+            if value(path) != b'enabled':
+                raise ValueError('required wake source is disabled')
+
+        # Child queries never inherit our call/display locks. The live input
+        # monitor owns its own wake registrations; this helper does not import them.
+        count = subprocess.check_output([
+            '/usr/bin/timeout', '-s', 'TERM', '-k', '1', '2',
+            '/bin/sed', '-n', '1p', str(POWER_SYSFS / 'wakeup_count')],
+            stderr=subprocess.DEVNULL, close_fds=True).strip()
+        if len(count) > 32 or not count.isdigit():
+            raise ValueError('invalid wakeup counter')
+        if subprocess.run([CALL, 'idle-check'], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, close_fds=True).returncode:
+            raise ValueError('call state is active or unknown')
+        (POWER_SYSFS / 'wakeup_count').write_bytes(count + b'\n')
+        if external_power():
+            raise ValueError('external power arrived')
+        # The actual writer owns both locks until this kernel operation returns.
+        with (POWER_SYSFS / 'state').open('wb', buffering=0) as state:
+            if state.write(b'mem\n') != 4:
+                raise OSError('short suspend write')
+        syslog.syslog(syslog.LOG_INFO, 'emacsos-suspend: kernel request returned')
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        # Upstream falls back on helper failure. Expected admission refusals
+        # therefore log a successful no-op instead of returning old exit75/77.
+        syslog.syslog(syslog.LOG_INFO, 'emacsos-suspend: veto: ' + str(error))
+    finally:
+        for fd in reversed(locks):
+            os.close(fd)
 
 
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 2:
         fail('fixed root entry is required')
-    if sys.argv[1] == 'handoff':
-        # doas closes descriptors above stderr. These three standard slots
-        # carry the same epoll and input objects into the admission owner.
-        os.dup2(0, 4, inheritable=True)
-        os.dup2(1, 3, inheritable=True)
-        os.dup2(2, 5, inheritable=True)
-        null = os.open('/dev/null', os.O_RDWR)
-        for fd in (0, 1, 2):
-            os.dup2(null, fd)
-        os.close(null)
-        for fd, (name, key) in INPUTS.items():
-            verify_input(fd, name, key)
-        verify_guard()
-        require_capability()
-        # MOD requires the same open file description, not just its inode.
-        # Retain the wrapper through exec: fromfd owns descriptor 4.
-        guard = select.epoll.fromfd(4)
-        for fd in INPUTS:
-            guard.modify(fd, select.EPOLLIN | WAKEUP)
-        os.execv(SUSPEND, [SUSPEND, 'guarded-suspend'])
+    if sys.argv[1] == 'provider-check':
+        provider_check()
+        return
+    if sys.argv[1] == 'entry':
+        entry()
+        return
     if sys.argv[1] != 'monitor':
         fail('unknown action')
     require_capability()
-    for fd in (3, 4, 5):
-        os.dup2(0, fd, inheritable=False)
     guard = select.epoll()
     found = set()
+    inputs = {}
     for name_file in Path('/sys/class/input').glob('event*/device/name'):
         name = name_file.read_text().strip()
-        for fd, (expected, key) in INPUTS.items():
+        for expected, key in INPUTS.items():
             if name != expected:
                 continue
-            if fd in found:
+            if expected in found:
                 fail('ambiguous wake input')
-            source = os.open('/dev/input/' + name_file.parents[1].name,
+            fd = os.open('/dev/input/' + name_file.parents[1].name,
                              os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
-            os.dup2(source, fd, inheritable=True)
-            os.close(source)
             verify_input(fd, expected, key)
             guard.register(fd, select.EPOLLIN | WAKEUP)
-            found.add(fd)
+            found.add(expected)
+            inputs[fd] = (expected, key)
     if found != set(INPUTS):
         fail('required wake input is absent')
-    os.dup2(guard.fileno(), 4, inheritable=True)
-    verify_guard()
     user = pwd.getpwnam('emacsos-lab')
     os.initgroups(user.pw_name, user.pw_gid)
     os.setresgid(user.pw_gid, user.pw_gid, user.pw_gid)
     os.setresuid(user.pw_uid, user.pw_uid, user.pw_uid)
     os.environ.update(HOME=user.pw_dir, XDG_RUNTIME_DIR=str(RUNTIME))
-    # Opening after setup/drop releases the session's bounded writer-open
-    # readiness barrier before the supervisor's initial wake.
-    fifo = os.open(RUNTIME / 'power-events', os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW)
-    if not stat.S_ISFIFO(os.fstat(fifo).st_mode):
-        fail('power event pipe is absent')
-    guard.register(fifo, select.EPOLLIN)
-    generation = 0
-    deadline = None
-    buffer = b''
+    print('ready', flush=True)
     resync = set()
     ready = []
     while True:
         if not ready:
-            wait = -1 if deadline is None else max(0, deadline - now())
-            ready = guard.poll(wait, 8)
+            ready = guard.poll(-1, 8)
         presses = 0
         wake = False
         for fd, flags in ready:
             if flags & (select.EPOLLHUP | select.EPOLLERR):
                 fail('power source disappeared')
-            if fd not in INPUTS:
+            if fd not in inputs:
                 continue
             data = os.read(fd, EVENT.size * 64)
             if not data or len(data) % EVENT.size:
@@ -155,8 +281,8 @@ def main():
                 elif fd in resync:
                     if kind == 0 and code == 0:
                         resync.remove(fd)
-                elif kind == 1 and code == INPUTS[fd][1] and value == 1:
-                    if fd == 3:
+                elif kind == 1 and code == inputs[fd][1] and value == 1:
+                    if inputs[fd][0] == 'axp20x-pek':
                         presses += 1
                     else:
                         wake = True
@@ -165,42 +291,14 @@ def main():
             subprocess.run([POWER, 'press'], check=True)
         if wake:
             subprocess.run([POWER, 'wake'], check=True)
-        try:
-            data = os.read(fifo, 4096)
-        except BlockingIOError:
-            data = b''
-        buffer += data
-        frames = buffer.split(b'\n')
-        buffer = frames.pop()
-        if len(buffer) > 128:
-            fail('invalid power event frame')
-        for frame in frames:
-            if frame == b'active':
-                deadline = None
-            else:
-                action, number, started = frame.decode('ascii').split(':')
-                if action != 'blank':
-                    fail('invalid power event')
-                number = int(number)
-                if number > generation:
-                    generation = number
-                    started = float(started)
-                    if not math.isfinite(started) or started < 0:
-                        fail('invalid screen-off timestamp')
-                    deadline = started + DELAY
-        # A new poll releases the completed processing guard. Ready input/FIFO
-        # is reconciled before admission; queued input still guards in-kernel.
+        # The next poll releases the completed input processing guard.
         ready = guard.poll(0, 8)
-        if not ready and deadline is not None and now() >= deadline:
-            result = subprocess.run([POWER, 'suspend', str(generation)], pass_fds=(3, 4, 5))
-            if result.returncode not in (0, 75):
-                syslog.syslog(syslog.LOG_ERR, 'emacsos-power-monitor: suspend admission failed '
-                              f'({result.returncode}); keeping wake monitor active')
-            deadline = now() + DELAY
 
 
 if __name__ == '__main__':
     try:
         main()
+    except BlockingIOError:
+        raise SystemExit(75)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         fail(str(error))
