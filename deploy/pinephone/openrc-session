@@ -227,6 +227,8 @@ if [ "$attempt" -ge 150 ]; then
 fi
 
 power_ready=$runtime/power-ready
+# Supervised respawns reuse runtime; clear readiness before scheduling the child.
+: >"$power_ready"
 "$root/process-group" "$root/session-power" monitor >"$power_ready" &
 power_pid=$!
 attempt=0

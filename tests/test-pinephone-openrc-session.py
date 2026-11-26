@@ -1,7 +1,10 @@
 """Exercise the real session checks and cleanup with isolated child stubs."""
 from pathlib import Path
+import os
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 SOURCE = (Path(__file__).resolve().parents[1] / 'deploy/pinephone/openrc-session').read_text()
@@ -68,6 +71,56 @@ class SessionTests(unittest.TestCase):
             result = self.run_piece(directory, 'kill() { return 0; }\n' + STARTUP)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Emacs server did not become ready', result.stdout)
+
+    def test_respawn_discards_stale_monitor_readiness_before_child_runs(self):
+        start = SOURCE.index('power_ready=$runtime/power-ready')
+        startup = SOURCE[start:SOURCE.index('# Optional configured SMS', start)]
+        launch = '"$root/process-group" "$root/session-power" monitor >"$power_ready" &'
+        # Hold the child before its redirection, a legal scheduling point after &.
+        startup = startup.replace(launch, '{ read gate <"$root/launch-gate";\n' +
+                                  launch[:-1] + '\n} &')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'power-ready').write_text('ready\n')
+            os.mkfifo(root / 'launch-gate')
+            (root / 'process-group').write_text('#!/bin/sh\nexec "$@"\n')
+            (root / 'session-power').write_text(
+                '#!/bin/sh\nif [ "$1" = monitor ]; then\n'
+                'touch "$TEST_ROOT/registered"; echo ready; sleep 30\n'
+                'else touch "$TEST_ROOT/display"; fi\n')
+            for name in ('process-group', 'session-power'):
+                (root / name).chmod(0o755)
+            script = ('set -eu\nroot=$1; runtime=$1; export TEST_ROOT=$1\n'
+                      'fail() { exit 1; }\n'
+                      'grep() { if command grep "$@"; then result=ready; rc=0; '
+                      'else result=not-ready; rc=1; fi; '
+                      'if [ ! -e "$root/checked" ]; then '
+                      'printf "%s\\n" "$result" >"$root/first-read"; '
+                      'touch "$root/checked"; fi; return "$rc"; }\n' +
+                      startup + '\nwait "$power_pid"\n')
+            process = subprocess.Popen(['/bin/sh', '-c', script, 'respawn', directory],
+                                       start_new_session=True,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                # Parent reaches its first readiness read while child cannot run.
+                deadline = time.monotonic() + 2
+                while not (root / 'checked').exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue((root / 'checked').exists())
+                self.assertEqual((root / 'first-read').read_text(), 'not-ready\n',
+                                 'first readiness read accepted the interrupted attempt token')
+                self.assertFalse((root / 'display').exists(),
+                                 'stale token admitted display before fresh monitor registration')
+                with (root / 'launch-gate').open('w') as gate:
+                    gate.write('continue\n')
+                deadline = time.monotonic() + 2
+                while not (root / 'display').exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue((root / 'registered').exists())
+                self.assertTrue((root / 'display').exists())
+            finally:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
 
 
 
