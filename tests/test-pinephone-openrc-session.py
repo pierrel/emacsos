@@ -43,6 +43,26 @@ class SessionTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('a required UI process exited', result.stdout)
 
+    def test_actual_idle_launch_blanks_at_60_then_requests_at_240(self):
+        start = SOURCE.index('"$root/process-group" /usr/bin/swayidle -w')
+        launch = SOURCE[start:SOURCE.index('\nidle_pid=$!', start)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / 'idle-argv'
+            wrapper = root / 'process-group'
+            wrapper.write_text('#!/bin/sh\nprintf "%s\n" "$@" > "$CAPTURE"\n')
+            wrapper.chmod(0o755)
+            result = subprocess.run(
+                ['/bin/sh', '-c', 'root=$1; CAPTURE=$2; export CAPTURE\n' + launch + '\nwait',
+                 'idle-launch-fixture', str(root), str(capture)],
+                capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            argv = capture.read_text().splitlines()
+            self.assertEqual(argv, ['/usr/bin/swayidle', '-w', 'timeout', '60',
+                                    str(root) + '/session-power idle-blank', 'timeout', '240',
+                                    'doas -n /usr/local/sbin/emacsos-openrc-suspend request',
+                                    'resume', str(root) + '/session-power resume'])
+
     def test_startup_still_requires_responsive_emacs(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_piece(directory, 'kill() { return 0; }\n' + STARTUP)

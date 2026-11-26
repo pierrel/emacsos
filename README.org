@@ -140,8 +140,8 @@ does not trigger a restart; a live but wedged Emacs or broken server socket
 requires manual recovery.
 
 Swayidle blanks after 60 seconds and makes one canonical elogind suspend
-request after 180 seconds without seat activity. Manual blanking does not
-start a separate 120-second timer. USB power vetoes admission; unplugging
+request after 240 seconds without seat activity, giving 180 seconds after the
+automatic blank. Manual blanking does not start a separate 120-second timer. USB power vetoes admission; unplugging
 after a veto does not retry until fresh seat activity starts another idle
 period. A refused suspend stays dark with trusted wake input active.
 

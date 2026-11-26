@@ -308,7 +308,7 @@ grep -F 'kill -TERM "-$leader"' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'while group_has_process' "$deploy_dir/openrc-process-group" >/dev/null
 grep -F 'timeout 60 "$root/session-power idle-blank"' "$deploy_dir/openrc-session" >/dev/null
 grep -F '"$root/process-group" "$root/session-power" monitor' "$deploy_dir/openrc-session" >/dev/null
-grep -F "timeout 180 'doas -n /usr/local/sbin/emacsos-openrc-suspend request'" "$deploy_dir/openrc-session" >/dev/null
+grep -F "timeout 240 'doas -n /usr/local/sbin/emacsos-openrc-suspend request'" "$deploy_dir/openrc-session" >/dev/null
 grep -F 'resume "$root/session-power resume"' "$deploy_dir/openrc-session" >/dev/null
 grep -F 'guard.register(fd, select.EPOLLIN | WAKEUP)' "$deploy_dir/openrc-power-monitor" >/dev/null
 grep -F 'doas -n /usr/local/sbin/emacsos-openrc-suspend' \

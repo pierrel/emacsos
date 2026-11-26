@@ -1,0 +1,22 @@
+#+TITLE: Native idle timing clarification
+#+DATE: 2026-11-26
+
+* Current contract
+
+Pierre clarified the ordinary idle sequence: blank after 60 seconds, then
+request suspend 180 seconds after that automatic blank. Swayidle therefore
+uses timeouts of 60 and 240 seconds from the last seat activity. This changes
+only its existing request threshold; no timer, controller or manual-blank
+semantics are added. Native admission and powered refusal remain unchanged.
+
+The shell-launch regression captures the actual session arguments with a
+substitute process-group executable. It checks the 60/240 thresholds and the
+unchanged request/resume actions without invoking suspend. Physical observation
+of this new timing remains pending; prior 60/180 observations do not validate it.
+
+* Historical supersessions
+
+This replaces only the 180-second total-inactivity timing in the "Proposed
+ownership and admission" section of
+[[file:2026-11-24-native-suspend-simplification.org]]. Its ownership, admission and
+other conclusions are unchanged; the historical document is not rewritten.
